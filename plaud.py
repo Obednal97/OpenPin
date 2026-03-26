@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plaud NotePin S - Open Source BLE Client & Cloud Downloader.
+"""Plaud NotePin S - Open Source BLE Client, Cloud Downloader & Transcription.
 
 Usage:
     python plaud.py scan              - Scan for nearby Plaud devices
@@ -9,6 +9,9 @@ Usage:
     python plaud.py cloud-list        - List recordings in cloud
     python plaud.py cloud-download    - Download all recordings from cloud
     python plaud.py battery           - Show battery level
+    python plaud.py transcribe <file> - Transcribe an audio file locally
+    python plaud.py transcribe-all    - Transcribe all downloaded recordings
+    python plaud.py summarize <file>  - Summarize a transcript
 """
 
 import asyncio
@@ -221,6 +224,107 @@ async def cmd_battery():
         await client.disconnect()
 
 
+def cmd_transcribe():
+    """Transcribe an audio file locally."""
+    from src.transcribe import transcribe, transcribe_directory
+
+    if len(sys.argv) < 3:
+        print("Usage: python plaud.py transcribe <file_or_directory>")
+        return
+
+    path = Path(sys.argv[2])
+    model = "base"
+    backend = "whisper"
+
+    # Parse optional flags
+    if "--fast" in sys.argv:
+        backend = "fast"
+        model = "distil-whisper/large-v2"
+    if "--large" in sys.argv:
+        model = "large-v3" if backend == "whisper" else "openai/whisper-large-v3"
+    if "--medium" in sys.argv:
+        model = "medium"
+
+    if path.is_dir():
+        results = transcribe_directory(str(path), backend=backend, model=model)
+        print(f"\nTranscribed {len(results)} file(s)")
+    elif path.is_file():
+        t = transcribe(str(path), model=model, backend=backend)
+        if t.text:
+            out_json = str(path.with_suffix(".json"))
+            out_txt = str(path.with_suffix(".txt"))
+            t.save(out_json)
+            Path(out_txt).write_text(t.formatted, encoding="utf-8")
+            print(f"\nSaved: {out_json}")
+            print(f"Saved: {out_txt}")
+            # Show first part of transcript
+            preview = t.formatted[:1500]
+            if len(t.formatted) > 1500:
+                preview += "\n..."
+            print(f"\n{preview}")
+    else:
+        print(f"Not found: {path}")
+
+
+def cmd_transcribe_all():
+    """Transcribe all downloaded recordings."""
+    from src.transcribe import transcribe_directory
+
+    directory = "cloud_recordings"
+    if not Path(directory).exists():
+        print(f"No recordings directory found at {directory}")
+        print("Run 'python plaud.py cloud-download' first")
+        return
+
+    model = "base"
+    if "--medium" in sys.argv:
+        model = "medium"
+    if "--large" in sys.argv:
+        model = "large-v3"
+
+    results = transcribe_directory(directory, model=model)
+    print(f"\nTranscribed {len(results)} file(s)")
+
+
+def cmd_summarize():
+    """Summarize a transcript."""
+    from src.transcribe import Transcript
+    from src.summarize import summarize
+
+    if len(sys.argv) < 3:
+        print("Usage: python plaud.py summarize <transcript.json>")
+        print("  --provider openai|anthropic|ollama (default: ollama)")
+        print("  --model <model_name>")
+        return
+
+    path = Path(sys.argv[2])
+    if not path.exists():
+        print(f"Not found: {path}")
+        return
+
+    provider = "ollama"
+    model = None
+    if "--provider" in sys.argv:
+        idx = sys.argv.index("--provider")
+        provider = sys.argv[idx + 1]
+    if "--model" in sys.argv:
+        idx = sys.argv.index("--model")
+        model = sys.argv[idx + 1]
+
+    transcript = Transcript.load(str(path))
+    print(f"Transcript: {len(transcript.segments)} segments, {transcript.duration:.0f}s")
+    print(f"Provider: {provider}, Model: {model or 'default'}")
+
+    summary = summarize(transcript, provider=provider, model=model)
+
+    summary_path = path.with_suffix(".summary.json")
+    md_path = path.with_suffix(".summary.md")
+    summary.save(str(summary_path))
+    md_path.write_text(summary.formatted, encoding="utf-8")
+
+    print(f"\n{summary.formatted}")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -237,10 +341,13 @@ def main():
         "battery": cmd_battery,
     }
 
-    # Sync commands (cloud API)
+    # Sync commands
     sync_commands = {
         "cloud_list": cmd_cloud_list,
         "cloud_download": cmd_cloud_download,
+        "transcribe": cmd_transcribe,
+        "transcribe_all": cmd_transcribe_all,
+        "summarize": cmd_summarize,
     }
 
     if command in async_commands:
