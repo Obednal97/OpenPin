@@ -180,6 +180,14 @@ async def main():
 
     await cl.stop_notify(N)
 
+    # === SAVE KEYS IMMEDIATELY (before any commands that might fail) ===
+    session_log["chacha_key"] = key.hex()
+    session_log["chacha_nonce"] = nonce.hex()
+    session_log["chacha_aad"] = aad.hex()
+    session_log["validation"] = "PLAUD.AI"
+    session_log["status"] = "HANDSHAKE_OK"
+    save_session(session_log)  # Save NOW so we never lose keys
+
     # === ENCRYPTED SESSION ===
     log_step("ENCRYPTED_SESSION")
     cipher = ChaCha20Poly1305(key)
@@ -192,38 +200,56 @@ async def main():
     def decrypt(ciphertext):
         return cipher.decrypt(nonce, ciphertext, aad)[4:]
 
-    async def send_cmd(name, plaintext, timeout=5.0):
-        ev = asyncio.Event()
-        resp = [None]
+    # Use a persistent notification handler instead of start/stop per command
+    cmd_responses = []
+    cmd_event = asyncio.Event()
 
-        def h(sender, data):
-            try:
-                resp[0] = decrypt(bytes(data))
-                ev.set()
-            except:
-                pass
-
-        await cl.start_notify(N, h)
-        await cl.write_gatt_char(W, encrypt(plaintext), response=False)
+    def persistent_handler(sender, data):
         try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
+            dec = decrypt(bytes(data))
+            cmd_responses.append(dec)
+            cmd_event.set()
+        except:
+            pass
+
+    await cl.start_notify(N, persistent_handler)
+
+    async def send_cmd(name, plaintext, timeout=5.0):
+        cmd_event.clear()
+        cmd_responses.clear()
+        try:
+            await cl.write_gatt_char(W, encrypt(plaintext), response=False)
+        except Exception as e:
+            print(f"  {name}: write failed ({e})")
+            return None
+        try:
+            await asyncio.wait_for(cmd_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             pass
-        await cl.stop_notify(N)
 
-        result = resp[0].hex() if resp[0] else None
+        resp = cmd_responses[0] if cmd_responses else None
+        result = resp.hex() if resp else None
         session_log["steps"].append({
             "step": f"CMD_{name}",
             "time": datetime.now().isoformat(),
             "response": result,
         })
-        if resp[0]:
+        if resp:
             print(f"  {name}: {result[:60]}")
         else:
             print(f"  {name}: no response")
-        return resp[0]
+        return resp
 
-    # Send commands
+    # Send handshake command FIRST (required before other commands work)
+    token32 = BIND_TOKEN[:32].encode("ascii")
+    hs_cmd = bytes([1, 1, 0, 2, 0, 0]) + token32
+    await send_cmd("HANDSHAKE_CMD", hs_cmd)
+
+    # Second handshake (subtype=1)
+    hs2_cmd = bytes([1, 1, 0, 2, 0, 1]) + token32
+    await send_cmd("HANDSHAKE2_CMD", hs2_cmd)
+
+    # Now send other commands
     await send_cmd("SYNC_TIME", bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
     await send_cmd("GET_STATE", bytes([1, 3, 0]))
     await send_cmd("GET_FILES", bytes([1, 26, 0]), timeout=10)
@@ -243,26 +269,39 @@ async def main():
     for i in range(hold_seconds):
         await asyncio.sleep(1)
         if not cl.is_connected:
-            print(f"  DISCONNECTED at {i}s!")
+            print(f"  Device disconnected at {i}s!")
+            session_log["hold_disconnected_at"] = i
             break
     else:
         print(f"  Held for {hold_seconds}s OK")
+        session_log["hold_completed"] = True
 
     # === DEPAIR ===
     if cl.is_connected:
         log_step("DEPAIR")
-        r = await send_cmd("DEPAIR", bytes([1, 5, 0]))
-        session_log["depair_response"] = r.hex() if r else None
-        if r:
-            print(f"  Depair sent successfully!")
-        else:
-            print(f"  Depair: no response (may still have worked)")
+        try:
+            r = await send_cmd("DEPAIR", bytes([1, 5, 0]))
+            session_log["depair_response"] = r.hex() if r else None
+            if r:
+                print(f"  Depair sent successfully!")
+            else:
+                print(f"  Depair: no response (may still have worked)")
+        except Exception as e:
+            print(f"  Depair error: {e}")
+            session_log["depair_error"] = str(e)
+    else:
+        print("  Skipping depair (already disconnected)")
 
     # === DISCONNECT ===
     log_step("DISCONNECT")
-    if cl.is_connected:
-        await cl.disconnect()
-    print("  Disconnected.")
+    try:
+        if cl.is_connected:
+            await cl.stop_notify(N)
+            await cl.disconnect()
+        print("  Disconnected.")
+    except Exception as e:
+        print(f"  Disconnect: {e}")
+        session_log["disconnect_error"] = str(e)
 
     # === SAVE ===
     session_log["status"] = "SUCCESS"
