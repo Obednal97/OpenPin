@@ -70,12 +70,20 @@ The Java code at C10595r4.java:413-421 expects:
 
 Total expected: 80 bytes minimum. We got 36.
 
-**Possible explanations:**
-1. The device firmware uses a different/shorter format than the Java code expects
-2. The 36 bytes are: key(32) + 4-byte status/flag — and ChaCha isn't used
-3. The nonce/AAD are derived from other data (device SN, session, etc.)
-4. The RSA blob assembly is wrong — maybe more data arrives after we send the public key
-5. The 36 bytes ARE the full decrypted output but PKCS1 padding consumed more space
+**IMPORTANT DISCOVERY: Dual cipher support (AbstractC11067m.java)**
+
+The crypto module supports TWO ciphers and tries both:
+1. **AES/GCM/NoPadding** (method `m40006i` / `m39998a`) — GCM with 128-bit tag, 12-byte nonce
+2. **ChaCha20-Poly1305** (method `m40007j` / `m39999b`) — via Conscrypt provider
+
+Method `m40000c` tries one and falls back to the other. The device might use AES-GCM.
+
+**Possible explanations for 36 bytes:**
+1. The RSA data arrived before we sent pubkey — device used a stored/factory key
+2. More RSA data arrives AFTER we send the pubkey (second wave)
+3. The 36 bytes are: key(32) + 4-byte flag/status — encryption not fully negotiated
+4. We're assembling the wrong notification packets as the RSA blob
+5. The packet header strip (4 bytes) should be different (2 or 3 bytes)
 
 ### Hypothesis to Test Next
 
