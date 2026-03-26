@@ -292,11 +292,60 @@ async def main():
     else:
         print("  Skipping depair (already disconnected)")
 
+    # === VERIFY DEPAIR ===
+    if cl.is_connected:
+        log_step("VERIFY_DEPAIR")
+        print("  Verifying depair by re-sending SN sig...")
+        verify_ack = asyncio.Event()
+        verify_got_callbacks = [False]
+
+        async def verify_handler_setup():
+            def vh(sender, data):
+                data = bytes(data)
+                cid = struct.unpack_from("<H", data, 0)[0] if len(data) >= 2 else 0
+                if cid == 65041:
+                    verify_ack.set()
+                elif cid == 65042:
+                    verify_got_callbacks[0] = True
+            try:
+                await cl.stop_notify(N)
+            except:
+                pass
+            await cl.start_notify(N, vh)
+
+        try:
+            await verify_handler_setup()
+            sig = base64.b64decode(SN_SIG)
+            tc = (len(sig) + 99) // 100
+            for i in range(tc):
+                await cl.write_gatt_char(
+                    W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i*100:(i+1)*100],
+                    response=False,
+                )
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(3)
+
+            if verify_ack.is_set():
+                print("  ✓ DEPAIR CONFIRMED — device accepted fresh SN sig (65041 ACK)")
+                session_log["depair_verified"] = True
+            elif verify_got_callbacks[0]:
+                print("  ✗ DEPAIR FAILED — device sent 65042 callbacks (still bonded)")
+                session_log["depair_verified"] = False
+            else:
+                print("  ? DEPAIR UNCLEAR — no response to verification SN sig")
+                session_log["depair_verified"] = "unknown"
+        except Exception as e:
+            print(f"  Verify error: {e}")
+            session_log["depair_verify_error"] = str(e)
+
     # === DISCONNECT ===
     log_step("DISCONNECT")
     try:
         if cl.is_connected:
-            await cl.stop_notify(N)
+            try:
+                await cl.stop_notify(N)
+            except:
+                pass
             await cl.disconnect()
         print("  Disconnected.")
     except Exception as e:
