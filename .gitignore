@@ -1,0 +1,9 @@
+.plaud_config.json
+recordings/
+cloud_recordings/
+__pycache__/
+*.pyc
+apk-extracted/
+jadx-output/
+plaud-app-extracted/
+PLAUD_release.apk
