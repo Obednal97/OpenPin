@@ -55,6 +55,15 @@ def get_public_key_pem_body() -> str:
     return "".join(body_lines)
 
 
+def get_public_key_full_pem() -> str:
+    """Get the FULL RSA public key PEM (with headers) for sending to device.
+
+    The device requires the full PEM format including -----BEGIN/END PUBLIC KEY-----.
+    """
+    with open(PUBLIC_KEY_PATH) as f:
+        return f.read().strip()
+
+
 def rsa_decrypt(encrypted_data: bytes, private_key=None) -> bytes:
     """RSA decrypt data using PKCS1v15 padding (RSA/ECB/PKCS1Padding in Java)."""
     if private_key is None:
