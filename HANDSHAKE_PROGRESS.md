@@ -135,6 +135,38 @@ TOb4HuuFPMhEB8bMCR3SFlqTRO9ihuhsHp0Jp3bwBGDYpew7FI9rFykg2JUKGLfe50BJS4z6Esm2Mt7B
 | `C10558l3.java:3920` (m38447j3) | Regular handshake (cmd 1, for unencrypted) |
 | `C10558l3.java:3265` | Second handshake (cmd 1, for encrypted, post-RSA) |
 
+## Latest Finding (Session with full hex capture)
+
+The device sends 9 notifications (3 sets of 3 chunks) in response to the SN signature.
+All have cmd_id=65042 (0xFE12). Phase 2 (after pubkey send) gets ZERO notifications.
+
+**RSA "decryption" of these packets produces inconsistent sizes (16B, 137B, 193B) across
+the 3 sets from a SINGLE session.** This proves the data is NOT RSA ciphertext — RSA would
+produce the same plaintext size for the same message. The "successful" RSA decryption was
+just PKCS1v15 accepting random data (~1/65536 chance).
+
+**The 65042 packets contain firmware memory/callback structures**, not encrypted data.
+They appear to be the device's internal response to the SN signature verification,
+containing function pointers and state data.
+
+**Key question**: Why does the device not send the actual RSA blob? Possibilities:
+1. The device expects the SN sig in a different format (cmd_id, framing, etc.)
+2. The device needs Bluetooth bonding/pairing before RSA exchange
+3. The factory-reset device needs a different initial pairing flow
+4. The 65042 packets ARE the protocol response but we don't understand the format
+5. Android's BLE stack handles the data differently (coalescing, MTU negotiation)
+
+## Alternative Approach: MITM the Phone App
+
+Instead of guessing the protocol, capture the actual BLE traffic:
+1. Install the Plaud app on Android phone
+2. Enable BLE HCI snoop log (developer options)
+3. Pair the device with the phone app
+4. Extract the HCI log and analyze with Wireshark
+5. See exactly what bytes are exchanged in a successful handshake
+
+This would give us the ground truth for the protocol.
+
 ## RSA Keys
 
 - Private: `keys/app_private.pem` (PKCS#8, RSA 2048-bit)
