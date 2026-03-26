@@ -43,13 +43,46 @@ async def cmd_scan():
     print(f"\nTotal: {len(devices)} device(s) found")
 
 
+def pick_device(devices, target_sn: str | None = None):
+    """Pick the right device from scan results."""
+    if target_sn:
+        for device, info in devices:
+            if target_sn in info.get("serial_number", ""):
+                return device, info
+        print(f"Device with SN containing '{target_sn}' not found")
+        return None, None
+
+    if len(devices) == 1:
+        return devices[0]
+
+    print("\nMultiple devices found. Pick one:")
+    for i, (d, info) in enumerate(devices):
+        sn = info.get("serial_number", "?")
+        model = info.get("model", "?")
+        print(f"  [{i+1}] {model} SN:{sn} RSSI:{info.get('rssi', '?')}")
+
+    try:
+        choice = int(input("Enter number: ")) - 1
+        if 0 <= choice < len(devices):
+            return devices[choice]
+    except (ValueError, EOFError):
+        pass
+    return devices[0]
+
+
+# Target SN from config or env
+TARGET_SN = os.environ.get("PLAUD_SN", "8820A0000000XXXX")
+
+
 async def cmd_connect():
     """Connect to a Plaud device and show info."""
-    devices = await scan_for_plaud(timeout=10)
+    devices = await scan_for_plaud(timeout=20)
     if not devices:
         return
 
-    device, info = devices[0]
+    device, info = pick_device(devices, TARGET_SN)
+    if not device:
+        return
     client = PlaudClient(device=device)
 
     if not await client.connect():
@@ -78,7 +111,9 @@ async def cmd_list():
     if not devices:
         return
 
-    device, _ = devices[0]
+    device, info = pick_device(devices, TARGET_SN)
+    if not device:
+        return
     client = PlaudClient(device=device)
 
     if not await client.connect():
@@ -104,7 +139,9 @@ async def cmd_download():
     if not devices:
         return
 
-    device, _ = devices[0]
+    device, info = pick_device(devices, TARGET_SN)
+    if not device:
+        return
     client = PlaudClient(device=device, output_dir="recordings")
 
     if not await client.connect():
@@ -169,7 +206,9 @@ async def cmd_battery():
     if not devices:
         return
 
-    device, _ = devices[0]
+    device, info = pick_device(devices, TARGET_SN)
+    if not device:
+        return
     client = PlaudClient(device=device)
 
     if not await client.connect():
