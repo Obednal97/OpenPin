@@ -301,22 +301,25 @@ Total reconnection to first command: **~1.5 seconds**
 
 ## 10. WiFi Fast Transfer Protocol
 
-### No distinct WiFi transfer protocol observed over BLE
+### WiFi transfer is device-to-phone directly, NOT cloud-based
 
-The capture does **not** show a separate WiFi transfer negotiation protocol. However:
+PacketLogger only captures Bluetooth HCI, not WiFi traffic, so the actual WiFi transfer isn't visible. From the decompiled app code, WiFi fast transfer works as follows:
 
-- The non-ATT L2CAP channels (CIDs 0x0040-0xFFE9) contain encrypted data on the **system-level** connections
-- These are likely iOS ANCS, AMS, or other Apple services, not WiFi transfer commands
-- WiFi fast transfer likely works as follows:
-  1. App sends WiFi credentials to device via the encrypted BLE command channel
-  2. Device connects directly to the cloud over WiFi
-  3. App polls the cloud API for transfer completion
-  4. No additional BLE packets needed during WiFi transfer
+1. App sends WiFi mode command over encrypted BLE (`action/connectWiFi` with token, SSID, password)
+2. **Device creates a WiFi hotspot** (open network, 2.4GHz)
+3. Phone connects to the device's WiFi hotspot directly
+4. Files transfer over WiFi (TCP/HTTP) — **device-to-phone, no cloud involved**
+5. After transfer, device exits WiFi mode and returns to BLE
 
-**Evidence**: Session 0x0057 (the last connection) had **zero file transfer chunks** but the same command exchange pattern. This session may have been a WiFi transfer setup:
-- 17 notifications received (563 bytes) - all small command responses
-- 18 writes sent (484 bytes) - command exchanges only
+From decompiled Flutter routes: `device-transfer-hotspot`, `device-transfer-setup-wifi`
+BLE commands: `connectWiFi`, `getWiFiFileList`, `syncWiFiFile`, `extendWifiExitTime`
+
+**Evidence**: Session 0x0057 (the last connection) had **zero BLE file transfer chunks** but the same command exchange pattern — consistent with the file transfer happening over WiFi instead of BLE:
+- 17 notifications received (563 bytes) - command responses only
+- 18 writes sent (484 bytes) - command exchanges (likely WiFi setup + file sync commands)
 - The connection parameter switched to idle (150-165ms) then device disconnected remotely
+
+**For Mac implementation**: We can trigger WiFi hotspot mode via BLE, connect the Mac to the device's hotspot, and download files much faster than BLE (potentially MB/s over WiFi vs ~33 KB/s over BLE).
 
 ---
 
