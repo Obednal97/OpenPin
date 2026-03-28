@@ -551,6 +551,12 @@ def upload_local_recordings_to_cloud():
                 if session_id not in uploaded_ids:
                     uploaded_ids.append(session_id)
                 conf["uploaded_session_ids"] = uploaded_ids
+                # Track cloud file ID for deletion support
+                cloud_fid = result.get("data", result).get("id", result.get("id", ""))
+                if cloud_fid:
+                    cids = conf.get("cloud_file_ids", {})
+                    cids[session_id] = cloud_fid
+                    conf["cloud_file_ids"] = cids
                 save_config(conf)
             if result.get("error"):
                 uploaded.append({"session_id": session_id, "status": "error", "error": result["error"]})

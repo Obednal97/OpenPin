@@ -341,6 +341,8 @@ function showDeleteDialog(ids, count, onDeleted) {
         } catch (err) {
           toast(`Deleted locally but cloud trash failed: ${err.message}`, 'error');
         }
+      } else if (app.cloudState.logged_in) {
+        toast(`Deleted locally — cloud file ID not available, remove from cloud manually`, 'info');
       } else {
         toast(`Deleted ${count} recording(s) locally`, 'success');
       }
