@@ -38,6 +38,9 @@ def get_settings():
             "webhooks": config.get("webhooks", []),
             "cloud_sync_direction": config.get("cloud_sync_direction", "download"),
             "auto_delete_after_sync": config.get("auto_delete_after_sync", False),
+            "auto_sync": config.get("auto_sync", True),
+            "auto_transcribe": config.get("auto_transcribe", True),
+            "auto_summarise": config.get("auto_summarise", False),
             "notion_auto_push": config.get("notion_auto_push", False),
         }
     )
@@ -64,6 +67,12 @@ def save_settings():
         config["cloud_sync_direction"] = data["cloud_sync_direction"]
     if "auto_delete_after_sync" in data:
         config["auto_delete_after_sync"] = data["auto_delete_after_sync"]
+    if "auto_sync" in data:
+        config["auto_sync"] = data["auto_sync"]
+    if "auto_transcribe" in data:
+        config["auto_transcribe"] = data["auto_transcribe"]
+    if "auto_summarise" in data:
+        config["auto_summarise"] = data["auto_summarise"]
     if "notion_auto_push" in data:
         config["notion_auto_push"] = data["notion_auto_push"]
     if "webhooks" in data:
