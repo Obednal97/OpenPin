@@ -24,6 +24,7 @@
         <span class="status-dot"></span>
         <span id="status-text">Disconnected</span>
         <span id="battery-text" class="battery-text"></span>
+        <span id="header-signal" class="header-signal hidden"></span>
       </div>
     </div>
     <div class="header-right">
@@ -333,7 +334,10 @@
                   <div class="dm-device-name" id="dm-device-name">Plaud NotePin S</div>
                   <div class="dm-device-meta" id="dm-device-meta"></div>
                 </div>
-                <div class="dm-device-battery" id="dm-device-battery"></div>
+                <div class="dm-device-right">
+                  <div class="dm-device-battery" id="dm-device-battery"></div>
+                  <div class="dm-device-rssi" id="dm-device-rssi"></div>
+                </div>
               </div>
               <div class="dm-actions mt-3">
                 <button id="dm-sync-btn" class="action-btn accent flex-1">

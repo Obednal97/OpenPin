@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('plaud', {
   disconnect: () => apiCall('POST', '/device/disconnect'),
   depair: () => apiCall('POST', '/device/depair'),
   status: () => apiCall('GET', '/device/status'),
+  rssi: () => apiCall('GET', '/device/rssi'),
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
   sync: () => apiCall('POST', '/device/sync'),
