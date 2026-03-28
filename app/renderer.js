@@ -126,6 +126,20 @@ dom.syncBtn.addEventListener('click', async () => {
           }
         }
         toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
+
+        // Auto-summarise if enabled
+        if (app.settings.auto_summarise) {
+          showProgress('Summarising...', 90);
+          for (const f of newFiles) {
+            if (f.ogg_path) {
+              try {
+                const sid = f.session_id || String(f.ogg_path).split('/').pop().replace('.ogg', '');
+                await window.plaud.summarize(sid);
+              } catch {}
+            }
+          }
+          toast('Summarised new recordings', 'success');
+        }
       }
 
       await loadRecordings();
@@ -274,6 +288,12 @@ async function init() {
         return;
       }
 
+      // Auto-sync if enabled
+      if (app.settings.auto_sync === false) {
+        _bgBusy = false;
+        return;
+      }
+
       const check = await window.plaud.checkNew();
       if (check.new_files > 0) {
         toast(`${check.new_files} new recording(s) found, syncing...`, 'info');
@@ -285,18 +305,36 @@ async function init() {
             const newFiles = (result.files || []).filter((f) => f.status === 'new');
             if (newFiles.length > 0) {
               toast(`Synced ${newFiles.length} recording(s)`, 'success');
-              for (const f of newFiles) {
-                if (f.ogg_path) {
-                  try {
-                    await window.plaud.transcribe(
-                      f.ogg_path,
-                      app.settings.model || 'small',
-                      app.settings.diarize || false,
-                      app.settings.language || 'en',
-                    );
-                  } catch {}
+
+              // Auto-transcribe if enabled
+              if (app.settings.auto_transcribe !== false) {
+                for (const f of newFiles) {
+                  if (f.ogg_path) {
+                    try {
+                      await window.plaud.transcribe(
+                        f.ogg_path,
+                        app.settings.model || 'small',
+                        app.settings.diarize || false,
+                        app.settings.language || 'en',
+                      );
+                    } catch {}
+                  }
+                }
+
+                // Auto-summarise if enabled (requires auto-transcribe)
+                if (app.settings.auto_summarise) {
+                  for (const f of newFiles) {
+                    if (f.ogg_path) {
+                      try {
+                        const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
+                        await window.plaud.summarize(sid);
+                      } catch {}
+                    }
+                  }
+                  toast('Auto-summarised new recordings', 'success');
                 }
               }
+
               await loadRecordings();
 
               const bgSyncDir = app.settings.cloud_sync_direction || 'download';
