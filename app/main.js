@@ -124,7 +124,7 @@ function createWindow() {
     minHeight: 600,
     transparent: false,
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    trafficLightPosition: { x: 16, y: 18 },
     roundedCorners: true,
     visualEffectState: 'active',
     icon: path.join(__dirname, 'icon.icns'),
