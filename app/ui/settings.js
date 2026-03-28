@@ -534,6 +534,60 @@ function initSettingsEvents() {
     toast(e.target.checked ? 'Diarization enabled' : 'Diarization disabled', 'success');
   });
 
+  // Automation pipeline toggles with cascade disable
+  function updateAutoPipelineState() {
+    const syncOn = $('#auto-sync-toggle').checked;
+    const transcribeOn = $('#auto-transcribe-toggle').checked;
+
+    // Transcribe depends on sync
+    const transcribeRow = $('#auto-transcribe-row');
+    const transcribeToggle = $('#auto-transcribe-toggle');
+    if (!syncOn) {
+      transcribeRow.classList.add('disabled');
+      transcribeToggle.disabled = true;
+    } else {
+      transcribeRow.classList.remove('disabled');
+      transcribeToggle.disabled = false;
+    }
+
+    // Summarise depends on sync + transcribe
+    const summariseRow = $('#auto-summarise-row');
+    const summariseToggle = $('#auto-summarise-toggle');
+    if (!syncOn || !transcribeOn) {
+      summariseRow.classList.add('disabled');
+      summariseToggle.disabled = true;
+    } else {
+      summariseRow.classList.remove('disabled');
+      summariseToggle.disabled = false;
+    }
+  }
+
+  // Initialize toggle states
+  $('#auto-sync-toggle').checked = app.settings.auto_sync !== false;
+  $('#auto-transcribe-toggle').checked = app.settings.auto_transcribe !== false;
+  $('#auto-summarise-toggle').checked = app.settings.auto_summarise || false;
+  updateAutoPipelineState();
+
+  $('#auto-sync-toggle').addEventListener('change', async (e) => {
+    app.settings.auto_sync = e.target.checked;
+    await window.plaud.saveSettings({ auto_sync: e.target.checked });
+    updateAutoPipelineState();
+    toast(e.target.checked ? 'Auto-sync enabled' : 'Auto-sync disabled', 'success');
+  });
+
+  $('#auto-transcribe-toggle').addEventListener('change', async (e) => {
+    app.settings.auto_transcribe = e.target.checked;
+    await window.plaud.saveSettings({ auto_transcribe: e.target.checked });
+    updateAutoPipelineState();
+    toast(e.target.checked ? 'Auto-transcribe enabled' : 'Auto-transcribe disabled', 'success');
+  });
+
+  $('#auto-summarise-toggle').addEventListener('change', async (e) => {
+    app.settings.auto_summarise = e.target.checked;
+    await window.plaud.saveSettings({ auto_summarise: e.target.checked });
+    toast(e.target.checked ? 'Auto-summarise enabled' : 'Auto-summarise disabled', 'success');
+  });
+
   // Profile save
   $('#profile-save-btn').addEventListener('click', async () => {
     const profile = {
