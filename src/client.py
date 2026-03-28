@@ -3,24 +3,34 @@
 import asyncio
 import os
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 
-from .crypto import BleEncryption, get_public_key_pem_body, complete_handshake
 from .constants import (
-    SERVICE_UUID, NOTIFY_CHAR_UUID, WRITE_CHAR_UUID,
-    BATTERY_LEVEL_UUID, APP_KEY,
-    BLE_CONNECT_TIMEOUT, HANDSHAKE_TIMEOUT, PACKET_LOSS_TIMEOUT,
+    APP_KEY,
+    BATTERY_LEVEL_UUID,
+    BLE_CONNECT_TIMEOUT,
+    NOTIFY_CHAR_UUID,
+    PACKET_LOSS_TIMEOUT,
+    WRITE_CHAR_UUID,
 )
+from .crypto import BleEncryption, complete_handshake, get_public_key_pem_body
 from .protocol import (
-    build_handshake, build_sync_time, build_get_state, build_get_file_list,
-    build_sync_file_start, build_stop_sync_file, build_get_storage,
-    build_command, unpack_u8, unpack_u16, unpack_u32,
-    HandshakeResponse, BleFile, FileDataPacket, DeviceState,
+    BleFile,
+    DeviceState,
+    FileDataPacket,
+    HandshakeResponse,
+    build_get_file_list,
+    build_get_state,
+    build_handshake,
+    build_stop_sync_file,
+    build_sync_file_start,
+    build_sync_time,
     parse_file_list,
+    unpack_u16,
 )
 
 
@@ -118,8 +128,10 @@ class PlaudClient:
 
         Returns raw Opus data or None on failure.
         """
-        print(f"Downloading file session={ble_file.session_id} "
-              f"size={ble_file.file_size} duration={ble_file.duration_str}...")
+        print(
+            f"Downloading file session={ble_file.session_id} "
+            f"size={ble_file.file_size} duration={ble_file.duration_str}..."
+        )
 
         self._file_buffer = bytearray()
         self._file_offset = 0
@@ -144,7 +156,7 @@ class PlaudClient:
                     self._file_transfer_done.wait(),
                     timeout=PACKET_LOSS_TIMEOUT,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 elapsed = time.time() - start_time
                 if elapsed > 300:  # 5 minute absolute timeout
                     print("\nFile transfer timed out after 5 minutes")
@@ -155,7 +167,11 @@ class PlaudClient:
                 if ble_file.file_size > 0:
                     progress = len(self._file_buffer) * 100 // ble_file.file_size
                     if progress != last_progress:
-                        print(f"\r  Progress: {progress}% ({len(self._file_buffer)}/{ble_file.file_size} bytes)", end="", flush=True)
+                        print(
+                            f"\r  Progress: {progress}% ({len(self._file_buffer)}/{ble_file.file_size} bytes)",
+                            end="",
+                            flush=True,
+                        )
                         last_progress = progress
 
                 # Re-request from current position if no data received
@@ -179,13 +195,13 @@ class PlaudClient:
 
         print(f"\nFound {len(files)} recording(s):")
         for i, f in enumerate(files):
-            print(f"  [{i+1}] Session {f.session_id}: {f.file_size} bytes ({f.duration_str})")
+            print(f"  [{i + 1}] Session {f.session_id}: {f.file_size} bytes ({f.duration_str})")
 
         os.makedirs(self.output_dir, exist_ok=True)
         saved_files = []
 
         for i, ble_file in enumerate(files):
-            print(f"\n--- Downloading [{i+1}/{len(files)}] ---")
+            print(f"\n--- Downloading [{i + 1}/{len(files)}] ---")
             data = await self.download_file(ble_file)
             if data:
                 filename = f"recording_{ble_file.session_id}.opus"
@@ -211,6 +227,7 @@ class PlaudClient:
         5. Client decrypts and validates ("PLAUD.AI")
         """
         import struct as struct_mod
+
         print("Performing handshake...")
 
         # Enable indications on B004 for RSA data
@@ -232,7 +249,7 @@ class PlaudClient:
         # Wait up to 15s for initial response
         try:
             await asyncio.wait_for(self._response_event.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         if self._response_data:
@@ -260,7 +277,7 @@ class PlaudClient:
 
         for i in range(total_chunks):
             offset = i * chunk_size
-            chunk = pubkey_bytes[offset:offset + chunk_size]
+            chunk = pubkey_bytes[offset : offset + chunk_size]
             # Packet: [cmd_type=1][cmd_id=65042 u16 LE][total_chunks u8][chunk_index u8][data]
             packet = bytes([1]) + struct_mod.pack("<H", 65042)
             packet += bytes([total_chunks, i])
@@ -319,7 +336,7 @@ class PlaudClient:
         if self._encryption.active:
             try:
                 data = bytearray(self._encryption.decrypt(bytes(data)))
-            except Exception as e:
+            except Exception:
                 # May be unencrypted control data
                 pass
 
@@ -376,5 +393,5 @@ class PlaudClient:
         try:
             await asyncio.wait_for(self._response_event.wait(), timeout=timeout)
             return self._response_data
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None

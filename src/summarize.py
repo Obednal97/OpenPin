@@ -10,8 +10,8 @@ Usage:
 import json
 import os
 import sys
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 from .transcribe import Transcript
 
@@ -27,13 +27,18 @@ class Summary:
 
     def save(self, path: str):
         with open(path, "w") as f:
-            json.dump({
-                "title": self.title,
-                "summary": self.summary,
-                "key_points": self.key_points,
-                "action_items": self.action_items,
-                "model": self.model,
-            }, f, indent=2, ensure_ascii=False)
+            json.dump(
+                {
+                    "title": self.title,
+                    "summary": self.summary,
+                    "key_points": self.key_points,
+                    "action_items": self.action_items,
+                    "model": self.model,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     @property
     def formatted(self) -> str:
@@ -78,8 +83,8 @@ def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> S
     except ImportError:
         print("Installing openai...")
         import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                             "--break-system-packages", "openai"])
+
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "openai"])
         from openai import OpenAI
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -97,7 +102,10 @@ def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> S
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that analyzes meeting transcripts and recordings."},
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that analyzes meeting transcripts and recordings.",
+            },
             {"role": "user", "content": SUMMARY_PROMPT + text},
         ],
         response_format={"type": "json_object"},
@@ -124,8 +132,8 @@ def summarize_with_anthropic(transcript_text: str, model: str = "claude-sonnet-4
     except ImportError:
         print("Installing anthropic...")
         import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                             "--break-system-packages", "anthropic"])
+
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "anthropic"])
         import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -141,8 +149,10 @@ def summarize_with_anthropic(transcript_text: str, model: str = "claude-sonnet-4
         model=model,
         max_tokens=4096,
         messages=[
-            {"role": "user", "content": SUMMARY_PROMPT + text +
-             "\n\nRespond with ONLY the JSON object, no other text."},
+            {
+                "role": "user",
+                "content": SUMMARY_PROMPT + text + "\n\nRespond with ONLY the JSON object, no other text.",
+            },
         ],
     )
 
@@ -231,8 +241,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Summarize transcripts using LLMs")
     parser.add_argument("path", help="Transcript JSON file path")
-    parser.add_argument("--provider", choices=["openai", "anthropic", "ollama"],
-                       default="ollama", help="LLM provider (default: ollama)")
+    parser.add_argument(
+        "--provider", choices=["openai", "anthropic", "ollama"], default="ollama", help="LLM provider (default: ollama)"
+    )
     parser.add_argument("--model", default=None, help="Model name")
 
     args = parser.parse_args()

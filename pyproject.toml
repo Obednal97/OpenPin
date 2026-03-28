@@ -1,0 +1,27 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4"]
+ignore = [
+  "E501",   # line length — handled by formatter
+  "E701",   # multiple statements on one line — compact CSS-style ok for simple cases
+  "E741",   # ambiguous variable name (we use l, f, etc.)
+  "B007",   # unused loop variable
+  "B904",   # raise-without-from — reraise patterns are fine
+  "SIM105", # contextlib.suppress — try/except/pass is clearer here
+  "SIM102", # collapsible if — nested ifs are clearer in callbacks
+  "SIM108", # ternary operator — readability preference
+  "SIM115", # open-file-with-context-handler — one-liner patterns ok
+  "UP015",  # redundant open mode — keep explicit for clarity
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/api_server.py" = ["E402"]  # imports after ensure_installed() calls
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "src"]
+
+[tool.ruff.format]
+quote-style = "double"

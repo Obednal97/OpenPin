@@ -1,9 +1,8 @@
 """Plaud Cloud API client - download recordings synced to the cloud."""
 
-import json
 import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 
@@ -26,12 +25,14 @@ class PlaudCloudClient:
         self.token = token
         self.api_domain = api_domain
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"bearer {token}",
-            "Content-Type": "application/json",
-            "app-platform": "desktop",
-            "app-language": "en",
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"bearer {token}",
+                "Content-Type": "application/json",
+                "app-platform": "desktop",
+                "app-language": "en",
+            }
+        )
 
     def get_user_info(self) -> dict:
         """Get current user info."""
@@ -64,15 +65,17 @@ class PlaudCloudClient:
             duration = item.get("duration", 0)
             if duration > 1000:
                 duration = duration // 1000  # Convert ms to seconds
-            recordings.append(PlaudRecording(
-                file_id=item.get("id", item.get("file_id", "")),
-                filename=item.get("filename", "unknown"),
-                duration=duration,
-                file_size=item.get("filesize", 0),
-                start_time=item.get("start_time", ""),
-                device_sn=item.get("serial_number", item.get("device_sn", "")),
-                scene=item.get("scene", 0),
-            ))
+            recordings.append(
+                PlaudRecording(
+                    file_id=item.get("id", item.get("file_id", "")),
+                    filename=item.get("filename", "unknown"),
+                    duration=duration,
+                    file_size=item.get("filesize", 0),
+                    start_time=item.get("start_time", ""),
+                    device_sn=item.get("serial_number", item.get("device_sn", "")),
+                    scene=item.get("scene", 0),
+                )
+            )
         return recordings
 
     def get_download_url(self, file_id: str, opus: bool = True) -> str:
@@ -118,11 +121,11 @@ class PlaudCloudClient:
             filepath = Path(output_dir) / filename
 
             if filepath.exists():
-                print(f"  [{i+1}/{len(recordings)}] Skipping (exists): {filename}")
+                print(f"  [{i + 1}/{len(recordings)}] Skipping (exists): {filename}")
                 saved.append(filepath)
                 continue
 
-            print(f"  [{i+1}/{len(recordings)}] Downloading: {filename} ({rec.duration}s)")
+            print(f"  [{i + 1}/{len(recordings)}] Downloading: {filename} ({rec.duration}s)")
             try:
                 if self.download_recording(rec.file_id, str(filepath), opus=opus):
                     saved.append(filepath)

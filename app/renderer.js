@@ -1,0 +1,318 @@
+/* ============================================================
+   Plaud V2 — Renderer Process (Orchestrator)
+   Loads: ui/utils.js, ui/recordings.js, ui/transcript.js, ui/settings.js
+   ============================================================ */
+
+// ---- Theme Toggle ----
+function showThemeIcon(preference) {
+  const icons = { light: 'theme-icon-light', dark: 'theme-icon-dark', auto: 'theme-icon-auto' };
+  Object.values(icons).forEach((id) => {
+    const el = document.getElementById(id);
+    el.classList.add('hidden');
+    el.classList.remove('entering', 'exiting');
+  });
+  const active = document.getElementById(icons[preference]);
+  if (active) {
+    active.classList.remove('hidden');
+    active.classList.add('entering');
+  }
+}
+
+(async () => {
+  try {
+    const { preference } = await window.plaud.getTheme();
+    showThemeIcon(preference);
+  } catch {}
+})();
+
+$('#theme-toggle-btn').addEventListener('click', async () => {
+  try {
+    const { preference } = await window.plaud.cycleTheme();
+    showThemeIcon(preference);
+    const labels = { auto: 'Auto (system)', light: 'Light mode', dark: 'Dark mode' };
+    toast(labels[preference], 'info');
+  } catch {}
+});
+
+// ---- Settings Open/Close ----
+dom.settingsBtn.addEventListener('click', () => {
+  openSettings();
+  loadSettings();
+});
+
+dom.settingsClose.addEventListener('click', closeSettings);
+dom.settingsOverlay.addEventListener('click', closeSettings);
+
+// ---- Main Actions ----
+dom.scanBtn.addEventListener('click', async () => {
+  setLoading(dom.scanBtn, true);
+  dom.statusEl.className = 'device-status scanning';
+  dom.statusText.textContent = 'Scanning...';
+
+  try {
+    toast('Scanning for Plaud NotePin S...', 'info');
+    const result = await window.plaud.scan();
+
+    if (result.found) {
+      toast(`Found ${result.name}`, 'success');
+      dom.statusText.textContent = 'Connecting...';
+
+      const conn = await window.plaud.connect(result.address, result.serial_number);
+      if (conn.connected) {
+        toast(`Connected! Battery: ${conn.battery || '?'}%`, 'success');
+        await updateDeviceStatus();
+      } else {
+        toast(`Connection failed: ${conn.error || 'Unknown error'}`, 'error');
+        dom.statusEl.className = 'device-status disconnected';
+        dom.statusText.textContent = 'Disconnected';
+      }
+    } else {
+      toast('Device not found. Make sure it is nearby and awake.', 'error');
+      dom.statusEl.className = 'device-status disconnected';
+      dom.statusText.textContent = 'Disconnected';
+    }
+  } catch (err) {
+    toast(`Scan error: ${err.message}`, 'error');
+    dom.statusEl.className = 'device-status disconnected';
+    dom.statusText.textContent = 'Disconnected';
+  } finally {
+    setLoading(dom.scanBtn, false);
+  }
+});
+
+dom.syncBtn.addEventListener('click', async () => {
+  setLoading(dom.syncBtn, true);
+  showProgress('Syncing recordings...', 20);
+  toast('Syncing recordings from device...', 'info');
+
+  try {
+    const result = await window.plaud.sync();
+    if (result.error) {
+      toast(`Sync failed: ${result.error}`, 'error');
+    } else {
+      const newFiles = (result.files || []).filter((f) => f.status === 'new');
+      const total = (result.files || []).length;
+      toast(`Sync complete: ${newFiles.length} new, ${total} total`, 'success');
+
+      if (newFiles.length > 0) {
+        showProgress('Transcribing new recordings...', 60);
+        for (let i = 0; i < newFiles.length; i++) {
+          const f = newFiles[i];
+          if (f.ogg_path) {
+            showProgress(`Transcribing ${i + 1}/${newFiles.length}...`, 60 + (40 * i) / newFiles.length);
+            try {
+              await window.plaud.transcribe(
+                f.ogg_path,
+                app.settings.model || 'small',
+                app.settings.diarize || false,
+                app.settings.language || 'auto',
+              );
+            } catch (err) {
+              console.error(`Transcription failed for ${f.session_id}:`, err);
+            }
+          }
+        }
+        toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
+      }
+
+      await loadRecordings();
+
+      const syncDir = app.settings.cloud_sync_direction || 'download';
+      if (syncDir === 'twoway' && app.cloudState.logged_in) {
+        toast('Uploading to Plaud Cloud...', 'info');
+        try {
+          const cloudResult = await window.plaud.cloudSync('twoway');
+          const ul = cloudResult.upload || {};
+          const uploaded = (ul.uploaded || []).filter((u) => u.status === 'uploaded');
+          if (uploaded.length > 0) {
+            toast(`Uploaded ${uploaded.length} recording(s) to cloud`, 'success');
+          }
+        } catch (err) {
+          toast(`Cloud upload error: ${err.message}`, 'error');
+        }
+      }
+    }
+  } catch (err) {
+    toast(`Sync error: ${err.message}`, 'error');
+  } finally {
+    setLoading(dom.syncBtn, false);
+    hideProgress();
+  }
+});
+
+dom.disconnectBtn.addEventListener('click', async () => {
+  try {
+    await window.plaud.disconnect();
+    toast('Disconnected', 'info');
+  } catch {}
+  await updateDeviceStatus();
+});
+
+// Back button
+$('#transcript-back').addEventListener('click', closeTranscript);
+
+// Select mode
+$('#select-toggle').addEventListener('click', () => {
+  app.selectMode ? exitSelectMode() : enterSelectMode();
+});
+
+$('#select-all-btn').addEventListener('click', () => {
+  if (app.selectedIds.size === app.recordings.length) {
+    app.selectedIds.clear();
+  } else {
+    app.recordings.forEach((r) => app.selectedIds.add(r.session_id));
+  }
+  renderRecordingsList();
+});
+
+$('#delete-selected-btn').addEventListener('click', deleteSelected);
+
+// Search
+$('#search-input').addEventListener('input', (e) => {
+  app.searchQuery = e.target.value;
+  const clearBtn = $('#search-clear');
+  if (app.searchQuery) {
+    clearBtn.classList.remove('hidden');
+  } else {
+    clearBtn.classList.add('hidden');
+  }
+  renderRecordingsList();
+});
+
+$('#search-clear').addEventListener('click', () => {
+  $('#search-input').value = '';
+  app.searchQuery = '';
+  $('#search-clear').classList.add('hidden');
+  renderRecordingsList();
+});
+
+// OAuth callback listener
+window.plaud.onOAuthCallback(async (authCode) => {
+  if (!authCode) return;
+  toast('Received login callback, authenticating...', 'info');
+  try {
+    const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
+    if (res.logged_in) {
+      app.cloudState = { logged_in: true, user: res.user };
+      toast('Plaud account connected!', 'success');
+      renderCloudAccount();
+    } else {
+      toast(res.error || 'Login failed', 'error');
+    }
+  } catch (err) {
+    toast(`Error: ${err.message}`, 'error');
+  }
+  app.pendingDesktopUuid = null;
+});
+
+// ---- Init ----
+async function init() {
+  let apiReady = false;
+  for (let i = 0; i < 20; i++) {
+    try {
+      const h = await window.plaud.health();
+      if (h.status === 'ok') {
+        apiReady = true;
+        break;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  if (!apiReady) {
+    dom.emptyState.querySelector('h2').textContent = 'Starting up...';
+    dom.emptyState.querySelector('p').textContent =
+      'The Python API server is starting. If this persists, check that Python 3 and Flask are installed.';
+    return;
+  }
+
+  // Init sub-modules
+  initAudioPlayer();
+  initSettingsEvents();
+
+  await updateDeviceStatus();
+  await loadCloudStatus();
+  await loadNotionStatus();
+  await loadSettings();
+  await loadRecordings();
+
+  // Poll device status every 10 seconds
+  app.pollInterval = setInterval(updateDeviceStatus, 10000);
+
+  // Background device polling
+  let _bgBusy = false;
+  async function bgDevicePoll() {
+    if (_bgBusy) return;
+    _bgBusy = true;
+    try {
+      const status = await window.plaud.status();
+
+      if (!status.connected) {
+        const scan = await window.plaud.scanKnown();
+        if (scan.found) {
+          const conn = await window.plaud.connect(scan.address, scan.serial_number);
+          if (conn.connected) {
+            toast(`Auto-connected to ${scan.name}`, 'success');
+            await updateDeviceStatus();
+          }
+        } else if (scan.reason === 'not_in_range') {
+          window._deviceNotFoundCount = (window._deviceNotFoundCount || 0) + 1;
+          if (window._deviceNotFoundCount >= 5 && !window._shownDeviceNotFound) {
+            window._shownDeviceNotFound = true;
+            toast("Device not found — make sure it's nearby and powered on", 'info');
+          }
+        }
+        _bgBusy = false;
+        return;
+      }
+
+      const check = await window.plaud.checkNew();
+      if (check.new_files > 0) {
+        toast(`${check.new_files} new recording(s) found, syncing...`, 'info');
+        dom.progressBar.classList.remove('hidden');
+        dom.progressBar.classList.add('indeterminate');
+        try {
+          const result = await window.plaud.sync();
+          if (!result.error) {
+            const newFiles = (result.files || []).filter((f) => f.status === 'new');
+            if (newFiles.length > 0) {
+              toast(`Synced ${newFiles.length} recording(s)`, 'success');
+              for (const f of newFiles) {
+                if (f.ogg_path) {
+                  try {
+                    await window.plaud.transcribe(
+                      f.ogg_path,
+                      app.settings.model || 'small',
+                      app.settings.diarize || false,
+                      app.settings.language || 'en',
+                    );
+                  } catch {}
+                }
+              }
+              await loadRecordings();
+
+              const bgSyncDir = app.settings.cloud_sync_direction || 'download';
+              if (bgSyncDir === 'twoway' && app.cloudState.logged_in) {
+                try {
+                  const cr = await window.plaud.cloudSync('twoway');
+                  const ul = cr.upload || {};
+                  const upped = (ul.uploaded || []).filter((u) => u.status === 'uploaded');
+                  if (upped.length > 0) toast(`Uploaded ${upped.length} to cloud`, 'success');
+                } catch {}
+              }
+            }
+          }
+        } finally {
+          dom.progressBar.classList.remove('indeterminate');
+          hideProgress();
+        }
+      }
+    } catch {}
+    _bgBusy = false;
+  }
+
+  bgDevicePoll();
+  setInterval(bgDevicePoll, 30000);
+}
+
+init();
