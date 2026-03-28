@@ -244,10 +244,27 @@ function openTranscript(sessionId, autoPlay = false) {
     });
   }
 
-  // Notion push
+  // Notion push / open
   const notionBtn = $('#notion-push-btn');
   if (notionBtn) {
+    // Check if this recording already has a Notion page
+    (async () => {
+      try {
+        const pageInfo = await window.plaud.notionPageUrl(sessionId);
+        if (pageInfo.has_page) {
+          notionBtn.innerHTML = `<img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;"><span>Open in Notion</span>`;
+          notionBtn.dataset.notionUrl = pageInfo.url;
+        }
+      } catch {}
+    })();
+
     notionBtn.addEventListener('click', async () => {
+      // If page exists, open it
+      if (notionBtn.dataset.notionUrl) {
+        window.plaud.openExternal(notionBtn.dataset.notionUrl);
+        return;
+      }
+
       const status = await window.plaud.notionStatus();
 
       if (!status.connected) {
@@ -291,7 +308,12 @@ function openTranscript(sessionId, autoPlay = false) {
         if (result.error) {
           toast(`Notion push failed: ${result.error}`, 'error');
         } else {
-          toast('Pushed to Notion!', 'success');
+          const verb = result.updated ? 'Updated in' : 'Pushed to';
+          toast(`${verb} Notion!`, 'success');
+          if (result.url) {
+            notionBtn.innerHTML = `<img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;"><span>Open in Notion</span>`;
+            notionBtn.dataset.notionUrl = result.url;
+          }
         }
       } catch (err) {
         toast(`Error: ${err.message}`, 'error');

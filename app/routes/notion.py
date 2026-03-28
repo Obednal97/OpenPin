@@ -6,7 +6,7 @@ import re
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
-from app.utils.config import load_config
+from app.utils.config import load_config, save_config
 from app.utils.constants import TRANSCRIPTS_DIR
 
 bp = Blueprint("notion", __name__, url_prefix="/notion")
@@ -149,9 +149,88 @@ def set_database():
     return jsonify({"saved": True})
 
 
+def _build_notion_content(t_data):
+    """Build markdown content for a Notion page from transcript data."""
+    content_parts = []
+    summary = t_data.get("summary", "")
+    if summary:
+        content_parts.append(summary)
+        content_parts.append("\n---\n")
+
+    content_parts.append("## Full Transcript\n")
+    segments = t_data.get("segments", [])
+    if segments:
+        for seg in segments:
+            ts = f"[{int(seg.get('start', 0)) // 60:02d}:{int(seg.get('start', 0)) % 60:02d}]"
+            speaker = f" **{seg['speaker']}**:" if seg.get("speaker") else ""
+            content_parts.append(f"{ts}{speaker} {seg.get('text', '').strip()}")
+    else:
+        content_parts.append(t_data.get("text", ""))
+
+    return "\n".join(content_parts)
+
+
+def _extract_page_url(result):
+    """Extract the Notion page URL from an MCP response."""
+    # The MCP response may contain the URL in various places
+    if not result:
+        return None
+    # Check content array for text that contains a URL
+    content = result.get("content", [])
+    for item in content if isinstance(content, list) else [content]:
+        text = item.get("text", "") if isinstance(item, dict) else str(item)
+        if "notion.so" in text or "notion.site" in text:
+            # Extract URL
+            import re as _re
+
+            m = _re.search(r"https://[^\s\"'<>]+notion[^\s\"'<>]+", text)
+            if m:
+                return m.group(0)
+        # Try parsing as JSON for page ID
+        try:
+            parsed = json.loads(text) if isinstance(text, str) else text
+            if isinstance(parsed, dict):
+                url = parsed.get("url", "")
+                if url:
+                    return url
+                page_id = parsed.get("id", "")
+                if page_id:
+                    return f"https://notion.so/{page_id.replace('-', '')}"
+                # Check results array
+                results = parsed.get("results", [parsed])
+                for r in results:
+                    if isinstance(r, dict) and r.get("url"):
+                        return r["url"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
+
+def _save_notion_page_url(session_id, url):
+    """Save the Notion page URL for a recording."""
+    config = load_config()
+    pages = config.get("notion_page_urls", {})
+    pages[session_id] = url
+    config["notion_page_urls"] = pages
+    save_config(config)
+
+
+def _get_notion_page_url(session_id):
+    """Get the saved Notion page URL for a recording, if any."""
+    config = load_config()
+    return config.get("notion_page_urls", {}).get(session_id, "")
+
+
+@bp.route("/page-url/<session_id>")
+def page_url(session_id):
+    """Get the Notion page URL for a recording."""
+    url = _get_notion_page_url(session_id)
+    return jsonify({"url": url, "has_page": bool(url)})
+
+
 @bp.route("/push", methods=["POST"])
 def push():
-    """Push a recording's transcript and summary to Notion."""
+    """Push or update a recording's transcript and summary in Notion."""
     if not notion.is_connected():
         return jsonify({"error": "Not connected to Notion"}), 401
     if not notion.get_database_id():
@@ -169,45 +248,43 @@ def push():
     t_data = json.loads(transcript_path.read_text())
     config = load_config()
     custom_title = config.get("recording_names", {}).get(session_id, "")
-
     title = custom_title or t_data.get("auto_title", "") or session_id
+    full_content = _build_notion_content(t_data)
 
-    content_parts = []
-    summary = t_data.get("summary", "")
-    if summary:
-        content_parts.append(summary)
-        content_parts.append("\n---\n")
-
-    content_parts.append("## Full Transcript\n")
-    segments = t_data.get("segments", [])
-    if segments:
-        for seg in segments:
-            ts = f"[{int(seg.get('start', 0)) // 60:02d}:{int(seg.get('start', 0)) % 60:02d}]"
-            speaker = f" **{seg['speaker']}**:" if seg.get("speaker") else ""
-            content_parts.append(f"{ts}{speaker} {seg.get('text', '').strip()}")
-    else:
-        content_parts.append(t_data.get("text", ""))
-
-    full_content = "\n".join(content_parts)
+    # Check if we already have a page for this recording
+    existing_url = _get_notion_page_url(session_id)
 
     try:
-        result = notion.mcp_call(
-            "notion-create-pages",
-            {
-                "parent": {
-                    "database_id": notion.get_database_id(),
+        if existing_url:
+            # Update existing page
+            result = notion.mcp_call(
+                "notion-update-page",
+                {
+                    "url": existing_url,
+                    "properties": {"title": title},
+                    "content": full_content,
                 },
-                "pages": [
-                    {
-                        "properties": {
-                            "title": title,
-                        },
-                        "content": full_content,
-                        "icon": "\U0001f399\ufe0f",
-                    }
-                ],
-            },
-        )
-        return jsonify({"pushed": True, "result": result})
+            )
+            return jsonify({"pushed": True, "updated": True, "url": existing_url, "result": result})
+        else:
+            # Create new page
+            result = notion.mcp_call(
+                "notion-create-pages",
+                {
+                    "parent": {"database_id": notion.get_database_id()},
+                    "pages": [
+                        {
+                            "properties": {"title": title},
+                            "content": full_content,
+                            "icon": "\U0001f399\ufe0f",
+                        }
+                    ],
+                },
+            )
+            # Extract and save the page URL
+            page_url = _extract_page_url(result)
+            if page_url:
+                _save_notion_page_url(session_id, page_url)
+            return jsonify({"pushed": True, "updated": False, "url": page_url or "", "result": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

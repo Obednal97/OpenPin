@@ -316,11 +316,51 @@ def summarize_transcript():
             "summarize", {"session_id": session_id, "title": title, "summary": summary_text, "provider": provider}
         )
 
+        # Auto-push to Notion if enabled
+        notion_url = ""
+        if config.get("notion_auto_push"):
+            try:
+                from app.routes.notion import _build_notion_content, _get_notion_page_url, _save_notion_page_url
+                from app.state import notion as notion_state
+
+                if notion_state.is_connected() and notion_state.get_database_id():
+                    content = _build_notion_content(t_data)
+                    existing = _get_notion_page_url(session_id)
+                    if existing:
+                        notion_state.mcp_call(
+                            "notion-update-page",
+                            {"url": existing, "properties": {"title": title}, "content": content},
+                        )
+                        notion_url = existing
+                    else:
+                        result = notion_state.mcp_call(
+                            "notion-create-pages",
+                            {
+                                "parent": {"database_id": notion_state.get_database_id()},
+                                "pages": [
+                                    {
+                                        "properties": {"title": title},
+                                        "content": content,
+                                        "icon": "\U0001f399\ufe0f",
+                                    }
+                                ],
+                            },
+                        )
+                        from app.routes.notion import _extract_page_url
+
+                        page_url = _extract_page_url(result)
+                        if page_url:
+                            _save_notion_page_url(session_id, page_url)
+                            notion_url = page_url
+            except Exception as e:
+                logging.warning(f"Notion auto-push failed: {e}")
+
         return jsonify(
             {
                 "summary": summary_text,
                 "title": title,
                 "provider": provider,
+                "notion_url": notion_url,
             }
         )
 
