@@ -1,8 +1,21 @@
 """Shared constants for Plaud V2."""
 
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# User data directory — outside the app bundle so it persists across updates.
+# In packaged app: ~/Library/Application Support/Plaud V2/
+# In dev mode: project root (so recordings/transcripts stay where they are)
+_is_packaged = not (PROJECT_ROOT / ".git").exists()
+if _is_packaged:
+    _data_dir = Path(os.path.expanduser("~/Library/Application Support/Plaud V2"))
+    _data_dir.mkdir(parents=True, exist_ok=True)
+else:
+    _data_dir = PROJECT_ROOT
+
+DATA_DIR = _data_dir
 
 # BLE UUIDs
 BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
@@ -13,15 +26,15 @@ BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 SN_SIG = "<REDACTED_SN_SIGNATURE>"
 BIND_TOKEN = "<REDACTED_JWT>"
 
-# Directory paths
-RECORDINGS_DIR = PROJECT_ROOT / "recordings"
-CLOUD_RECORDINGS_DIR = PROJECT_ROOT / "cloud_recordings_decoded"
-TRANSCRIPTS_DIR = PROJECT_ROOT / "transcripts"
-SESSIONS_DIR = PROJECT_ROOT / "sessions"
+# Directory paths — user data lives in DATA_DIR, keys stay in the app bundle
+RECORDINGS_DIR = DATA_DIR / "recordings"
+CLOUD_RECORDINGS_DIR = DATA_DIR / "cloud_recordings_decoded"
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "app_private.pem"
-CONFIG_PATH = PROJECT_ROOT / ".plaud_v2_config.json"
-HF_TOKEN_PATH = PROJECT_ROOT / ".hf_token"
-PLAUD_CONFIG_PATH = PROJECT_ROOT / ".plaud_config.json"
+CONFIG_PATH = DATA_DIR / ".plaud_v2_config.json"
+HF_TOKEN_PATH = DATA_DIR / ".hf_token"
+PLAUD_CONFIG_PATH = DATA_DIR / ".plaud_config.json"
 
 # Plaud Cloud API
 PLAUD_API_DOMAINS = {
@@ -41,7 +54,7 @@ WHISPER_MODELS = {
 
 # Notion MCP
 NOTION_MCP_URL = "https://mcp.notion.com/mcp"
-NOTION_CONFIG_PATH = PROJECT_ROOT / ".notion_mcp.json"
+NOTION_CONFIG_PATH = DATA_DIR / ".notion_mcp.json"
 NOTION_CALLBACK_PORT = 5124
 
 # Default tags

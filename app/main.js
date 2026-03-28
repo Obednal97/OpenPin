@@ -507,6 +507,11 @@ app.whenReady().then(async () => {
   // Set dock icon (needed for dev mode — packaged app uses .icns from build config)
   if (app.dock) {
     app.dock.setIcon(path.join(__dirname, 'icon_512.png'));
+    // Restore dock visibility preference
+    const prefs = loadElectronPrefs();
+    if (prefs.dockVisible === false) {
+      app.dock.hide();
+    }
   }
 
   startPythonServer();
@@ -617,6 +622,15 @@ ipcMain.handle('set-login-item', (event, enabled) => {
   return { enabled };
 });
 
+// Persist Electron-level preferences to a JSON file in userData (survives updates)
+const _prefsPath = path.join(app.getPath('userData'), 'electron-prefs.json');
+function loadElectronPrefs() {
+  try { return JSON.parse(fs.readFileSync(_prefsPath, 'utf8')); } catch { return {}; }
+}
+function saveElectronPrefs(prefs) {
+  fs.writeFileSync(_prefsPath, JSON.stringify(prefs, null, 2));
+}
+
 ipcMain.handle('get-dock-visible', () => {
   return { visible: !app.dock || app.dock.isVisible() };
 });
@@ -634,6 +648,9 @@ ipcMain.handle('set-dock-visible', async (event, visible) => {
       }
     }
   }
+  const prefs = loadElectronPrefs();
+  prefs.dockVisible = visible;
+  saveElectronPrefs(prefs);
   return { visible };
 });
 
