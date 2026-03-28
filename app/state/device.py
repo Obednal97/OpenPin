@@ -496,6 +496,115 @@ async def list_device_files():
     return files
 
 
+async def get_device_info():
+    """Query all available device information in one call."""
+    info = {}
+
+    # cmd 2 — Get SSN (serial number + firmware version)
+    try:
+        r = await send_cmd(bytes([1, 2, 0]), timeout=3)
+        if r and len(r) >= 10:
+            # Serial number: null-terminated string starting at offset 3 (relative to payload)
+            # But our send_cmd strips the cmd_type prefix, so payload starts at byte 0
+            # Actually send_cmd returns the decrypted payload dd[1:] — let's check
+            # The handler strips the first byte (dd[0] = type), so we get from byte 1 onward
+            # cmd_resp = dd = decrypted[4:] then response is dd
+            # dd[0] = type (1=cmd, 2=file), dd[1:3] = cmd_id, dd[3:] = payload
+            # So offset 3 in raw = index 3 in our response
+            sn_bytes = r[3:59] if len(r) >= 59 else r[3:]
+            null_idx = sn_bytes.find(0)
+            if null_idx >= 0:
+                sn_bytes = sn_bytes[:null_idx]
+            sn = bytes(sn_bytes).decode("ascii", errors="ignore").strip("\x00")
+            if sn:
+                info["serial_number_full"] = sn
+
+            if len(r) >= 63:
+                ver_type = chr(r[59]) if r[59] > 0 else ""
+                ver_num = r[60] | (r[61] << 8) | (r[62] << 16) if len(r) >= 63 else 0
+                # Version is typically encoded as major*65536 + minor*256 + patch
+                # e.g. 65546 = 1*65536 + 0*256 + 10 = v1.0.10
+                major = (ver_num >> 16) & 0xFF
+                minor = (ver_num >> 8) & 0xFF
+                patch = ver_num & 0xFF
+                info["firmware_version"] = f"{major}.{minor}.{patch}"
+                info["firmware_version_raw"] = ver_num
+    except Exception:
+        pass
+
+    # cmd 3 — Get State
+    try:
+        r = await send_cmd(bytes([1, 3, 0]), timeout=3)
+        if r and len(r) >= 8:
+            state_val = struct.unpack_from("<I", r, 3)[0] if len(r) >= 7 else 0
+            info["recording_state"] = state_val
+            # state_val: 0=idle, 1=recording, 2=paused, 3=resuming
+            info["is_recording"] = state_val in (1, 3)
+            info["is_paused"] = state_val == 2
+            if len(r) >= 8:
+                info["privacy_enabled"] = bool(r[7])
+            if len(r) >= 9:
+                info["key_state"] = r[8]
+                info["button_pressed"] = r[8] == 1
+            if len(r) >= 10:
+                info["usb_connected"] = bool(r[9])
+            if len(r) >= 11:
+                scene = r[10]
+                info["scene"] = scene
+                scene_names = {0: "Idle", 1: "Recording", 2: "Meeting", 3: "Call", 4: "Lecture"}
+                info["scene_name"] = scene_names.get(scene, f"Mode {scene}")
+            if len(r) >= 15:
+                info["active_session_id"] = struct.unpack_from("<I", r, 11)[0]
+            if len(r) >= 16:
+                info["find_my_state"] = r[15]
+                info["find_my_enabled"] = r[15] > 0
+    except Exception:
+        pass
+
+    # cmd 6 — Storage
+    try:
+        r = await send_cmd(bytes([1, 6, 0]), timeout=3)
+        if r and len(r) >= 19:
+            free_bytes = struct.unpack_from("<Q", r, 3)[0]
+            total_bytes = struct.unpack_from("<Q", r, 11)[0]
+            info["storage_free_bytes"] = free_bytes
+            info["storage_total_bytes"] = total_bytes
+            info["storage_used_bytes"] = total_bytes - free_bytes
+            if total_bytes > 0:
+                info["storage_used_pct"] = round((total_bytes - free_bytes) / total_bytes * 100, 1)
+            # Estimate remaining recording time (80 bytes per 20ms frame = 4000 bytes/sec)
+            info["storage_remaining_hours"] = round(free_bytes / 4000 / 3600, 1)
+            if len(r) >= 27:
+                duration_raw = struct.unpack_from("<Q", r, 19)[0]
+                # Value appears to be in milliseconds
+                info["total_recorded_seconds"] = duration_raw / 1000
+                info["total_recorded_raw"] = duration_raw
+    except Exception:
+        pass
+
+    # cmd 9 — Battery/charging status
+    try:
+        r = await send_cmd(bytes([1, 9, 0]), timeout=3)
+        if r and len(r) >= 5:
+            info["charging"] = bool(r[3])
+            info["battery_level"] = r[4]
+    except Exception:
+        pass
+
+    # cmd 36 — Accelerometer / orientation
+    try:
+        r = await send_cmd(bytes([1, 36, 0]), timeout=3)
+        if r and len(r) >= 15:
+            pitch = struct.unpack_from("<i", r, 3)[0]
+            roll = struct.unpack_from("<i", r, 7)[0]
+            yaw = struct.unpack_from("<i", r, 11)[0]
+            info["accelerometer"] = {"pitch": pitch, "roll": roll, "yaw": yaw}
+    except Exception:
+        pass
+
+    return info
+
+
 async def start_recording():
     """Start recording on the device."""
     await send_cmd(bytes([1, 20, 0]))

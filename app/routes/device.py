@@ -120,6 +120,18 @@ def rssi():
         return jsonify({"rssi": None, "error": str(e)})
 
 
+@bp.route("/info")
+def info():
+    """Get comprehensive device information (storage, firmware, state, accelerometer)."""
+    if not dev.is_connected():
+        return jsonify({"error": "Not connected"}), 400
+    try:
+        data = dev.run_async(dev.get_device_info())
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/scan-known", methods=["POST"])
 def scan_known():
     """Scan for a previously paired Plaud device, matched by serial number."""
