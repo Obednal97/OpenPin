@@ -463,7 +463,9 @@ async function updateDeviceStatus() {
     if (status.connected) {
       dom.statusEl.className = 'device-status connected';
       dom.statusText.textContent = status.device_name || 'Connected';
-      dom.batteryText.textContent = status.battery != null ? `${status.battery}%` : '';
+      const battStr = status.battery != null ? `${status.battery}%` : '';
+      const chargingStr = status.charging ? ' \u26A1' : '';
+      dom.batteryText.textContent = battStr + chargingStr;
       dom.scanBtn.classList.add('hidden');
       dom.syncBtn.classList.remove('hidden');
       dom.disconnectBtn.classList.remove('hidden');

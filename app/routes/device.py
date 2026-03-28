@@ -72,11 +72,15 @@ def status():
     is_recording = False
     state = dev.get_state()
     rssi = state.get("rssi")
+    battery = state["battery"]
+    charging = False
     if state["connected"]:
-        # Combine state check + RSSI read in a single async call to avoid deadlocks
-        async def _status_and_rssi():
+        # Combine state + battery + RSSI in a single async call
+        async def _poll_device():
             _is_rec = False
             _rssi = None
+            _battery = None
+            _charging = False
             try:
                 r = await dev.send_cmd(bytes([1, 3, 0]), timeout=3)
                 if r and len(r) >= 5:
@@ -85,20 +89,30 @@ def status():
             except Exception:
                 pass
             try:
+                r = await dev.send_cmd(bytes([1, 9, 0]), timeout=3)
+                if r and len(r) >= 5:
+                    _charging = bool(r[3])
+                    _battery = r[4]
+            except Exception:
+                pass
+            try:
                 _rssi = await dev.read_rssi()
             except Exception:
                 pass
-            return _is_rec, _rssi
+            return _is_rec, _battery, _charging, _rssi
 
         try:
-            is_recording, rssi = dev.run_async(_status_and_rssi())
+            is_recording, live_battery, charging, rssi = dev.run_async(_poll_device())
+            if live_battery is not None:
+                battery = live_battery
         except Exception:
             pass
 
     return jsonify(
         {
             "connected": state["connected"],
-            "battery": state["battery"],
+            "battery": battery,
+            "charging": charging,
             "device_name": state["device_name"],
             "address": state["device_address"],
             "serial_number": state.get("serial_number"),
