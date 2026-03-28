@@ -468,7 +468,38 @@
             </div>
           </div>
 
-          <p class="settings-hint" class="mt-3">Anthropic preferred for summaries, OpenAI for transcription. Local is always the fallback.</p>
+          <!-- OpenRouter -->
+          <div class="ai-key-group" id="openrouter-key-group">
+            <div id="openrouter-key-connected" class="ai-provider-card hidden">
+              <div class="ai-provider-card-left">
+                <div class="ai-provider-name">OpenRouter</div>
+                <div class="ai-provider-detail">Access Claude + GPT via one key</div>
+              </div>
+              <div class="ai-provider-card-right">
+                <span class="ai-key-badge connected">Connected</span>
+                <button id="openrouter-key-remove" class="ai-provider-remove" title="Remove key">&times;</button>
+              </div>
+            </div>
+            <div id="openrouter-key-form">
+              <div class="ai-key-row">
+                <div class="ai-key-info">
+                  <div class="ai-key-name">OpenRouter</div>
+                  <div class="ai-key-detail">Access Claude + GPT models via one key</div>
+                </div>
+                <span id="openrouter-key-badge" class="ai-key-badge none">Not set</span>
+              </div>
+              <a href="#" id="openrouter-key-link" class="ai-key-get-link">
+                Get key from openrouter.ai
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </a>
+              <div class="token-input-row">
+                <input type="password" id="openrouter-key-input" class="settings-input" placeholder="Paste API key (sk-or-...)">
+              </div>
+              <p id="openrouter-key-status" class="ai-key-status hidden"></p>
+            </div>
+          </div>
+
+          <p class="settings-hint">Direct provider keys are preferred. OpenRouter is used as a fallback for any provider without a direct key. Local Whisper + DistilBART is always the final fallback.</p>
         </div>
       </div>
 

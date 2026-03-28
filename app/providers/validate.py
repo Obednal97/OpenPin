@@ -38,6 +38,19 @@ def validate_key(provider, key):
             else:
                 return False, f"HTTP {r.status_code}"
 
+        elif provider == "openrouter":
+            r = http_requests.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return True, None
+            elif r.status_code == 401:
+                return False, "Invalid API key"
+            else:
+                return False, f"HTTP {r.status_code}"
+
         return False, "Unknown provider"
     except Exception as e:
         return False, str(e)[:100]
