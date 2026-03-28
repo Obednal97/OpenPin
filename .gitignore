@@ -6,12 +6,13 @@
 session_keys.json
 keys/
 
-# Generated data
+# Runtime data
 recordings/
 cloud_recordings/
 cloud_recordings_decoded/
 transcripts/
 sessions/
+ble_capture/
 
 # Build artifacts
 __pycache__/
@@ -19,8 +20,9 @@ __pycache__/
 .DS_Store
 node_modules/
 .pytest_cache/
+.ruff_cache/
 
-# APK analysis
+# APK reverse engineering
 apk-extracted/
 jadx-output/
 plaud-app-extracted/
