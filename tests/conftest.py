@@ -36,10 +36,12 @@ def tmp_dirs(tmp_path):
 
 
 @pytest.fixture
-def flask_client():
-    """Create a Flask test client with mocked cloud/notion state."""
-    # Prevent cloud token loading and notion loading from hitting network
+def flask_client(tmp_path):
+    """Create a Flask test client with isolated config and mocked cloud/notion state."""
+    # Use a temp config file so tests don't pollute the real config
+    test_config = tmp_path / ".plaud_v2_config.json"
     with (
+        patch("app.utils.config.CONFIG_PATH", test_config),
         patch("app.state.cloud.load_cloud_token", return_value=False),
         patch(
             "app.state.cloud._cloud_state",
