@@ -1,12 +1,27 @@
+# Secrets & credentials
 .plaud_config.json
+.plaud_v2_config.json
+.notion_mcp.json
+.hf_token
+session_keys.json
+keys/
+
+# Generated data
 recordings/
 cloud_recordings/
+cloud_recordings_decoded/
+transcripts/
+sessions/
+
+# Build artifacts
 __pycache__/
 *.pyc
+.DS_Store
+node_modules/
+.pytest_cache/
+
+# APK analysis
 apk-extracted/
 jadx-output/
 plaud-app-extracted/
 PLAUD_release.apk
-keys/
-sessions/
-recordings/

@@ -160,12 +160,14 @@ def parse_file_list(data: bytes) -> list[BleFile]:
                     channel = unpack_u8(remaining, pos + 9) if pos + 10 <= len(remaining) else 1
                     if sid == 0 and fsize == 0:
                         break
-                    files.append(BleFile(
-                        session_id=sid,
-                        file_size=fsize,
-                        codec_type=codec,
-                        channel_type=max(channel, 1),
-                    ))
+                    files.append(
+                        BleFile(
+                            session_id=sid,
+                            file_size=fsize,
+                            codec_type=codec,
+                            channel_type=max(channel, 1),
+                        )
+                    )
                     pos += entry_size
                 if files:
                     break
@@ -176,6 +178,7 @@ def parse_file_list(data: bytes) -> list[BleFile]:
 @dataclass
 class FileDataPacket:
     """Parsed file data packet (cmd_type=2)."""
+
     session_id: int
     offset: int
     data: bytes
@@ -198,7 +201,7 @@ class FileDataPacket:
                 error_code = unpack_u8(raw, 9) if len(raw) > 9 else 0
                 return FileDataPacket(session_id, 0, b"", is_end=True, error_code=error_code)
             data_len = unpack_u8(raw, 9)
-            data = raw[10:10 + data_len]
+            data = raw[10 : 10 + data_len]
             return FileDataPacket(session_id, offset, data)
         else:
             # [type=2][offset u32][length u8][data...]
@@ -206,7 +209,7 @@ class FileDataPacket:
             if offset == 0xFFFFFFFF:
                 return FileDataPacket(0, 0, b"", is_end=True)
             data_len = unpack_u8(raw, 5)
-            data = raw[6:6 + data_len]
+            data = raw[6 : 6 + data_len]
             return FileDataPacket(0, offset, data)
 
 

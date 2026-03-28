@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:5123 https://*; media-src http://127.0.0.1:5123; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self';">
+  <title>Plaud V2</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header id="header">
+    <div class="header-left">
+      <div class="app-title">Plaud V2</div>
+    </div>
+    <div class="header-center">
+      <div id="device-status" class="device-status disconnected">
+        <span class="status-dot"></span>
+        <span id="status-text">Disconnected</span>
+        <span id="battery-text" class="battery-text"></span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button id="theme-toggle-btn" class="icon-btn theme-toggle" title="Toggle theme">
+        <svg id="theme-icon-light" class="theme-icon" width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="4" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.3 3.3l1.4 1.4M13.3 13.3l1.4 1.4M3.3 14.7l1.4-1.4M13.3 4.7l1.4-1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        <svg id="theme-icon-dark" class="theme-icon hidden" width="18" height="18" viewBox="0 0 24 24" fill="none">
+          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg id="theme-icon-auto" class="theme-icon hidden" width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M9 2a7 7 0 000 14z" fill="currentColor" opacity="0.3"/>
+        </svg>
+      </button>
+      <button id="settings-btn" class="icon-btn" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M16.2 12.2a1.4 1.4 0 00.28 1.54l.05.05a1.7 1.7 0 11-2.4 2.4l-.05-.05a1.4 1.4 0 00-1.54-.28 1.4 1.4 0 00-.85 1.28v.14a1.7 1.7 0 11-3.4 0v-.08A1.4 1.4 0 007.4 16a1.4 1.4 0 00-1.54.28l-.05.05a1.7 1.7 0 11-2.4-2.4l.05-.05A1.4 1.4 0 003.74 12.2 1.4 1.4 0 002.46 11.35H2.3a1.7 1.7 0 110-3.4h.08A1.4 1.4 0 003.46 7.06a1.4 1.4 0 00-.28-1.54l-.05-.05a1.7 1.7 0 112.4-2.4l.05.05a1.4 1.4 0 001.54.28h.07a1.4 1.4 0 00.85-1.28V2a1.7 1.7 0 013.4 0v.08a1.4 1.4 0 00.85 1.28 1.4 1.4 0 001.54-.28l.05-.05a1.7 1.7 0 112.4 2.4l-.05.05a1.4 1.4 0 00-.28 1.54v.07a1.4 1.4 0 001.28.85h.14a1.7 1.7 0 110 3.4h-.08a1.4 1.4 0 00-1.28.85z" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main id="main-content">
+    <!-- Empty State -->
+    <div id="empty-state" class="empty-state">
+      <div class="empty-icon">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+          <circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+          <path d="M32 20v24M20 32h24" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.3"/>
+        </svg>
+      </div>
+      <h2>No recordings yet</h2>
+      <p>Connect your Plaud NotePin S and sync recordings, or start a new recording from the device.</p>
+    </div>
+
+    <!-- Select Bar -->
+    <div id="select-bar" class="select-bar hidden">
+      <div class="select-bar-left">
+        <button id="select-toggle" class="icon-btn" title="Select recordings">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <rect x="2" y="2" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M5.5 9.5l2.5 2.5 5-5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div id="select-actions" class="select-actions hidden">
+          <span id="select-count" class="select-count"></span>
+          <button id="select-all-btn" class="icon-btn" title="Select all">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="1" y="1" width="14" height="14" rx="2.5" stroke="currentColor" stroke-width="1.3"/>
+              <rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor"/>
+            </svg>
+          </button>
+          <button id="delete-selected-btn" class="icon-btn" title="Delete selected" class="text-destructive">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2 4h12M5.3 4V2.7a1.3 1.3 0 011.3-1.3h2.8a1.3 1.3 0 011.3 1.3V4M6.7 7.3v4M9.3 7.3v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3.3 4h9.4l-.7 9.3a1.3 1.3 0 01-1.3 1.2H5.3a1.3 1.3 0 01-1.3-1.2L3.3 4z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="select-bar-divider"></div>
+        <div id="tag-filters" class="tag-filters"></div>
+      </div>
+    </div>
+
+    <!-- Recordings List -->
+    <div id="recordings-list" class="recordings-list"></div>
+
+    <!-- Expanded Transcript View -->
+    <div id="transcript-view" class="transcript-view hidden">
+      <button id="transcript-back" class="back-btn">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Back to recordings
+      </button>
+      <div class="transcript-header">
+        <div class="transcript-title-editable" id="transcript-title" contenteditable="true" spellcheck="false" data-placeholder="Add a title..."></div>
+        <div id="transcript-date" class="transcript-date"></div>
+        <div id="transcript-tags" class="tag-picker"></div>
+        <div id="transcript-meta" class="transcript-meta"></div>
+      </div>
+      <div id="audio-player" class="audio-player">
+        <audio id="audio-element"></audio>
+        <button id="play-btn" class="play-btn">
+          <svg id="play-icon" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+          <svg id="pause-icon" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" class="hidden">
+            <path d="M6 4h4v16H6zM14 4h4v16h-4z"/>
+          </svg>
+        </button>
+        <div class="player-track">
+          <div id="player-progress" class="player-progress">
+            <div id="player-fill" class="player-fill"></div>
+          </div>
+          <div class="player-times">
+            <span id="player-current">00:00</span>
+            <span id="player-duration">00:00</span>
+          </div>
+        </div>
+        <button id="download-audio-btn" class="icon-btn" title="Download audio">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M9 2v10M5 8l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2 14h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div id="transcript-actions" class="transcript-actions"></div>
+      <div id="transcript-tabs" class="transcript-tabs hidden">
+        <button class="transcript-tab active" data-tab="transcript">Transcript</button>
+        <button class="transcript-tab" data-tab="summary">Summary</button>
+      </div>
+      <div id="transcript-content">
+        <div id="transcript-segments" class="transcript-segments"></div>
+        <div id="transcript-summary" class="transcript-summary hidden"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Bottom Action Bar -->
+  <footer id="action-bar">
+    <div class="action-bar-left">
+      <button id="scan-btn" class="action-btn primary">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <path d="M13.5 9a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M15.75 2.25L13 5M2.25 15.75L5 13M15.75 15.75L13 13M2.25 2.25L5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span>Scan for Device</span>
+      </button>
+      <button id="sync-btn" class="action-btn accent hidden">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Sync Recordings</span>
+      </button>
+      <button id="disconnect-btn" class="action-btn subtle hidden">
+        <span>Disconnect</span>
+      </button>
+    </div>
+    <div class="action-bar-right" id="action-bar-right">
+      <div id="search-bar" class="search-bar-inline">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <input type="text" id="search-input" class="search-input" placeholder="Search...">
+        <button id="search-clear" class="search-clear hidden">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M10 4L4 10M4 4l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div id="progress-bar" class="progress-bar hidden">
+      <div id="progress-fill" class="progress-fill"></div>
+      <span id="progress-text" class="progress-text"></span>
+    </div>
+  </footer>
+
+  <!-- Settings Panel -->
+  <div id="settings-overlay" class="settings-overlay hidden"></div>
+  <div id="settings-panel" class="settings-panel hidden">
+    <div class="settings-header">
+      <h2>Settings</h2>
+      <button id="settings-close" class="icon-btn">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M15 5L5 15M5 5l10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <!-- Tab Navigation -->
+    <div class="settings-tabs">
+      <button class="settings-tab active" data-tab="general">General</button>
+      <button class="settings-tab" data-tab="device">Device</button>
+      <button class="settings-tab" data-tab="processing">Processing</button>
+      <button class="settings-tab" data-tab="plaud-cloud">Plaud Cloud</button>
+      <button class="settings-tab" data-tab="profile">Profile</button>
+      <button class="settings-tab" data-tab="integrations">Integrations</button>
+    </div>
+    <div class="settings-body">
+
+      <!-- ===== GENERAL TAB ===== -->
+      <div class="settings-tab-content active" data-tab="general">
+        <div class="settings-section">
+          <h3>Language</h3>
+          <p class="settings-desc">Default language for transcription.</p>
+          <select id="language-select" class="settings-select">
+            <option value="auto">Auto-detect</option>
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
+            <option value="nl">Dutch</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="ar">Arabic</option>
+            <option value="ru">Russian</option>
+            <option value="pl">Polish</option>
+            <option value="sv">Swedish</option>
+            <option value="da">Danish</option>
+            <option value="no">Norwegian</option>
+            <option value="fi">Finnish</option>
+          </select>
+        </div>
+        <div class="settings-section">
+          <h3>Speaker Diarization</h3>
+          <p class="settings-desc">Identify who is speaking (Speaker 1, Speaker 2, etc.).</p>
+          <label class="toggle-label">
+            <input type="checkbox" id="diarize-toggle" class="toggle-input">
+            <span class="toggle-switch"></span>
+            <span>Enable speaker diarization</span>
+          </label>
+        </div>
+        <div class="settings-section">
+          <h3>System</h3>
+          <label class="toggle-label mb-3">
+            <input type="checkbox" id="launch-login-toggle" class="toggle-input">
+            <span class="toggle-switch"></span>
+            <span>Open Plaud V2 at login</span>
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="show-dock-toggle" class="toggle-input">
+            <span class="toggle-switch"></span>
+            <span>Show icon in Dock</span>
+          </label>
+        </div>
+        <div class="settings-section">
+          <h3>About</h3>
+          <p class="settings-desc">
+            Plaud V2 — open-source voice recorder companion.
+            All processing happens locally on your Mac unless you connect cloud AI.
+          </p>
+          <p class="settings-desc version">Version 1.0.0</p>
+        </div>
+      </div>
+
+      <!-- ===== PROFILE TAB ===== -->
+      <div class="settings-tab-content" data-tab="profile">
+        <div class="settings-section">
+          <h3>About You</h3>
+          <p class="settings-desc">Help the AI generate better summaries and transcriptions tailored to you.</p>
+          <div class="profile-field">
+            <label class="settings-label">Job Function</label>
+            <input type="text" id="profile-job" class="settings-input" placeholder="e.g. Product Manager, Software Engineer">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label">Industry</label>
+            <input type="text" id="profile-industry" class="settings-input" placeholder="e.g. Technology, Healthcare, Finance">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label">Seniority</label>
+            <select id="profile-seniority" class="settings-select">
+              <option value="">Not set</option>
+              <option value="individual">Individual Contributor</option>
+              <option value="lead">Team Lead</option>
+              <option value="manager">Manager</option>
+              <option value="director">Director</option>
+              <option value="vp">VP</option>
+              <option value="c-level">C-Level / Founder</option>
+            </select>
+          </div>
+          <div class="profile-field">
+            <label class="settings-label">Primary Use Cases</label>
+            <input type="text" id="profile-usecases" class="settings-input" placeholder="e.g. Meeting notes, interviews, brainstorming">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label">Custom Instructions</label>
+            <textarea id="profile-instructions" class="settings-textarea" rows="3" placeholder="Any specific instructions for how summaries should be written, what to focus on, etc."></textarea>
+          </div>
+          <button id="profile-save-btn" class="btn-small mt-2">Save Profile</button>
+        </div>
+        <div class="settings-section">
+          <h3>Custom Vocabulary</h3>
+          <p class="settings-desc">Add company names, product names, technical terms, or web addresses that should be transcribed accurately.</p>
+          <div class="token-input-row">
+            <input type="text" id="vocab-input" class="settings-input" placeholder="Add a word or phrase...">
+            <button id="vocab-add-btn" class="btn-small">Add</button>
+          </div>
+          <div id="vocab-list" class="vocab-list"></div>
+        </div>
+      </div>
+
+      <!-- ===== DEVICE TAB ===== -->
+      <div class="settings-tab-content" data-tab="device">
+        <div class="settings-section">
+          <div id="device-manager">
+            <div id="dm-disconnected">
+              <p class="settings-desc">Scan for nearby Plaud devices to connect.</p>
+              <button id="dm-scan-btn" class="action-btn primary w-full justify-center">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                  <path d="M13.5 9a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" stroke="currentColor" stroke-width="1.5"/>
+                  <path d="M15.75 2.25L13 5M2.25 15.75L5 13M15.75 15.75L13 13M2.25 2.25L5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <span>Scan for Devices</span>
+              </button>
+              <div id="dm-scan-results" class="dm-scan-results hidden"></div>
+            </div>
+            <div id="dm-connected" class="hidden">
+              <div class="dm-device-card">
+                <div class="dm-device-info">
+                  <div class="dm-device-name" id="dm-device-name">Plaud NotePin S</div>
+                  <div class="dm-device-meta" id="dm-device-meta"></div>
+                </div>
+                <div class="dm-device-battery" id="dm-device-battery"></div>
+              </div>
+              <div class="dm-actions mt-3">
+                <button id="dm-sync-btn" class="action-btn accent flex-1">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                    <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>Force Sync</span>
+                </button>
+              </div>
+              <div class="dm-actions mt-2">
+                <button id="dm-disconnect-btn" class="action-btn subtle flex-1">Disconnect</button>
+                <button id="dm-depair-btn" class="action-btn delete flex-1">Erase &amp; Disconnect</button>
+              </div>
+              <p class="settings-hint mt-2">
+                <strong>Disconnect</strong> keeps pairing — device will reconnect next time.<br>
+                <strong>Erase &amp; Disconnect</strong> unpairs the device so it can pair with another phone or computer.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PROCESSING TAB ===== -->
+      <div class="settings-tab-content" data-tab="processing">
+        <div class="settings-section">
+          <h3>Whisper Model</h3>
+          <p class="settings-desc">Local transcription model. Larger models are more accurate but slower.</p>
+          <div id="model-selector" class="model-selector"></div>
+          <p id="ram-info" class="ram-info"></p>
+        </div>
+        <div class="settings-section">
+          <h3>Cloud AI</h3>
+          <p class="settings-desc">Connect API keys for faster, more accurate cloud processing. The app auto-selects the best provider for each task.</p>
+
+          <!-- OpenAI -->
+          <div class="ai-key-group" id="openai-key-group">
+            <div id="openai-key-connected" class="ai-provider-card hidden">
+              <div class="ai-provider-card-left">
+                <div class="ai-provider-name">OpenAI</div>
+                <div class="ai-provider-detail">Whisper API + GPT-5.4 mini</div>
+              </div>
+              <div class="ai-provider-card-right">
+                <span class="ai-key-badge connected">Connected</span>
+                <button id="openai-key-remove" class="ai-provider-remove" title="Remove key">&times;</button>
+              </div>
+            </div>
+            <div id="openai-key-form">
+              <div class="ai-key-row">
+                <div class="ai-key-info">
+                  <div class="ai-key-name">OpenAI</div>
+                  <div class="ai-key-detail">Whisper API + GPT-5.4 mini</div>
+                </div>
+                <span id="openai-key-badge" class="ai-key-badge none">Not set</span>
+              </div>
+              <a href="#" id="openai-key-link" class="ai-key-get-link">
+                Get key from platform.openai.com
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </a>
+              <div class="token-input-row" class="mt-1">
+                <input type="password" id="openai-key-input" class="settings-input" placeholder="Paste API key (sk-...)">
+              </div>
+              <p id="openai-key-status" class="ai-key-status hidden"></p>
+            </div>
+          </div>
+
+          <!-- Anthropic -->
+          <div class="ai-key-group" id="anthropic-key-group" class="mt-3">
+            <div id="anthropic-key-connected" class="ai-provider-card hidden">
+              <div class="ai-provider-card-left">
+                <div class="ai-provider-name">Anthropic</div>
+                <div class="ai-provider-detail">Claude Sonnet 4.6 for summaries</div>
+              </div>
+              <div class="ai-provider-card-right">
+                <span class="ai-key-badge connected">Connected</span>
+                <button id="anthropic-key-remove" class="ai-provider-remove" title="Remove key">&times;</button>
+              </div>
+            </div>
+            <div id="anthropic-key-form">
+              <div class="ai-key-row">
+                <div class="ai-key-info">
+                  <div class="ai-key-name">Anthropic</div>
+                  <div class="ai-key-detail">Claude Sonnet 4.6 for summaries</div>
+                </div>
+                <span id="anthropic-key-badge" class="ai-key-badge none">Not set</span>
+              </div>
+              <a href="#" id="anthropic-key-link" class="ai-key-get-link">
+                Get key from console.anthropic.com
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </a>
+              <div class="token-input-row" class="mt-1">
+                <input type="password" id="anthropic-key-input" class="settings-input" placeholder="Paste API key (sk-ant-...)">
+              </div>
+              <p id="anthropic-key-status" class="ai-key-status hidden"></p>
+            </div>
+          </div>
+
+          <p class="settings-hint" class="mt-3">Anthropic preferred for summaries, OpenAI for transcription. Local is always the fallback.</p>
+        </div>
+      </div>
+
+      <!-- ===== PLAUD CLOUD TAB ===== -->
+      <div class="settings-tab-content" data-tab="plaud-cloud">
+        <div class="settings-section">
+          <h3>Plaud Account</h3>
+          <p class="settings-desc">Connect your Plaud account to sync cloud recordings.</p>
+          <div id="cloud-account-section">
+            <div id="cloud-logged-out">
+              <button id="cloud-login-browser-btn" class="action-btn primary w-full justify-center mb-2">
+                Sign in with Plaud Account
+              </button>
+              <div class="cloud-divider"><span>or paste token manually</span></div>
+              <div class="token-input-row mt-2">
+                <input type="password" id="cloud-token-input" class="settings-input" placeholder="Paste bearer token...">
+                <button id="cloud-token-login-btn" class="btn-small">Login</button>
+              </div>
+              <p class="settings-hint mt-1">
+                Get your token from <a href="#" id="plaud-web-link" class="link">web.plaud.ai</a>
+              </p>
+            </div>
+            <div id="cloud-logged-in" class="hidden">
+              <div class="cloud-user-card">
+                <div class="cloud-user-info">
+                  <span class="cloud-user-badge">Connected</span>
+                  <span id="cloud-user-name" class="cloud-user-name"></span>
+                </div>
+              </div>
+              <div class="settings-section mt-4 mb-0">
+                <h3>Sync Direction</h3>
+                <label class="toggle-label mb-2">
+                  <input type="radio" name="sync-direction" id="sync-download" value="download" checked class="toggle-input inline mr-1">
+                  <span>Download only — pull recordings from Plaud cloud</span>
+                </label>
+                <label class="toggle-label">
+                  <input type="radio" name="sync-direction" id="sync-twoway" value="twoway" class="toggle-input inline mr-1">
+                  <span>Two-way — also upload local recordings to Plaud cloud</span>
+                </label>
+              </div>
+              <div class="dm-actions mt-3">
+                <button id="cloud-sync-btn" class="action-btn accent flex-1">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                    <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>Sync Now</span>
+                </button>
+              </div>
+              <p id="cloud-sync-status" class="settings-hint mt-2"></p>
+              <button id="cloud-logout-btn" class="action-btn subtle mt-3 settings-btn-compact">
+                Disconnect Account
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== INTEGRATIONS TAB ===== -->
+      <div class="settings-tab-content" data-tab="integrations">
+        <div class="settings-section">
+          <h3>Notion</h3>
+          <p class="settings-desc">Push transcripts and summaries to a Notion database.</p>
+          <div id="notion-section">
+            <div id="notion-disconnected">
+              <button id="notion-connect-btn" class="action-btn primary w-full justify-center">
+                <img src="notion-icon.svg" width="16" height="16" class="valign-mid">
+                <span>Connect Notion</span>
+              </button>
+            </div>
+            <div id="notion-connected" class="hidden">
+              <div class="notion-db-card" id="notion-db-card">
+                <div class="notion-db-card-icon">
+                  <img src="notion-icon.svg" width="20" height="20">
+                </div>
+                <div class="notion-db-card-info">
+                  <div class="notion-db-card-label">Connected Database</div>
+                  <div class="notion-db-card-name" id="notion-db-name">No database selected</div>
+                </div>
+                <span class="ai-key-badge connected">Active</span>
+              </div>
+              <div class="settings-section mt-3 mb-0">
+                <label class="settings-label">Change Database</label>
+                <div class="token-input-row">
+                  <input type="text" id="notion-db-search" class="settings-input" placeholder="Search databases...">
+                </div>
+                <div class="cloud-divider my-2"><span>or paste URL</span></div>
+                <div class="token-input-row">
+                  <input type="text" id="notion-db-url-input" class="settings-input" placeholder="https://www.notion.so/...">
+                  <button id="notion-db-url-save" class="btn-small">Set</button>
+                </div>
+              </div>
+              <div id="notion-db-list" class="dm-scan-results hidden"></div>
+              <button id="notion-disconnect-btn" class="action-btn subtle mt-2 settings-btn-compact">
+                Disconnect Notion
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Webhooks</h3>
+          <p class="settings-desc">Automatically send data to external services when recordings are processed. Works with Zapier, Make, n8n, or any URL that accepts POST requests.</p>
+          <div id="webhook-list"></div>
+          <div class="ai-key-group mt-2">
+            <label class="settings-label">Add Webhook</label>
+            <div class="token-input-row">
+              <input type="text" id="webhook-url-input" class="settings-input" placeholder="https://hooks.zapier.com/...">
+              <button id="webhook-add-btn" class="btn-small">Add</button>
+            </div>
+            <div class="mt-2">
+              <p class="settings-label">Trigger when:</p>
+              <label class="toggle-label mb-2">
+                <input type="checkbox" id="webhook-on-transcribe" class="toggle-input" checked>
+                <span class="toggle-switch"></span>
+                <span>Recording transcribed</span>
+              </label>
+              <label class="toggle-label mb-2">
+                <input type="checkbox" id="webhook-on-summarize" class="toggle-input" checked>
+                <span class="toggle-switch"></span>
+                <span>Summary generated</span>
+              </label>
+              <label class="toggle-label">
+                <input type="checkbox" id="webhook-on-sync" class="toggle-input">
+                <span class="toggle-switch"></span>
+                <span>New recording synced</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="ui/utils.js"></script>
+  <script src="ui/recordings.js"></script>
+  <script src="ui/transcript.js"></script>
+  <script src="ui/settings.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

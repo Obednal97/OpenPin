@@ -1,0 +1,49 @@
+{
+  "name": "plaud-v2",
+  "version": "1.0.0",
+  "description": "Plaud NotePin S — Local sync, decrypt & transcribe",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac",
+    "dev": "NODE_ENV=development electron .",
+    "lint": "eslint renderer.js main.js preload.js ui/*.js && stylelint 'css/*.css'",
+    "lint:py": "cd .. && ruff check app/ src/ tests/",
+    "format": "prettier --write renderer.js main.js preload.js ui/*.js && cd .. && ruff format app/ src/ tests/",
+    "test:py": "cd .. && python3 -m pytest tests/ -v"
+  },
+  "author": "Plaud V2",
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "electron": "^41.1.0",
+    "electron-builder": "^25.0.0",
+    "eslint": "^10.1.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
+    "stylelint": "^17.6.0",
+    "stylelint-config-standard": "^40.0.0"
+  },
+  "build": {
+    "appId": "com.plaud.v2",
+    "productName": "Plaud V2",
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": "dmg"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/.cache"
+    ],
+    "extraResources": [
+      {
+        "from": "../src",
+        "to": "src"
+      },
+      {
+        "from": "../keys",
+        "to": "keys"
+      }
+    ]
+  }
+}

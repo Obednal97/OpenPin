@@ -2,11 +2,12 @@
 
 import asyncio
 import struct
+
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from .constants import SERVICE_UUID, PROJECT_CODES
+from .constants import PROJECT_CODES, SERVICE_UUID
 
 
 def parse_manufacturer_data(mfr_data: dict) -> dict | None:
@@ -27,7 +28,7 @@ def parse_manufacturer_data(mfr_data: dict) -> dict | None:
                 sn_length = data[5]
 
                 if 6 + sn_length <= len(data):
-                    sn_raw = data[6:6 + sn_length]
+                    sn_raw = data[6 : 6 + sn_length]
                     serial_number = sn_raw.hex().upper()
 
                     # Detect model from SN prefix
