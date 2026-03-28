@@ -342,16 +342,6 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  // E2EE
-  if (info.privacy_enabled != null) {
-    const dot = info.privacy_enabled ? 'on' : 'off';
-    const label = info.privacy_enabled ? 'Enabled' : 'Disabled';
-    items.push(`<div class="dm-info-item">
-      <div class="dm-info-label">E2EE</div>
-      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
-    </div>`);
-  }
-
   // USB
   if (info.usb_connected != null) {
     const dot = info.usb_connected ? 'on' : 'off';
@@ -361,29 +351,6 @@ function renderDeviceInfoPanel(panel, info) {
       <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
     </div>`);
   }
-
-  // Find My — toggle
-  if (info.find_my_enabled != null) {
-    const checked = info.find_my_enabled ? 'checked' : '';
-    items.push(`<div class="dm-info-item">
-      <div class="dm-info-label">Find My</div>
-      <label class="toggle-label" style="margin-top:2px;">
-        <input type="checkbox" id="dm-find-my-toggle" class="toggle-input" ${checked}>
-        <span class="toggle-switch"></span>
-      </label>
-    </div>`);
-  }
-
-  // Auto-delete after sync — app-side toggle
-  const autoDelete = app.settings.auto_delete_after_sync || false;
-  items.push(`<div class="dm-info-item">
-    <div class="dm-info-label">Auto-delete from device</div>
-    <label class="toggle-label" style="margin-top:2px;">
-      <input type="checkbox" id="dm-auto-delete-toggle" class="toggle-input" ${autoDelete ? 'checked' : ''}>
-      <span class="toggle-switch"></span>
-      <span class="dm-info-secondary">after sync</span>
-    </label>
-  </div>`);
 
   // Button state
   if (info.button_pressed != null) {
@@ -403,18 +370,6 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  // Total recorded
-  if (info.total_recorded_seconds && info.total_recorded_seconds > 0) {
-    const totalSec = info.total_recorded_seconds;
-    const hrs = Math.floor(totalSec / 3600);
-    const mins = Math.floor((totalSec % 3600) / 60);
-    const display = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
-    items.push(`<div class="dm-info-item">
-      <div class="dm-info-label">Total Recorded</div>
-      <div class="dm-info-value">${display}</div>
-    </div>`);
-  }
-
   // Accelerometer
   if (info.accelerometer) {
     const a = info.accelerometer;
@@ -424,22 +379,17 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  panel.innerHTML = items.join('');
+  // Build the panel: grid for info cards, then standalone toggle rows below
+  const autoDelete = app.settings.auto_delete_after_sync || false;
+  const toggles = `<div class="dm-toggles">
+    <label class="toggle-label dm-toggle-row">
+      <input type="checkbox" id="dm-auto-delete-toggle" class="toggle-input" ${autoDelete ? 'checked' : ''}>
+      <span class="toggle-switch"></span>
+      <span>Delete recordings from device after sync</span>
+    </label>
+  </div>`;
 
-  // Wire up Find My toggle
-  const findMyToggle = document.getElementById('dm-find-my-toggle');
-  if (findMyToggle) {
-    findMyToggle.addEventListener('change', async (e) => {
-      const enabled = e.target.checked;
-      try {
-        await window.plaud.setFindMy(enabled);
-        toast(enabled ? 'Find My enabled on device' : 'Find My disabled on device', 'success');
-      } catch (err) {
-        toast(`Failed: ${err.message}`, 'error');
-        e.target.checked = !enabled;
-      }
-    });
-  }
+  panel.innerHTML = `<div class="dm-info-grid">${items.join('')}</div>${toggles}`;
 
   // Wire up auto-delete toggle
   const autoDeleteToggle = document.getElementById('dm-auto-delete-toggle');
