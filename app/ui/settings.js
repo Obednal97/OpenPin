@@ -1012,7 +1012,7 @@ function initSettingsEvents() {
             try {
               const conn = await window.plaud.connect(address, sn);
               if (conn.connected) {
-                toast(`Connected to ${name}! Battery: ${conn.battery || '?'}%`, 'success');
+                toast(`Connected to ${name}`, 'success');
                 await updateDeviceStatus();
                 renderDeviceManager();
                 results.classList.add('hidden');
