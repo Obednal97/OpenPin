@@ -220,6 +220,11 @@ function openTranscript(sessionId, autoPlay = false) {
           toast(`Summary failed: ${result.error}`, 'error');
         } else {
           toast('Summary generated', 'success');
+          if (result.notion_url) {
+            toast('Pushed to Notion', 'success');
+          } else if (result.notion_error) {
+            toast(`Notion: ${result.notion_error}`, 'error');
+          }
           if (t) {
             t.summary = result.summary;
             t.auto_title = result.title;
