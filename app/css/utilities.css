@@ -1,0 +1,44 @@
+/* Plaud V2 — Utilities */
+
+/* === UTILITY === */
+.hidden { display: none !important; }
+.flex-1 { flex: 1; }
+.w-full { width: 100%; }
+.text-center { text-align: center; }
+.text-destructive { color: var(--destructive); }
+.inline { display: inline; width: auto; }
+.valign-mid { vertical-align: middle; }
+.justify-center { justify-content: center; }
+.mt-1 { margin-top: var(--sp-1); }
+.mt-2 { margin-top: var(--sp-2); }
+.mt-3 { margin-top: var(--sp-3); }
+.mt-4 { margin-top: var(--sp-4); }
+.mb-0 { margin-bottom: 0; }
+.mb-2 { margin-bottom: var(--sp-2); }
+.mb-3 { margin-bottom: var(--sp-3); }
+.mr-1 { margin-right: var(--sp-1); }
+.my-2 { margin: var(--sp-2) 0; }
+.settings-btn-compact { padding: var(--sp-1_5) var(--sp-3); font-size: var(--text-sm); }
+
+/* === ANIMATIONS === */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes toastIn {
+  from { transform: translateX(100%) scale(0.95); opacity: 0; }
+  to { transform: translateX(0) scale(1); opacity: 1; }
+}
+@keyframes toastOut {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.95); }
+}
+
+/* === RESPONSIVE === */
+@media (width <= 900px) {
+  .settings-panel { width: 100%; }
+  #action-bar { flex-wrap: wrap; gap: var(--sp-2); }
+  .action-bar-left, .action-bar-right { flex-wrap: wrap; }
+  .search-bar-inline { width: 160px; }
+}

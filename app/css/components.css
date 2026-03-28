@@ -1,0 +1,251 @@
+/* Plaud V2 — Components */
+
+/* === COMPONENT: Icon Button === */
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  transition: all var(--duration) var(--ease);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+.icon-btn:hover { color: var(--text); background: var(--bg-hover); }
+.icon-btn:active { transform: scale(0.94); }
+
+/* Theme toggle */
+.theme-toggle { position: relative; overflow: hidden; }
+.theme-icon {
+  transition: transform 0.4s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.3s ease;
+}
+.theme-icon.hidden {
+  display: none !important;
+}
+.theme-icon.exiting {
+  position: absolute;
+  opacity: 0;
+  transform: rotate(90deg) scale(0.5);
+}
+.theme-icon.entering {
+  animation: themeIconIn 0.4s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+@keyframes themeIconIn {
+  from { opacity: 0; transform: rotate(-90deg) scale(0.5); }
+  to { opacity: 1; transform: rotate(0) scale(1); }
+}
+
+/* === COMPONENT: Action Button === */
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+  color: var(--white);
+  position: relative;
+  white-space: nowrap;
+}
+.action-btn:active { transform: scale(0.97); }
+.action-btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+.action-btn.primary { background: var(--accent); }
+.action-btn.primary:hover { background: var(--accent-hover); }
+.action-btn.accent { background: var(--accent); }
+.action-btn.accent:hover { background: var(--accent-hover); }
+.action-btn.subtle { background: transparent; border: 1px solid var(--border-strong); color: var(--text-secondary); }
+.action-btn.subtle:hover { background: var(--bg-hover); color: var(--text); border-color: var(--text-tertiary); }
+.action-btn.delete { background: var(--destructive); }
+.action-btn.delete:hover { background: var(--destructive-hover); }
+
+/* === COMPONENT: Action Button — Loading State === */
+.action-btn.loading { pointer-events: none; opacity: 0.6; }
+.action-btn.loading > span, .action-btn.loading > svg, .action-btn.loading > img { visibility: hidden; }
+.action-btn.loading::after {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: var(--white);
+  border-radius: var(--radius-full);
+  animation: spin 0.6s linear infinite;
+}
+.action-btn.subtle.loading::after {
+  border-color: var(--border-strong);
+  border-top-color: var(--accent);
+}
+
+/* === COMPONENT: Small Button === */
+.btn-small {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--accent);
+  color: var(--white);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.btn-small:hover { background: var(--accent-hover); }
+.btn-small:active { transform: scale(0.96); }
+
+/* === COMPONENT: Text Input === */
+.settings-input {
+  flex: 1;
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  transition: border-color var(--duration) var(--ease);
+}
+.settings-input:focus { outline: none; border-color: var(--accent); }
+.token-input-row .settings-input { width: auto; } /* In rows, flex handles width */
+
+/* === COMPONENT: Select === */
+.settings-select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--duration) var(--ease);
+}
+.settings-select:focus { outline: none; border-color: var(--accent); }
+
+/* === COMPONENT: Toggle === */
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.toggle-input { display: none; }
+.toggle-switch {
+  width: 44px; height: 26px;
+  background: var(--text-tertiary);
+  border-radius: var(--radius-full);
+  position: relative;
+  transition: background var(--duration) var(--ease);
+  flex-shrink: 0;
+}
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 20px; height: 20px;
+  background: var(--white);
+  border-radius: 50%;
+  transition: transform var(--duration) var(--ease);
+  box-shadow: var(--shadow-sm);
+}
+.toggle-input:checked + .toggle-switch { background: var(--green); }
+.toggle-input:checked + .toggle-switch::after { transform: translateX(18px); }
+
+/* === COMPONENT: Badge === */
+.recording-badge {
+  font-size: var(--text-xs);
+  padding: var(--sp-0_5) var(--sp-2);
+  border-radius: var(--radius-full);
+  font-weight: var(--weight-semibold);
+  flex-shrink: 0;
+  letter-spacing: 0.2px;
+}
+.badge-new { background: var(--accent-subtle); color: var(--accent); }
+.badge-transcribed { background: var(--green-subtle); color: var(--green); }
+.badge-transcribing { background: var(--yellow-subtle); color: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
+.badge-processing {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.badge-processing::before {
+  content: '';
+  width: 10px; height: 10px;
+  border: 1.5px solid var(--accent-subtle);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+/* === COMPONENT: Toast === */
+.toast-container {
+  position: fixed;
+  top: calc(var(--header-height) + var(--sp-3));
+  right: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  z-index: 200;
+  pointer-events: none;
+}
+.toast {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  max-width: 360px;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  animation: toastIn 0.3s var(--ease), toastOut 0.3s var(--ease) 2.7s forwards;
+  pointer-events: auto;
+  box-shadow: var(--shadow-md);
+}
+.toast-success { background: rgba(48, 209, 88, 0.9); color: var(--white); }
+.toast-error { background: rgba(255, 69, 58, 0.9); color: var(--white); }
+.toast-info { background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); }
+
+/* === COMPONENT: Checkbox === */
+.select-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.select-checkbox input { display: none; }
+.checkbox-mark {
+  width: 22px; height: 22px;
+  border: 2px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration) var(--ease);
+  background: var(--bg-input);
+}
+.select-checkbox input:checked + .checkbox-mark {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.select-checkbox input:checked + .checkbox-mark::after {
+  content: '';
+  width: 6px; height: 10px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  margin-bottom: 2px;
+}

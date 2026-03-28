@@ -128,7 +128,73 @@ The firmware update notification shown on the iOS app likely comes from the **de
 | [leonardsellem/plaud-sync-for-obsidian](https://github.com/leonardsellem/plaud-sync-for-obsidian) | TypeScript | Obsidian sync plugin |
 | [landoncrabtree/applaud](https://github.com/landoncrabtree/applaud) | — | Self-hosted transcription alternative |
 
-All community projects use the **cloud API only** — no one has built a direct BLE client yet.
+All community projects use the **cloud API only** — no one has built a direct BLE client yet. **We are the first to achieve direct BLE control, file download, and offline audio decryption.**
+
+## Audio File Encryption (CRACKED)
+
+### Overview
+
+Audio files on the Plaud NotePin S are encrypted with a **per-file ChaCha20 key**, which is itself **RSA-encrypted with a static key pair from the APK**. This is NOT true end-to-end encryption — the same RSA key pair is embedded in every copy of the app. Decryption is fully offline.
+
+### BLE-Downloaded File Format (512-byte header)
+
+```
+Offset   Size   Field
+0x000    8      Magic: "PLAUD.AI"
+0x008    4      Version: 01 00 00 02 (u32 LE)
+0x00C    4      Size field (u32 LE, uncompressed audio size)
+0x010    32     User ID (ASCII, zero-padded)
+0x030    16     Audio params: codec=5 (Opus), channels=1
+0x040    68     Reserved (zeros)
+0x084    12     ChaCha20 nonce (unique per file)
+0x090    1      Frame size: 0x50 (80 bytes)
+0x091    111    Reserved (zeros)
+0x100    256    RSA-encrypted per-file key (PKCS1v15, 2048-bit)
+0x200+   N×80   Encrypted Opus frames (80 bytes each, no auth tag)
+```
+
+### Decryption Algorithm
+
+```python
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+
+# 1. Load the static app RSA private key (from APK assets)
+app_key = load_pem_private_key(open("keys/app_private.pem", "rb").read(), password=None)
+
+# 2. RSA-decrypt the per-file key
+file_key = app_key.decrypt(data[0x100:0x200], padding.PKCS1v15())  # → 32 bytes
+
+# 3. Read the per-file nonce
+nonce = data[0x84:0x90]  # 12 bytes
+
+# 4. Generate 80 bytes of ChaCha20 keystream (counter=0)
+full_nonce = b'\x00\x00\x00\x00' + nonce  # 4-byte counter (0) + 12-byte nonce
+cipher = Cipher(algorithms.ChaCha20(file_key, full_nonce), mode=None)
+keystream = cipher.decryptor().update(b'\x00' * 80)
+
+# 5. XOR each 80-byte frame with the SAME keystream
+audio = data[0x200:]
+decrypted = bytearray()
+for i in range(0, len(audio), 80):
+    frame = audio[i:i+80]
+    decrypted.extend(bytes(a ^ b for a, b in zip(frame, keystream)))
+
+# Result: raw Opus frames (TOC 0xb8 = CELT 48kHz 20ms mono)
+```
+
+### Key Points
+
+1. **Static key pair**: `keys/app_private.pem` is identical for every Plaud app installation. No account or cloud required.
+2. **Per-frame independent encryption**: Every frame uses the SAME keystream (counter=0 reset per frame). This is unusual but confirmed — all encrypted frames have the same first byte (XOR of constant TOC with constant first keystream byte).
+3. **No authentication tags**: The encryption is pure XOR (ChaCha20 stream), not AEAD. There are no 16-byte Poly1305 tags per frame.
+4. **Optional E2EE layer**: Users who enabled E2EE (PIN-based) have an additional encryption layer using a per-user RSA key pair stored in the cloud. This is separate from the app-level encryption described here.
+5. **Hardcoded key is for logs**: `plaud2023_log_chacha20_key_32bit` found in libapp.so is for device log encryption, NOT audio files.
+
+### Cloud File Format
+
+Cloud API (`/file/temp-url/{id}?is_opus=1`) serves audio as **raw Opus frames** (80 bytes each, TOC=0xb8). These are already server-side decrypted. NOT wrapped in OggS — must wrap in Ogg container for playback. Cloud "wav" files are actually MP3 (ID3 header).
 
 ## Third-Party Services (from app analysis)
 

@@ -1,0 +1,134 @@
+/* Plaud V2 — Recordings */
+
+/* === MODULE: Search Bar (inline in action bar) === */
+.search-bar-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-3);
+  width: 220px;
+  transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease), width var(--duration) var(--ease);
+}
+.search-bar-inline:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); width: 300px; }
+.search-icon { color: var(--text-tertiary); flex-shrink: 0; }
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  outline: none;
+  min-width: 0;
+}
+.search-input::placeholder { color: var(--text-tertiary); }
+.search-clear {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: color var(--duration) var(--ease);
+}
+.search-clear:hover { color: var(--text); }
+
+/* === MODULE: Select Bar === */
+.select-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-3);
+}
+.select-bar-left { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.select-actions { display: flex; align-items: center; gap: var(--sp-1); }
+.select-count { font-size: var(--text-sm); color: var(--text-secondary); font-weight: var(--weight-medium); }
+.select-bar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+.tag-filters { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.tag-filter {
+  font-size: var(--text-xs);
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font);
+  font-weight: var(--weight-medium);
+  transition: all var(--duration) var(--ease);
+  white-space: nowrap;
+}
+.tag-filter:hover { border-color: var(--accent); color: var(--text); }
+.tag-filter.active { background: var(--accent); color: var(--white); border-color: var(--accent); }
+
+/* === MODULE: Recordings List === */
+.recordings-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+.recording-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.recording-card:hover { background: var(--bg-hover); border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.recording-card.selected { border-color: var(--accent); background: var(--accent-subtle); }
+
+.recording-play-btn {
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  color: var(--white);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+  flex-shrink: 0;
+}
+.recording-play-btn:hover { background: var(--accent-hover); transform: scale(1.06); }
+.recording-play-btn:active { transform: scale(0.95); }
+
+.recording-info { flex: 1; min-width: 0; }
+.recording-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  margin-bottom: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cloud-icon { color: var(--accent); vertical-align: middle; display: inline; margin-right: 2px; }
+.recording-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+.recording-right .tag-list { flex-shrink: 0; }
+.recording-date { font-size: var(--text-sm); color: var(--text-secondary); font-weight: var(--weight-medium); }
+.recording-duration { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-0_5); }
+.recording-preview {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: var(--sp-1);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,0 +1,158 @@
+/* Plaud V2 — Design Tokens */
+
+/* ============================================================
+   Plaud V2 — Design System
+   Apple-inspired glass UI with light/dark mode
+   ============================================================ */
+
+/* --- Design Tokens --- */
+:root {
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* Radii — standardised across all controls */
+  --radius-xs: 8px;    /* small inline elements */
+  --radius-sm: 10px;   /* inputs, buttons, selects */
+  --radius-md: 14px;   /* cards, panels, groups */
+  --radius-lg: 18px;   /* large panels */
+  --radius-full: 9999px; /* pills, badges, toggles */
+
+  /* Typography — Inter (matches Plaud app) */
+  --font: 'Inter', -apple-system, blinkmacsystemfont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, 'Cascadia Code', monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Timing */
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --duration: 0.2s;
+  --duration-slow: 0.35s;
+
+  /* Shadows (dark mode defaults — overridden in light) */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.4);
+
+  /* Fixed colors (theme-independent) */
+  --white: #fff;
+  --black: #000;
+
+  /* Micro spacing */
+  --sp-0_5: 2px;
+  --sp-1_5: 6px;
+
+  /* Layout anchors */
+  --header-height: 52px;
+}
+
+/* --- Dark Mode (default) --- */
+:root, [data-theme="dark"] {
+  --bg:           #0d0d0d;
+  --bg-panel:     rgba(28, 28, 30, 0.85);
+  --bg-card:      rgba(44, 44, 46, 0.6);
+  --bg-card-solid:#2c2c2e;
+  --bg-hover:     rgba(58, 58, 60, 0.6);
+  --bg-input:     rgba(28, 28, 30, 0.8);
+  --bg-glass:     rgba(44, 44, 46, 0.45);
+  --accent:       #0a84ff;
+  --accent-hover: #409cff;
+  --accent-subtle:rgba(10, 132, 255, 0.12);
+  --destructive:  #ff453a;
+  --destructive-hover: #ff6961;
+  --green:        #30d158;
+  --yellow:       #ffd60a;
+  --orange:       #ff9f0a;
+  --text:         #f5f5f7;
+  --text-secondary:#98989d;
+  --text-tertiary: #636366;
+  --border:       rgba(84, 84, 88, 0.36);
+  --border-strong:rgba(84, 84, 88, 0.65);
+  --overlay:      rgba(0, 0, 0, 0.5);
+  --glass-blur:   saturate(180%) blur(20px);
+  --green-subtle:      rgba(48, 209, 88, 0.15);
+  --green-faint:       rgba(48, 209, 88, 0.05);
+  --destructive-subtle:rgba(255, 69, 58, 0.15);
+  --destructive-faint: rgba(255, 69, 58, 0.1);
+  --yellow-subtle:     rgba(255, 214, 10, 0.15);
+  --badge-on-color:    var(--black);
+
+  color-scheme: dark;
+}
+
+/* --- Light Mode --- */
+[data-theme="light"] {
+  --bg:           #f5f5f7;
+  --bg-panel:     rgba(255, 255, 255, 0.8);
+  --bg-card:      rgba(255, 255, 255, 0.7);
+  --bg-card-solid:#fff;
+  --bg-hover:     rgba(0, 0, 0, 0.04);
+  --bg-input:     rgba(118, 118, 128, 0.08);
+  --bg-glass:     rgba(255, 255, 255, 0.6);
+  --accent:       #007aff;
+  --accent-hover: #0066d6;
+  --accent-subtle:rgba(0, 122, 255, 0.08);
+  --destructive:  #ff3b30;
+  --destructive-hover: #d62d24;
+  --green:        #28cd41;
+  --yellow:       #fc0;
+  --orange:       #ff9500;
+  --text:         #1d1d1f;
+  --text-secondary:#86868b;
+  --text-tertiary: #aeaeb2;
+  --border:       rgba(0, 0, 0, 0.08);
+  --border-strong:rgba(0, 0, 0, 0.15);
+  --overlay:      rgba(0, 0, 0, 0.3);
+  --glass-blur:   saturate(180%) blur(20px);
+  --green-subtle:      rgba(40, 205, 65, 0.12);
+  --green-faint:       rgba(40, 205, 65, 0.05);
+  --destructive-subtle:rgba(255, 59, 48, 0.12);
+  --destructive-faint: rgba(255, 59, 48, 0.08);
+  --yellow-subtle:     rgba(255, 204, 0, 0.15);
+  --badge-on-color:    var(--white);
+  --shadow-sm:    0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md:    0 4px 12px rgba(0,0,0,0.08);
+  --shadow-lg:    0 8px 24px rgba(0,0,0,0.12);
+
+  color-scheme: light;
+}
+
+/* --- Reset --- */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* Apple squircle corners — applies to ALL elements with border-radius */
+* {
+  -electron-corner-smoothing: system-ui;
+}
+
+html {
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: var(--text-base);
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}

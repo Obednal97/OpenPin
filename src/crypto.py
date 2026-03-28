@@ -8,16 +8,16 @@ Protocol (portVersion >= 20):
 5. All subsequent BLE data is encrypted with those ChaCha20 parameters
 """
 
-import os
-import base64
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
-from cryptography.hazmat.primitives.serialization import (
-    load_pem_private_key, load_pem_public_key, Encoding, PublicFormat,
-)
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_private_key,
+    load_pem_public_key,
+)
 
 # Default key paths
 KEYS_DIR = Path(__file__).parent.parent / "keys"
@@ -161,9 +161,7 @@ def complete_handshake(rsa_encrypted_blob: bytes) -> BleEncryption:
     # Step 4: Validate
     expected = b"PLAUD.AI"
     if plaintext != expected:
-        raise ValueError(
-            f"Handshake validation failed: got {plaintext!r}, expected {expected!r}"
-        )
+        raise ValueError(f"Handshake validation failed: got {plaintext!r}, expected {expected!r}")
 
     # Step 5: Set up encryption
     enc = BleEncryption()

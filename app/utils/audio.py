@@ -1,0 +1,126 @@
+"""Audio processing utilities — OGG wrapping, BLE decryption."""
+
+import struct
+from pathlib import Path
+
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+
+from app.utils.constants import CRC_LOOKUP
+
+
+def _ogg_crc(data):
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) ^ CRC_LOOKUP[((crc >> 24) & 0xFF) ^ b]) & 0xFFFFFFFF
+    return crc
+
+
+def wrap_opus_ogg(raw_data, frame_size=80):
+    """Wrap raw Opus frames into an OGG container."""
+    frames = [raw_data[i : i + frame_size] for i in range(0, len(raw_data), frame_size)]
+    serial = 1
+    page_seq = [0]
+    pages = bytearray()
+
+    def make_page(segments, bos=False, eos=False, granule=0):
+        flags = (0x02 if bos else 0) | (0x04 if eos else 0)
+        seg_table = bytearray()
+        for seg in segments:
+            sz = len(seg)
+            while sz >= 255:
+                seg_table.append(255)
+                sz -= 255
+            seg_table.append(sz)
+        body = b"".join(segments)
+        hdr = bytearray(27)
+        hdr[0:4] = b"OggS"
+        hdr[5] = flags
+        struct.pack_into("<Q", hdr, 6, granule)
+        struct.pack_into("<I", hdr, 14, serial)
+        struct.pack_into("<I", hdr, 18, page_seq[0])
+        hdr[26] = len(seg_table)
+        page = bytes(hdr) + bytes(seg_table) + body
+        crc = _ogg_crc(page)
+        page = page[:22] + struct.pack("<I", crc) + page[26:]
+        page_seq[0] += 1
+        return page
+
+    head = bytearray(19)
+    head[0:8] = b"OpusHead"
+    head[8] = 1
+    head[9] = 1
+    struct.pack_into("<I", head, 12, 16000)
+    pages.extend(make_page([bytes(head)], bos=True))
+    vendor = b"plaud-v2"
+    tags = b"OpusTags" + struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", 0)
+    pages.extend(make_page([tags]))
+    granule = 0
+    batch = 50
+    for i in range(0, len(frames), batch):
+        chunk = frames[i : i + batch]
+        granule += len(chunk) * 960
+        pages.extend(make_page(chunk, eos=(i + batch >= len(frames)), granule=granule))
+    return bytes(pages)
+
+
+def decrypt_ble_file(data, app_key):
+    """Decrypt a BLE-downloaded ASR file -> raw Opus frames."""
+    if data[:8] != b"PLAUD.AI" or len(data) < 0x300:
+        return None
+    nonce = data[0x84:0x90]
+    rsa_blob = data[0x100:0x200]
+    try:
+        file_key = app_key.decrypt(rsa_blob, padding.PKCS1v15())
+    except Exception:
+        return None
+    if len(file_key) > 32:
+        file_key = file_key[:32]
+    if len(file_key) != 32:
+        return None
+    full_nonce = b"\x00\x00\x00\x00" + nonce
+    cipher = Cipher(algorithms.ChaCha20(file_key, full_nonce), mode=None)
+    keystream = cipher.decryptor().update(b"\x00" * 80)
+    audio = data[0x200:]
+    decrypted = bytearray()
+    for i in range(0, len(audio), 80):
+        frame = audio[i : i + 80]
+        decrypted.extend(bytes(a ^ b for a, b in zip(frame, keystream[: len(frame)], strict=False)))
+    if len(decrypted) >= 160:
+        toc = decrypted[0]
+        if decrypted[80] != toc:
+            return None
+    return bytes(decrypted)
+
+
+def unwrap_ogg_to_raw_opus(ogg_path):
+    """Extract raw Opus frames from an OGG container.
+    The Plaud cloud expects raw Opus frames (80 bytes each), not OGG-wrapped files.
+    """
+    data = Path(ogg_path).read_bytes()
+    if data[:4] != b"OggS":
+        return data  # Already raw, not OGG
+
+    frames = bytearray()
+    pos = 0
+    page_num = 0
+    while pos < len(data):
+        if data[pos : pos + 4] != b"OggS":
+            break
+        num_segments = data[pos + 26] if pos + 26 < len(data) else 0
+        seg_table_start = pos + 27
+        seg_table = data[seg_table_start : seg_table_start + num_segments]
+        body_start = seg_table_start + num_segments
+
+        if page_num >= 2:
+            offset = body_start
+            for seg_size in seg_table:
+                if seg_size > 0 and offset + seg_size <= len(data):
+                    frames.extend(data[offset : offset + seg_size])
+                offset += seg_size
+
+        body_size = sum(seg_table)
+        pos = body_start + body_size
+        page_num += 1
+
+    return bytes(frames) if frames else data
