@@ -61,7 +61,24 @@ def get_state():
         "device_address": _device_state["device_address"],
         "battery": _device_state["battery"],
         "serial_number": _device_state.get("serial_number"),
+        "rssi": _device_state.get("rssi"),
     }
+
+
+async def read_rssi():
+    """Read RSSI for the connected device via CoreBluetooth's readRSSI."""
+    cl = _device_state.get("client")
+    if not cl or not _device_state["connected"]:
+        return None
+    try:
+        # BleakClient wraps the platform backend — access it directly
+        backend = getattr(cl, "_backend", cl)
+        rssi = await backend.get_rssi()
+        if rssi is not None:
+            _device_state["rssi"] = int(rssi)
+        return _device_state.get("rssi")
+    except Exception:
+        return _device_state.get("rssi")
 
 
 def _get_loop():

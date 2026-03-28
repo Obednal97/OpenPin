@@ -68,14 +68,31 @@ def depair():
 
 @bp.route("/status")
 def status():
+    import asyncio
+
     is_recording = False
     state = dev.get_state()
+    rssi = state.get("rssi")
     if state["connected"]:
+        # Combine state check + RSSI read in a single async call to avoid deadlocks
+        async def _status_and_rssi():
+            _is_rec = False
+            _rssi = None
+            try:
+                r = await dev.send_cmd(bytes([1, 3, 0]), timeout=3)
+                if r and len(r) >= 5:
+                    state_byte = r[3] if len(r) > 3 else 0
+                    _is_rec = state_byte in (1, 2, 3)
+            except Exception:
+                pass
+            try:
+                _rssi = await dev.read_rssi()
+            except Exception:
+                pass
+            return _is_rec, _rssi
+
         try:
-            r = dev.run_async(dev.send_cmd(bytes([1, 3, 0]), timeout=3))
-            if r and len(r) >= 5:
-                state_byte = r[3] if len(r) > 3 else 0
-                is_recording = state_byte in (1, 2, 3)
+            is_recording, rssi = dev.run_async(_status_and_rssi())
         except Exception:
             pass
 
@@ -87,8 +104,21 @@ def status():
             "address": state["device_address"],
             "serial_number": state.get("serial_number"),
             "is_recording": is_recording,
+            "rssi": rssi,
         }
     )
+
+
+@bp.route("/rssi")
+def rssi():
+    """Read current RSSI for the connected device via a quick BLE scan."""
+    if not dev.is_connected():
+        return jsonify({"rssi": None, "error": "Not connected"})
+    try:
+        rssi_val = dev.run_async(dev.read_rssi())
+        return jsonify({"rssi": rssi_val})
+    except Exception as e:
+        return jsonify({"rssi": None, "error": str(e)})
 
 
 @bp.route("/scan-known", methods=["POST"])

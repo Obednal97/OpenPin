@@ -263,7 +263,16 @@ function renderDeviceManager() {
     $('#dm-device-meta').textContent = sn ? `SN: ${sn}` : '';
     const bat = app.deviceStateCache.battery;
     $('#dm-device-battery').textContent = bat != null ? `${bat}%` : '';
+    // Show RSSI if available
+    const dmRssi = $('#dm-device-rssi');
+    if (dmRssi && app.deviceStateCache.rssi != null) {
+      dmRssi.innerHTML =
+        renderSignalBars(app.deviceStateCache.rssi) +
+        ` <span class="dm-rssi-value">${app.deviceStateCache.rssi} dBm</span>`;
+    }
+    startRssiPolling();
   } else {
+    stopRssiPolling();
     dmDisconnected.classList.remove('hidden');
     dmConnected.classList.add('hidden');
   }
@@ -296,6 +305,21 @@ function renderSignalBars(rssi) {
 
 // ---- Device Status ----
 
+function renderHeaderSignal(rssi) {
+  const el = $('#header-signal');
+  if (rssi == null) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  const level = rssiToSignalLevel(rssi);
+  const heights = [3, 5, 8, 11];
+  el.innerHTML = heights
+    .map((h, i) => `<div class="header-signal-bar ${i < level ? 'active' : ''}" style="height:${h}px;"></div>`)
+    .join('');
+  el.title = `Signal: ${rssi} dBm (${rssiToLabel(rssi)})`;
+}
+
 async function updateDeviceStatus() {
   try {
     const status = await window.plaud.status();
@@ -307,6 +331,7 @@ async function updateDeviceStatus() {
       dom.scanBtn.classList.add('hidden');
       dom.syncBtn.classList.remove('hidden');
       dom.disconnectBtn.classList.remove('hidden');
+      renderHeaderSignal(status.rssi);
     } else {
       dom.statusEl.className = 'device-status disconnected';
       dom.statusText.textContent = 'Disconnected';
@@ -314,11 +339,45 @@ async function updateDeviceStatus() {
       dom.scanBtn.classList.remove('hidden');
       dom.syncBtn.classList.add('hidden');
       dom.disconnectBtn.classList.add('hidden');
+      renderHeaderSignal(null);
     }
     renderDeviceManager();
   } catch {
     dom.statusEl.className = 'device-status disconnected';
     dom.statusText.textContent = 'API unavailable';
+    renderHeaderSignal(null);
+  }
+}
+
+// RSSI polling — updates signal in header and device manager every 5s
+let _rssiPollInterval = null;
+
+function startRssiPolling() {
+  stopRssiPolling();
+  _rssiPollInterval = setInterval(async () => {
+    if (!app.deviceStateCache || !app.deviceStateCache.connected) {
+      stopRssiPolling();
+      return;
+    }
+    try {
+      const result = await window.plaud.rssi();
+      if (result.rssi != null) {
+        app.deviceStateCache.rssi = result.rssi;
+        renderHeaderSignal(result.rssi);
+        // Update device manager if visible
+        const dmRssi = $('#dm-device-rssi');
+        if (dmRssi) {
+          dmRssi.innerHTML = renderSignalBars(result.rssi) + ` <span class="dm-rssi-value">${result.rssi} dBm</span>`;
+        }
+      }
+    } catch {}
+  }, 5000);
+}
+
+function stopRssiPolling() {
+  if (_rssiPollInterval) {
+    clearInterval(_rssiPollInterval);
+    _rssiPollInterval = null;
   }
 }
 
