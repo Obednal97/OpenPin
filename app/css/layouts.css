@@ -21,6 +21,17 @@
   letter-spacing: -0.3px;
   color: var(--text);
 }
+.app-wordmark {
+  -webkit-app-region: no-drag;
+  user-select: none;
+  pointer-events: none;
+}
+/* Dark mode (default): show white wordmark */
+:root .app-wordmark-dark, [data-theme="dark"] .app-wordmark-dark { display: inline; }
+:root .app-wordmark-light, [data-theme="dark"] .app-wordmark-light { display: none; }
+/* Light mode: show black wordmark */
+[data-theme="light"] .app-wordmark-dark { display: none; }
+[data-theme="light"] .app-wordmark-light { display: inline; }
 .header-center { display: flex; align-items: center; }
 .header-right { display: flex; align-items: center; gap: var(--sp-1); }
 

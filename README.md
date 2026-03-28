@@ -1,6 +1,11 @@
-# Plaud V2
+<p align="center">
+  <img src="app/assets/wordmark-black.png" alt="Plaud V2" height="40">
+</p>
 
-An open-source desktop companion for the **Plaud NotePin S** voice recorder. Syncs recordings via BLE, decrypts audio locally, transcribes with Whisper, and summarises with AI — no cloud required.
+<p align="center">
+An open-source desktop companion for the <b>Plaud NotePin S</b> voice recorder.<br>
+Syncs recordings via BLE, decrypts audio locally, transcribes with Whisper, and summarises with AI — no cloud required.
+</p>
 
 Built as a replacement for the official Plaud app. All processing happens on your Mac unless you explicitly connect cloud AI providers.
 

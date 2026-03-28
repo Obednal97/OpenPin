@@ -127,6 +127,7 @@ function createWindow() {
     trafficLightPosition: { x: 16, y: 16 },
     roundedCorners: true,
     visualEffectState: 'active',
+    icon: path.join(__dirname, 'icon.icns'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
