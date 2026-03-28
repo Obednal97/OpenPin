@@ -3,14 +3,21 @@
    ============================================================ */
 
 // Global error reporter — catches unhandled errors and sends to GitHub Issues
+function _errorContext(base) {
+  try {
+    const parts = [base];
+    if (typeof app !== 'undefined') parts.push(`view:${app.currentView || 'unknown'}`);
+    return parts.join(' | ');
+  } catch { return base; }
+}
 window.onerror = (msg, src, line, col, err) => {
-  const context = `renderer:${(src || '').split('/').pop()}:${line}`;
+  const context = _errorContext(`renderer:${(src || '').split('/').pop()}:${line}`);
   window.plaud.reportError(String(msg), err?.stack || '', context).catch(() => {});
 };
 window.onunhandledrejection = (event) => {
   const err = event.reason;
   const msg = err instanceof Error ? err.message : String(err);
-  window.plaud.reportError(msg, err?.stack || '', 'renderer-unhandled').catch(() => {});
+  window.plaud.reportError(msg, err?.stack || '', _errorContext('renderer-unhandled')).catch(() => {});
 };
 
 const $ = (sel) => document.querySelector(sel);

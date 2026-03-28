@@ -224,6 +224,15 @@ function errorFingerprint(error) {
   return msg;
 }
 
+function getMacOSName() {
+  // Map Darwin kernel versions to macOS names
+  const major = parseInt(os.release().split('.')[0], 10);
+  const names = { 24: 'Sequoia 15', 25: 'Tahoe 26', 23: 'Sonoma 14', 22: 'Ventura 13', 21: 'Monterey 12' };
+  return names[major] || `Darwin ${os.release()}`;
+}
+
+const _appStartTime = Date.now();
+
 async function reportError(error, context = 'main') {
   try {
     const fingerprint = errorFingerprint(error);
@@ -234,11 +243,26 @@ async function reportError(error, context = 'main') {
     const errorMsg = String(error.message || error);
     const stack = error.stack || '';
 
+    // Gather system info
+    const uptimeMin = Math.round((Date.now() - _appStartTime) / 60000);
+    const memMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    const pythonRunning = pythonProcess && !pythonProcess.killed;
+    const electronVersion = process.versions.electron;
+
     // Search for existing issues with this error
     const query = encodeURIComponent(`repo:${UPDATE_REPO} is:issue label:auto-bug "${fingerprint.slice(0, 60)}"`);
     const search = await githubApi(`/search/issues?q=${query}&per_page=5`);
 
-    const systemInfo = `- **Version:** ${version}\n- **macOS:** ${os.release()}\n- **Arch:** ${os.arch()}\n- **Context:** ${context}`;
+    const systemInfo = [
+      `- **Version:** ${version}`,
+      `- **Electron:** ${electronVersion}`,
+      `- **macOS:** ${getMacOSName()} (${os.release()})`,
+      `- **Arch:** ${os.arch()}`,
+      `- **Memory:** ${memMB} MB`,
+      `- **Uptime:** ${uptimeMin} min`,
+      `- **Python server:** ${pythonRunning ? 'running' : 'not running'}`,
+      `- **Context:** ${context}`,
+    ].join('\n');
 
     const openIssue = (search.items || []).find((i) => i.state === 'open');
     if (openIssue) {
