@@ -313,7 +313,7 @@ def summarize_transcript():
             save_config(config)
 
         fire_webhooks(
-            "summarize", {"session_id": session_id, "title": title, "summary": summary_text[:500], "provider": provider}
+            "summarize", {"session_id": session_id, "title": title, "summary": summary_text, "provider": provider}
         )
 
         return jsonify(
