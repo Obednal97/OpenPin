@@ -122,6 +122,20 @@ def status():
     )
 
 
+@bp.route("/find-my", methods=["POST"])
+def find_my():
+    """Enable or disable Find My on the device."""
+    if not dev.is_connected():
+        return jsonify({"error": "Not connected"}), 400
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled", False)
+    try:
+        result = dev.run_async(dev.set_find_my(enabled))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/rssi")
 def rssi():
     """Read current RSSI for the connected device via a quick BLE scan."""

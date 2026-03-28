@@ -362,15 +362,28 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  // Find My
+  // Find My — toggle
   if (info.find_my_enabled != null) {
-    const dot = info.find_my_enabled ? 'on' : 'off';
-    const label = info.find_my_enabled ? 'Enabled' : 'Disabled';
+    const checked = info.find_my_enabled ? 'checked' : '';
     items.push(`<div class="dm-info-item">
       <div class="dm-info-label">Find My</div>
-      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
+      <label class="toggle-label" style="margin-top:2px;">
+        <input type="checkbox" id="dm-find-my-toggle" class="toggle-input" ${checked}>
+        <span class="toggle-switch"></span>
+      </label>
     </div>`);
   }
+
+  // Auto-delete after sync — app-side toggle
+  const autoDelete = app.settings.auto_delete_after_sync || false;
+  items.push(`<div class="dm-info-item">
+    <div class="dm-info-label">Auto-delete from device</div>
+    <label class="toggle-label" style="margin-top:2px;">
+      <input type="checkbox" id="dm-auto-delete-toggle" class="toggle-input" ${autoDelete ? 'checked' : ''}>
+      <span class="toggle-switch"></span>
+      <span class="dm-info-secondary">after sync</span>
+    </label>
+  </div>`);
 
   // Button state
   if (info.button_pressed != null) {
@@ -412,6 +425,35 @@ function renderDeviceInfoPanel(panel, info) {
   }
 
   panel.innerHTML = items.join('');
+
+  // Wire up Find My toggle
+  const findMyToggle = document.getElementById('dm-find-my-toggle');
+  if (findMyToggle) {
+    findMyToggle.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      try {
+        await window.plaud.setFindMy(enabled);
+        toast(enabled ? 'Find My enabled on device' : 'Find My disabled on device', 'success');
+      } catch (err) {
+        toast(`Failed: ${err.message}`, 'error');
+        e.target.checked = !enabled;
+      }
+    });
+  }
+
+  // Wire up auto-delete toggle
+  const autoDeleteToggle = document.getElementById('dm-auto-delete-toggle');
+  if (autoDeleteToggle) {
+    autoDeleteToggle.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      await window.plaud.saveSettings({ auto_delete_after_sync: enabled });
+      app.settings.auto_delete_after_sync = enabled;
+      toast(
+        enabled ? 'Files will be deleted from device after sync' : 'Files will be kept on device after sync',
+        'success',
+      );
+    });
+  }
 }
 
 function rssiToSignalLevel(rssi) {
