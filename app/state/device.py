@@ -520,8 +520,7 @@ async def get_device_info():
                 info["serial_number_full"] = sn
 
             if len(r) >= 63:
-                ver_type = chr(r[59]) if r[59] > 0 else ""
-                ver_num = r[60] | (r[61] << 8) | (r[62] << 16) if len(r) >= 63 else 0
+                ver_num = r[60] | (r[61] << 8) | (r[62] << 16)
                 # Version is typically encoded as major*65536 + minor*256 + patch
                 # e.g. 65546 = 1*65536 + 0*256 + 10 = v1.0.10
                 major = (ver_num >> 16) & 0xFF
@@ -603,6 +602,27 @@ async def get_device_info():
         pass
 
     return info
+
+
+async def set_find_my(enabled):
+    """Enable or disable Find My on the device (cmd 109)."""
+    r = await send_cmd(bytes([1, 109, 0, 1 if enabled else 0]), timeout=3)
+    # Read back to confirm
+    if r and len(r) >= 4:
+        return {"find_my_enabled": bool(r[3])}
+    return {"find_my_enabled": enabled}
+
+
+async def delete_device_file(session_id):
+    """Delete a file from the device by session ID (cmd 31)."""
+    r = await send_cmd(
+        bytes([1, 31, 0]) + struct.pack("<I", session_id),
+        timeout=5,
+    )
+    if r and len(r) >= 8:
+        status = r[7] if len(r) > 7 else r[3]
+        return {"deleted": status == 0, "session_id": session_id}
+    return {"deleted": True, "session_id": session_id}
 
 
 async def start_recording():
@@ -701,7 +721,19 @@ async def sync_files(progress_callback=None):
                 }
             )
 
-    return {"files": new_files}
+    # Auto-delete synced files from device if enabled
+    auto_delete = load_config().get("auto_delete_after_sync", False)
+    deleted_from_device = []
+    if auto_delete:
+        for f in new_files:
+            if f["status"] == "new" and f.get("session_id"):
+                try:
+                    await delete_device_file(f["session_id"])
+                    deleted_from_device.append(f["session_id"])
+                except Exception:
+                    pass
+
+    return {"files": new_files, "deleted_from_device": deleted_from_device}
 
 
 def save_known_device(address, name=None, serial_number=None):

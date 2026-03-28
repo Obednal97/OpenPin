@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('plaud', {
   status: () => apiCall('GET', '/device/status'),
   rssi: () => apiCall('GET', '/device/rssi'),
   deviceInfo: () => apiCall('GET', '/device/info'),
+  setFindMy: (enabled) => apiCall('POST', '/device/find-my', { enabled }),
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
   sync: () => apiCall('POST', '/device/sync'),

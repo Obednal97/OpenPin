@@ -37,6 +37,7 @@ def get_settings():
             "custom_vocabulary": config.get("custom_vocabulary", []),
             "webhooks": config.get("webhooks", []),
             "cloud_sync_direction": config.get("cloud_sync_direction", "download"),
+            "auto_delete_after_sync": config.get("auto_delete_after_sync", False),
         }
     )
 
@@ -60,6 +61,8 @@ def save_settings():
         config["custom_vocabulary"] = data["custom_vocabulary"]
     if "cloud_sync_direction" in data:
         config["cloud_sync_direction"] = data["cloud_sync_direction"]
+    if "auto_delete_after_sync" in data:
+        config["auto_delete_after_sync"] = data["auto_delete_after_sync"]
     if "webhooks" in data:
         config["webhooks"] = data["webhooks"]
     if "remove_openai_key" in data:
