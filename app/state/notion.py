@@ -42,6 +42,28 @@ def is_connected():
     return _notion_state["connected"]
 
 
+def verify_connection():
+    """Check if the Notion token is still valid. Returns True if connected, False if not.
+    Tries to refresh if the current token has expired."""
+    if not _notion_state.get("access_token"):
+        _notion_state["connected"] = False
+        return False
+    try:
+        # Try a lightweight MCP initialize to test the token
+        mcp_init()
+        return True
+    except Exception:
+        # Token might be expired — try refresh
+        if refresh_token():
+            try:
+                mcp_init()
+                return True
+            except Exception:
+                pass
+        _notion_state["connected"] = False
+        return False
+
+
 def load():
     """Load saved Notion OAuth tokens."""
     if NOTION_CONFIG_PATH.exists():

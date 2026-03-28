@@ -2,6 +2,7 @@
 
 import json
 import re
+import time as _time
 
 from flask import Blueprint, jsonify, request
 
@@ -12,9 +13,19 @@ from app.utils.constants import TRANSCRIPTS_DIR
 bp = Blueprint("notion", __name__, url_prefix="/notion")
 
 
+_last_notion_verify = 0
+
+
 @bp.route("/status")
 def status():
-    return jsonify(notion.get_state())
+    global _last_notion_verify
+    state = notion.get_state()
+    # Periodically verify the token is still valid (every 5 minutes)
+    if state["connected"] and _time.time() - _last_notion_verify > 300:
+        _last_notion_verify = _time.time()
+        if not notion.verify_connection():
+            state = notion.get_state()  # Refresh after verify updated the state
+    return jsonify(state)
 
 
 @bp.route("/connect", methods=["POST"])
