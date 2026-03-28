@@ -94,4 +94,13 @@ contextBridge.exposeInMainWorld('plaud', {
 
   // Open external URL
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
+  // Auto-updater
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  onUpdateStatus: (callback) => ipcRenderer.on('update-status', (event, data) => callback(data)),
+
+  // Bug reporter
+  reportError: (message, stack, context) => ipcRenderer.invoke('report-error', { message, stack, context }),
 });

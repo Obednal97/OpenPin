@@ -50,6 +50,13 @@
     </div>
   </header>
 
+  <!-- Update Banner -->
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-message">A new version is available</span>
+    <button id="update-action" class="update-action-btn">Restart to Update</button>
+    <button id="update-dismiss" class="update-dismiss-btn" title="Dismiss">&times;</button>
+  </div>
+
   <!-- Main Content -->
   <main id="main-content">
     <!-- Empty State -->
@@ -284,7 +291,11 @@
             Plaud V2 — open-source voice recorder companion.
             All processing happens locally on your Mac unless you connect cloud AI.
           </p>
-          <p class="settings-desc version">Version 1.0.0</p>
+          <p class="settings-desc version" id="app-version">Version ...</p>
+          <div class="update-check-row">
+            <button id="check-updates-btn" class="link">Check for Updates</button>
+            <span id="update-check-status" class="settings-hint"></span>
+          </div>
         </div>
       </div>
 

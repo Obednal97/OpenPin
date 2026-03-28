@@ -232,7 +232,53 @@ window.plaud.onOAuthCallback(async (authCode) => {
   app.pendingDesktopUuid = null;
 });
 
+// ---- Auto-Update UI ----
+// Global update status listeners — settings.js can push handlers here
+app.updateListeners = [];
+
+window.plaud.onUpdateStatus((data) => {
+  const banner = $('#update-banner');
+  const message = $('#update-message');
+  const actionBtn = $('#update-action');
+
+  if (data.status === 'available') {
+    banner.classList.remove('hidden');
+    message.textContent = `Downloading v${data.version}...`;
+    actionBtn.style.display = 'none';
+  } else if (data.status === 'downloading') {
+    banner.classList.remove('hidden');
+    message.textContent = `Downloading update... ${data.percent}%`;
+    actionBtn.style.display = 'none';
+  } else if (data.status === 'ready') {
+    banner.classList.remove('hidden');
+    message.textContent = `v${data.version} ready to install`;
+    actionBtn.style.display = '';
+    actionBtn.textContent = 'Restart to Update';
+  } else if (data.status === 'error') {
+    console.error('[Updater]', data.message);
+  } else if (data.status === 'up-to-date') {
+    console.log('[Updater] App is up to date');
+  }
+
+  // Notify any waiting listeners (e.g. Check for Updates button)
+  for (const fn of app.updateListeners.splice(0)) fn(data);
+});
+
+$('#update-action').addEventListener('click', () => {
+  $('#update-message').textContent = 'Installing update, restarting...';
+  $('#update-action').disabled = true;
+  window.plaud.installUpdate();
+});
+
+$('#update-dismiss').addEventListener('click', () => {
+  $('#update-banner').classList.add('hidden');
+});
+
 // ---- Init ----
+
+// Init Electron-only features immediately (don't wait for Python API)
+initSettingsEvents();
+
 async function init() {
   let apiReady = false;
   for (let i = 0; i < 20; i++) {
@@ -255,7 +301,6 @@ async function init() {
 
   // Init sub-modules
   initAudioPlayer();
-  initSettingsEvents();
 
   await updateDeviceStatus();
   await loadCloudStatus();

@@ -11,6 +11,7 @@ Electron 41 desktop app with a Python Flask backend. The Electron main process s
 │  - Theme sync (light/dark/auto)              │
 │  - OAuth URL scheme (plaud-v2://)            │
 │  - Tray icon, login items, dock visibility   │
+│  - Auto-updates via electron-updater         │
 │  - Clean BLE disconnect on quit/reload       │
 ├──────────────────────────────────────────────┤
 │  Renderer (index.html + JS modules)          │
@@ -137,6 +138,19 @@ Token-based design system with light/dark mode, split into 7 files:
 3. On failure: try OpenAI GPT-5.4-mini (JSON mode)
 4. On failure: try local DistilBART (chunked)
 5. Auto-set recording title from summary if none exists
+
+## Auto-Updates
+
+Custom updater using GitHub Releases API (no code signing required). See [RELEASING.md](RELEASING.md) for full workflow.
+
+- Checks for updates 5s after launch, then every 4 hours
+- Downloads ZIP silently, shows banner when ready
+- Install: detached bash script extracts with `ditto`, safe-swaps the `.app` bundle, ad-hoc signs, relaunches
+- Manual check available in Settings > General > About
+
+## Auto Bug Reporter
+
+Unhandled errors are automatically reported as GitHub Issues (tagged `auto-bug`). Deduplicates by error fingerprint — same error creates a comment on the existing issue instead of a new one. Catches both main process (`uncaughtException`) and renderer (`window.onerror`) errors.
 
 ## Testing
 
