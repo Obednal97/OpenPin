@@ -138,7 +138,7 @@ function renderWebhooks() {
 // ---- Cloud AI Keys ----
 
 function renderAIKeys() {
-  for (const provider of ['openai', 'anthropic', 'openrouter']) {
+  for (const provider of ['deepgram', 'groq', 'openai', 'anthropic', 'openrouter']) {
     const isSet = app.settings[`${provider}_key_set`];
     const badge = $(`#${provider}-key-badge`);
     const form = $(`#${provider}-key-form`);
@@ -175,7 +175,7 @@ async function handleKeyPaste(provider, key) {
       app.settings[`${provider}_key_set`] = true;
       input.value = '';
       statusEl.classList.add('hidden');
-      const names = { openai: 'OpenAI', anthropic: 'Anthropic', openrouter: 'OpenRouter' };
+      const names = { deepgram: 'Deepgram', groq: 'Groq', openai: 'OpenAI', anthropic: 'Anthropic', openrouter: 'OpenRouter' };
       toast(`${names[provider] || provider} key connected`, 'success');
       renderAIKeys();
     } else {
@@ -721,8 +721,8 @@ function initSettingsEvents() {
   });
 
   // AI key auto-paste + validation
-  const keyPrefixes = { openai: 'sk-', anthropic: 'sk-ant-', openrouter: 'sk-or-' };
-  for (const provider of ['openai', 'anthropic', 'openrouter']) {
+  const keyPrefixes = { deepgram: '', groq: 'gsk_', openai: 'sk-', anthropic: 'sk-ant-', openrouter: 'sk-or-' };
+  for (const provider of ['deepgram', 'groq', 'openai', 'anthropic', 'openrouter']) {
     const input = $(`#${provider}-key-input`);
     const prefix = keyPrefixes[provider];
 
@@ -744,6 +744,20 @@ function initSettingsEvents() {
   }
 
   // Remove key buttons
+  $('#deepgram-key-remove').addEventListener('click', async () => {
+    await window.plaud.saveSettings({ remove_deepgram_key: true });
+    app.settings.deepgram_key_set = false;
+    toast('Deepgram key removed', 'info');
+    renderAIKeys();
+  });
+
+  $('#groq-key-remove').addEventListener('click', async () => {
+    await window.plaud.saveSettings({ remove_groq_key: true });
+    app.settings.groq_key_set = false;
+    toast('Groq key removed', 'info');
+    renderAIKeys();
+  });
+
   $('#openai-key-remove').addEventListener('click', async () => {
     await window.plaud.saveSettings({ remove_openai_key: true });
     app.settings.openai_key_set = false;
@@ -766,6 +780,16 @@ function initSettingsEvents() {
   });
 
   // External links
+  $('#deepgram-key-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.plaud.openExternal('https://console.deepgram.com/');
+  });
+
+  $('#groq-key-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.plaud.openExternal('https://console.groq.com/keys');
+  });
+
   $('#openai-key-link').addEventListener('click', (e) => {
     e.preventDefault();
     window.plaud.openExternal('https://platform.openai.com/api-keys');

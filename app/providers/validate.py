@@ -38,6 +38,32 @@ def validate_key(provider, key):
             else:
                 return False, f"HTTP {r.status_code}"
 
+        elif provider == "groq":
+            r = http_requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return True, None
+            elif r.status_code == 401:
+                return False, "Invalid API key"
+            else:
+                return False, f"HTTP {r.status_code}"
+
+        elif provider == "deepgram":
+            r = http_requests.get(
+                "https://api.deepgram.com/v1/projects",
+                headers={"Authorization": f"Token {key}"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return True, None
+            elif r.status_code == 401:
+                return False, "Invalid API key"
+            else:
+                return False, f"HTTP {r.status_code}"
+
         elif provider == "openrouter":
             r = http_requests.get(
                 "https://openrouter.ai/api/v1/auth/key",

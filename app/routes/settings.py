@@ -33,6 +33,8 @@ def get_settings():
             "anthropic_key_set": bool(config.get("anthropic_api_key", "")),
             "openai_key_set": bool(config.get("openai_api_key", "")),
             "openrouter_key_set": bool(config.get("openrouter_api_key", "")),
+            "deepgram_key_set": bool(config.get("deepgram_api_key", "")),
+            "groq_key_set": bool(config.get("groq_api_key", "")),
             "available_tags": all_tags,
             "profile": config.get("profile", {}),
             "custom_vocabulary": config.get("custom_vocabulary", []),
@@ -84,6 +86,10 @@ def save_settings():
         config.pop("anthropic_api_key", None)
     if "remove_openrouter_key" in data:
         config.pop("openrouter_api_key", None)
+    if "remove_deepgram_key" in data:
+        config.pop("deepgram_api_key", None)
+    if "remove_groq_key" in data:
+        config.pop("groq_api_key", None)
     if "anthropic_api_key" in data:
         key = data["anthropic_api_key"].strip()
         config["anthropic_api_key"] = key
@@ -93,6 +99,12 @@ def save_settings():
     if "openrouter_api_key" in data:
         key = data["openrouter_api_key"].strip()
         config["openrouter_api_key"] = key
+    if "deepgram_api_key" in data:
+        key = data["deepgram_api_key"].strip()
+        config["deepgram_api_key"] = key
+    if "groq_api_key" in data:
+        key = data["groq_api_key"].strip()
+        config["groq_api_key"] = key
 
     save_config(config)
     return jsonify({"saved": True})
