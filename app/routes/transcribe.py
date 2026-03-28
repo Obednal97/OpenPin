@@ -129,14 +129,46 @@ def transcribe_file():
                         td["speakers"] = speakers
                         tp.write_text(json.dumps(td, indent=2, ensure_ascii=False))
                         print(f"  [bg-diarize] Complete for {_bg_sid}: {len(speakers)} speaker(s)")
+                        # Fire webhook after diarization with full segmented transcript
+                        fire_webhooks(
+                            "transcribe",
+                            {
+                                "session_id": _bg_sid,
+                                "text": _bg_text[:500],
+                                "duration": _bg_dur,
+                                "language": _bg_lang,
+                                "speakers": speakers,
+                                "segments": updated_segments,
+                            },
+                        )
                     except Exception as e:
                         print(f"  [bg-diarize] FAILED for {_bg_sid}: {e}")
+                        # Fire webhook anyway on diarization failure, with basic segments
+                        fire_webhooks(
+                            "transcribe",
+                            {
+                                "session_id": _bg_sid,
+                                "text": _bg_text[:500],
+                                "duration": _bg_dur,
+                                "language": _bg_lang,
+                                "segments": _bg_segs,
+                            },
+                        )
 
                 threading.Thread(target=_bg_diarize, daemon=True).start()
 
-            fire_webhooks(
-                "transcribe", {"session_id": session_id, "text": text[:500], "duration": duration, "language": lang}
-            )
+            else:
+                # No diarization — fire webhook immediately with segments
+                fire_webhooks(
+                    "transcribe",
+                    {
+                        "session_id": session_id,
+                        "text": text[:500],
+                        "duration": duration,
+                        "language": lang,
+                        "segments": segments,
+                    },
+                )
 
             return jsonify(
                 {
@@ -167,6 +199,9 @@ def transcribe_file():
             txt_path.write_text(t.formatted, encoding="utf-8")
 
             speakers = list({s.speaker for s in t.segments if s.speaker})
+            local_segments = [
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
+            ]
             fire_webhooks(
                 "transcribe",
                 {
@@ -175,6 +210,7 @@ def transcribe_file():
                     "duration": t.duration,
                     "language": t.language,
                     "speakers": speakers,
+                    "segments": local_segments,
                 },
             )
 

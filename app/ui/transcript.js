@@ -156,6 +156,14 @@ function openTranscript(sessionId, autoPlay = false) {
     `
         : ''
     }
+    <div class="actions-divider"></div>
+    <button class="action-btn subtle" id="delete-recording-btn" title="Delete recording" style="color:var(--destructive);">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M2 4h12M5.3 4V2.7a1.3 1.3 0 011.3-1.3h2.8a1.3 1.3 0 011.3 1.3V4M6.7 7.3v4M9.3 7.3v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M3.3 4h9.4l-.7 9.3a1.3 1.3 0 01-1.3 1.2H5.3a1.3 1.3 0 01-1.3-1.2L3.3 4z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Delete</span>
+    </button>
   `;
 
   // Re-transcribe
@@ -308,6 +316,56 @@ function openTranscript(sessionId, autoPlay = false) {
       toast(`Error: ${err.message}`, 'error');
     }
   };
+
+  // Delete recording
+  const deleteBtn = $('#delete-recording-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', () => {
+      if (rec.cloud_synced) {
+        // Cloud recording — show choice dialog, then navigate back
+        showDeleteDialog([sessionId], 1, () => {
+          closeTranscript();
+        });
+      } else {
+        // Local only — confirm and delete
+        const overlay = document.createElement('div');
+        overlay.className = 'delete-dialog-overlay';
+        overlay.innerHTML = `
+          <div class="delete-dialog">
+            <h3>Delete recording?</h3>
+            <p class="settings-desc">This will delete the audio and transcript permanently.</p>
+            <div class="delete-dialog-actions">
+              <button class="action-btn delete" id="confirm-delete-btn">Delete</button>
+            </div>
+            <button class="action-btn subtle" id="cancel-delete-btn" style="width:100%;margin-top:8px;justify-content:center;">Cancel</button>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.offsetHeight;
+        overlay.classList.add('visible');
+
+        const cleanup = () => {
+          overlay.classList.remove('visible');
+          setTimeout(() => overlay.remove(), 300);
+        };
+
+        document.getElementById('cancel-delete-btn').addEventListener('click', cleanup);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+
+        document.getElementById('confirm-delete-btn').addEventListener('click', async () => {
+          cleanup();
+          try {
+            await window.plaud.deleteRecordings([sessionId]);
+            toast('Recording deleted', 'success');
+            closeTranscript();
+            await loadRecordings();
+          } catch (err) {
+            toast(`Delete failed: ${err.message}`, 'error');
+          }
+        });
+      }
+    });
+  }
 
   // Tabs
   const tabsEl = $('#transcript-tabs');
