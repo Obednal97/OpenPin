@@ -138,7 +138,7 @@ function renderWebhooks() {
 // ---- Cloud AI Keys ----
 
 function renderAIKeys() {
-  for (const provider of ['openai', 'anthropic']) {
+  for (const provider of ['openai', 'anthropic', 'openrouter']) {
     const isSet = app.settings[`${provider}_key_set`];
     const badge = $(`#${provider}-key-badge`);
     const form = $(`#${provider}-key-form`);
@@ -175,7 +175,8 @@ async function handleKeyPaste(provider, key) {
       app.settings[`${provider}_key_set`] = true;
       input.value = '';
       statusEl.classList.add('hidden');
-      toast(`${provider === 'openai' ? 'OpenAI' : 'Anthropic'} key connected`, 'success');
+      const names = { openai: 'OpenAI', anthropic: 'Anthropic', openrouter: 'OpenRouter' };
+      toast(`${names[provider] || provider} key connected`, 'success');
       renderAIKeys();
     } else {
       statusEl.textContent = result.error || 'Invalid key';
@@ -720,9 +721,10 @@ function initSettingsEvents() {
   });
 
   // AI key auto-paste + validation
-  for (const provider of ['openai', 'anthropic']) {
+  const keyPrefixes = { openai: 'sk-', anthropic: 'sk-ant-', openrouter: 'sk-or-' };
+  for (const provider of ['openai', 'anthropic', 'openrouter']) {
     const input = $(`#${provider}-key-input`);
-    const prefix = provider === 'openai' ? 'sk-' : 'sk-ant-';
+    const prefix = keyPrefixes[provider];
 
     input.addEventListener('paste', (e) => {
       setTimeout(() => {
@@ -756,6 +758,13 @@ function initSettingsEvents() {
     renderAIKeys();
   });
 
+  $('#openrouter-key-remove').addEventListener('click', async () => {
+    await window.plaud.saveSettings({ remove_openrouter_key: true });
+    app.settings.openrouter_key_set = false;
+    toast('OpenRouter key removed', 'info');
+    renderAIKeys();
+  });
+
   // External links
   $('#openai-key-link').addEventListener('click', (e) => {
     e.preventDefault();
@@ -765,6 +774,11 @@ function initSettingsEvents() {
   $('#anthropic-key-link').addEventListener('click', (e) => {
     e.preventDefault();
     window.plaud.openExternal('https://console.anthropic.com/settings/keys');
+  });
+
+  $('#openrouter-key-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    window.plaud.openExternal('https://openrouter.ai/settings/keys');
   });
 
   // Notion connect/disconnect

@@ -32,6 +32,7 @@ def get_settings():
             "ram_headroom_gb": round(headroom_gb, 1),
             "anthropic_key_set": bool(config.get("anthropic_api_key", "")),
             "openai_key_set": bool(config.get("openai_api_key", "")),
+            "openrouter_key_set": bool(config.get("openrouter_api_key", "")),
             "available_tags": all_tags,
             "profile": config.get("profile", {}),
             "custom_vocabulary": config.get("custom_vocabulary", []),
@@ -81,12 +82,17 @@ def save_settings():
         config.pop("openai_api_key", None)
     if "remove_anthropic_key" in data:
         config.pop("anthropic_api_key", None)
+    if "remove_openrouter_key" in data:
+        config.pop("openrouter_api_key", None)
     if "anthropic_api_key" in data:
         key = data["anthropic_api_key"].strip()
         config["anthropic_api_key"] = key
     if "openai_api_key" in data:
         key = data["openai_api_key"].strip()
         config["openai_api_key"] = key
+    if "openrouter_api_key" in data:
+        key = data["openrouter_api_key"].strip()
+        config["openrouter_api_key"] = key
 
     save_config(config)
     return jsonify({"saved": True})

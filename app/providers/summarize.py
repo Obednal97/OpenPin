@@ -1,4 +1,4 @@
-"""Summarization provider cascade: Anthropic -> OpenAI -> Local."""
+"""Summarization provider cascade: Anthropic -> OpenAI -> OpenRouter -> Local."""
 
 import json
 import logging
@@ -95,6 +95,43 @@ def summarize_openai(full_text, api_key, tag_context=""):
     return parsed.get("summary", content), parsed.get("title", "")
 
 
+def summarize_openrouter(full_text, api_key, model, tag_context=""):
+    """Summarize using OpenRouter (OpenAI-compatible API for any model)."""
+    safe_text = sanitize_for_json(full_text[:15000])
+    r = http_requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/Obednal97/Plaud-V2",
+            "X-Title": "Plaud V2",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": 'You analyze and summarize transcripts. Return JSON with "title" (5-12 word descriptive title) and "summary" (thorough markdown with ## Core Synopsis, ## Key Points with ### subheadings and bullets, and ## Action Items with - [ ] checkboxes). Be analytical — synthesize, don\'t just paraphrase.',
+                },
+                {"role": "user", "content": f"Analyze and summarize this transcript:{tag_context}\n\n{safe_text}"},
+            ],
+            "max_tokens": 2048,
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        content = content.rsplit("```", 1)[0]
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return content, ""
+    return parsed.get("summary", content), parsed.get("title", "")
+
+
 def summarize_local(full_text):
     """Summarize using local distilbart model."""
     try:
@@ -140,6 +177,7 @@ def summarize_local(full_text):
 def summarize(full_text, config, tag_context=""):
     """Run the summarization cascade. Returns (summary, title, provider, errors)."""
     attempts = []
+    or_key = config.get("openrouter_api_key")
     if config.get("anthropic_api_key"):
         attempts.append(
             (
@@ -148,12 +186,30 @@ def summarize(full_text, config, tag_context=""):
                 lambda: summarize_anthropic(full_text, config["anthropic_api_key"], tag_context),
             )
         )
+    elif or_key:
+        # No direct Anthropic key — use OpenRouter to access Claude
+        attempts.append(
+            (
+                "OpenRouter (Claude Sonnet 4.6)",
+                "openrouter-claude",
+                lambda: summarize_openrouter(full_text, or_key, "anthropic/claude-sonnet-4.6", tag_context),
+            )
+        )
     if config.get("openai_api_key"):
         attempts.append(
             (
                 "OpenAI (GPT-5.4 mini)",
                 "openai",
                 lambda: summarize_openai(full_text, config["openai_api_key"], tag_context),
+            )
+        )
+    elif or_key:
+        # No direct OpenAI key — use OpenRouter to access GPT
+        attempts.append(
+            (
+                "OpenRouter (GPT-5.4 mini)",
+                "openrouter-gpt",
+                lambda: summarize_openrouter(full_text, or_key, "openai/gpt-5.4-mini", tag_context),
             )
         )
     attempts.append(("Local (DistilBART)", "local", lambda: (summarize_local(full_text), "")))
