@@ -14,7 +14,13 @@
   -webkit-app-region: drag;
   flex-shrink: 0;
 }
-.header-left { display: flex; align-items: center; padding-left: 64px; }
+.header-left { display: flex; align-items: center; padding-left: 64px; gap: var(--sp-3); }
+.header-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
 .app-title {
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
