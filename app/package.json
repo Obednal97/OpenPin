@@ -1,11 +1,12 @@
 {
   "name": "plaud-v2",
-  "version": "1.0.0",
+  "version": "1.0.9",
   "description": "Plaud NotePin S — Local sync, decrypt & transcribe",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --mac",
+    "publish": "export $(cat ../.env | grep -v '^#' | xargs) && electron-builder --mac --publish always",
     "dev": "NODE_ENV=development electron .",
     "lint": "eslint renderer.js main.js preload.js ui/*.js && stylelint 'css/*.css'",
     "lint:py": "cd .. && ruff check app/ src/ tests/",
@@ -27,10 +28,19 @@
   "build": {
     "appId": "com.plaud.v2",
     "productName": "Plaud V2",
+    "asar": false,
+    "publish": {
+      "provider": "github",
+      "owner": "Obednal97",
+      "repo": "Plaud-V2"
+    },
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "icon.icns",
-      "target": "dmg"
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
     "files": [
       "**/*",
