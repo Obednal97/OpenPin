@@ -103,14 +103,18 @@ function renderWebhooks() {
   list.innerHTML = webhooks
     .map((wh, i) => {
       const url = wh.url || '';
+      const name = wh.name || '';
       const triggers = Object.entries(wh.triggers || {})
         .filter(([, v]) => v)
         .map(([k]) => k)
         .join(', ');
       return `<div class="webhook-item">
-      <span class="webhook-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>
+      <div class="webhook-info">
+        ${name ? `<span class="webhook-name">${escapeHtml(name)}</span>` : ''}
+        <span class="webhook-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>
+      </div>
       <span class="webhook-status active">${escapeHtml(triggers || 'none')}</span>
-      <button class="icon-btn" data-index="${i}" title="Remove" style="color:var(--destructive);flex-shrink:0;">
+      <button class="icon-btn text-destructive" data-index="${i}" title="Remove" style="flex-shrink:0;">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <path d="M10 4L4 10M4 4l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
@@ -233,7 +237,8 @@ function renderCloudAccount() {
     loggedIn.classList.remove('hidden');
     const userName = $('#cloud-user-name');
     if (app.cloudState.user) {
-      const u = app.cloudState.user;
+      const raw = app.cloudState.user;
+      const u = raw.data_user || raw;
       userName.textContent = u.nickname || u.email || u.phone || 'Plaud User';
     } else {
       userName.textContent = 'Plaud User';
@@ -452,11 +457,14 @@ function initSettingsEvents() {
       toast('Could not reach URL — added anyway (check URL)', 'info');
     }
 
+    const nameInput = $('#webhook-name-input');
+    const name = nameInput ? nameInput.value.trim() : '';
     const webhooks = app.settings.webhooks || [];
-    webhooks.push({ url, triggers });
+    webhooks.push({ url, name, triggers });
     app.settings.webhooks = webhooks;
     await window.plaud.saveSettings({ webhooks });
     input.value = '';
+    if (nameInput) nameInput.value = '';
     renderWebhooks();
   });
 

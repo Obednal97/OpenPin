@@ -67,6 +67,15 @@
 }
 .webhook-status.active { background: var(--green-subtle); color: var(--green); }
 .webhook-status.failed { background: var(--destructive-subtle); color: var(--destructive); }
+.webhook-info { flex: 1; min-width: 0; overflow: hidden; }
+.webhook-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  display: block;
+  margin-bottom: 1px;
+}
+.webhook-name + .webhook-url { font-size: var(--text-xs); }
 
 /* === MODULE: Model Selector === */
 .model-selector { display: flex; flex-direction: column; gap: var(--sp-1); }
@@ -142,6 +151,7 @@
   border-radius: var(--radius-sm);
   padding: var(--sp-3);
 }
+.ai-key-group + .ai-key-group { margin-top: var(--sp-3); }
 .ai-key-row {
   display: flex;
   align-items: center;
