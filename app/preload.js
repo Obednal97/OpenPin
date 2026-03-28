@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('plaud', {
     apiCall('POST', '/notion/set-database', { database_id, database_name }),
   notionSetDatabaseUrl: (url) => apiCall('POST', '/notion/set-database-url', { url }),
   notionPush: (session_id) => apiCall('POST', '/notion/push', { session_id }),
+  notionPageUrl: (session_id) => apiCall('GET', `/notion/page-url/${session_id}`),
 
   // Theme
   cycleTheme: () => ipcRenderer.invoke('cycle-theme'),

@@ -208,6 +208,11 @@ function renderNotion() {
     disconnected.classList.remove('hidden');
     connected.classList.add('hidden');
   }
+  // Set auto-push toggle state
+  const autoPushToggle = $('#notion-auto-push-toggle');
+  if (autoPushToggle) {
+    autoPushToggle.checked = app.settings.notion_auto_push || false;
+  }
 }
 
 // ---- Cloud Account ----
@@ -702,6 +707,14 @@ function initSettingsEvents() {
     app.notionState = { connected: false };
     renderNotion();
     toast('Notion disconnected', 'info');
+  });
+
+  // Notion auto-push toggle
+  $('#notion-auto-push-toggle').addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    await window.plaud.saveSettings({ notion_auto_push: enabled });
+    app.settings.notion_auto_push = enabled;
+    toast(enabled ? 'Auto-push to Notion enabled' : 'Auto-push to Notion disabled', 'success');
   });
 
   // Notion database search (debounced)
