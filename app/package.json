@@ -29,6 +29,7 @@
     "productName": "Plaud V2",
     "mac": {
       "category": "public.app-category.utilities",
+      "icon": "icon.icns",
       "target": "dmg"
     },
     "files": [
