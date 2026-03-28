@@ -574,10 +574,7 @@ async def get_device_info():
             # Estimate remaining recording time (80 bytes per 20ms frame = 4000 bytes/sec)
             info["storage_remaining_hours"] = round(free_bytes / 4000 / 3600, 1)
             if len(r) >= 27:
-                duration_raw = struct.unpack_from("<Q", r, 19)[0]
-                # Value appears to be in milliseconds
-                info["total_recorded_seconds"] = duration_raw / 1000
-                info["total_recorded_raw"] = duration_raw
+                info["storage_field3_raw"] = struct.unpack_from("<Q", r, 19)[0]
     except Exception:
         pass
 
