@@ -406,6 +406,68 @@
           <h3>Cloud AI</h3>
           <p class="settings-desc">Connect API keys for faster, more accurate cloud processing. The app auto-selects the best provider for each task.</p>
 
+          <!-- Deepgram -->
+          <div class="ai-key-group" id="deepgram-key-group">
+            <div id="deepgram-key-connected" class="ai-provider-card hidden">
+              <div class="ai-provider-card-left">
+                <div class="ai-provider-name">Deepgram</div>
+                <div class="ai-provider-detail">Nova-3 transcription + built-in diarization</div>
+              </div>
+              <div class="ai-provider-card-right">
+                <span class="ai-key-badge connected">Connected</span>
+                <button id="deepgram-key-remove" class="ai-provider-remove" title="Remove key">&times;</button>
+              </div>
+            </div>
+            <div id="deepgram-key-form">
+              <div class="ai-key-row">
+                <div class="ai-key-info">
+                  <div class="ai-key-name">Deepgram</div>
+                  <div class="ai-key-detail">Nova-3 transcription + built-in speaker diarization</div>
+                </div>
+                <span id="deepgram-key-badge" class="ai-key-badge none">Not set</span>
+              </div>
+              <a href="#" id="deepgram-key-link" class="ai-key-get-link">
+                Get key from deepgram.com
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </a>
+              <div class="token-input-row">
+                <input type="password" id="deepgram-key-input" class="settings-input" placeholder="Paste API key">
+              </div>
+              <p id="deepgram-key-status" class="ai-key-status hidden"></p>
+            </div>
+          </div>
+
+          <!-- Groq -->
+          <div class="ai-key-group" id="groq-key-group">
+            <div id="groq-key-connected" class="ai-provider-card hidden">
+              <div class="ai-provider-card-left">
+                <div class="ai-provider-name">Groq</div>
+                <div class="ai-provider-detail">Whisper large-v3 (ultra-fast transcription)</div>
+              </div>
+              <div class="ai-provider-card-right">
+                <span class="ai-key-badge connected">Connected</span>
+                <button id="groq-key-remove" class="ai-provider-remove" title="Remove key">&times;</button>
+              </div>
+            </div>
+            <div id="groq-key-form">
+              <div class="ai-key-row">
+                <div class="ai-key-info">
+                  <div class="ai-key-name">Groq</div>
+                  <div class="ai-key-detail">Whisper large-v3 — ultra-fast transcription</div>
+                </div>
+                <span id="groq-key-badge" class="ai-key-badge none">Not set</span>
+              </div>
+              <a href="#" id="groq-key-link" class="ai-key-get-link">
+                Get key from console.groq.com
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </a>
+              <div class="token-input-row">
+                <input type="password" id="groq-key-input" class="settings-input" placeholder="Paste API key (gsk_...)">
+              </div>
+              <p id="groq-key-status" class="ai-key-status hidden"></p>
+            </div>
+          </div>
+
           <!-- OpenAI -->
           <div class="ai-key-group" id="openai-key-group">
             <div id="openai-key-connected" class="ai-provider-card hidden">
@@ -499,7 +561,7 @@
             </div>
           </div>
 
-          <p class="settings-hint">Direct provider keys are preferred. OpenRouter is used as a fallback for any provider without a direct key. Local Whisper + DistilBART is always the final fallback.</p>
+          <p class="settings-hint">Deepgram preferred for transcription (includes diarization). Anthropic preferred for summaries. OpenRouter fills gaps when direct keys aren't set. Local Whisper + DistilBART is always the final fallback.</p>
         </div>
       </div>
 
