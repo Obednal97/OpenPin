@@ -270,10 +270,148 @@ function renderDeviceManager() {
         renderSignalBars(app.deviceStateCache.rssi) +
         ` <span class="dm-rssi-value">${app.deviceStateCache.rssi} dBm</span>`;
     }
+    // Fetch full device info (async, populates panel when ready)
+    fetchDeviceInfo();
   } else {
     dmDisconnected.classList.remove('hidden');
     dmConnected.classList.add('hidden');
   }
+}
+
+let _deviceInfoFetching = false;
+async function fetchDeviceInfo() {
+  const panel = $('#dm-info-panel');
+  if (!panel || _deviceInfoFetching) return;
+  _deviceInfoFetching = true;
+  try {
+    const info = await window.plaud.deviceInfo();
+    if (info.error) {
+      _deviceInfoFetching = false;
+      return;
+    }
+    renderDeviceInfoPanel(panel, info);
+  } catch {}
+  _deviceInfoFetching = false;
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+function renderDeviceInfoPanel(panel, info) {
+  const items = [];
+
+  // Storage
+  if (info.storage_total_bytes) {
+    const used = formatBytes(info.storage_used_bytes || 0);
+    const total = formatBytes(info.storage_total_bytes);
+    const pct = info.storage_used_pct || 0;
+    const remaining = info.storage_remaining_hours || 0;
+    items.push(`<div class="dm-info-item full-width">
+      <div class="dm-info-label">Storage</div>
+      <div class="dm-info-value">${used} / ${total} <span class="dm-info-secondary">(${remaining}h remaining)</span></div>
+      <div class="dm-info-bar"><div class="dm-info-bar-fill" style="width:${pct}%"></div></div>
+    </div>`);
+  }
+
+  // Firmware
+  if (info.firmware_version) {
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Firmware</div>
+      <div class="dm-info-value">${escapeHtml(info.firmware_version)}</div>
+    </div>`);
+  }
+
+  // Battery + charging
+  if (info.battery_level != null) {
+    const charging = info.charging ? ' (Charging)' : '';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Battery</div>
+      <div class="dm-info-value">${info.battery_level}%${charging}</div>
+    </div>`);
+  }
+
+  // Recording status
+  if (info.scene_name != null) {
+    const dot = info.is_recording ? 'on' : 'off';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Status</div>
+      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${escapeHtml(info.scene_name)}</div>
+    </div>`);
+  }
+
+  // E2EE
+  if (info.privacy_enabled != null) {
+    const dot = info.privacy_enabled ? 'on' : 'off';
+    const label = info.privacy_enabled ? 'Enabled' : 'Disabled';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">E2EE</div>
+      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
+    </div>`);
+  }
+
+  // USB
+  if (info.usb_connected != null) {
+    const dot = info.usb_connected ? 'on' : 'off';
+    const label = info.usb_connected ? 'Connected' : 'Disconnected';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">USB</div>
+      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
+    </div>`);
+  }
+
+  // Find My
+  if (info.find_my_enabled != null) {
+    const dot = info.find_my_enabled ? 'on' : 'off';
+    const label = info.find_my_enabled ? 'Enabled' : 'Disabled';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Find My</div>
+      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
+    </div>`);
+  }
+
+  // Button state
+  if (info.button_pressed != null) {
+    const dot = info.button_pressed ? 'on' : 'off';
+    const label = info.button_pressed ? 'Pressed' : 'Idle';
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Button</div>
+      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
+    </div>`);
+  }
+
+  // Active session
+  if (info.active_session_id && info.active_session_id > 0) {
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Active Session</div>
+      <div class="dm-info-value">${info.active_session_id}</div>
+    </div>`);
+  }
+
+  // Total recorded
+  if (info.total_recorded_seconds && info.total_recorded_seconds > 0) {
+    const totalSec = info.total_recorded_seconds;
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const display = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+    items.push(`<div class="dm-info-item">
+      <div class="dm-info-label">Total Recorded</div>
+      <div class="dm-info-value">${display}</div>
+    </div>`);
+  }
+
+  // Accelerometer
+  if (info.accelerometer) {
+    const a = info.accelerometer;
+    items.push(`<div class="dm-info-item full-width">
+      <div class="dm-info-label">Orientation</div>
+      <div class="dm-info-value">Pitch ${a.pitch}\u00B0 \u00B7 Roll ${a.roll}\u00B0 \u00B7 Yaw ${a.yaw}\u00B0</div>
+    </div>`);
+  }
+
+  panel.innerHTML = items.join('');
 }
 
 function rssiToSignalLevel(rssi) {
