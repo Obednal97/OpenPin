@@ -44,16 +44,17 @@ def is_connected():
 
 def verify_connection():
     """Check if the Notion token is still valid. Returns True if connected, False if not.
-    Tries to refresh if the current token has expired."""
+    Proactively refreshes if expiring soon, retries if expired."""
     if not _notion_state.get("access_token"):
         _notion_state["connected"] = False
         return False
+    # Proactively refresh if near expiry
+    _ensure_fresh_token()
     try:
-        # Try a lightweight MCP initialize to test the token
         mcp_init()
         return True
     except Exception:
-        # Token might be expired — try refresh
+        # Token expired — try refresh
         if refresh_token():
             try:
                 mcp_init()
@@ -122,8 +123,12 @@ def _register_client(registration_endpoint):
     return data.get("client_id"), data.get("client_secret", "")
 
 
+_token_expires_at = 0  # Unix timestamp when the access token expires
+
+
 def refresh_token():
     """Refresh the access token using the refresh token."""
+    global _token_expires_at
     if not _notion_state.get("refresh_token") or not _notion_state.get("token_endpoint"):
         return False
     try:
@@ -141,6 +146,10 @@ def refresh_token():
         if tokens.get("refresh_token"):
             _notion_state["refresh_token"] = tokens["refresh_token"]
         _notion_state["connected"] = True
+        # Track when this token expires (default 1 hour)
+        import time
+
+        _token_expires_at = time.time() + tokens.get("expires_in", 3600)
         save()
         return True
     except Exception as e:
@@ -176,11 +185,23 @@ def mcp_init():
     return _notion_session_id
 
 
+def _ensure_fresh_token():
+    """Proactively refresh the token if it's about to expire (within 5 minutes)."""
+    import time
+
+    if _token_expires_at > 0 and time.time() > _token_expires_at - 300:
+        logging.info("Notion token expiring soon, refreshing proactively")
+        refresh_token()
+
+
 def mcp_call(method, params=None):
     """Make an MCP tool call to Notion via Streamable HTTP."""
     global _notion_session_id
     if not _notion_state.get("access_token"):
         raise ValueError("Not connected to Notion")
+
+    # Proactively refresh if token is about to expire
+    _ensure_fresh_token()
 
     if not _notion_session_id:
         mcp_init()
