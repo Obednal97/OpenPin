@@ -2,6 +2,17 @@
    Plaud V2 — Shared UI Utilities
    ============================================================ */
 
+// Global error reporter — catches unhandled errors and sends to GitHub Issues
+window.onerror = (msg, src, line, col, err) => {
+  const context = `renderer:${(src || '').split('/').pop()}:${line}`;
+  window.plaud.reportError(String(msg), err?.stack || '', context).catch(() => {});
+};
+window.onunhandledrejection = (event) => {
+  const err = event.reason;
+  const msg = err instanceof Error ? err.message : String(err);
+  window.plaud.reportError(msg, err?.stack || '', 'renderer-unhandled').catch(() => {});
+};
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 

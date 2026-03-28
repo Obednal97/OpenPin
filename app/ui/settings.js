@@ -506,6 +506,43 @@ function initSettingsEvents() {
     });
   });
 
+  // App version + check for updates
+  (async () => {
+    try {
+      const version = await window.plaud.getAppVersion();
+      const el = $('#app-version');
+      if (el) el.textContent = `Version ${version}`;
+    } catch (e) {
+      console.error('[Settings] Failed to get app version:', e);
+    }
+  })();
+
+  $('#check-updates-btn').addEventListener('click', async () => {
+    const statusEl = $('#update-check-status');
+    statusEl.textContent = 'Checking...';
+    try {
+      const resultPromise = new Promise((resolve) => {
+        app.updateListeners.push(resolve);
+        setTimeout(() => resolve({ status: 'timeout' }), 10000);
+      });
+      window.plaud.checkForUpdates();
+      const result = await resultPromise;
+      if (result.status === 'up-to-date') {
+        statusEl.textContent = 'You\'re up to date!';
+      } else if (result.status === 'available' || result.status === 'downloading' || result.status === 'ready') {
+        statusEl.textContent = '';
+      } else if (result.status === 'error') {
+        statusEl.textContent = `Update error: ${result.message || 'Unknown'}`;
+      } else if (result.status === 'timeout') {
+        statusEl.textContent = 'No response — check may not work in dev mode';
+      }
+      setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    } catch (e) {
+      statusEl.textContent = `Error: ${e.message || 'Could not check'}`;
+      setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    }
+  });
+
   // System settings
   (async () => {
     try {

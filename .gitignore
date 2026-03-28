@@ -1,4 +1,5 @@
 # Secrets & credentials
+.env
 .plaud_config.json
 .plaud_v2_config.json
 .notion_mcp.json
@@ -19,6 +20,7 @@ __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+dist/
 .pytest_cache/
 .ruff_cache/
 

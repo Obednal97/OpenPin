@@ -19,14 +19,99 @@ Built as a replacement for the official Plaud app. All processing happens on you
 - **Plaud Cloud sync** — Two-way sync with your existing Plaud account
 - **Notion integration** — Push transcripts and summaries to a Notion database via MCP
 - **Webhooks** — Trigger external services on transcribe/summarise/sync events
+- **Auto-updates** — App checks for new versions and updates itself
 - **Apple-style UI** — Glass design, light/dark/auto theme, squircle corners
+
+---
+
+## Install
+
+### 1. Make sure you have Python 3
+
+Open **Terminal** and run:
+
+```bash
+python3 --version
+```
+
+If you see `Python 3.x.x`, you're good. If not:
+
+```bash
+# Install via Homebrew (recommended)
+brew install python3
+
+# Or download from https://www.python.org/downloads/
+```
+
+> macOS 13+ usually has Python 3 via Xcode Command Line Tools. If you've ever used `git` in Terminal, you likely already have it.
+
+### 2. Download the app
+
+Go to the [latest release](https://github.com/Obednal97/Plaud-V2/releases/latest) and download **`Plaud-V2-x.x.x.dmg`**.
+
+### 3. Install
+
+1. Open the DMG
+2. Drag **Plaud V2** to your **Applications** folder
+3. Open the app — macOS will block it the first time since it's unsigned:
+   - **Right-click** (or Control-click) the app in Applications
+   - Click **Open**
+   - Click **Open** again on the dialog
+   - You only need to do this once
+
+### 4. First launch
+
+The app will:
+- Start a Python backend server automatically
+- Auto-install Python dependencies (Flask, Whisper, etc.) — this takes ~30 seconds on first run
+- Download Whisper speech models on first transcription (~74 MB for the `small` model)
+
+That's it. Connect your Plaud NotePin S and hit **Scan**.
+
+### Updates
+
+The app checks for updates automatically. When a new version is available, a banner appears at the top — click **Restart to Update** and you're done. You can also check manually in **Settings > General > About > Check for Updates**.
+
+---
+
+## Optional Setup
+
+### Cloud AI (better transcription + summaries)
+
+Add API keys in **Settings > Processing > Cloud AI**:
+
+| Provider | What it does | Get a key |
+|----------|-------------|-----------|
+| **OpenAI** | Faster transcription (Whisper API) + GPT summaries | [platform.openai.com](https://platform.openai.com/api-keys) |
+| **Anthropic** | Higher-quality summaries (Claude) | [console.anthropic.com](https://console.anthropic.com/) |
+
+Without API keys, everything runs locally using Whisper `small` and DistilBART. Works fine, just slower.
+
+### Notion Integration
+
+Push transcripts and summaries to a Notion database:
+
+1. Go to **Settings > Notion**
+2. Click **Connect to Notion** and authorise
+3. Paste your database URL or search for it
+4. Enable **Auto-push** to send summaries automatically
+
+### Plaud Cloud
+
+Sync recordings with your existing Plaud account:
+
+1. Go to **Settings > Cloud Account**
+2. Log in with your Plaud credentials
+3. Choose sync direction (download / two-way)
+
+---
 
 ## Architecture
 
 ```
 app/
   api_server.py          # Flask API (51 lines — app factory)
-  main.js                # Electron main process
+  main.js                # Electron main process + auto-updater
   renderer.js            # Frontend orchestrator
   index.html             # UI markup
   styles.css             # @import hub for CSS modules
@@ -42,56 +127,12 @@ src/
   scanner.py             # BLE manufacturer data parser
 tests/                   # 58 tests (pytest)
 docs/
+  ARCHITECTURE.md        # Detailed architecture docs
+  RELEASING.md           # Release workflow + auto-update system
   reverse-engineering/   # BLE protocol specs, capture analysis, API findings
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation.
-
-## Quick Start
-
-### Prerequisites
-
-- macOS (BLE + CoreWLAN)
-- Python 3.12+
-- Node.js 18+
-- [ffmpeg](https://formulae.brew.sh/formula/ffmpeg) (optional, for MP3 export)
-
-### Install & Run
-
-```bash
-git clone https://github.com/Obednal97/Plaud-V2.git
-cd Plaud-V2/app
-npm install
-npm start
-```
-
-The Electron app launches and starts the Python API server automatically. On first run, it will install Python dependencies (Flask, Whisper, etc.).
-
-### API Keys (Optional)
-
-For cloud AI features, add API keys in **Settings > Processing > Cloud AI**:
-
-- **OpenAI** — Whisper API for faster transcription + GPT for summaries
-- **Anthropic** — Claude for higher-quality summaries
-
-Without API keys, everything runs locally using Whisper `small` and DistilBART.
-
-## Development
-
-```bash
-# Run the app
-cd app && npm start
-
-# Run Python tests
-cd .. && python3 -m pytest tests/ -v
-
-# Lint
-cd app && npm run lint          # eslint + stylelint
-cd .. && ruff check app/ src/ tests/   # Python
-
-# Format
-cd app && npm run format        # prettier + ruff
-```
 
 ## How It Works
 
@@ -104,6 +145,29 @@ cd app && npm run format        # prettier + ruff
 4. **Transcription** — Routes to OpenAI Whisper API (if key provided) or local Whisper. Background diarization runs in a separate thread.
 
 5. **Summarisation** — Cascade: Anthropic Claude > OpenAI GPT > local DistilBART. Injects user profile context and recording tags into prompts.
+
+## Development
+
+```bash
+# Run in dev mode
+cd app && npm run dev
+
+# Run Python tests
+cd .. && python3 -m pytest tests/ -v
+
+# Lint
+cd app && npm run lint          # eslint + stylelint
+cd .. && ruff check app/ src/ tests/   # Python
+
+# Format
+cd app && npm run format        # prettier + ruff
+
+# Build DMG
+cd app && npm run build
+
+# Publish a new release (see docs/RELEASING.md)
+cd app && npm run publish
+```
 
 ## Reverse Engineering
 
