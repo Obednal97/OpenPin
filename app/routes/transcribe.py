@@ -9,7 +9,7 @@ import requests as http_requests
 from flask import Blueprint, jsonify, request
 
 from app.providers.summarize import summarize
-from app.providers.transcribe import transcribe_openai
+from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
 from app.providers.validate import validate_key as do_validate_key
 from app.utils.config import load_config, save_config
 from app.utils.constants import TRANSCRIPTS_DIR
@@ -36,29 +36,76 @@ def transcribe_file():
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 
     try:
-        _used_openai = False
-        _openai_error = None
-        if config.get("openai_api_key"):
+        _used_cloud = False
+        _cloud_error = None
+        _cloud_provider = None
+        _cloud_has_speakers = False
+
+        # Try Deepgram first (has built-in diarization — no pyannote needed)
+        if config.get("deepgram_api_key"):
+            try:
+                result = transcribe_deepgram(path, config["deepgram_api_key"], language or "en", diarize=diarize)
+                _used_cloud = True
+                _cloud_provider = "deepgram"
+                _cloud_has_speakers = bool(result.get("speakers"))
+            except http_requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if status == 401:
+                    _cloud_error = "Deepgram: Invalid API key — check your key in Settings"
+                elif status == 429:
+                    _cloud_error = "Deepgram: Rate limited — falling back"
+                else:
+                    _cloud_error = f"Deepgram: HTTP {status} — falling back"
+                logging.warning(f"Deepgram transcription failed ({status}): {e}")
+            except Exception as e:
+                _cloud_error = f"Deepgram: {str(e)[:100]} — falling back"
+                logging.warning(f"Deepgram transcription failed: {e}")
+
+        # Try Groq Whisper (same as OpenAI format, ~10x faster)
+        if not _used_cloud and config.get("groq_api_key"):
+            try:
+                vocab = config.get("custom_vocabulary", [])
+                result = transcribe_groq(
+                    path, config["groq_api_key"], language or "en", vocab_prompt=", ".join(vocab) if vocab else None
+                )
+                _used_cloud = True
+                _cloud_provider = "groq"
+            except http_requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if status == 401:
+                    _cloud_error = "Groq: Invalid API key — check your key in Settings"
+                elif status == 429:
+                    _cloud_error = "Groq: Rate limited — falling back"
+                else:
+                    _cloud_error = f"Groq: HTTP {status} — falling back"
+                logging.warning(f"Groq transcription failed ({status}): {e}")
+            except Exception as e:
+                _cloud_error = f"Groq: {str(e)[:100]} — falling back"
+                logging.warning(f"Groq transcription failed: {e}")
+
+        # Try OpenAI Whisper
+        if not _used_cloud and config.get("openai_api_key"):
             try:
                 vocab = config.get("custom_vocabulary", [])
                 result = transcribe_openai(
                     path, config["openai_api_key"], language or "en", vocab_prompt=", ".join(vocab) if vocab else None
                 )
-                _used_openai = True
+                _used_cloud = True
+                _cloud_provider = "openai"
             except http_requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else 0
                 if status == 401:
-                    _openai_error = "OpenAI: Invalid API key — check your key in Settings"
+                    _cloud_error = "OpenAI: Invalid API key — check your key in Settings"
                 elif status == 429:
-                    _openai_error = "OpenAI: Rate limited — falling back to local Whisper"
+                    _cloud_error = "OpenAI: Rate limited — falling back to local Whisper"
                 else:
-                    _openai_error = f"OpenAI: HTTP {status} — falling back to local Whisper"
+                    _cloud_error = f"OpenAI: HTTP {status} — falling back to local Whisper"
                 logging.warning(f"OpenAI transcription failed ({status}): {e}")
             except Exception as e:
-                _openai_error = f"OpenAI: {str(e)[:100]} — falling back to local Whisper"
+                _cloud_error = f"OpenAI: {str(e)[:100]} — falling back to local Whisper"
                 logging.warning(f"OpenAI transcription failed: {e}")
 
-        if _used_openai:
+        if _used_cloud:
             text = result.get("text", "")
             segments = []
             for seg in result.get("segments", []):
@@ -67,12 +114,13 @@ def transcribe_file():
                         "start": seg.get("start", 0),
                         "end": seg.get("end", 0),
                         "text": seg.get("text", "").strip(),
-                        "speaker": None,
+                        "speaker": seg.get("speaker"),
                     }
                 )
             duration = result.get("duration", 0)
             lang = result.get("language", language or "en")
-            prov = "openai"
+            speakers = result.get("speakers", [])
+            prov = _cloud_provider
 
             t_data = {
                 "text": text,
@@ -81,11 +129,13 @@ def transcribe_file():
                 "segments": segments,
                 "provider": prov,
             }
+            if speakers:
+                t_data["speakers"] = speakers
             transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
             txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
             txt_path.write_text(text, encoding="utf-8")
 
-            if diarize and text:
+            if diarize and text and not _cloud_has_speakers:
                 _bg_path = str(path)
                 _bg_segs = list(segments)
                 _bg_tp = str(transcript_path)
@@ -125,7 +175,7 @@ def transcribe_file():
                         tp = Path(_bg_tp)
                         td = json.loads(tp.read_text())
                         td["segments"] = updated_segments
-                        td["provider"] = "openai+pyannote"
+                        td["provider"] = f"{_cloud_provider}+pyannote"
                         td["speakers"] = speakers
                         tp.write_text(json.dumps(td, indent=2, ensure_ascii=False))
                         print(f"  [bg-diarize] Complete for {_bg_sid}: {len(speakers)} speaker(s)")
@@ -176,12 +226,12 @@ def transcribe_file():
                     "text": text,
                     "duration": duration,
                     "language": lang,
-                    "speakers": [],
+                    "speakers": speakers,
                     "segments": segments,
                     "path": str(transcript_path),
                     "provider": prov,
-                    "warning": _openai_error,
-                    "diarizing": diarize,
+                    "warning": _cloud_error,
+                    "diarizing": diarize and not _cloud_has_speakers,
                 }
             )
 
@@ -226,7 +276,7 @@ def transcribe_file():
                     ],
                     "path": str(transcript_path),
                     "provider": "local",
-                    "warning": _openai_error,
+                    "warning": _cloud_error,
                 }
             )
         else:
