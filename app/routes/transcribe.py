@@ -318,9 +318,15 @@ def summarize_transcript():
 
         # Auto-push to Notion if enabled
         notion_url = ""
+        notion_error = ""
         if config.get("notion_auto_push"):
             try:
-                from app.routes.notion import _build_notion_content, _get_notion_page_url, _save_notion_page_url
+                from app.routes.notion import (
+                    _build_notion_content,
+                    _extract_page_url,
+                    _get_notion_page_url,
+                    _save_notion_page_url,
+                )
                 from app.state import notion as notion_state
 
                 if notion_state.is_connected() and notion_state.get_database_id():
@@ -346,13 +352,16 @@ def summarize_transcript():
                                 ],
                             },
                         )
-                        from app.routes.notion import _extract_page_url
-
                         page_url = _extract_page_url(result)
                         if page_url:
                             _save_notion_page_url(session_id, page_url)
                             notion_url = page_url
+                elif not notion_state.is_connected():
+                    notion_error = "Notion not connected"
+                elif not notion_state.get_database_id():
+                    notion_error = "No Notion database selected"
             except Exception as e:
+                notion_error = f"Notion push failed: {e}"
                 logging.warning(f"Notion auto-push failed: {e}")
 
         return jsonify(
@@ -361,6 +370,7 @@ def summarize_transcript():
                 "title": title,
                 "provider": provider,
                 "notion_url": notion_url,
+                "notion_error": notion_error,
             }
         )
 
