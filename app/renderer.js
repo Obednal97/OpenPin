@@ -72,7 +72,7 @@ dom.scanBtn.addEventListener('click', async () => {
 
       const conn = await window.plaud.connect(result.address, result.serial_number);
       if (conn.connected) {
-        toast(`Connected! Battery: ${conn.battery || '?'}%`, 'success');
+        toast(`Connected to ${conn.device_name || 'Plaud NotePin S'}`, 'success');
         await updateDeviceStatus();
       } else {
         toast(`Connection failed: ${conn.error || 'Unknown error'}`, 'error');
