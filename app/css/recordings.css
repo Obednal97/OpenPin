@@ -9,6 +9,8 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--sp-1) var(--sp-3);
+  height: 34px;
+  box-sizing: border-box;
   width: 220px;
   transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease), width var(--duration) var(--ease);
 }

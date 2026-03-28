@@ -87,6 +87,8 @@
 /* === COMPONENT: Small Button === */
 .btn-small {
   padding: var(--sp-2) var(--sp-3);
+  height: 34px;
+  box-sizing: border-box;
   background: var(--accent);
   color: var(--white);
   border: none;
