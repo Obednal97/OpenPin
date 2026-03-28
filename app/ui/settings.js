@@ -53,6 +53,16 @@ function renderSettings() {
   // Diarize toggle
   $('#diarize-toggle').checked = app.settings.diarize || false;
 
+  // Auto-pipeline toggles — must be set here (not just initSettingsEvents)
+  // because settings load async after init
+  const syncToggle = $('#auto-sync-toggle');
+  const transcribeToggle = $('#auto-transcribe-toggle');
+  const summariseToggle = $('#auto-summarise-toggle');
+  if (syncToggle) syncToggle.checked = app.settings.auto_sync !== false;
+  if (transcribeToggle) transcribeToggle.checked = app.settings.auto_transcribe !== false;
+  if (summariseToggle) summariseToggle.checked = app.settings.auto_summarise || false;
+  updateAutoPipelineState();
+
   // Subsections
   renderProfile();
   renderWebhooks();
@@ -479,6 +489,34 @@ async function updateDeviceStatus() {
 
 // ---- Settings Event Wiring ----
 
+function updateAutoPipelineState() {
+  const syncToggle = $('#auto-sync-toggle');
+  const transcribeToggle = $('#auto-transcribe-toggle');
+  const summariseToggle = $('#auto-summarise-toggle');
+  if (!syncToggle) return; // DOM not ready yet
+
+  const syncOn = syncToggle.checked;
+  const transcribeOn = transcribeToggle.checked;
+
+  const transcribeRow = $('#auto-transcribe-row');
+  if (!syncOn) {
+    transcribeRow.classList.add('disabled');
+    transcribeToggle.disabled = true;
+  } else {
+    transcribeRow.classList.remove('disabled');
+    transcribeToggle.disabled = false;
+  }
+
+  const summariseRow = $('#auto-summarise-row');
+  if (!syncOn || !transcribeOn) {
+    summariseRow.classList.add('disabled');
+    summariseToggle.disabled = true;
+  } else {
+    summariseRow.classList.remove('disabled');
+    summariseToggle.disabled = false;
+  }
+}
+
 function initSettingsEvents() {
   // Settings tabs — translate vertical scroll to horizontal (mouse wheel)
   // but let native horizontal scroll through (trackpad two-finger swipe)
@@ -579,37 +617,7 @@ function initSettingsEvents() {
   });
 
   // Automation pipeline toggles with cascade disable
-  function updateAutoPipelineState() {
-    const syncOn = $('#auto-sync-toggle').checked;
-    const transcribeOn = $('#auto-transcribe-toggle').checked;
-
-    // Transcribe depends on sync
-    const transcribeRow = $('#auto-transcribe-row');
-    const transcribeToggle = $('#auto-transcribe-toggle');
-    if (!syncOn) {
-      transcribeRow.classList.add('disabled');
-      transcribeToggle.disabled = true;
-    } else {
-      transcribeRow.classList.remove('disabled');
-      transcribeToggle.disabled = false;
-    }
-
-    // Summarise depends on sync + transcribe
-    const summariseRow = $('#auto-summarise-row');
-    const summariseToggle = $('#auto-summarise-toggle');
-    if (!syncOn || !transcribeOn) {
-      summariseRow.classList.add('disabled');
-      summariseToggle.disabled = true;
-    } else {
-      summariseRow.classList.remove('disabled');
-      summariseToggle.disabled = false;
-    }
-  }
-
-  // Initialize toggle states
-  $('#auto-sync-toggle').checked = app.settings.auto_sync !== false;
-  $('#auto-transcribe-toggle').checked = app.settings.auto_transcribe !== false;
-  $('#auto-summarise-toggle').checked = app.settings.auto_summarise || false;
+  // Initialize toggle states (also set in renderSettings when settings load)
   updateAutoPipelineState();
 
   $('#auto-sync-toggle').addEventListener('change', async (e) => {
