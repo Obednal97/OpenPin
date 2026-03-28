@@ -275,7 +275,7 @@ async function deleteSelected() {
   }
 }
 
-function showDeleteDialog(ids, count) {
+function showDeleteDialog(ids, count, onDeleted) {
   const overlay = document.createElement('div');
   overlay.className = 'delete-dialog-overlay';
   overlay.innerHTML = `
@@ -314,6 +314,7 @@ function showDeleteDialog(ids, count) {
     try {
       await window.plaud.deleteRecordings(ids);
       toast(`Deleted ${count} recording(s) locally`, 'success');
+      if (onDeleted) onDeleted();
       exitSelectMode();
       await loadRecordings();
     } catch (err) {
@@ -344,6 +345,7 @@ function showDeleteDialog(ids, count) {
         toast(`Deleted ${count} recording(s) locally`, 'success');
       }
 
+      if (onDeleted) onDeleted();
       exitSelectMode();
       await loadRecordings();
     } catch (err) {

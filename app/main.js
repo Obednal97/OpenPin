@@ -201,6 +201,11 @@ function createWindow() {
 
 // Lifecycle
 app.whenReady().then(async () => {
+  // Set dock icon (needed for dev mode — packaged app uses .icns from build config)
+  if (app.dock) {
+    app.dock.setIcon(path.join(__dirname, 'icon_512.png'));
+  }
+
   startPythonServer();
 
   try {
@@ -307,10 +312,18 @@ ipcMain.handle('get-dock-visible', () => {
   return { visible: !app.dock || app.dock.isVisible() };
 });
 
-ipcMain.handle('set-dock-visible', (event, visible) => {
+ipcMain.handle('set-dock-visible', async (event, visible) => {
   if (app.dock) {
-    if (visible) app.dock.show();
-    else app.dock.hide();
+    if (visible) {
+      app.dock.show();
+    } else {
+      app.dock.hide();
+      // dock.hide() deactivates the app on macOS — re-focus the window
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    }
   }
   return { visible };
 });

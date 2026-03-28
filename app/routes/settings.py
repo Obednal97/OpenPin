@@ -25,7 +25,7 @@ def get_settings():
         {
             "model": config.get("whisper_model", "small"),
             "diarize": config.get("diarize", False),
-            "language": config.get("language", "en"),
+            "language": config.get("language", "auto"),
             "models": models,
             "ram_total_gb": round(total_gb, 1),
             "ram_used_gb": round(used_gb, 1),
