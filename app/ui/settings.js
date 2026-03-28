@@ -352,16 +352,6 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  // Button state
-  if (info.button_pressed != null) {
-    const dot = info.button_pressed ? 'on' : 'off';
-    const label = info.button_pressed ? 'Pressed' : 'Idle';
-    items.push(`<div class="dm-info-item">
-      <div class="dm-info-label">Button</div>
-      <div class="dm-info-value"><span class="dm-info-dot ${dot}"></span>${label}</div>
-    </div>`);
-  }
-
   // Active session
   if (info.active_session_id && info.active_session_id > 0) {
     items.push(`<div class="dm-info-item">
