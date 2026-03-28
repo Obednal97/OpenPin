@@ -258,10 +258,27 @@
 }
 .dm-device-name { font-size: var(--text-base); font-weight: var(--weight-semibold); }
 .dm-device-meta { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-0_5); }
+.dm-device-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
 .dm-device-battery {
   font-size: var(--text-2xl);
   font-weight: var(--weight-bold);
   color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+.dm-device-rssi {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.dm-rssi-value {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 .dm-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
