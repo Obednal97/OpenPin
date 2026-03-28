@@ -25,7 +25,7 @@ def scan():
 def scan_all():
     """Scan for all Plaud devices in range with full info."""
     try:
-        devices = dev.run_async(dev.scan_devices())
+        devices = dev.run_async(dev.scan_devices_with_retry(attempts=2, scan_duration=6))
         return jsonify({"devices": devices})
     except Exception as e:
         return jsonify({"devices": [], "error": str(e)}), 500
@@ -68,7 +68,6 @@ def depair():
 
 @bp.route("/status")
 def status():
-    import asyncio
 
     is_recording = False
     state = dev.get_state()
@@ -128,7 +127,7 @@ def scan_known():
         known_sns = dev.get_paired_serials()
         if not known_sns:
             return jsonify({"found": False, "reason": "never_paired"})
-        devices = dev.run_async(dev.scan_devices())
+        devices = dev.run_async(dev.scan_devices_with_retry(attempts=2, scan_duration=4))
         for d in devices:
             sn = d.get("serial_number", "")
             if sn and sn in known_sns:
