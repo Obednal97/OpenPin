@@ -255,13 +255,8 @@ async function init() {
             toast(`Auto-connected to ${scan.name}`, 'success');
             await updateDeviceStatus();
           }
-        } else if (scan.reason === 'not_in_range') {
-          window._deviceNotFoundCount = (window._deviceNotFoundCount || 0) + 1;
-          if (window._deviceNotFoundCount >= 5 && !window._shownDeviceNotFound) {
-            window._shownDeviceNotFound = true;
-            toast("Device not found — make sure it's nearby and powered on", 'info');
-          }
         }
+        // Don't spam toasts about device not found — user can see "Disconnected" in header
         _bgBusy = false;
         return;
       }
@@ -311,8 +306,9 @@ async function init() {
     _bgBusy = false;
   }
 
-  bgDevicePoll();
-  setInterval(bgDevicePoll, 30000);
+  // First attempt after 5s, then every 45s (reduced from 30s to minimize BLE contention)
+  setTimeout(bgDevicePoll, 5000);
+  setInterval(bgDevicePoll, 45000);
 }
 
 init();
