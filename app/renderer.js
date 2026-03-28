@@ -43,6 +43,19 @@ dom.settingsBtn.addEventListener('click', () => {
 dom.settingsClose.addEventListener('click', closeSettings);
 dom.settingsOverlay.addEventListener('click', closeSettings);
 
+// Clicking the device status chip opens Settings > Device tab
+dom.statusEl.addEventListener('click', () => {
+  openSettings();
+  loadSettings();
+  // Switch to Device tab
+  document.querySelectorAll('.settings-tab').forEach((t) => t.classList.remove('active'));
+  document.querySelectorAll('.settings-tab-content').forEach((c) => c.classList.remove('active'));
+  const deviceTab = document.querySelector('.settings-tab[data-tab="device"]');
+  const deviceContent = document.querySelector('.settings-tab-content[data-tab="device"]');
+  if (deviceTab) deviceTab.classList.add('active');
+  if (deviceContent) deviceContent.classList.add('active');
+});
+
 // ---- Main Actions ----
 dom.scanBtn.addEventListener('click', async () => {
   setLoading(dom.scanBtn, true);

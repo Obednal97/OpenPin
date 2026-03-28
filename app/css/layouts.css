@@ -53,7 +53,10 @@
   border-radius: var(--radius-full);
   background: var(--bg-card);
   border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
 }
+.device-status:hover { border-color: var(--border-strong); background: var(--bg-hover); }
 .status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
