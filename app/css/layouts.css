@@ -13,6 +13,7 @@
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   flex-shrink: 0;
+  position: relative;
 }
 .header-left { display: flex; align-items: center; padding-left: 64px; gap: var(--sp-3); }
 .header-separator {
@@ -38,7 +39,13 @@
 /* Light mode: show black wordmark */
 [data-theme="light"] .app-wordmark-dark { display: none; }
 [data-theme="light"] .app-wordmark-light { display: inline; }
-.header-center { display: flex; align-items: center; }
+.header-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+}
 .header-right { display: flex; align-items: center; gap: var(--sp-1); }
 
 /* Device status chip */

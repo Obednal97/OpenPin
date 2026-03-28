@@ -240,15 +240,13 @@ async function reportError(error, context = 'main') {
 
     const systemInfo = `- **Version:** ${version}\n- **macOS:** ${os.release()}\n- **Arch:** ${os.arch()}\n- **Context:** ${context}`;
 
-    if (search.items && search.items.length > 0) {
-      // Found existing issue — add a comment with this occurrence
-      const issue = search.items[0];
-      if (issue.state === 'open') {
-        await githubApiPost(`/repos/${UPDATE_REPO}/issues/${issue.number}/comments`, {
-          body: `Another occurrence reported:\n\n${systemInfo}\n\n\`\`\`\n${errorMsg}\n\`\`\``,
-        });
-        console.log(`[BugReporter] Commented on existing issue #${issue.number}`);
-      }
+    const openIssue = (search.items || []).find((i) => i.state === 'open');
+    if (openIssue) {
+      // Comment on existing open issue
+      await githubApiPost(`/repos/${UPDATE_REPO}/issues/${openIssue.number}/comments`, {
+        body: `Another occurrence reported:\n\n${systemInfo}\n\n\`\`\`\n${errorMsg}\n\`\`\``,
+      });
+      console.log(`[BugReporter] Commented on existing issue #${openIssue.number}`);
     } else {
       // Create new issue
       const title = `[Auto] ${errorMsg.slice(0, 80)}`;
