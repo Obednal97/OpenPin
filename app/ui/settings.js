@@ -479,10 +479,16 @@ async function updateDeviceStatus() {
 // ---- Settings Event Wiring ----
 
 function initSettingsEvents() {
-  // Settings tabs — horizontal scroll
+  // Settings tabs — translate vertical scroll to horizontal (mouse wheel)
+  // but let native horizontal scroll through (trackpad two-finger swipe)
   document.querySelector('.settings-tabs').addEventListener(
     'wheel',
     (e) => {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        // Trackpad horizontal swipe — let it scroll natively
+        return;
+      }
+      // Mouse wheel vertical — convert to horizontal
       e.preventDefault();
       e.currentTarget.scrollLeft += e.deltaY;
     },
