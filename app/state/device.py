@@ -53,6 +53,28 @@ _loop = None
 _loop_thread = None
 
 
+def _reset_state():
+    """Reset all connection state to disconnected defaults."""
+    _device_state["connected"] = False
+    _device_state["client"] = None
+    _device_state["session_keys"] = None
+    _device_state["cipher"] = None
+    _device_state["battery"] = None
+    _device_state["device_name"] = None
+    _device_state["rssi"] = None
+    _device_state["seq"] = 0
+    _device_state["cmd_evt"] = None
+    _device_state["cmd_resp"] = None
+    _device_state["file_data"] = None
+    _device_state["file_done"] = None
+
+
+def _on_disconnect(client):
+    """Callback fired by bleak when BLE connection drops unexpectedly."""
+    logging.warning("BLE device disconnected unexpectedly")
+    _reset_state()
+
+
 def get_state():
     """Get a read-only snapshot of device state."""
     return {
@@ -71,7 +93,6 @@ async def read_rssi():
     if not cl or not _device_state["connected"]:
         return None
     try:
-        # BleakClient wraps the platform backend — access it directly
         backend = getattr(cl, "_backend", cl)
         rssi = await backend.get_rssi()
         if rssi is not None:
@@ -98,13 +119,14 @@ def _get_loop():
 
 
 def run_async(coro):
-    """Run an async coroutine from sync Flask context."""
-    loop = _get_loop()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=120)
+    """Run an async coroutine from sync Flask context. Serialized via _ble_lock."""
+    with _ble_lock:
+        loop = _get_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=120)
 
 
-async def scan_devices():
+async def scan_devices(scan_duration=6):
     """Scan for all Plaud devices in range, returning detailed info for each."""
     from bleak import BleakScanner
 
@@ -129,29 +151,72 @@ async def scan_devices():
 
     scanner = BleakScanner(detection_callback=callback)
     await scanner.start()
-    await asyncio.sleep(6)
+    await asyncio.sleep(scan_duration)
     await scanner.stop()
 
     found.sort(key=lambda d: d.get("rssi", -100), reverse=True)
     return found
 
 
+async def scan_devices_with_retry(attempts=2, scan_duration=6):
+    """Scan with retry — if first scan finds nothing, try again."""
+    for i in range(attempts):
+        devices = await scan_devices(scan_duration)
+        if devices:
+            return devices
+        if i < attempts - 1:
+            await asyncio.sleep(1)
+    return []
+
+
 async def scan_device():
-    """Scan for the closest Plaud device (legacy single-device endpoint)."""
-    devices = await scan_devices()
-    if devices:
-        d = devices[0]
-        return {
-            "found": True,
-            "name": d.get("name", "Plaud NotePin S"),
-            "address": d["address"],
-            "rssi": d.get("rssi", -60),
-        }
+    """Scan for a Plaud device — tries paired devices first, then full scan."""
+    # Try paired devices first (fast path)
+    known_sns = get_paired_serials()
+    if known_sns:
+        devices = await scan_devices_with_retry(attempts=2, scan_duration=4)
+        for d in devices:
+            sn = d.get("serial_number", "")
+            if sn and sn in known_sns:
+                return {
+                    "found": True,
+                    "name": d.get("name", "Plaud NotePin S"),
+                    "address": d["address"],
+                    "rssi": d.get("rssi", -60),
+                    "serial_number": sn,
+                }
+        # Paired device not found — fall through to return strongest
+        if devices:
+            d = devices[0]
+            return {
+                "found": True,
+                "name": d.get("name", "Plaud NotePin S"),
+                "address": d["address"],
+                "rssi": d.get("rssi", -60),
+            }
+    else:
+        # No paired devices — standard scan with retry
+        devices = await scan_devices_with_retry(attempts=2, scan_duration=6)
+        if devices:
+            d = devices[0]
+            return {
+                "found": True,
+                "name": d.get("name", "Plaud NotePin S"),
+                "address": d["address"],
+                "rssi": d.get("rssi", -60),
+            }
     return {"found": False}
 
 
 async def connect_device(address=None):
     """Connect to device, perform handshake, return status."""
+
+    # Clean up any stale connection first
+    if _device_state.get("client"):
+        try:
+            await disconnect_device()
+        except Exception:
+            _reset_state()
 
     if not address:
         scan_result = await scan_device()
@@ -161,10 +226,10 @@ async def connect_device(address=None):
         _device_state["device_name"] = scan_result["name"]
     _device_state["device_address"] = address
 
-    # Connect
+    # Connect with disconnect callback
     from bleak import BleakClient as BC
 
-    cl = BC(address, timeout=30.0)
+    cl = BC(address, timeout=30.0, disconnected_callback=_on_disconnect)
     await cl.connect()
     await asyncio.sleep(1)
     if not cl.services:
@@ -328,12 +393,7 @@ async def disconnect_device():
             await cl.disconnect()
         except Exception:
             pass
-    _device_state["connected"] = False
-    _device_state["client"] = None
-    _device_state["session_keys"] = None
-    _device_state["cipher"] = None
-    _device_state["battery"] = None
-    _device_state["device_name"] = None
+    _reset_state()
     return {"disconnected": True}
 
 

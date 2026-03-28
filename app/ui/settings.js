@@ -270,9 +270,7 @@ function renderDeviceManager() {
         renderSignalBars(app.deviceStateCache.rssi) +
         ` <span class="dm-rssi-value">${app.deviceStateCache.rssi} dBm</span>`;
     }
-    startRssiPolling();
   } else {
-    stopRssiPolling();
     dmDisconnected.classList.remove('hidden');
     dmConnected.classList.add('hidden');
   }
@@ -349,37 +347,7 @@ async function updateDeviceStatus() {
   }
 }
 
-// RSSI polling — updates signal in header and device manager every 5s
-let _rssiPollInterval = null;
-
-function startRssiPolling() {
-  stopRssiPolling();
-  _rssiPollInterval = setInterval(async () => {
-    if (!app.deviceStateCache || !app.deviceStateCache.connected) {
-      stopRssiPolling();
-      return;
-    }
-    try {
-      const result = await window.plaud.rssi();
-      if (result.rssi != null) {
-        app.deviceStateCache.rssi = result.rssi;
-        renderHeaderSignal(result.rssi);
-        // Update device manager if visible
-        const dmRssi = $('#dm-device-rssi');
-        if (dmRssi) {
-          dmRssi.innerHTML = renderSignalBars(result.rssi) + ` <span class="dm-rssi-value">${result.rssi} dBm</span>`;
-        }
-      }
-    } catch {}
-  }, 5000);
-}
-
-function stopRssiPolling() {
-  if (_rssiPollInterval) {
-    clearInterval(_rssiPollInterval);
-    _rssiPollInterval = null;
-  }
-}
+// RSSI is read inline during the 10s status poll — no separate poller needed
 
 // ---- Settings Event Wiring ----
 
