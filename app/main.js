@@ -701,3 +701,59 @@ ipcMain.handle('report-error', (event, { message, stack, context }) => {
   err.stack = stack || '';
   reportError(err, context || 'renderer');
 });
+
+// IPC: manual bug report (from renderer)
+ipcMain.handle('report-bug', async (event, { expected, actual, steps }) => {
+  try {
+    const version = app.getVersion();
+    const uptimeMin = Math.round((Date.now() - _appStartTime) / 60000);
+    const memMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    const pythonRunning = pythonProcess && !pythonProcess.killed;
+    const electronVersion = process.versions.electron;
+
+    const systemInfo = [
+      `- **Version:** ${version}`,
+      `- **Electron:** ${electronVersion}`,
+      `- **macOS:** ${getMacOSName()} (${os.release()})`,
+      `- **Arch:** ${os.arch()}`,
+      `- **Memory:** ${memMB} MB`,
+      `- **Uptime:** ${uptimeMin} min`,
+      `- **Python server:** ${pythonRunning ? 'running' : 'not running'}`,
+    ].join('\n');
+
+    const titleText = (actual || expected || 'Bug report').slice(0, 80);
+    const title = `[User Report] ${titleText}`;
+    const body = [
+      '## User Bug Report',
+      '',
+      '### Expected behaviour',
+      expected || '_Not provided_',
+      '',
+      '### Actual behaviour',
+      actual || '_Not provided_',
+      '',
+      steps ? `### Steps to reproduce\n${steps}\n` : '',
+      '### System',
+      systemInfo,
+      '',
+      '---',
+      '*This issue was submitted by a user via the in-app bug reporter.*',
+    ].filter(Boolean).join('\n');
+
+    const result = await githubApiPost(`/repos/${UPDATE_REPO}/issues`, {
+      title,
+      body,
+      labels: ['user-report'],
+    });
+
+    if (result.status === 201) {
+      console.log(`[BugReporter] User report created: #${result.data.number}`);
+      return { success: true, number: result.data.number, url: result.data.html_url };
+    }
+    console.log(`[BugReporter] Failed to create user report: ${result.status}`);
+    return { success: false, error: `GitHub returned ${result.status}` };
+  } catch (err) {
+    console.error('[BugReporter] Failed to submit user report:', err.message);
+    return { success: false, error: err.message };
+  }
+});

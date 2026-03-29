@@ -34,6 +34,65 @@ $('#theme-toggle-btn').addEventListener('click', async () => {
   } catch {}
 });
 
+// ---- Bug Report Modal ----
+function openBugReport() {
+  const overlay = $('#bug-report-overlay');
+  overlay.classList.remove('hidden');
+  overlay.offsetHeight; // force reflow
+  overlay.classList.add('visible');
+  $('#bug-expected').focus();
+}
+
+function closeBugReport() {
+  const overlay = $('#bug-report-overlay');
+  overlay.classList.remove('visible');
+  overlay.addEventListener('transitionend', function handler() {
+    if (!overlay.classList.contains('visible')) {
+      overlay.classList.add('hidden');
+      // Clear form
+      $('#bug-expected').value = '';
+      $('#bug-actual').value = '';
+      $('#bug-steps').value = '';
+    }
+    overlay.removeEventListener('transitionend', handler);
+  });
+}
+
+$('#bug-report-btn').addEventListener('click', openBugReport);
+$('#bug-report-close').addEventListener('click', closeBugReport);
+$('#bug-report-cancel').addEventListener('click', closeBugReport);
+$('#bug-report-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeBugReport();
+});
+
+$('#bug-report-submit').addEventListener('click', async () => {
+  const expected = $('#bug-expected').value.trim();
+  const actual = $('#bug-actual').value.trim();
+  const steps = $('#bug-steps').value.trim();
+
+  if (!expected && !actual) {
+    toast('Please describe what you expected or what happened', 'error');
+    return;
+  }
+
+  const btn = $('#bug-report-submit');
+  setLoading(btn, true);
+
+  try {
+    const result = await window.plaud.reportBug(expected, actual, steps);
+    if (result.success) {
+      toast(`Bug report submitted (#${result.number})`, 'success');
+      closeBugReport();
+    } else {
+      toast(`Failed to submit: ${result.error}`, 'error');
+    }
+  } catch (err) {
+    toast(`Failed to submit: ${err.message}`, 'error');
+  } finally {
+    setLoading(btn, false);
+  }
+});
+
 // ---- Settings Open/Close ----
 dom.settingsBtn.addEventListener('click', () => {
   openSettings();
