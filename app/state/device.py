@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import struct
+import sys
 import threading
 import time
 from datetime import datetime
@@ -50,6 +51,8 @@ _device_state = {
 
 _ble_lock = threading.Lock()
 _syncing = False  # True while a file sync is in progress — blocks status polls
+_sync_abort = False  # Set True to abort current BLE sync (e.g. switching to WiFi)
+_wifi_sync_status = {"message": "", "percent": 0}  # Progress for WiFi sync polling
 _loop = None
 _loop_thread = None
 
@@ -686,8 +689,12 @@ async def sync_files(progress_callback=None):
         _syncing = False
 
 
-async def do_wifi_sync():
-    """Run WiFi sync (user-initiated). Returns same format as sync_files."""
+def do_wifi_sync_blocking():
+    """Run WiFi sync as a subprocess (user-initiated, blocking).
+
+    Spawns wifi_sync_worker.py as a standalone process with its own clean
+    asyncio event loop — identical to the test script that works reliably.
+    """
     global _syncing
     if _syncing:
         return {"error": "Sync already in progress"}
@@ -697,38 +704,96 @@ async def do_wifi_sync():
         return {"error": "No BLE session — connect device first"}
 
     _syncing = True
+    sn = _device_state["serial_number"]
+    key, nonce, aad = _device_state["session_keys"]
+
+    def _on_status(msg, pct):
+        _wifi_sync_status["message"] = msg
+        _wifi_sync_status["percent"] = pct
+
+    _on_status("Starting WiFi transfer...", 5)
+
     try:
-        from app.utils.wifi_sync import wifi_sync_files
-
-        sn = _device_state["serial_number"]
-        keys = _device_state["session_keys"]
-
-        async def _send_ble_cmd(name, pt, timeout=5):
-            return await send_cmd(pt, timeout=timeout)
-
-        cl = _device_state["client"]
+        # Disconnect BLE first — the worker needs to make its own connection.
+        # The device invalidates crypto sessions when BLE drops, so the worker
+        # must do the full BLE handshake → WiFi flow in one process.
+        _on_status("Preparing for WiFi transfer...", 5)
         try:
-            await cl.stop_notify(N)
-        except Exception:
-            pass
-
-        result = await wifi_sync_files(keys, sn, _send_ble_cmd)
-
-        try:
-            if cl and _device_state["connected"]:
-                await _setup_notify(cl)
-        except Exception:
-            pass
-
-        return result or {"error": "WiFi sync returned no result"}
-    except Exception as e:
-        logging.warning(f"WiFi sync error: {e}")
-        try:
-            cl = _device_state["client"]
+            cl = _device_state.get("client")
             if cl:
-                await _setup_notify(cl)
+                run_async(cl.disconnect(), timeout=5)
+                print("[WiFi] Disconnected existing BLE")
         except Exception:
             pass
+        _reset_state()
+
+        # Build worker args — worker does its own BLE connect + handshake
+        worker_args = json.dumps({
+            "sn": sn,
+            "recordings_dir": str(RECORDINGS_DIR),
+            "app_key_path": str(APP_KEY_PATH),
+            "dismissed": list(load_config().get("deleted_ids", [])),
+        })
+
+        # Find the worker script
+        import importlib.util
+        from pathlib import Path as _Path
+        worker_path = _Path(importlib.util.find_spec("app.utils.wifi_sync_worker").origin)
+        python_bin = sys.executable
+        print(f"[WiFi] Spawning worker: {python_bin} {worker_path}")
+
+        # Run worker as subprocess — it has its own clean asyncio.run()
+        import subprocess as sp
+        proc = sp.Popen(
+            [python_bin, str(worker_path), worker_args],
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+            cwd=str(APP_KEY_PATH.parent.parent),  # project root
+            env={**__import__("os").environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
+        )
+
+        # Read stderr for progress updates in a thread
+        import threading
+
+        def _read_progress():
+            for line in proc.stderr:
+                line = line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                print(f"[WiFi Worker] {line}")
+                try:
+                    update = json.loads(line)
+                    if "status" in update:
+                        _on_status(update["status"], update.get("percent", 0))
+                except Exception:
+                    pass
+
+        progress_thread = threading.Thread(target=_read_progress, daemon=True)
+        progress_thread.start()
+
+        # Wait for completion (up to 10 minutes)
+        stdout, _ = proc.communicate(timeout=600)
+        progress_thread.join(timeout=5)
+
+        # Parse result from stdout
+        stdout_str = stdout.decode("utf-8", errors="replace").strip()
+        print(f"[WiFi] Worker stdout: {stdout_str[:500]}")
+
+        if proc.returncode != 0:
+            _on_status("WiFi transfer failed", 0)
+            return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200]}
+
+        if stdout_str:
+            result = json.loads(stdout_str)
+            done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
+            _on_status(f"Complete: {done_count} file(s)", 100)
+            return result
+        return {"error": "WiFi worker produced no output"}
+
+    except Exception as e:
+        print(f"[WiFi] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return {"error": str(e)}
     finally:
         _syncing = False
@@ -749,6 +814,13 @@ async def _sync_files_inner(progress_callback=None):
 
     new_files = []
     for i, f in enumerate(files):
+        # Check abort flag (user switching to WiFi sync)
+        global _sync_abort
+        if _sync_abort:
+            _sync_abort = False
+            logging.info("BLE sync aborted (switching to WiFi)")
+            break
+
         sid = f["session_id"]
         fsize = f["size"]
         ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
@@ -887,6 +959,15 @@ def is_connected():
 
 def is_syncing():
     return _syncing
+
+
+def abort_sync():
+    global _sync_abort
+    _sync_abort = True
+
+
+def get_wifi_sync_status():
+    return dict(_wifi_sync_status)
 
 
 def set_connected(val):

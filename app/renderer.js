@@ -383,12 +383,35 @@ async function executeWifiSync() {
     overlay.removeEventListener('transitionend', h);
   });
 
+  // Abort any running BLE sync
+  try {
+    await window.plaud.abortSync();
+  } catch {}
+
+  // Wait briefly for BLE sync to release the lock
+  await new Promise((r) => setTimeout(r, 2000));
+
   app.syncing = true;
-  showProgress('WiFi sync — connecting to device hotspot...', 10);
-  toast('Starting WiFi transfer — internet will disconnect briefly', 'info');
+  showProgress('WiFi sync — starting...', 5);
+
+  // Poll for progress updates while sync runs
+  let pollActive = true;
+  const pollProgress = async () => {
+    while (pollActive) {
+      try {
+        const s = await window.plaud.wifiSyncStatus();
+        if (s && s.message) {
+          showProgress(`WiFi: ${s.message}`, s.percent || 5);
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  };
+  const pollPromise = pollProgress();
 
   try {
     const result = await window.plaud.wifiSync();
+    pollActive = false;
     if (result.error) {
       toast(`WiFi sync failed: ${result.error}`, 'error');
     } else {
@@ -429,10 +452,24 @@ async function executeWifiSync() {
       }
     }
   } catch (err) {
+    pollActive = false;
     toast(`WiFi sync error: ${err.message}`, 'error');
   } finally {
+    pollActive = false;
     app.syncing = false;
     hideProgress();
+
+    // Reconnect BLE (worker disconnected it to do its own BLE session)
+    toast('Reconnecting to device...', 'info');
+    try {
+      const scan = await window.plaud.scanKnown();
+      if (scan.found) {
+        const conn = await window.plaud.connect(scan.address, scan.serial_number);
+        if (conn.connected) {
+          toast(`Reconnected to ${scan.name}`, 'success');
+        }
+      }
+    } catch {}
     await updateDeviceStatus();
   }
 }
@@ -445,6 +482,14 @@ function dismissWifiConfirm() {
     overlay.removeEventListener('transitionend', h);
   });
 }
+
+// WiFi confirmation modal event listeners
+$('#wifi-confirm-close').addEventListener('click', dismissWifiConfirm);
+$('#wifi-confirm-cancel').addEventListener('click', dismissWifiConfirm);
+$('#wifi-confirm-start').addEventListener('click', executeWifiSync);
+$('#wifi-confirm-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) dismissWifiConfirm();
+});
 
 // Handle notification action from background
 window.plaud.onNotificationAction((action) => {
@@ -529,6 +574,21 @@ async function init() {
   await loadSettings();
   await loadRecordings();
 
+  // Immediately try to connect to a known device on startup
+  try {
+    const status = await window.plaud.status();
+    if (!status.connected) {
+      const scan = await window.plaud.scanKnown();
+      if (scan.found) {
+        const conn = await window.plaud.connect(scan.address, scan.serial_number);
+        if (conn.connected) {
+          toast(`Connected to ${scan.name}`, 'success');
+          await updateDeviceStatus();
+        }
+      }
+    }
+  } catch {}
+
   // Poll device status every 10 seconds
   app.pollInterval = setInterval(updateDeviceStatus, 10000);
 
@@ -568,15 +628,13 @@ async function init() {
 
       const check = await window.plaud.checkNew();
       if (check.new_files > 0) {
-        // If large files, offer WiFi sync instead of slow BLE
+        // Offer WiFi alongside BLE for large files
         if (check.total_size > WIFI_SIZE_THRESHOLD) {
           const isBackground = !document.hasFocus();
           offerWifiSync(check.total_size, check.new_files, isBackground);
-          _bgBusy = false;
-          return;
         }
 
-        toast(`${check.new_files} new recording(s) found, syncing...`, 'info');
+        toast(`${check.new_files} new recording(s) found, syncing via Bluetooth...`, 'info');
         dom.progressBar.classList.remove('hidden');
         dom.progressBar.classList.add('indeterminate');
         app.syncing = true;
