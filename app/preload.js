@@ -31,7 +31,9 @@ contextBridge.exposeInMainWorld('plaud', {
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
   sync: () => apiCall('POST', '/device/sync'),
+  abortSync: () => apiCall('POST', '/device/abort-sync'),
   wifiSync: () => apiCall('POST', '/device/wifi-sync'),
+  wifiSyncStatus: () => apiCall('GET', '/device/wifi-sync-status'),
 
   // Transcription
   transcribe: (path, model, diarize, language) => apiCall('POST', '/transcribe', { path, model, diarize, language }),
