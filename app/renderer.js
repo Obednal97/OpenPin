@@ -333,6 +333,48 @@ $('#update-dismiss').addEventListener('click', () => {
   $('#update-banner').classList.add('hidden');
 });
 
+// ---- System Wake Recovery ----
+// BLE connections die during macOS sleep — detect wake and force reconnect cycle
+window.plaud.onSystemWake(async () => {
+  console.log('[Wake] System resumed — refreshing device status');
+  // Give BLE stack a moment to settle after wake
+  await new Promise((r) => setTimeout(r, 2000));
+  await updateDeviceStatus();
+
+  // If the device is now showing disconnected, try auto-reconnect
+  const status = await window.plaud.status();
+  if (!status.connected) {
+    console.log('[Wake] Device disconnected after sleep — attempting reconnect');
+    try {
+      const scan = await window.plaud.scanKnown();
+      if (scan.found) {
+        const conn = await window.plaud.connect(scan.address, scan.serial_number);
+        if (conn.connected) {
+          toast(`Reconnected to ${scan.name}`, 'success');
+          await updateDeviceStatus();
+
+          // Auto-sync if enabled
+          if (app.settings.auto_sync !== false) {
+            const check = await window.plaud.checkNew();
+            if (check.new_files > 0) {
+              toast(`${check.new_files} new recording(s), syncing...`, 'info');
+              try {
+                await window.plaud.sync();
+                await loadRecordings();
+                toast('Sync complete', 'success');
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.log('[Wake] Reconnect failed:', err.message);
+    }
+  } else {
+    console.log('[Wake] Device still connected');
+  }
+});
+
 // ---- Init ----
 
 // Init Electron-only features immediately (don't wait for Python API)
