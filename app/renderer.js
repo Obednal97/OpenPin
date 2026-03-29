@@ -154,6 +154,17 @@ dom.scanBtn.addEventListener('click', async () => {
 
 dom.syncBtn.addEventListener('click', async () => {
   setLoading(dom.syncBtn, true);
+
+  // Check file sizes first — offer WiFi for large transfers
+  try {
+    const check = await window.plaud.checkNew();
+    if (check.new_files > 0 && check.total_size > WIFI_SIZE_THRESHOLD) {
+      setLoading(dom.syncBtn, false);
+      offerWifiSync(check.total_size, check.new_files, false);
+      return;
+    }
+  } catch {}
+
   showProgress('Syncing recordings...', 20);
   toast('Syncing recordings from device...', 'info');
   app.syncing = true;
