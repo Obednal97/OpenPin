@@ -415,6 +415,16 @@ async function executeWifiSync() {
     if (result.error) {
       toast(`WiFi sync failed: ${result.error}`, 'error');
     } else {
+      // Check if WiFi restore needs manual intervention
+      if (result.wifi_restore && result.wifi_restore.need_manual) {
+        const ssidName = result.wifi_restore.ssid || 'your WiFi';
+        toast(`Please reconnect to ${ssidName}`, 'info');
+        window.plaud.showNotification(
+          'WiFi transfer complete',
+          `Please reconnect to "${ssidName}" in the WiFi settings panel that just opened.`,
+        );
+      }
+
       const newFiles = (result.files || []).filter((f) => f.status === 'new');
       if (newFiles.length > 0) {
         toast(`WiFi sync complete: ${newFiles.length} recording(s)`, 'success');
