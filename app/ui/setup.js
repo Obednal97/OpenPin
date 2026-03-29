@@ -245,6 +245,46 @@ async function completeSetup() {
   await loadRecordings();
   app.pollInterval = setInterval(updateDeviceStatus, 10000);
   _startBgPoll();
+
+  // Auto-sync after first pairing — check for recordings on device
+  try {
+    const check = await window.plaud.checkNew();
+    if (check.new_files > 0) {
+      toast(`${check.new_files} recording(s) found, syncing...`, 'info');
+      showProgress('Syncing recordings...', 20);
+      app.syncing = true;
+      try {
+        const result = await window.plaud.sync();
+        if (!result.error) {
+          const newFiles = (result.files || []).filter((f) => f.status === 'new');
+          if (newFiles.length > 0) {
+            toast(`Synced ${newFiles.length} recording(s)`, 'success');
+            // Auto-transcribe
+            for (let i = 0; i < newFiles.length; i++) {
+              const f = newFiles[i];
+              if (f.ogg_path) {
+                showProgress(`Transcribing ${i + 1}/${newFiles.length}...`, 60 + (30 * i) / newFiles.length);
+                try {
+                  await window.plaud.transcribe(
+                    f.ogg_path,
+                    app.settings.model || 'small',
+                    app.settings.diarize || false,
+                    app.settings.language || 'auto',
+                  );
+                } catch {}
+              }
+            }
+            toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
+          }
+          await loadRecordings();
+        }
+      } finally {
+        app.syncing = false;
+        hideProgress();
+        await updateDeviceStatus();
+      }
+    }
+  } catch {}
 }
 
 function _closeSetup() {
