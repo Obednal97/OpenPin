@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, Tray, Menu, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeTheme, Tray, Menu, powerMonitor, Notification } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const http = require('http');
@@ -764,4 +764,31 @@ ipcMain.handle('report-bug', async (event, { expected, actual, steps }) => {
     console.error('[BugReporter] Failed to submit user report:', err.message);
     return { success: false, error: err.message };
   }
+});
+
+// IPC: system notification (for background WiFi sync prompts)
+ipcMain.handle('show-notification', (event, { title, body, actionLabel }) => {
+  if (!Notification.isSupported()) return { shown: false };
+  const notif = new Notification({
+    title,
+    body,
+    silent: false,
+    actions: actionLabel ? [{ type: 'button', text: actionLabel }] : [],
+  });
+  notif.on('click', () => {
+    // Bring window to front
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  if (actionLabel) {
+    notif.on('action', () => {
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send('notification-action', 'wifi-sync');
+      }
+    });
+  }
+  notif.show();
+  return { shown: true };
 });

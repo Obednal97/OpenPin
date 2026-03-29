@@ -117,6 +117,27 @@ function toast(message, type = 'info') {
   setTimeout(() => el.remove(), 3000);
 }
 
+function toastAction(message, actionLabel, onAction, duration = 10000) {
+  const container = $('#toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast toast-info toast-with-action';
+  el.innerHTML = `
+    <div class="toast-content">
+      <span class="toast-message">${escapeHtml(message)}</span>
+      <button class="toast-action-btn">${escapeHtml(actionLabel)}</button>
+    </div>
+  `;
+  const btn = el.querySelector('.toast-action-btn');
+  btn.addEventListener('click', () => {
+    el.remove();
+    onAction();
+  });
+  container.appendChild(el);
+  const timer = setTimeout(() => el.remove(), duration);
+  el._timer = timer;
+  return el;
+}
+
 function showProgress(text, pct) {
   dom.progressBar.classList.remove('hidden');
   dom.progressFill.style.width = `${pct}%`;

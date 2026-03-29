@@ -94,6 +94,37 @@
     </div>
   </div>
 
+  <!-- WiFi Sync Confirmation Modal -->
+  <div id="wifi-confirm-overlay" class="modal-overlay hidden" onclick="if(event.target===this)dismissWifiConfirm()">
+    <div class="modal-panel" style="width: 380px;">
+      <div class="modal-header">
+        <h2>WiFi Transfer</h2>
+        <button id="wifi-confirm-close" class="icon-btn" title="Close" onclick="dismissWifiConfirm()">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M4.5 4.5l9 9M13.5 4.5l-9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary);">
+          WiFi transfer downloads recordings <strong>~50x faster</strong> than Bluetooth by connecting directly to your Plaud device's hotspot.
+        </p>
+        <p style="font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary); margin-top: var(--sp-3);">
+          Your internet will be <strong>temporarily disconnected</strong> during transfer and will auto-reconnect afterwards (~15 seconds).
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn subtle" onclick="dismissWifiConfirm()">Cancel</button>
+        <button class="action-btn primary" onclick="executeWifiSync()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="margin-right: 4px;">
+            <path d="M5 12.55a11 11 0 0114 0M8.53 16.11a6 6 0 016.95 0M12 20h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Start WiFi Transfer
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Update Banner -->
   <div id="update-banner" class="update-banner hidden">
     <span id="update-message">A new version is available</span>
