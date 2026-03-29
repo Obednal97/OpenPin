@@ -160,7 +160,11 @@ dom.syncBtn.addEventListener('click', async () => {
     const check = await window.plaud.checkNew();
     if (check.new_files > 0 && check.total_size > WIFI_SIZE_THRESHOLD) {
       setLoading(dom.syncBtn, false);
-      offerWifiSync(check.total_size, check.new_files, false);
+      if (app.settings.auto_prefer_wifi) {
+        executeWifiSync();
+      } else {
+        offerWifiSync(check.total_size, check.new_files, false);
+      }
       return;
     }
   } catch {}
@@ -652,8 +656,13 @@ function _startBgPoll() {
 
       const check = await window.plaud.checkNew();
       if (check.new_files > 0) {
-        // Offer WiFi alongside BLE for large files
+        // WiFi for large files — auto-execute or offer depending on setting
         if (check.total_size > WIFI_SIZE_THRESHOLD) {
+          if (app.settings.auto_prefer_wifi) {
+            executeWifiSync();
+            _bgBusy = false;
+            return;
+          }
           const isBackground = !document.hasFocus();
           offerWifiSync(check.total_size, check.new_files, isBackground);
         }
