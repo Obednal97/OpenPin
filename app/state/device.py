@@ -76,6 +76,38 @@ def _on_disconnect(client):
     _reset_state()
 
 
+async def _setup_notify(cl):
+    """Re-register the BLE notification handler using existing state."""
+    cipher = _device_state["cipher"]
+    key, nonce, aad = _device_state["session_keys"]
+    cmd_evt = _device_state["cmd_evt"]
+    cmd_resp = _device_state["cmd_resp"]
+    file_data = _device_state["file_data"]
+    file_done = _device_state["file_done"]
+
+    def handler(s, d):
+        try:
+            dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
+        except Exception:
+            return
+        if len(dd) < 1:
+            return
+        if dd[0] == 2 and len(dd) >= 10:
+            off = struct.unpack_from("<I", dd, 5)[0]
+            if off == 0xFFFFFFFF:
+                file_done.set()
+            else:
+                file_data.extend(dd[10 : 10 + dd[9]])
+        elif dd[0] == 1:
+            cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
+            if cid == 29:
+                file_done.set()
+            cmd_resp[0] = dd
+            cmd_evt.set()
+
+    await cl.start_notify(N, handler)
+
+
 def get_state():
     """Get a read-only snapshot of device state."""
     return {
@@ -655,7 +687,7 @@ async def sync_files(progress_callback=None):
 
 
 async def _sync_files_inner(progress_callback=None):
-    """Internal sync implementation."""
+    """Internal sync implementation. Auto-selects WiFi for large transfers."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
     app_rsa_key = load_pem_private_key(APP_KEY_PATH.read_bytes(), password=None)
@@ -665,9 +697,63 @@ async def _sync_files_inner(progress_callback=None):
         return {"files": [], "message": "No files on device"}
 
     RECORDINGS_DIR.mkdir(exist_ok=True)
-    new_files = []
-
     dismissed = set(load_config().get("deleted_ids", []))
+
+    # Check if WiFi transfer is worthwhile
+    new_download_size = 0
+    for f in files:
+        sid = f["session_id"]
+        ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
+        if str(sid) not in dismissed and not ogg_path.exists():
+            new_download_size += f["size"]
+
+    if new_download_size > 500_000 and _device_state.get("serial_number"):
+        # Try WiFi transfer for large downloads
+        try:
+            logging.info(f"Sync: {new_download_size} bytes to download — attempting WiFi transfer")
+            from app.utils.wifi_sync import wifi_sync_files
+
+            sn = _device_state["serial_number"]
+            keys = _device_state["session_keys"]
+
+            async def _send_ble_cmd(name, pt, timeout=5):
+                return await send_cmd(pt, timeout=timeout)
+
+            # Stop BLE notifications during WiFi (they conflict)
+            cl = _device_state["client"]
+            try:
+                await cl.stop_notify(N)
+            except Exception:
+                pass
+
+            result = await wifi_sync_files(keys, sn, _send_ble_cmd)
+
+            # Restart BLE notifications
+            try:
+                await _setup_notify(cl)
+            except Exception:
+                pass
+
+            if result and result.get("files"):
+                new_count = sum(1 for f in result["files"] if f["status"] == "new")
+                if new_count > 0:
+                    logging.info(f"WiFi sync complete: {new_count} new file(s)")
+                    return result
+                # WiFi got no new files but didn't error — fall through to BLE
+            if result and result.get("error"):
+                logging.warning(f"WiFi sync failed: {result['error']} — falling back to BLE")
+        except Exception as e:
+            logging.warning(f"WiFi sync error: {e} — falling back to BLE")
+            # Restart BLE notifications after WiFi failure
+            try:
+                cl = _device_state["client"]
+                if cl:
+                    await _setup_notify(cl)
+            except Exception:
+                pass
+
+    # BLE sync fallback / default for small transfers
+    new_files = []
     for i, f in enumerate(files):
         sid = f["session_id"]
         fsize = f["size"]
