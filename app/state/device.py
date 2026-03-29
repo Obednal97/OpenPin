@@ -707,14 +707,30 @@ async def _sync_files_inner(progress_callback=None):
 
         start = time.time()
         max_time = max(fsize / 1500, 60)  # ~1.5 KB/s worst case, 60s minimum
+        last_progress_len = 0
+        last_progress_time = time.time()
+        stall_timeout = 15  # Abort if no new data for 15 seconds (device out of range)
         while not file_done.is_set():
             try:
                 await asyncio.wait_for(file_done.wait(), timeout=2)
             except TimeoutError:
-                if time.time() - start > max_time:
+                now = time.time()
+                if now - start > max_time:
+                    logging.warning(f"Sync timeout for session {sid} after {now - start:.0f}s")
+                    break
+                # Check if data is still flowing
+                current_len = len(file_data)
+                if current_len > last_progress_len:
+                    last_progress_len = current_len
+                    last_progress_time = now
+                elif now - last_progress_time > stall_timeout:
+                    logging.warning(f"Sync stalled for session {sid} — no data for {stall_timeout}s, device likely out of range")
                     break
 
         if not file_data:
+            # If we also lost connection, stop trying further files
+            if not _device_state["connected"]:
+                break
             continue
 
         raw_data = bytes(file_data)
