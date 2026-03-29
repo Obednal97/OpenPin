@@ -95,6 +95,9 @@ contextBridge.exposeInMainWorld('plaud', {
   // Open external URL
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
+  // System events
+  onSystemWake: (callback) => ipcRenderer.on('system-wake', () => callback()),
+
   // Auto-updater
   installUpdate: () => ipcRenderer.invoke('install-update'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),

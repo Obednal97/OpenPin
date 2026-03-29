@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeTheme, Tray, Menu, powerMonitor } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const http = require('http');
@@ -556,6 +556,14 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+    }
+  });
+
+  // Detect system wake from sleep — BLE connections silently die during sleep
+  powerMonitor.on('resume', () => {
+    console.log('[PowerMonitor] System resumed from sleep — notifying renderer');
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('system-wake');
     }
   });
 });

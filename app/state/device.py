@@ -367,13 +367,20 @@ async def connect_device(address=None):
 async def send_cmd(pt, timeout=5):
     """Send an encrypted command and wait for response."""
     cl = _device_state["client"]
+    if not cl or not _device_state["connected"]:
+        return None
     cipher = _device_state["cipher"]
     key, nonce, aad = _device_state["session_keys"]
     _device_state["seq"] += 1
     ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + pt, aad)
     _device_state["cmd_evt"].clear()
     _device_state["cmd_resp"][0] = None
-    await cl.write_gatt_char(W, ct, response=False)
+    try:
+        await cl.write_gatt_char(W, ct, response=False)
+    except Exception as e:
+        logging.warning(f"BLE write failed (device likely disconnected): {e}")
+        _reset_state()
+        return None
     try:
         await asyncio.wait_for(_device_state["cmd_evt"].wait(), timeout=timeout)
     except TimeoutError:
