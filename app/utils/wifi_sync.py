@@ -13,13 +13,11 @@ Protocol (reverse-engineered from decompiled APK):
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import struct
 import subprocess
 import time
-from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -84,7 +82,7 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
         logging.warning("CoreWLAN not available — cannot connect to hotspot")
         return None
 
-    print(f"[WiFi] disconnecting from current network...")
+    print("[WiFi] disconnecting from current network...")
     if iface:
         iface.disassociate()
     for _ in range(10):
@@ -238,8 +236,6 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
     wifi_ssid = f"Plaud{serial_number[-4:]}"
     wifi_pass = serial_number[-8:]
     original_ip = _get_en0_ip()
-    expected_token = hashlib.md5(serial_number.encode()).hexdigest().upper()
-
     # State for WebSocket handler
     ws_seq = 0
     handshake_done = asyncio.Event()
@@ -409,14 +405,14 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
         _status("Waiting for device handshake...", 25)
         try:
             await asyncio.wait_for(handshake_done.wait(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _status("Handshake timed out", 0)
             return {"error": "WiFi handshake timed out", "files": new_files}
 
         _status("Getting file list...", 30)
         try:
             await asyncio.wait_for(file_list_received.wait(), timeout=15)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _status("File list timed out", 0)
             return {"error": "WiFi file list timed out", "files": new_files}
 
@@ -431,7 +427,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
             while not all_downloads_done.is_set():
                 try:
                     await asyncio.wait_for(all_downloads_done.wait(), timeout=2)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     elapsed = asyncio.get_event_loop().time() - start_dl
                     if elapsed > dl_timeout:
                         print(f"[WiFi] WARNING: download timed out after {dl_timeout:.0f}s")

@@ -1,5 +1,6 @@
 """Device routes: BLE scanning, connecting, syncing, recording."""
 
+import logging
 import threading
 import time
 
