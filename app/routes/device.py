@@ -261,13 +261,27 @@ def sync():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/abort-sync", methods=["POST"])
+def abort_sync():
+    """Abort current BLE sync (e.g. to switch to WiFi)."""
+    dev.abort_sync()
+    return jsonify({"aborted": True})
+
+
 @bp.route("/wifi-sync", methods=["POST"])
 def wifi_sync():
     """Sync files via WiFi (user-initiated). Faster but interrupts internet."""
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
     try:
-        result = dev.run_async(dev.do_wifi_sync(), timeout=600)  # 10 min max
+        # Runs on its own fresh event loop — NOT via run_async (websockets needs clean loop)
+        result = dev.do_wifi_sync_blocking()
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/wifi-sync-status")
+def wifi_sync_status():
+    """Poll WiFi sync progress."""
+    return jsonify(dev.get_wifi_sync_status())

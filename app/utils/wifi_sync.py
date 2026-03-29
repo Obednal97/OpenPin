@@ -84,7 +84,7 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
         logging.warning("CoreWLAN not available — cannot connect to hotspot")
         return None
 
-    logging.info(f"WiFi: disconnecting from current network...")
+    print(f"[WiFi] disconnecting from current network...")
     if iface:
         iface.disassociate()
     for _ in range(10):
@@ -92,7 +92,7 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
         if not _get_en0_ip():
             break
 
-    logging.info(f"WiFi: connecting to '{ssid}'...")
+    print(f"[WiFi] connecting to '{ssid}'...")
     deadline = time.time() + timeout
     attempt = 0
     while time.time() < deadline:
@@ -112,7 +112,7 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
                 time.sleep(1)
                 ip = _get_en0_ip()
                 if ip and ip != original_ip:
-                    logging.info(f"WiFi: on hotspot IP={ip} (attempt {attempt})")
+                    print(f"[WiFi] on hotspot IP={ip} (attempt {attempt})")
                     return ip
             ip = _get_en0_ip()
             if ip and ip != original_ip:
@@ -123,8 +123,25 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
         else:
             time.sleep(1)
 
-    logging.warning(f"WiFi: could not connect to hotspot after {timeout}s")
+    print(f"[WiFi] WARNING: could not connect to hotspot after {timeout}s")
     return None
+
+
+def _get_preferred_networks(exclude_ssid=""):
+    """Get list of preferred/saved WiFi networks."""
+    try:
+        r = subprocess.run(
+            ["networksetup", "-listpreferredwirelessnetworks", "en0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        networks = []
+        for line in r.stdout.strip().split("\n")[1:]:
+            name = line.strip()
+            if name and name != exclude_ssid:
+                networks.append(name)
+        return networks
+    except Exception:
+        return []
 
 
 async def _restore_internet(ssid, hotspot_ip=""):
@@ -132,34 +149,68 @@ async def _restore_internet(ssid, hotspot_ip=""):
 
     macOS WiFi radio gets stuck after disconnecting from device hotspot —
     networksetup -setairportnetwork fails with -3900 and CoreWLAN scan
-    returns 0 results. The only reliable fix is a full 10-second power-off
-    to reset the radio hardware, then let macOS auto-join.
+    returns 0 results. Fix: 10-second power-off to reset radio hardware,
+    then actively try joining preferred networks if auto-join is slow.
     """
+    preferred = _get_preferred_networks(exclude_ssid=ssid)
     subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", ssid], capture_output=True)
-    logging.info("WiFi: power-cycling (10s off) to restore internet...")
+    print("[WiFi] power-cycling (10s off) to restore internet...")
     subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
     await asyncio.sleep(10)  # 10s off required — 3s is not enough after hotspot
     subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
-    for i in range(20):
+
+    # Wait up to 15s for auto-join
+    for i in range(10):
         await asyncio.sleep(1.5)
         ip = _get_en0_ip()
         if ip and ip != hotspot_ip:
-            logging.info(f"WiFi: internet restored IP={ip} ({int((i + 1) * 1.5 + 10)}s total)")
+            print(f"[WiFi] internet restored via auto-join IP={ip} ({int((i + 1) * 1.5 + 10)}s)")
             return True
-    logging.warning("WiFi: auto-join slow — internet may need manual reconnection")
+
+    # Auto-join didn't work — actively try preferred networks
+    print("[WiFi] auto-join slow, trying preferred networks...")
+    for net in preferred[:5]:
+        try:
+            r = subprocess.run(
+                ["networksetup", "-setairportnetwork", "en0", net],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and "-3900" not in (r.stdout + r.stderr):
+                await asyncio.sleep(3)
+                ip = _get_en0_ip()
+                if ip and ip != hotspot_ip:
+                    print(f"[WiFi] internet restored via '{net}' IP={ip}")
+                    return True
+        except Exception:
+            pass
+
+    # Last resort — another power cycle
+    print("[WiFi] second power-cycle attempt...")
+    subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
+    await asyncio.sleep(10)
+    subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
+    for i in range(15):
+        await asyncio.sleep(2)
+        ip = _get_en0_ip()
+        if ip and ip != hotspot_ip:
+            print(f"[WiFi] internet restored on second cycle IP={ip}")
+            return True
+
+    print("[WiFi] WARNING: could not restore internet — user may need to reconnect manually")
     return False
 
 
 # ── WiFi file transfer ──
 
 
-async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
+async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_callback=None):
     """Download all files from device via WiFi.
 
     Args:
         session_keys: (key, nonce, aad) from BLE handshake
         serial_number: device serial number string
         send_ble_cmd: async callable to send encrypted BLE commands
+        status_callback: optional callable(message, percent) for progress updates
 
     Returns:
         dict with "files" list (same format as BLE sync) or "error"
@@ -212,6 +263,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
                 sid = f["session_id"]
                 ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
                 if str(sid) in dismissed or ogg_path.exists():
+                    print(f"[WiFi] skipping {sid} (exists={ogg_path.exists()}, dismissed={str(sid) in dismissed})")
                     new_files.append(
                         {"session_id": sid, "ogg_path": str(ogg_path) if ogg_path.exists() else None, "duration": 0, "status": "exists"}
                     )
@@ -219,8 +271,9 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
                 current_sid = sid
                 dl_req = build_wifi_packet(12, {"session": sid, "scene": 0, "start": 0, "end": f["size"]})
                 await websocket.send(ws_encrypt(dl_req))
-                logging.info(f"WiFi: downloading session {sid} ({f['size']} bytes)")
+                print(f"[WiFi] requesting download session={sid} size={f['size']}")
                 return True
+            print(f"[WiFi] all downloads done, new_files count={len(new_files)}")
             all_downloads_done.set()
             return False
 
@@ -243,7 +296,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
 
                 elif cmd_id == 1:
                     # Handshake accepted
-                    logging.info("WiFi: handshake accepted")
+                    print("[WiFi] handshake accepted")
                     handshake_done.set()
                     await asyncio.sleep(0.3)
                     uid = int(time.time())
@@ -262,7 +315,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
                             fsize = struct.unpack_from("<I", bin_data, i + 4)[0]
                             codec = struct.unpack_from("<H", bin_data, i + 8)[0]
                             wifi_files.append({"session_id": sid, "size": fsize, "codec": codec})
-                        logging.info(f"WiFi: {len(wifi_files)} file(s) on device")
+                        print(f"[WiFi] {len(wifi_files)} file(s) on device")
                     file_list_received.set()
                     file_queue = list(wifi_files)
                     if not file_queue:
@@ -290,18 +343,16 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
                             ogg = wrap_opus_ogg(frames)
                             ogg_path = RECORDINGS_DIR / f"{current_sid}.ogg"
                             ogg_path.write_bytes(ogg)
-                            duration = len(frames) / 50 * 0.02  # 20ms per frame
-                            # Correct duration: frames/50 gives seconds (50fps at 20ms/frame)
-                            duration = len(frames) * 0.02
+                            duration = len(frames) // 80 * 0.02
                             new_files.append(
                                 {"session_id": current_sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
                             )
-                            logging.info(f"WiFi: saved {current_sid}.ogg ({len(raw)} → {len(ogg)} bytes, {duration:.1f}s)")
+                            print(f"[WiFi] saved {current_sid}.ogg ({len(raw)} → {len(ogg)} bytes, {duration:.1f}s)")
                         else:
                             raw_path = RECORDINGS_DIR / f"{current_sid}_encrypted.bin"
                             raw_path.write_bytes(raw)
                             new_files.append({"session_id": current_sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed"})
-                            logging.warning(f"WiFi: decrypt failed for {current_sid}")
+                            print(f"[WiFi] WARNING: decrypt failed for {current_sid}")
                         await download_next()
 
                 elif cmd_id == 3:
@@ -310,54 +361,92 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd):
                     await websocket.send(ws_encrypt(pong))
 
         except Exception as e:
-            logging.warning(f"WiFi: WebSocket error: {e}")
+            print(f"[WiFi] WARNING: WebSocket error: {e}")
             if not all_downloads_done.is_set():
                 error_msg[0] = str(e)
                 all_downloads_done.set()
+
+    def _status(msg, pct):
+        print(f"[WiFi] {msg}")
+        if status_callback:
+            try:
+                status_callback(msg, pct)
+            except Exception:
+                pass
 
     # ── Execute WiFi transfer flow ──
     hotspot_ip = None
     server = None
     try:
-        # Start WebSocket server BEFORE opening hotspot
+        _status("Starting WebSocket server...", 5)
         server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
-        logging.info(f"WiFi: WebSocket server on port {WS_PORT}")
 
-        # Open hotspot via BLE
+        _status("Opening device hotspot...", 10)
         await send_ble_cmd("WiFi_Open", bytes([1, 10, 0]))
-        logging.info("WiFi: hotspot opening...")
 
-        # Connect to hotspot
-        hotspot_ip = _connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=25)
+        _status(f"Connecting to {wifi_ssid}... (internet will drop)", 15)
+        # Run hotspot connection in a thread — it uses time.sleep() which would block
+        # the asyncio event loop and prevent the WebSocket server from accepting connections
+        loop = asyncio.get_event_loop()
+        hotspot_ip = await loop.run_in_executor(
+            None, _connect_to_hotspot, wifi_ssid, wifi_pass, original_ip, 25
+        )
         if not hotspot_ip:
+            _status("Failed to connect to hotspot", 0)
             return {"error": "Could not connect to device WiFi hotspot", "files": new_files}
 
-        # Wait for handshake
+        _status("Waiting for device handshake...", 25)
         try:
             await asyncio.wait_for(handshake_done.wait(), timeout=30)
         except asyncio.TimeoutError:
+            _status("Handshake timed out", 0)
             return {"error": "WiFi handshake timed out", "files": new_files}
 
-        # Wait for file list
+        _status("Getting file list...", 30)
         try:
             await asyncio.wait_for(file_list_received.wait(), timeout=15)
         except asyncio.TimeoutError:
+            _status("File list timed out", 0)
             return {"error": "WiFi file list timed out", "files": new_files}
 
-        # Wait for all downloads (generous timeout for large files)
         total_size = sum(f["size"] for f in wifi_files)
-        dl_timeout = max(total_size / 50000, 60)  # ~50 KB/s minimum, 60s floor
+        total_new = sum(1 for f in wifi_files if str(f["session_id"]) not in dismissed and not (RECORDINGS_DIR / f"{f['session_id']}.ogg").exists())
+        _status(f"Downloading {total_new} file(s)...", 35)
+
+        dl_timeout = max(total_size / 50000, 60)
         try:
-            await asyncio.wait_for(all_downloads_done.wait(), timeout=dl_timeout)
-        except asyncio.TimeoutError:
-            logging.warning(f"WiFi: download timed out after {dl_timeout:.0f}s")
+            # Poll progress while waiting for downloads
+            start_dl = asyncio.get_event_loop().time()
+            while not all_downloads_done.is_set():
+                try:
+                    await asyncio.wait_for(all_downloads_done.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    elapsed = asyncio.get_event_loop().time() - start_dl
+                    if elapsed > dl_timeout:
+                        print(f"[WiFi] WARNING: download timed out after {dl_timeout:.0f}s")
+                        break
+                    done_count = sum(1 for f in new_files if f["status"] == "new")
+                    pct = 35 + int(55 * done_count / max(total_new, 1))
+                    _status(f"Downloading... {done_count}/{total_new} complete", pct)
+        except Exception:
+            pass
+
+        done_count = sum(1 for f in new_files if f["status"] == "new")
+        total_downloaded = sum(1 for f in new_files if f["status"] in ("new", "decrypt_failed"))
+        _status(f"Download complete: {done_count} file(s) saved, {total_downloaded} downloaded", 90)
+        print(f"[WiFi] new_files={new_files}")
+        print(f"[WiFi] wifi_files={wifi_files}")
 
     finally:
-        # Always restore internet
+        # Always restore internet — but keep server alive until downloads are done
         if server:
+            # Give WebSocket handler a moment to finish writing any pending files
+            await asyncio.sleep(1)
             server.close()
         if hotspot_ip:
+            _status("Restoring internet connection...", 92)
             await _restore_internet(wifi_ssid, hotspot_ip)
+            _status("Internet restored", 98)
 
         # Close hotspot via BLE (may fail if BLE dropped during WiFi)
         try:
