@@ -108,47 +108,72 @@ def get_preferred_networks(exclude):
         return []
 
 
-async def restore_internet(ssid, hotspot_ip):
-    preferred = get_preferred_networks(ssid)
+async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
+    """Restore internet after Plaud hotspot.
+
+    Strategy:
+    1. Power-cycle WiFi (10s off) to reset stuck radio
+    2. Try CoreWLAN scan + associateToNetwork to rejoin saved SSID
+    3. If -3900, second power-cycle + retry
+    4. If still fails, open WiFi settings + tell user which network to click
+    """
     subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", ssid], capture_output=True)
-    status("Restoring internet (WiFi off 10s)...", 92)
-    subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
-    await asyncio.sleep(10)
-    subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
 
-    for i in range(10):
-        await asyncio.sleep(1.5)
+    try:
+        from CoreWLAN import CWWiFiClient
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+    except Exception:
+        iface = None
+
+    for cycle in range(2):
+        off_time = 10 if cycle == 0 else 5
+        settle_time = 5 if cycle == 0 else 8
+        status(f"Restoring WiFi (cycle {cycle + 1}/2)...", 92 + cycle * 2)
+        subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
+        await asyncio.sleep(off_time)
+        subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
+        await asyncio.sleep(settle_time)
+
+        # Try CoreWLAN scan + join for the original network
+        if original_ssid and iface:
+            status(f"Scanning for {original_ssid}...", 93 + cycle * 2)
+            networks, _ = iface.scanForNetworksWithName_error_(original_ssid, None)
+            if networks:
+                best = None
+                enumerator = networks.objectEnumerator()
+                while True:
+                    obj = enumerator.nextObject()
+                    if obj is None:
+                        break
+                    if obj.ssid() and str(obj.ssid()) == original_ssid:
+                        if best is None or obj.rssiValue() > best.rssiValue():
+                            best = obj
+                if best:
+                    status(f"Joining {original_ssid}...", 95 + cycle)
+                    success, error = iface.associateToNetwork_password_error_(best, None, None)
+                    if success:
+                        await asyncio.sleep(3)
+                        ip = get_en0_ip()
+                        if ip and ip != hotspot_ip:
+                            status(f"Restored to {original_ssid} ({ip})", 98)
+                            return {"restored": True, "ssid": original_ssid, "ip": ip}
+                    elif "-3900" in str(error):
+                        continue  # Try another power-cycle
+
+        # Check if auto-join worked
         ip = get_en0_ip()
         if ip and ip != hotspot_ip:
-            status(f"Internet restored ({ip})", 98)
-            return True
+            current = str(iface.ssid()) if iface and iface.ssid() else ""
+            if not original_ip or ip == original_ip:
+                status(f"Restored to {current or 'network'} ({ip})", 98)
+                return {"restored": True, "ssid": current, "ip": ip}
 
-    status("Trying preferred networks...", 95)
-    for net in preferred[:5]:
-        try:
-            r = subprocess.run(["networksetup", "-setairportnetwork", "en0", net], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0 and "-3900" not in (r.stdout + r.stderr):
-                await asyncio.sleep(3)
-                ip = get_en0_ip()
-                if ip and ip != hotspot_ip:
-                    status(f"Internet restored via {net}", 98)
-                    return True
-        except Exception:
-            pass
-
-    status("Second power-cycle...", 95)
-    subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
-    await asyncio.sleep(10)
-    subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
-    for i in range(15):
-        await asyncio.sleep(2)
-        ip = get_en0_ip()
-        if ip and ip != hotspot_ip:
-            status(f"Internet restored ({ip})", 98)
-            return True
-
-    status("Internet may need manual reconnection", 95)
-    return False
+    # All automatic methods failed — open WiFi settings for user
+    status("Opening WiFi settings...", 96)
+    subprocess.run(["open", "x-apple.systempreferences:com.apple.wifi-settings"], capture_output=True)
+    msg = f"Please reconnect to {original_ssid}" if original_ssid else "Please reconnect to your WiFi"
+    status(msg, 97)
+    return {"restored": False, "need_manual": True, "ssid": original_ssid, "message": msg}
 
 
 SN_SIG = "<REDACTED_SN_SIGNATURE>"
@@ -260,6 +285,17 @@ async def main():
     wifi_ssid = f"Plaud{sn[-4:]}"
     wifi_pass = sn[-8:]
     original_ip = get_en0_ip()
+
+    # Save current SSID before transfer (requires Location permission)
+    original_ssid = ""
+    try:
+        from CoreWLAN import CWWiFiClient
+        _iface = CWWiFiClient.sharedWiFiClient().interface()
+        if _iface and _iface.ssid():
+            original_ssid = str(_iface.ssid())
+            status(f"Current network: {original_ssid}", 3)
+    except Exception:
+        pass
 
     ws_seq = 0
     handshake_done = asyncio.Event()
@@ -391,6 +427,7 @@ async def main():
     # ── Execute ──
     hotspot_ip = None
     server = None
+    restore_result = None
     try:
         status("Starting WebSocket server...", 5)
         server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
@@ -437,7 +474,7 @@ async def main():
             await asyncio.sleep(1)
             server.close()
         if hotspot_ip:
-            await restore_internet(wifi_ssid, hotspot_ip)
+            restore_result = await restore_internet(wifi_ssid, hotspot_ip, original_ip, original_ssid)
 
         # Close hotspot + disconnect BLE
         try:
@@ -451,7 +488,10 @@ async def main():
         except Exception:
             pass
 
-    print(json.dumps({"files": new_files, "method": "wifi"}))
+    result = {"files": new_files, "method": "wifi"}
+    if restore_result and restore_result.get("need_manual"):
+        result["wifi_restore"] = restore_result
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
