@@ -81,9 +81,11 @@ def status():
             _rssi = None
             _battery = None
             _charging = False
+            _cmd_ok = False
             try:
                 r = await dev.send_cmd(bytes([1, 3, 0]), timeout=3)
                 if r and len(r) >= 5:
+                    _cmd_ok = True
                     state_byte = r[3] if len(r) > 3 else 0
                     _is_rec = state_byte in (1, 2, 3)
             except Exception:
@@ -91,6 +93,7 @@ def status():
             try:
                 r = await dev.send_cmd(bytes([1, 9, 0]), timeout=3)
                 if r and len(r) >= 5:
+                    _cmd_ok = True
                     _charging = bool(r[3])
                     _battery = r[4]
             except Exception:
@@ -99,12 +102,20 @@ def status():
                 _rssi = await dev.read_rssi()
             except Exception:
                 pass
-            return _is_rec, _battery, _charging, _rssi
+            return _is_rec, _battery, _charging, _rssi, _cmd_ok
 
         try:
-            is_recording, live_battery, charging, rssi = dev.run_async(_poll_device())
+            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(_poll_device())
             if live_battery is not None:
                 battery = live_battery
+            # If all commands failed and no RSSI, device is gone — mark disconnected
+            if not cmd_ok and rssi is None and not dev.is_connected():
+                # send_cmd already reset state via _reset_state()
+                state = dev.get_state()
+            elif not cmd_ok and rssi is None:
+                logging.warning("All BLE commands timed out — marking device as disconnected")
+                dev.set_connected(False)
+                state = dev.get_state()
         except Exception:
             pass
 
