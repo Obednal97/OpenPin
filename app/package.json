@@ -32,7 +32,8 @@
     "publish": {
       "provider": "github",
       "owner": "Obednal97",
-      "repo": "Plaud-V2"
+      "repo": "Plaud-V2",
+      "releaseType": "release"
     },
     "mac": {
       "category": "public.app-category.utilities",
