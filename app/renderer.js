@@ -383,14 +383,6 @@ async function executeWifiSync() {
     overlay.removeEventListener('transitionend', h);
   });
 
-  // Abort any running BLE sync
-  try {
-    await window.plaud.abortSync();
-  } catch {}
-
-  // Wait briefly for BLE sync to release the lock
-  await new Promise((r) => setTimeout(r, 2000));
-
   app.syncing = true;
   showProgress('WiFi sync — starting...', 5);
 
