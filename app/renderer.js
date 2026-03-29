@@ -587,6 +587,13 @@ async function init() {
   await loadSettings();
   await loadRecordings();
 
+  // First-run setup — show onboarding if no paired devices and not dismissed
+  const isFirstRun = !app.settings.has_paired_devices && !app.settings.setup_dismissed;
+  if (isFirstRun) {
+    showSetupWelcome();
+    return; // completeSetup() will resume polling after onboarding finishes
+  }
+
   // Immediately try to connect to a known device on startup
   try {
     const status = await window.plaud.status();
@@ -602,6 +609,10 @@ async function init() {
     }
   } catch {}
 
+  _startBgPoll();
+}
+
+function _startBgPoll() {
   // Poll device status every 10 seconds
   app.pollInterval = setInterval(updateDeviceStatus, 10000);
 

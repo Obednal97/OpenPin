@@ -45,6 +45,8 @@ def get_settings():
             "auto_transcribe": config.get("auto_transcribe", True),
             "auto_summarise": config.get("auto_summarise", False),
             "notion_auto_push": config.get("notion_auto_push", False),
+            "has_paired_devices": bool(config.get("paired_devices", {})),
+            "setup_dismissed": config.get("setup_dismissed", False),
         }
     )
 
@@ -80,6 +82,8 @@ def save_settings():
         config["notion_auto_push"] = data["notion_auto_push"]
     if "webhooks" in data:
         config["webhooks"] = data["webhooks"]
+    if "setup_dismissed" in data:
+        config["setup_dismissed"] = data["setup_dismissed"]
     if "remove_openai_key" in data:
         config.pop("openai_api_key", None)
     if "remove_anthropic_key" in data:
