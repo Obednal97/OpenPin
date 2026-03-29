@@ -695,15 +695,27 @@ def do_wifi_sync_blocking():
     Spawns wifi_sync_worker.py as a standalone process with its own clean
     asyncio event loop — identical to the test script that works reliably.
     """
-    global _syncing
-    if _syncing:
-        return {"error": "Sync already in progress"}
+    global _syncing, _sync_abort
     if not _device_state.get("serial_number"):
         return {"error": "Device serial number unknown"}
     if not _device_state.get("session_keys"):
         return {"error": "No BLE session — connect device first"}
 
-    _syncing = True
+    # Force-abort any running BLE sync and take over the lock
+    if _syncing:
+        _sync_abort = True
+        # Wait up to 10s for BLE sync to notice the abort and release
+        for _ in range(20):
+            import time as _time
+            _time.sleep(0.5)
+            if not _syncing:
+                break
+        # If still locked, force it — WiFi worker runs in a separate process anyway
+        _syncing = True
+        _sync_abort = False
+    else:
+        _syncing = True
+
     sn = _device_state["serial_number"]
     key, nonce, aad = _device_state["session_keys"]
 
