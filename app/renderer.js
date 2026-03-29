@@ -337,6 +337,122 @@ $('#update-dismiss').addEventListener('click', () => {
   $('#update-banner').classList.add('hidden');
 });
 
+// ---- WiFi Sync (user-initiated) ----
+const WIFI_SIZE_THRESHOLD = 500000; // 500KB — offer WiFi above this
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function offerWifiSync(totalSize, fileCount, isBackground) {
+  const sizeStr = formatBytes(totalSize);
+  const msg = `${fileCount} recording(s) (${sizeStr}) — WiFi transfer is ~50x faster`;
+
+  if (isBackground) {
+    // App is in tray/background — show system notification
+    window.plaud.showNotification(
+      'Large recordings detected',
+      `${sizeStr} to sync. Tap to use WiFi transfer (temporarily disconnects internet).`,
+      'Use WiFi',
+    );
+    return;
+  }
+
+  // App is visible — show action toast
+  toastAction(msg, 'Use WiFi', () => {
+    startWifiSync();
+  }, 15000);
+}
+
+async function startWifiSync() {
+  // Confirm with user — WiFi interrupts internet
+  const overlay = $('#wifi-confirm-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  overlay.offsetHeight;
+  overlay.classList.add('visible');
+}
+
+async function executeWifiSync() {
+  const overlay = $('#wifi-confirm-overlay');
+  overlay.classList.remove('visible');
+  overlay.addEventListener('transitionend', function h() {
+    overlay.classList.add('hidden');
+    overlay.removeEventListener('transitionend', h);
+  });
+
+  app.syncing = true;
+  showProgress('WiFi sync — connecting to device hotspot...', 10);
+  toast('Starting WiFi transfer — internet will disconnect briefly', 'info');
+
+  try {
+    const result = await window.plaud.wifiSync();
+    if (result.error) {
+      toast(`WiFi sync failed: ${result.error}`, 'error');
+    } else {
+      const newFiles = (result.files || []).filter((f) => f.status === 'new');
+      if (newFiles.length > 0) {
+        toast(`WiFi sync complete: ${newFiles.length} recording(s)`, 'success');
+
+        // Auto-transcribe if enabled
+        if (app.settings.auto_transcribe !== false) {
+          showProgress('Transcribing...', 60);
+          for (const f of newFiles) {
+            if (f.ogg_path) {
+              try {
+                await window.plaud.transcribe(
+                  f.ogg_path,
+                  app.settings.model || 'small',
+                  app.settings.diarize || false,
+                  app.settings.language || 'en',
+                );
+              } catch {}
+            }
+          }
+          if (app.settings.auto_summarise) {
+            showProgress('Summarising...', 90);
+            for (const f of newFiles) {
+              if (f.ogg_path) {
+                try {
+                  const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
+                  await window.plaud.summarize(sid);
+                } catch {}
+              }
+            }
+          }
+        }
+        await loadRecordings();
+      } else {
+        toast('WiFi sync: no new recordings', 'info');
+      }
+    }
+  } catch (err) {
+    toast(`WiFi sync error: ${err.message}`, 'error');
+  } finally {
+    app.syncing = false;
+    hideProgress();
+    await updateDeviceStatus();
+  }
+}
+
+function dismissWifiConfirm() {
+  const overlay = $('#wifi-confirm-overlay');
+  overlay.classList.remove('visible');
+  overlay.addEventListener('transitionend', function h() {
+    overlay.classList.add('hidden');
+    overlay.removeEventListener('transitionend', h);
+  });
+}
+
+// Handle notification action from background
+window.plaud.onNotificationAction((action) => {
+  if (action === 'wifi-sync') {
+    startWifiSync();
+  }
+});
+
 // ---- System Wake Recovery ----
 // BLE connections die during macOS sleep — detect wake and force reconnect cycle
 window.plaud.onSystemWake(async () => {
@@ -452,6 +568,14 @@ async function init() {
 
       const check = await window.plaud.checkNew();
       if (check.new_files > 0) {
+        // If large files, offer WiFi sync instead of slow BLE
+        if (check.total_size > WIFI_SIZE_THRESHOLD) {
+          const isBackground = !document.hasFocus();
+          offerWifiSync(check.total_size, check.new_files, isBackground);
+          _bgBusy = false;
+          return;
+        }
+
         toast(`${check.new_files} new recording(s) found, syncing...`, 'info');
         dom.progressBar.classList.remove('hidden');
         dom.progressBar.classList.add('indeterminate');
