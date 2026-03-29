@@ -210,7 +210,8 @@ def check_new():
         existing = {f.stem for f in RECORDINGS_DIR.glob("*.ogg")}
         dismissed = set(load_config().get("deleted_ids", []))
         new_files = [f for f in files if str(f["session_id"]) not in existing and str(f["session_id"]) not in dismissed]
-        return jsonify({"new_files": len(new_files), "files": new_files})
+        total_size = sum(f.get("size", 0) for f in new_files)
+        return jsonify({"new_files": len(new_files), "total_size": total_size, "files": new_files})
     except Exception:
         return jsonify({"new_files": 0})
 
@@ -255,6 +256,18 @@ def sync():
         return jsonify({"error": "Not connected"}), 400
     try:
         result = dev.run_async(dev.sync_files(), timeout=1800)  # 30 min for large multi-file syncs
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/wifi-sync", methods=["POST"])
+def wifi_sync():
+    """Sync files via WiFi (user-initiated). Faster but interrupts internet."""
+    if not dev.is_connected():
+        return jsonify({"error": "Not connected"}), 400
+    try:
+        result = dev.run_async(dev.do_wifi_sync(), timeout=600)  # 10 min max
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

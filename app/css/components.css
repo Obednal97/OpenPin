@@ -219,6 +219,28 @@
 .toast-error { background: rgba(255, 69, 58, 0.9); color: var(--white); }
 .toast-info { background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); }
 
+/* Toast with action button */
+.toast-with-action {
+  animation: toastIn 0.3s var(--ease);
+  max-width: 420px;
+}
+.toast-content { display: flex; align-items: center; gap: var(--sp-3); }
+.toast-message { flex: 1; }
+.toast-action-btn {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--duration) var(--ease);
+}
+.toast-action-btn:hover { background: var(--accent); color: var(--white); }
+
 /* === COMPONENT: Modal === */
 .modal-overlay {
   position: fixed;

@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('plaud', {
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
   sync: () => apiCall('POST', '/device/sync'),
+  wifiSync: () => apiCall('POST', '/device/wifi-sync'),
 
   // Transcription
   transcribe: (path, model, diarize, language) => apiCall('POST', '/transcribe', { path, model, diarize, language }),
@@ -97,6 +98,10 @@ contextBridge.exposeInMainWorld('plaud', {
 
   // System events
   onSystemWake: (callback) => ipcRenderer.on('system-wake', () => callback()),
+  showNotification: (title, body, actionLabel) =>
+    ipcRenderer.invoke('show-notification', { title, body, actionLabel }),
+  onNotificationAction: (callback) =>
+    ipcRenderer.on('notification-action', (event, action) => callback(action)),
 
   // Auto-updater
   installUpdate: () => ipcRenderer.invoke('install-update'),

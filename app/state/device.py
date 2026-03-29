@@ -686,8 +686,56 @@ async def sync_files(progress_callback=None):
         _syncing = False
 
 
+async def do_wifi_sync():
+    """Run WiFi sync (user-initiated). Returns same format as sync_files."""
+    global _syncing
+    if _syncing:
+        return {"error": "Sync already in progress"}
+    if not _device_state.get("serial_number"):
+        return {"error": "Device serial number unknown"}
+    if not _device_state.get("session_keys"):
+        return {"error": "No BLE session — connect device first"}
+
+    _syncing = True
+    try:
+        from app.utils.wifi_sync import wifi_sync_files
+
+        sn = _device_state["serial_number"]
+        keys = _device_state["session_keys"]
+
+        async def _send_ble_cmd(name, pt, timeout=5):
+            return await send_cmd(pt, timeout=timeout)
+
+        cl = _device_state["client"]
+        try:
+            await cl.stop_notify(N)
+        except Exception:
+            pass
+
+        result = await wifi_sync_files(keys, sn, _send_ble_cmd)
+
+        try:
+            if cl and _device_state["connected"]:
+                await _setup_notify(cl)
+        except Exception:
+            pass
+
+        return result or {"error": "WiFi sync returned no result"}
+    except Exception as e:
+        logging.warning(f"WiFi sync error: {e}")
+        try:
+            cl = _device_state["client"]
+            if cl:
+                await _setup_notify(cl)
+        except Exception:
+            pass
+        return {"error": str(e)}
+    finally:
+        _syncing = False
+
+
 async def _sync_files_inner(progress_callback=None):
-    """Internal sync implementation. Auto-selects WiFi for large transfers."""
+    """Internal BLE sync implementation."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
     app_rsa_key = load_pem_private_key(APP_KEY_PATH.read_bytes(), password=None)
@@ -699,60 +747,6 @@ async def _sync_files_inner(progress_callback=None):
     RECORDINGS_DIR.mkdir(exist_ok=True)
     dismissed = set(load_config().get("deleted_ids", []))
 
-    # Check if WiFi transfer is worthwhile
-    new_download_size = 0
-    for f in files:
-        sid = f["session_id"]
-        ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
-        if str(sid) not in dismissed and not ogg_path.exists():
-            new_download_size += f["size"]
-
-    if new_download_size > 500_000 and _device_state.get("serial_number"):
-        # Try WiFi transfer for large downloads
-        try:
-            logging.info(f"Sync: {new_download_size} bytes to download — attempting WiFi transfer")
-            from app.utils.wifi_sync import wifi_sync_files
-
-            sn = _device_state["serial_number"]
-            keys = _device_state["session_keys"]
-
-            async def _send_ble_cmd(name, pt, timeout=5):
-                return await send_cmd(pt, timeout=timeout)
-
-            # Stop BLE notifications during WiFi (they conflict)
-            cl = _device_state["client"]
-            try:
-                await cl.stop_notify(N)
-            except Exception:
-                pass
-
-            result = await wifi_sync_files(keys, sn, _send_ble_cmd)
-
-            # Restart BLE notifications
-            try:
-                await _setup_notify(cl)
-            except Exception:
-                pass
-
-            if result and result.get("files"):
-                new_count = sum(1 for f in result["files"] if f["status"] == "new")
-                if new_count > 0:
-                    logging.info(f"WiFi sync complete: {new_count} new file(s)")
-                    return result
-                # WiFi got no new files but didn't error — fall through to BLE
-            if result and result.get("error"):
-                logging.warning(f"WiFi sync failed: {result['error']} — falling back to BLE")
-        except Exception as e:
-            logging.warning(f"WiFi sync error: {e} — falling back to BLE")
-            # Restart BLE notifications after WiFi failure
-            try:
-                cl = _device_state["client"]
-                if cl:
-                    await _setup_notify(cl)
-            except Exception:
-                pass
-
-    # BLE sync fallback / default for small transfers
     new_files = []
     for i, f in enumerate(files):
         sid = f["session_id"]
