@@ -35,6 +35,7 @@ const app = {
   selectedIds: new Set(),
   searchQuery: '',
   activeTagFilters: new Set(),
+  syncing: false,
   processingIds: new Map(),
   cloudState: { logged_in: false, user: null },
   notionState: { connected: false, database_id: null, database_name: null },

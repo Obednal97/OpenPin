@@ -49,6 +49,7 @@ _device_state = {
 }
 
 _ble_lock = threading.Lock()
+_syncing = False  # True while a file sync is in progress — blocks status polls
 _loop = None
 _loop_thread = None
 
@@ -118,12 +119,12 @@ def _get_loop():
     return _loop
 
 
-def run_async(coro):
+def run_async(coro, timeout=120):
     """Run an async coroutine from sync Flask context. Serialized via _ble_lock."""
     with _ble_lock:
         loop = _get_loop()
         future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=120)
+        return future.result(timeout=timeout)
 
 
 async def scan_devices(scan_duration=6):
@@ -643,6 +644,18 @@ async def stop_recording():
 
 async def sync_files(progress_callback=None):
     """Download all files from device, decrypt, save as .ogg."""
+    global _syncing
+    if _syncing:
+        return {"error": "Sync already in progress"}
+    _syncing = True
+    try:
+        return await _sync_files_inner(progress_callback)
+    finally:
+        _syncing = False
+
+
+async def _sync_files_inner(progress_callback=None):
+    """Internal sync implementation."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
     app_rsa_key = load_pem_private_key(APP_KEY_PATH.read_bytes(), password=None)
@@ -685,10 +698,15 @@ async def sync_files(progress_callback=None):
         _device_state["seq"] += 1
         sync_cmd = bytes([1, 28, 0]) + struct.pack("<I", sid) + struct.pack("<I", 0) + struct.pack("<I", fsize)
         ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + sync_cmd, aad)
-        await _device_state["client"].write_gatt_char(W, ct, response=False)
+        try:
+            await _device_state["client"].write_gatt_char(W, ct, response=False)
+        except Exception as e:
+            logging.warning(f"BLE write failed during sync for session {sid}: {e}")
+            _reset_state()
+            break
 
         start = time.time()
-        max_time = max(fsize / 3000, 30)
+        max_time = max(fsize / 1500, 60)  # ~1.5 KB/s worst case, 60s minimum
         while not file_done.is_set():
             try:
                 await asyncio.wait_for(file_done.wait(), timeout=2)
@@ -769,6 +787,10 @@ def set_serial_number(sn):
 
 def is_connected():
     return _device_state["connected"]
+
+
+def is_syncing():
+    return _syncing
 
 
 def set_connected(val):

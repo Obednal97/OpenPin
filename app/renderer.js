@@ -156,6 +156,7 @@ dom.syncBtn.addEventListener('click', async () => {
   setLoading(dom.syncBtn, true);
   showProgress('Syncing recordings...', 20);
   toast('Syncing recordings from device...', 'info');
+  app.syncing = true;
 
   try {
     const result = await window.plaud.sync();
@@ -221,6 +222,7 @@ dom.syncBtn.addEventListener('click', async () => {
   } catch (err) {
     toast(`Sync error: ${err.message}`, 'error');
   } finally {
+    app.syncing = false;
     setLoading(dom.syncBtn, false);
     hideProgress();
   }
@@ -415,10 +417,16 @@ async function init() {
   // Background device polling
   let _bgBusy = false;
   async function bgDevicePoll() {
-    if (_bgBusy) return;
+    if (_bgBusy || app.syncing) return;
     _bgBusy = true;
     try {
       const status = await window.plaud.status();
+
+      // Skip reconnect/sync if a sync is already running server-side
+      if (status.syncing) {
+        _bgBusy = false;
+        return;
+      }
 
       if (!status.connected) {
         const scan = await window.plaud.scanKnown();
@@ -445,6 +453,7 @@ async function init() {
         toast(`${check.new_files} new recording(s) found, syncing...`, 'info');
         dom.progressBar.classList.remove('hidden');
         dom.progressBar.classList.add('indeterminate');
+        app.syncing = true;
         try {
           const result = await window.plaud.sync();
           if (!result.error) {
@@ -495,6 +504,7 @@ async function init() {
             }
           }
         } finally {
+          app.syncing = false;
           dom.progressBar.classList.remove('indeterminate');
           hideProgress();
         }

@@ -74,8 +74,10 @@ def status():
     rssi = state.get("rssi")
     battery = state["battery"]
     charging = False
-    if state["connected"]:
+    syncing = dev.is_syncing()
+    if state["connected"] and not syncing:
         # Combine state + battery + RSSI in a single async call
+        # Skip when syncing — BLE commands would interfere with file transfer
         async def _poll_device():
             _is_rec = False
             _rssi = None
@@ -129,6 +131,7 @@ def status():
             "serial_number": state.get("serial_number"),
             "is_recording": is_recording,
             "rssi": rssi,
+            "syncing": syncing,
         }
     )
 
@@ -251,7 +254,7 @@ def sync():
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
     try:
-        result = dev.run_async(dev.sync_files())
+        result = dev.run_async(dev.sync_files(), timeout=1800)  # 30 min for large multi-file syncs
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
