@@ -61,6 +61,8 @@ function renderSettings() {
   if (syncToggle) syncToggle.checked = app.settings.auto_sync !== false;
   if (transcribeToggle) transcribeToggle.checked = app.settings.auto_transcribe !== false;
   if (summariseToggle) summariseToggle.checked = app.settings.auto_summarise || false;
+  const wifiToggle = $('#auto-wifi-toggle');
+  if (wifiToggle) wifiToggle.checked = app.settings.auto_prefer_wifi || false;
   updateAutoPipelineState();
 
   // Subsections
@@ -517,6 +519,18 @@ function updateAutoPipelineState() {
     summariseRow.classList.remove('disabled');
     summariseToggle.disabled = false;
   }
+
+  const wifiToggle = $('#auto-wifi-toggle');
+  const wifiRow = $('#auto-wifi-row');
+  if (wifiToggle && wifiRow) {
+    if (!syncOn) {
+      wifiRow.classList.add('disabled');
+      wifiToggle.disabled = true;
+    } else {
+      wifiRow.classList.remove('disabled');
+      wifiToggle.disabled = false;
+    }
+  }
 }
 
 function initSettingsEvents() {
@@ -640,6 +654,17 @@ function initSettingsEvents() {
     app.settings.auto_summarise = e.target.checked;
     await window.plaud.saveSettings({ auto_summarise: e.target.checked });
     toast(e.target.checked ? 'Auto-summarise enabled' : 'Auto-summarise disabled', 'success');
+  });
+
+  $('#auto-wifi-toggle').addEventListener('change', async (e) => {
+    app.settings.auto_prefer_wifi = e.target.checked;
+    await window.plaud.saveSettings({ auto_prefer_wifi: e.target.checked });
+    toast(
+      e.target.checked
+        ? 'WiFi preferred — large transfers will use WiFi automatically'
+        : 'WiFi preference disabled',
+      'success',
+    );
   });
 
   // Profile save
