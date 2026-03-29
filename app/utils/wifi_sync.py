@@ -128,17 +128,23 @@ def _connect_to_hotspot(ssid, password, original_ip, timeout=25):
 
 
 async def _restore_internet(ssid, hotspot_ip=""):
-    """Restore internet: remove hotspot from preferred, power-cycle WiFi, wait for auto-join."""
+    """Restore internet after Plaud hotspot.
+
+    macOS WiFi radio gets stuck after disconnecting from device hotspot —
+    networksetup -setairportnetwork fails with -3900 and CoreWLAN scan
+    returns 0 results. The only reliable fix is a full 10-second power-off
+    to reset the radio hardware, then let macOS auto-join.
+    """
     subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", ssid], capture_output=True)
-    logging.info("WiFi: power-cycling to restore internet...")
+    logging.info("WiFi: power-cycling (10s off) to restore internet...")
     subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
-    await asyncio.sleep(3)
+    await asyncio.sleep(10)  # 10s off required — 3s is not enough after hotspot
     subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
     for i in range(20):
         await asyncio.sleep(1.5)
         ip = _get_en0_ip()
         if ip and ip != hotspot_ip:
-            logging.info(f"WiFi: internet restored IP={ip} ({int((i + 1) * 1.5)}s)")
+            logging.info(f"WiFi: internet restored IP={ip} ({int((i + 1) * 1.5 + 10)}s total)")
             return True
     logging.warning("WiFi: auto-join slow — internet may need manual reconnection")
     return False
