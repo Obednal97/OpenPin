@@ -97,9 +97,9 @@ def connect_to_hotspot(target_ssid, password, original_ip, timeout=25):
 
 async def restore_internet(hotspot_ip=""):
     subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", WIFI_SSID], capture_output=True)
-    print(f"    WiFi off...")
+    print(f"    WiFi off (10s)...")
     subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
-    await asyncio.sleep(3)
+    await asyncio.sleep(10)
     print(f"    WiFi on — waiting for auto-join...")
     subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
     for i in range(20):
