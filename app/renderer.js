@@ -225,6 +225,8 @@ dom.syncBtn.addEventListener('click', async () => {
     app.syncing = false;
     setLoading(dom.syncBtn, false);
     hideProgress();
+    // Immediately refresh status after sync ends — catches disconnections during transfer
+    await updateDeviceStatus();
   }
 });
 
@@ -507,6 +509,7 @@ async function init() {
           app.syncing = false;
           dom.progressBar.classList.remove('indeterminate');
           hideProgress();
+          await updateDeviceStatus();
         }
       }
     } catch {}
