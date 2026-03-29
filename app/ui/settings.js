@@ -455,6 +455,8 @@ function renderHeaderSignal(rssi) {
 }
 
 async function updateDeviceStatus() {
+  // Skip polling during active sync — BLE commands would interfere with file transfer
+  if (app.syncing) return;
   try {
     const status = await window.plaud.status();
     app.deviceStateCache = status;
