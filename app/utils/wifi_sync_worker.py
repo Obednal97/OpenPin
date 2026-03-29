@@ -8,7 +8,6 @@ Usage: python3 wifi_sync_worker.py '{"key":"...","nonce":"...","aad":"...","sn":
 """
 
 import asyncio
-import hashlib
 import json
 import struct
 import subprocess
@@ -184,7 +183,9 @@ N = "00002bb0-0000-1000-8000-00805f9b34fb"
 async def ble_connect_and_setup():
     """Full BLE connect + handshake + setup, returns (client, key, nonce, aad, cipher, enc_func)."""
     import base64
+
     from bleak import BleakClient, BleakScanner
+
     from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
 
     status("BLE scanning...", 2)
@@ -205,25 +206,35 @@ async def ble_connect_and_setup():
     status("BLE connected, handshaking...", 3)
 
     # RSA handshake
-    ack = asyncio.Event(); rsa = {}; done = asyncio.Event()
+    ack = asyncio.Event()
+    rsa = {}
+    done = asyncio.Event()
+
     def h(s, d):
-        d = bytes(d); cid = struct.unpack_from("<H", d, 0)[0] if len(d) >= 2 else 0
-        if cid == 65041: ack.set()
+        d = bytes(d)
+        cid = struct.unpack_from("<H", d, 0)[0] if len(d) >= 2 else 0
+        if cid == 65041:
+            ack.set()
         elif cid == 65042 and len(d) >= 4:
             idx = d[3]
-            if idx not in rsa: rsa[idx] = d[4:]
-            if len(rsa) >= d[2]: done.set()
+            if idx not in rsa:
+                rsa[idx] = d[4:]
+            if len(rsa) >= d[2]:
+                done.set()
     await cl.start_notify(N, h)
-    sig = base64.b64decode(SN_SIG); tc = (len(sig) + 99) // 100
+    sig = base64.b64decode(SN_SIG)
+    tc = (len(sig) + 99) // 100
     for _ in range(2):
         for i in range(tc):
             await cl.write_gatt_char(W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i*100:(i+1)*100], response=False)
             await asyncio.sleep(0.02)
     for _ in range(50):
         await asyncio.sleep(0.1)
-        if ack.is_set() or done.is_set(): break
+        if ack.is_set() or done.is_set():
+            break
     if ack.is_set() and not done.is_set():
-        pem = get_public_key_full_pem().encode(); pc = (len(pem) + 99) // 100
+        pem = get_public_key_full_pem().encode()
+        pc = (len(pem) + 99) // 100
         for i in range(pc):
             await cl.write_gatt_char(W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i*100:(i+1)*100], response=True)
             await asyncio.sleep(0.02)
@@ -232,7 +243,8 @@ async def ble_connect_and_setup():
         await cl.stop_notify(N)
         return None
     blob = bytearray()
-    for i in sorted(rsa.keys()): blob.extend(rsa[i])
+    for i in sorted(rsa.keys()):
+        blob.extend(rsa[i])
     dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
     key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
     cipher = ChaCha20Poly1305(key)
@@ -241,19 +253,32 @@ async def ble_connect_and_setup():
 
     # Setup encrypted command channel
     seq = [0]
-    def enc(pt): seq[0] += 1; return cipher.encrypt(nonce, struct.pack("<I", seq[0]) + pt, aad)
-    cmd_evt = asyncio.Event(); cmd_resp = [None]
+
+    def enc(pt):
+        seq[0] += 1
+        return cipher.encrypt(nonce, struct.pack("<I", seq[0]) + pt, aad)
+
+    cmd_evt = asyncio.Event()
+    cmd_resp = [None]
+
     def handler(s, d):
-        try: dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
-        except: return
-        if len(dd) >= 1 and dd[0] == 1: cmd_resp[0] = dd; cmd_evt.set()
+        try:
+            dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
+        except Exception:
+            return
+        if len(dd) >= 1 and dd[0] == 1:
+            cmd_resp[0] = dd
+            cmd_evt.set()
     await cl.start_notify(N, handler)
 
     async def cmd(name, pt):
-        cmd_evt.clear(); cmd_resp[0] = None
+        cmd_evt.clear()
+        cmd_resp[0] = None
         await cl.write_gatt_char(W, enc(pt), response=False)
-        try: await asyncio.wait_for(cmd_evt.wait(), timeout=5)
-        except: pass
+        try:
+            await asyncio.wait_for(cmd_evt.wait(), timeout=5)
+        except Exception:
+            pass
         return cmd_resp[0]
 
     # BLE setup commands
@@ -420,7 +445,7 @@ async def main():
                     pong = build_wifi_packet(16, {})
                     await websocket.send(ws_encrypt(pong))
 
-        except Exception as e:
+        except Exception:
             if not all_downloads_done.is_set():
                 all_downloads_done.set()
 
@@ -436,8 +461,10 @@ async def main():
         await ble_cmd("WiFi_Open", bytes([1, 10, 0]))
 
         # Stop BLE notifications — they conflict with WiFi
-        try: await cl.stop_notify(N)
-        except: pass
+        try:
+            await cl.stop_notify(N)
+        except Exception:
+            pass
 
         status(f"Connecting to {wifi_ssid}...", 15)
         hotspot_ip = connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=25)
@@ -448,14 +475,14 @@ async def main():
         status("Waiting for handshake...", 25)
         try:
             await asyncio.wait_for(handshake_done.wait(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(json.dumps({"error": "Handshake timed out", "files": new_files}))
             return
 
         status("Getting file list...", 30)
         try:
             await asyncio.wait_for(file_list_received.wait(), timeout=15)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(json.dumps({"error": "File list timed out", "files": new_files}))
             return
 
@@ -463,7 +490,7 @@ async def main():
         dl_timeout = max(total_size / 50000, 60)
         try:
             await asyncio.wait_for(all_downloads_done.wait(), timeout=dl_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         done_count = sum(1 for f in new_files if f["status"] == "new")

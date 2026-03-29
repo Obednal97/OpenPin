@@ -75,6 +75,11 @@ export default [
         rssiToSignalLevel: "writable",
         rssiToLabel: "writable",
         showThemeIcon: "writable",
+        // Cross-file functions (setup, background polling, toasts)
+        showSetupWelcome: "writable",
+        _startBgPoll: "writable",
+        toastAction: "writable",
+        updateAutoPipelineState: "writable",
       },
     },
     rules: {
