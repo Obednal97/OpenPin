@@ -234,6 +234,30 @@ function getMacOSName() {
 
 const _appStartTime = Date.now();
 
+// Gather Python environment details (cached after first call)
+let _pythonEnvCache = null;
+function getPythonEnv() {
+  if (_pythonEnvCache) return _pythonEnvCache;
+  _pythonEnvCache = { version: 'unknown', path: 'unknown', pip: 'unknown', packages: 'unknown', sitePackages: 'unknown' };
+  try {
+    const python = findPython();
+    if (!python) return _pythonEnvCache;
+    _pythonEnvCache.path = python.path;
+    _pythonEnvCache.version = python.version;
+    try {
+      _pythonEnvCache.pip = execSync(`${python.path} -m pip --version`, { stdio: 'pipe', env: { ...process.env, PATH: fullPath }, timeout: 5000 }).toString().trim();
+    } catch {}
+    try {
+      const pkgs = execSync(`${python.path} -m pip list --format=columns 2>/dev/null | grep -iE "flask|requests|bleak|cryptography|diarize|urllib3|openssl"`, { stdio: 'pipe', env: { ...process.env, PATH: fullPath }, timeout: 5000 }).toString().trim();
+      _pythonEnvCache.packages = pkgs || 'none of the key packages found';
+    } catch { _pythonEnvCache.packages = 'pip list failed'; }
+    try {
+      _pythonEnvCache.sitePackages = execSync(`${python.path} -c "import site; print('; '.join(site.getsitepackages()))"`, { stdio: 'pipe', timeout: 5000 }).toString().trim();
+    } catch {}
+  } catch {}
+  return _pythonEnvCache;
+}
+
 async function reportError(error, context = 'main') {
   try {
     const fingerprint = errorFingerprint(error);
@@ -247,33 +271,68 @@ async function reportError(error, context = 'main') {
     // Gather system info
     const uptimeMin = Math.round((Date.now() - _appStartTime) / 60000);
     const memMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    const totalMemGB = Math.round(os.totalmem() / 1024 / 1024 / 1024);
+    const freeMemGB = Math.round(os.freemem() / 1024 / 1024 / 1024);
     const pythonRunning = pythonProcess && !pythonProcess.killed;
     const electronVersion = process.versions.electron;
+    const nodeVersion = process.versions.node;
+    const pyEnv = getPythonEnv();
+
+    // Check if running from /Applications or dev
+    const appPath = app.getAppPath();
+    const isPackaged = !process.defaultApp;
 
     // Search for existing issues with this error
     const query = encodeURIComponent(`repo:${UPDATE_REPO} is:issue label:auto-bug "${fingerprint.slice(0, 60)}"`);
     const search = await githubApi(`/search/issues?q=${query}&per_page=5`);
 
     const systemInfo = [
-      `- **Version:** ${version}`,
-      `- **Electron:** ${electronVersion}`,
+      `- **App version:** ${version}`,
+      `- **Electron:** ${electronVersion} (Node ${nodeVersion})`,
       `- **macOS:** ${getMacOSName()} (${os.release()})`,
       `- **Arch:** ${os.arch()}`,
-      `- **Memory:** ${memMB} MB`,
+      `- **RAM:** ${freeMemGB} GB free / ${totalMemGB} GB total`,
+      `- **App memory:** ${memMB} MB RSS`,
       `- **Uptime:** ${uptimeMin} min`,
-      `- **Python server:** ${pythonRunning ? 'running' : 'not running'}`,
-      `- **Context:** ${context}`,
+      `- **Packaged:** ${isPackaged ? 'yes' : 'no (dev mode)'}`,
+      `- **App path:** \`${appPath}\``,
+      `- **API port:** ${API_PORT}`,
     ].join('\n');
+
+    const pythonInfo = [
+      `- **Python:** ${pyEnv.version}`,
+      `- **Python path:** \`${pyEnv.path}\``,
+      `- **Pip:** ${pyEnv.pip}`,
+      `- **Site-packages:** \`${pyEnv.sitePackages}\``,
+      `- **Server process:** ${pythonRunning ? 'running (pid ' + (pythonProcess ? pythonProcess.pid : '?') + ')' : 'not running'}`,
+    ].join('\n');
+
+    const packageInfo = `\`\`\`\n${pyEnv.packages}\n\`\`\``;
 
     const openIssue = (search.items || []).find((i) => i.state === 'open');
     if (openIssue) {
-      // Comment on existing open issue
       await githubApiPost(`/repos/${UPDATE_REPO}/issues/${openIssue.number}/comments`, {
-        body: `Another occurrence reported:\n\n${systemInfo}\n\n\`\`\`\n${errorMsg}\n\`\`\``,
+        body: [
+          '### Another occurrence',
+          '',
+          '**System**',
+          systemInfo,
+          '',
+          '**Python**',
+          pythonInfo,
+          '',
+          '**Key packages**',
+          packageInfo,
+          '',
+          `**Context:** \`${context}\``,
+          '',
+          '```',
+          errorMsg,
+          '```',
+        ].join('\n'),
       });
       console.log(`[BugReporter] Commented on existing issue #${openIssue.number}`);
     } else {
-      // Create new issue
       const title = `[Auto] ${errorMsg.slice(0, 80)}`;
       const body = [
         '## Auto-generated bug report',
@@ -281,7 +340,14 @@ async function reportError(error, context = 'main') {
         '### System',
         systemInfo,
         '',
+        '### Python environment',
+        pythonInfo,
+        '',
+        '### Key packages',
+        packageInfo,
+        '',
         '### Error',
+        `**Context:** \`${context}\``,
         '```',
         errorMsg,
         '```',
