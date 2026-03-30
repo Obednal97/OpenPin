@@ -570,6 +570,7 @@ function showStartupError(error) {
   const hint = isStructured ? error.hint : '';
   const code = isStructured ? error.code : 'UNKNOWN';
 
+  _startupErrorShown = true;
   h2.textContent = title;
   p.innerHTML = '';
 
@@ -596,6 +597,15 @@ window.plaud.onStartupError((error) => {
   showStartupError(error);
 });
 
+// Show startup progress messages (e.g. "Installing dependencies...")
+window.plaud.onStartupStatus((msg) => {
+  const p = dom.emptyState.querySelector('p');
+  if (p && !_startupErrorShown) {
+    p.textContent = msg;
+  }
+});
+let _startupErrorShown = false;
+
 // Init Electron-only features immediately (don't wait for Python API)
 initSettingsEvents();
 
@@ -605,6 +615,11 @@ async function init() {
   if (apiInfo.error) {
     showStartupError(apiInfo.error);
     return;
+  }
+
+  // Show current startup status from main process
+  if (apiInfo.status) {
+    dom.emptyState.querySelector('p').textContent = apiInfo.status;
   }
 
   let apiReady = false;

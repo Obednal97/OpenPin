@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld('plaud', {
   health: () => apiCall('GET', '/health'),
   getApiInfo: () => _apiInfoReady,
   onStartupError: (callback) => ipcRenderer.on('startup-error', (event, error) => callback(error)),
+  onStartupStatus: (callback) => ipcRenderer.on('startup-status', (event, msg) => callback(msg)),
 
   // Notion
   notionStatus: () => apiCall('GET', '/notion/status'),
