@@ -7,6 +7,8 @@ Usage:
     python -m src.summarize path/to/transcript.json --provider ollama --model llama3.2
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys

@@ -523,14 +523,24 @@ function ensurePythonDeps(pythonPath) {
   if (missing.length === 0) return null;
 
   console.log(`[Python] Installing missing dependencies: ${missing.join(', ')}`);
+  // Try with --break-system-packages first (pip 23.1+), fall back without it (older pip)
+  const pipArgs = missing.join(' ');
   try {
     execSync(
-      `${pythonPath} -m pip install --break-system-packages -q ${missing.join(' ')}`,
+      `${pythonPath} -m pip install --break-system-packages --user -q ${pipArgs}`,
       { stdio: 'pipe', env: { ...process.env, PATH: fullPath }, timeout: 120000 },
     );
     return null;
-  } catch (err) {
-    return `pip install failed for: ${missing.join(', ')}. stderr: ${(err.stderr || '').toString().slice(0, 500)}`;
+  } catch {
+    try {
+      execSync(
+        `${pythonPath} -m pip install --user -q ${pipArgs}`,
+        { stdio: 'pipe', env: { ...process.env, PATH: fullPath }, timeout: 120000 },
+      );
+      return null;
+    } catch (err) {
+      return `pip install failed for: ${missing.join(', ')}. stderr: ${(err.stderr || '').toString().slice(0, 500)}`;
+    }
   }
 }
 

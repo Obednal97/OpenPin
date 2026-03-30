@@ -9,15 +9,20 @@ def ensure_installed(package, pip_name=None):
     try:
         __import__(package)
     except ImportError:
-        try:
-            print(f"Installing {pip_name or package}...")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", pip_name or package],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            print(f"  Could not install {pip_name or package} (optional)")
+        name = pip_name or package
+        print(f"Installing {name}...")
+        # Try with --break-system-packages (pip 23.1+), fall back without (older pip)
+        for extra_args in [["--break-system-packages"], []]:
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", *extra_args, "--user", "-q", name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            except Exception:
+                pass
+        print(f"  Could not install {name} (optional)")
 
 
 def get_ram_info():
