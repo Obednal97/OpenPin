@@ -8,6 +8,8 @@ Protocol (portVersion >= 20):
 5. All subsequent BLE data is encrypted with those ChaCha20 parameters
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding

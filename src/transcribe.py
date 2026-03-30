@@ -10,6 +10,8 @@ Usage:
     python -m src.transcribe cloud_recordings/ --all
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess
