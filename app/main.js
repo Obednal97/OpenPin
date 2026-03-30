@@ -690,6 +690,16 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // macOS: hide window on close instead of destroying it, so tray can reopen it
+  let _forceQuit = false;
+  app.on('before-quit', () => { _forceQuit = true; });
+  mainWindow.on('close', (e) => {
+    if (!_forceQuit) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
