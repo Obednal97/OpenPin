@@ -13,12 +13,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Auto-install dependencies if missing
+# Auto-install core dependencies if missing (diarize is optional, lazy-imported at transcription time)
 from app.utils.system import ensure_installed
 
 ensure_installed("flask")
 ensure_installed("requests")
-ensure_installed("diarize")
 
 from flask import Flask
 

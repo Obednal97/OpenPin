@@ -621,7 +621,7 @@ function startPythonServer() {
 }
 
 // Poll until the API server responds
-function waitForServer(maxAttempts = 30) {
+function waitForServer(maxAttempts = 60) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const check = () => {
