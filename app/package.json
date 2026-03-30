@@ -1,6 +1,6 @@
 {
   "name": "plaud-v2",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Plaud NotePin S — Local sync, decrypt & transcribe",
   "main": "main.js",
   "scripts": {

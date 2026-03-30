@@ -559,12 +559,56 @@ window.plaud.onSystemWake(async () => {
 
 // ---- Init ----
 
+function showStartupError(error) {
+  const h2 = dom.emptyState.querySelector('h2');
+  const p = dom.emptyState.querySelector('p');
+
+  // error is either a structured object { code, title, friendly, hint, detail } or a plain string
+  const isStructured = error && typeof error === 'object' && error.code;
+  const title = isStructured ? error.title : 'Server failed to start';
+  const friendly = isStructured ? error.friendly : String(error);
+  const hint = isStructured ? error.hint : '';
+  const code = isStructured ? error.code : 'UNKNOWN';
+
+  h2.textContent = title;
+  p.innerHTML = '';
+
+  const msg = document.createElement('div');
+  msg.textContent = friendly;
+  msg.style.marginBottom = '8px';
+  p.appendChild(msg);
+
+  if (hint) {
+    const hintEl = document.createElement('div');
+    hintEl.textContent = hint;
+    hintEl.style.cssText = 'font-size:12px;padding:8px 12px;border-radius:6px;background:var(--bg-secondary);text-align:left;';
+    p.appendChild(hintEl);
+  }
+
+  const footer = document.createElement('div');
+  footer.style.cssText = 'margin-top:12px;font-size:11px;opacity:0.5;';
+  footer.textContent = `This error has been automatically reported. Error code: ${code}`;
+  p.appendChild(footer);
+}
+
+// Listen for late-arriving startup errors (e.g. Python crashes after window opens)
+window.plaud.onStartupError((error) => {
+  showStartupError(error);
+});
+
 // Init Electron-only features immediately (don't wait for Python API)
 initSettingsEvents();
 
 async function init() {
+  // Check if main process already detected a startup error
+  const apiInfo = await window.plaud.getApiInfo();
+  if (apiInfo.error) {
+    showStartupError(apiInfo.error);
+    return;
+  }
+
   let apiReady = false;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 30; i++) {
     try {
       const h = await window.plaud.health();
       if (h.status === 'ok') {
@@ -576,9 +620,12 @@ async function init() {
   }
 
   if (!apiReady) {
-    dom.emptyState.querySelector('h2').textContent = 'Starting up...';
-    dom.emptyState.querySelector('p').textContent =
-      'The Python API server is starting. If this persists, check that Python 3 and Flask are installed.';
+    showStartupError({
+      code: 'SERVER_TIMEOUT',
+      title: 'Server not responding',
+      friendly: 'The Python backend started but never became ready.',
+      hint: 'Try restarting the app. Another instance may be running.',
+    });
     return;
   }
 

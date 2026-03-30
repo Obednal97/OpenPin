@@ -48,5 +48,7 @@ app.register_blueprint(settings.bp)
 
 
 if __name__ == "__main__":
-    print("Plaud V2 API server starting on http://localhost:5123")
-    app.run(host="127.0.0.1", port=5123, debug=False, threaded=True)
+    import os
+    port = int(os.environ.get("PLAUD_API_PORT", "5123"))
+    print(f"Plaud V2 API server starting on http://localhost:{port}")
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

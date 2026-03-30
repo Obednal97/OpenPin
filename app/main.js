@@ -8,9 +8,10 @@ const fs = require('fs');
 let mainWindow;
 let pythonProcess;
 let tray = null;
-const API_PORT = 5123;
-const API_URL = `http://127.0.0.1:${API_PORT}`;
+let API_PORT = 5123;
+let API_URL = `http://127.0.0.1:${API_PORT}`;
 let themePreference = 'auto'; // 'auto' | 'light' | 'dark'
+let _startupError = null; // Sent to renderer via IPC
 
 // ---- Custom Auto-Updater (no code signing required) ----
 const UPDATE_REPO = 'Obednal97/Plaud-V2';
@@ -350,9 +351,72 @@ const EXTRA_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
 const systemPath = process.env.PATH || '';
 const fullPath = [...new Set([...EXTRA_PATHS, ...systemPath.split(':')])].join(':');
 
-// Find python3 binary
+// Find a free port starting from the preferred one
+function findFreePort(startPort) {
+  return new Promise((resolve) => {
+    const net = require('net');
+    const server = net.createServer();
+    server.listen(startPort, '127.0.0.1', () => {
+      server.close(() => resolve(startPort));
+    });
+    server.on('error', () => {
+      // Port in use — try the next one
+      resolve(findFreePort(startPort + 1));
+    });
+  });
+}
+
+// Startup error codes — friendly messages for users, raw details go to GitHub
+const STARTUP_ERRORS = {
+  PYTHON_NOT_FOUND: {
+    code: 'PYTHON_NOT_FOUND',
+    title: 'Python 3 not found',
+    friendly: 'Plaud V2 needs Python 3 to run. We tried installing it automatically via Homebrew and by downloading a standalone build, but neither worked.',
+    hint: 'Install Python 3 manually from python.org or run: brew install python3\nThen restart Plaud V2.',
+  },
+  DEPS_FAILED: {
+    code: 'DEPS_FAILED',
+    title: 'Missing dependencies',
+    friendly: 'Some required Python packages couldn\'t be installed automatically.',
+    hint: 'Try running in Terminal: pip3 install flask requests bleak cryptography',
+  },
+  SERVER_CRASH: {
+    code: 'SERVER_CRASH',
+    title: 'Server crashed',
+    friendly: 'The Python backend exited unexpectedly.',
+    hint: 'Try restarting the app. If this keeps happening, check that Python 3 and pip are working.',
+  },
+  SERVER_TIMEOUT: {
+    code: 'SERVER_TIMEOUT',
+    title: 'Server not responding',
+    friendly: 'The Python backend started but never became ready.',
+    hint: 'Try restarting the app. Another instance may be running.',
+  },
+  SPAWN_FAILED: {
+    code: 'SPAWN_FAILED',
+    title: 'Couldn\'t start Python',
+    friendly: 'The system couldn\'t launch the Python process.',
+    hint: 'Check that Python 3 is installed and accessible.',
+  },
+};
+
+function setStartupError(errorKey, rawDetail) {
+  const info = STARTUP_ERRORS[errorKey] || { code: errorKey, title: 'Unknown error', friendly: rawDetail, hint: '' };
+  _startupError = { ...info, detail: rawDetail };
+  console.error(`[Startup] ${info.code}: ${rawDetail}`);
+  // Report raw detail to GitHub (user never sees this)
+  reportError(new Error(`[${info.code}] ${rawDetail}`), `startup-${info.code.toLowerCase()}`);
+}
+
+// Bundled standalone Python lives here when auto-downloaded
+const BUNDLED_PYTHON_DIR = path.join(app.getPath('userData'), 'python');
+
+// Find python3 binary — returns { path, version } or null
 function findPython() {
+  // Check bundled standalone Python first (from a previous auto-install)
+  const bundled = path.join(BUNDLED_PYTHON_DIR, 'bin', 'python3');
   const candidates = [
+    bundled,
     '/opt/homebrew/bin/python3',
     '/usr/local/bin/python3',
     '/usr/bin/python3',
@@ -360,29 +424,162 @@ function findPython() {
   ];
   for (const p of candidates) {
     try {
-      execSync(`${p} --version`, { stdio: 'pipe', env: { ...process.env, PATH: fullPath } });
-      return p;
+      const version = execSync(`${p} --version`, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, PATH: fullPath },
+      }).toString().trim();
+      return { path: p, version };
     } catch {}
   }
-  return 'python3';
+  return null;
+}
+
+// Strategy 1: Install Python 3 via Homebrew (if available)
+function tryHomebrewInstall() {
+  try {
+    execSync('which brew', { stdio: 'pipe', env: { ...process.env, PATH: fullPath } });
+  } catch {
+    console.log('[Python] Homebrew not available, skipping');
+    return false;
+  }
+  console.log('[Python] Attempting install via Homebrew...');
+  try {
+    execSync('brew install python3', {
+      stdio: 'pipe',
+      env: { ...process.env, PATH: fullPath },
+      timeout: 300000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Strategy 2: Download standalone Python to app data dir (no admin, no Homebrew)
+// Uses python-build-standalone from Astral (https://github.com/astral-sh/python-build-standalone)
+function tryDownloadStandalonePython() {
+  const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+  const tag = '20250317';
+  const pyVer = '3.12.9';
+  const filename = `cpython-${pyVer}+${tag}-${arch}-apple-darwin-install_only.tar.gz`;
+  const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/${filename}`;
+
+  console.log(`[Python] Downloading standalone Python: ${filename}`);
+
+  const tarPath = path.join(app.getPath('temp'), filename);
+  try {
+    // Download using curl (always available on macOS)
+    execSync(`curl -fSL --retry 2 -o "${tarPath}" "${url}"`, {
+      stdio: 'pipe',
+      timeout: 300000,
+    });
+  } catch (err) {
+    console.error(`[Python] Download failed: ${err.message}`);
+    return false;
+  }
+
+  // Extract to app data dir
+  try {
+    fs.mkdirSync(BUNDLED_PYTHON_DIR, { recursive: true });
+    // The tarball extracts to a "python/" directory — strip one level
+    execSync(`tar -xzf "${tarPath}" --strip-components=1 -C "${BUNDLED_PYTHON_DIR}"`, {
+      stdio: 'pipe',
+      timeout: 60000,
+    });
+  } catch (err) {
+    console.error(`[Python] Extract failed: ${err.message}`);
+    return false;
+  }
+
+  // Clean up tarball
+  try { fs.unlinkSync(tarPath); } catch {}
+
+  // Verify it works
+  const bin = path.join(BUNDLED_PYTHON_DIR, 'bin', 'python3');
+  try {
+    const version = execSync(`"${bin}" --version`, { stdio: 'pipe' }).toString().trim();
+    console.log(`[Python] Standalone Python installed: ${version}`);
+    return true;
+  } catch {
+    console.error('[Python] Standalone Python binary not working after extract');
+    return false;
+  }
+}
+
+// Check pip works and install missing dependencies
+function ensurePythonDeps(pythonPath) {
+  const deps = ['flask', 'requests', 'bleak', 'cryptography'];
+  const missing = [];
+  for (const dep of deps) {
+    try {
+      execSync(`${pythonPath} -c "import ${dep}"`, {
+        stdio: 'pipe',
+        env: { ...process.env, PATH: fullPath },
+      });
+    } catch {
+      missing.push(dep);
+    }
+  }
+  if (missing.length === 0) return null;
+
+  console.log(`[Python] Installing missing dependencies: ${missing.join(', ')}`);
+  try {
+    execSync(
+      `${pythonPath} -m pip install --break-system-packages -q ${missing.join(' ')}`,
+      { stdio: 'pipe', env: { ...process.env, PATH: fullPath }, timeout: 120000 },
+    );
+    return null;
+  } catch (err) {
+    return `pip install failed for: ${missing.join(', ')}. stderr: ${(err.stderr || '').toString().slice(0, 500)}`;
+  }
 }
 
 // Start the Python API server
 function startPythonServer() {
-  const pythonPath = findPython();
+  let python = findPython();
+
+  // Python not found — try to install it automatically
+  if (!python) {
+    console.log('[Python] Python 3 not found, attempting auto-install...');
+    // Strategy 1: Homebrew (fast if available)
+    if (tryHomebrewInstall()) {
+      python = findPython();
+    }
+    // Strategy 2: Download standalone Python (works everywhere, no admin needed)
+    if (!python) {
+      if (tryDownloadStandalonePython()) {
+        python = findPython();
+      }
+    }
+    if (!python) {
+      setStartupError('PYTHON_NOT_FOUND', 'No python3 binary found. Homebrew install failed or unavailable. Standalone Python download failed. Arch: ' + process.arch);
+      return;
+    }
+    console.log('[Python] Auto-install succeeded');
+  }
+
+  const pythonPath = python.path;
+  console.log(`[Python] Binary: ${pythonPath} (${python.version})`);
+
+  // Install missing deps before starting
+  const depError = ensurePythonDeps(pythonPath);
+  if (depError) {
+    setStartupError('DEPS_FAILED', depError);
+    return;
+  }
+
   const serverScript = path.join(__dirname, 'api_server.py');
   const cwd = path.join(__dirname, '..');
 
-  console.log(`[Python] Binary: ${pythonPath}`);
   console.log(`[Python] Script: ${serverScript}`);
   console.log(`[Python] CWD: ${cwd}`);
-  console.log(`[Python] Packaged: ${!process.defaultApp}`);
-  console.log(`[Python] PATH: ${fullPath}`);
+  console.log(`[Python] Port: ${API_PORT}`);
 
+  const _stderrBuf = [];
   pythonProcess = spawn(pythonPath, [serverScript], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PATH: fullPath, PYTHONUNBUFFERED: '1' },
+    env: { ...process.env, PATH: fullPath, PYTHONUNBUFFERED: '1', PLAUD_API_PORT: String(API_PORT) },
   });
 
   pythonProcess.stdout.on('data', (data) => {
@@ -390,16 +587,26 @@ function startPythonServer() {
   });
 
   pythonProcess.stderr.on('data', (data) => {
-    console.error(`[Python] ${data.toString().trim()}`);
+    const line = data.toString().trim();
+    console.error(`[Python] ${line}`);
+    _stderrBuf.push(line);
   });
 
   pythonProcess.on('close', (code) => {
     console.log(`Python server exited with code ${code}`);
+    if (code !== 0 && code !== null && !_startupError) {
+      const stderr = _stderrBuf.slice(-10).join('\n');
+      setStartupError('SERVER_CRASH', `Exit code ${code}. Last stderr:\n${stderr}`);
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send('startup-error', _startupError);
+      }
+    }
     pythonProcess = null;
   });
 
   pythonProcess.on('error', (err) => {
     console.error('Failed to start Python server:', err);
+    setStartupError('SPAWN_FAILED', err.message);
   });
 }
 
@@ -536,13 +743,21 @@ app.whenReady().then(async () => {
     }
   }
 
+  // Find a free port (in case 5123 is already in use)
+  API_PORT = await findFreePort(5123);
+  API_URL = `http://127.0.0.1:${API_PORT}`;
+  console.log(`[Startup] Using port ${API_PORT}`);
+
   startPythonServer();
 
-  try {
-    await waitForServer();
-  } catch (err) {
-    console.error(err.message);
-    // Still create the window — the UI will show an error state
+  if (!_startupError) {
+    try {
+      await waitForServer();
+    } catch (err) {
+      if (!_startupError) {
+        setStartupError('SERVER_TIMEOUT', err.message);
+      }
+    }
   }
 
   createWindow();
@@ -628,6 +843,11 @@ if (!gotTheLock) {
     }
   });
 }
+
+// IPC: API connection info (dynamic port)
+ipcMain.handle('get-api-info', () => {
+  return { port: API_PORT, url: API_URL, error: _startupError };
+});
 
 // IPC: theme cycling
 ipcMain.handle('cycle-theme', () => {

@@ -1,10 +1,15 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Listen for OAuth callbacks from the main process
-
-const API_URL = 'http://127.0.0.1:5123';
+// Get API URL dynamically from main process (port may vary if 5123 was in use)
+let _apiUrl = null;
+let _apiInfoReady = ipcRenderer.invoke('get-api-info').then((info) => {
+  _apiUrl = info.url;
+  return info;
+});
 
 async function apiCall(method, endpoint, body = null) {
+  // Wait for the dynamic port to be resolved before first API call
+  if (!_apiUrl) await _apiInfoReady;
   const opts = {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -12,7 +17,7 @@ async function apiCall(method, endpoint, body = null) {
   if (body) {
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${API_URL}${endpoint}`, opts);
+  const res = await fetch(`${_apiUrl}${endpoint}`, opts);
   return res.json();
 }
 
@@ -65,11 +70,13 @@ contextBridge.exposeInMainWorld('plaud', {
   cloudSync: (direction) => apiCall('POST', '/cloud/sync', { direction }),
   cloudDevices: () => apiCall('GET', '/cloud/devices'),
 
-  // Audio URL builder
-  audioUrl: (filename) => `${API_URL}/audio/${encodeURIComponent(filename)}`,
+  // Audio URL builder (port resolved by the time UI calls this — after init())
+  audioUrl: (filename) => `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}`,
 
   // Health check
   health: () => apiCall('GET', '/health'),
+  getApiInfo: () => _apiInfoReady,
+  onStartupError: (callback) => ipcRenderer.on('startup-error', (event, error) => callback(error)),
 
   // Notion
   notionStatus: () => apiCall('GET', '/notion/status'),
