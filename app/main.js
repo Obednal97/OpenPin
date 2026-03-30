@@ -12,6 +12,7 @@ let API_PORT = 5123;
 let API_URL = `http://127.0.0.1:${API_PORT}`;
 let themePreference = 'auto'; // 'auto' | 'light' | 'dark'
 let _startupError = null; // Sent to renderer via IPC
+let _startupStatus = 'Starting up...'; // Current status message for the UI
 
 // ---- Custom Auto-Updater (no code signing required) ----
 const UPDATE_REPO = 'Obednal97/Plaud-V2';
@@ -466,6 +467,14 @@ const STARTUP_ERRORS = {
   },
 };
 
+function sendStartupStatus(msg) {
+  _startupStatus = msg;
+  console.log(`[Startup] ${msg}`);
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('startup-status', msg);
+  }
+}
+
 function setStartupError(errorKey, rawDetail) {
   const info = STARTUP_ERRORS[errorKey] || { code: errorKey, title: 'Unknown error', friendly: rawDetail, hint: '' };
   _startupError = { ...info, detail: rawDetail };
@@ -588,7 +597,7 @@ function ensurePythonDeps(pythonPath) {
   }
   if (missing.length === 0) return null;
 
-  console.log(`[Python] Installing missing dependencies: ${missing.join(', ')}`);
+  sendStartupStatus(`Installing ${missing.join(', ')}...`);
   // Try with --break-system-packages first (pip 23.1+), fall back without it (older pip)
   const pipArgs = missing.join(' ');
   try {
@@ -610,40 +619,70 @@ function ensurePythonDeps(pythonPath) {
   }
 }
 
+// Minimum Python version required (3.10 for modern syntax support)
+const MIN_PYTHON_VERSION = [3, 10];
+
+function parsePythonVersion(versionStr) {
+  // "Python 3.9.6" → [3, 9, 6]
+  const match = versionStr.match(/(\d+)\.(\d+)\.?(\d*)/);
+  if (!match) return null;
+  return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3] || '0')];
+}
+
+function isPythonTooOld(python) {
+  if (!python) return true;
+  const ver = parsePythonVersion(python.version);
+  if (!ver) return true;
+  return ver[0] < MIN_PYTHON_VERSION[0] || (ver[0] === MIN_PYTHON_VERSION[0] && ver[1] < MIN_PYTHON_VERSION[1]);
+}
+
 // Start the Python API server
 function startPythonServer() {
   let python = findPython();
 
-  // Python not found — try to install it automatically
-  if (!python) {
-    console.log('[Python] Python 3 not found, attempting auto-install...');
-    // Strategy 1: Homebrew (fast if available)
+  // Python missing or too old — install a suitable version
+  if (!python || isPythonTooOld(python)) {
+    const reason = python
+      ? `${python.version} is too old (need ${MIN_PYTHON_VERSION.join('.')}+)`
+      : 'not found';
+    sendStartupStatus(`Python ${reason} — installing automatically...`);
+
+    // Strategy 1: Homebrew (fast if available, installs latest)
+    sendStartupStatus('Trying Homebrew install...');
     if (tryHomebrewInstall()) {
-      python = findPython();
+      const fresh = findPython();
+      if (fresh && !isPythonTooOld(fresh)) python = fresh;
     }
-    // Strategy 2: Download standalone Python (works everywhere, no admin needed)
-    if (!python) {
+    // Strategy 2: Download standalone Python (works everywhere, known good version)
+    if (!python || isPythonTooOld(python)) {
+      sendStartupStatus('Downloading Python 3.12...');
       if (tryDownloadStandalonePython()) {
-        python = findPython();
+        const fresh = findPython();
+        if (fresh && !isPythonTooOld(fresh)) python = fresh;
       }
     }
-    if (!python) {
-      setStartupError('PYTHON_NOT_FOUND', 'No python3 binary found. Homebrew install failed or unavailable. Standalone Python download failed. Arch: ' + process.arch);
+    if (!python || isPythonTooOld(python)) {
+      const detail = python
+        ? `Found ${python.version} but need ${MIN_PYTHON_VERSION.join('.')}+. Auto-install failed.`
+        : 'No python3 binary found. Auto-install failed. Arch: ' + process.arch;
+      setStartupError('PYTHON_NOT_FOUND', detail);
       return;
     }
-    console.log('[Python] Auto-install succeeded');
+    sendStartupStatus('Python installed successfully');
   }
 
   const pythonPath = python.path;
-  console.log(`[Python] Binary: ${pythonPath} (${python.version})`);
+  sendStartupStatus(`Found ${python.version}`);
 
   // Install missing deps before starting
+  sendStartupStatus('Checking dependencies...');
   const depError = ensurePythonDeps(pythonPath);
   if (depError) {
     setStartupError('DEPS_FAILED', depError);
     return;
   }
 
+  sendStartupStatus('Starting server...');
   const serverScript = path.join(__dirname, 'api_server.py');
   const cwd = path.join(__dirname, '..');
 
@@ -932,7 +971,7 @@ if (!gotTheLock) {
 
 // IPC: API connection info (dynamic port)
 ipcMain.handle('get-api-info', () => {
-  return { port: API_PORT, url: API_URL, error: _startupError };
+  return { port: API_PORT, url: API_URL, error: _startupError, status: _startupStatus };
 });
 
 // IPC: theme cycling
