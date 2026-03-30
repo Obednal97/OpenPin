@@ -7,6 +7,15 @@ let _apiInfoReady = ipcRenderer.invoke('get-api-info').then((info) => {
   return info;
 });
 
+// Endpoints whose errors should be auto-reported to GitHub
+const REPORT_ENDPOINTS = new Set([
+  '/device/connect', '/device/scan', '/device/scan-known', '/device/wifi-sync',
+  '/device/sync', '/device/depair',
+  '/transcribe',
+  '/cloud/sync', '/cloud/exchange-token',
+  '/notion/push', '/notion/connect',
+]);
+
 async function apiCall(method, endpoint, body = null) {
   // Wait for the dynamic port to be resolved before first API call
   if (!_apiUrl) await _apiInfoReady;
@@ -17,8 +26,30 @@ async function apiCall(method, endpoint, body = null) {
   if (body) {
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${_apiUrl}${endpoint}`, opts);
-  return res.json();
+  let res;
+  try {
+    res = await fetch(`${_apiUrl}${endpoint}`, opts);
+  } catch (err) {
+    // Network error (server down, etc.)
+    if (REPORT_ENDPOINTS.has(endpoint)) {
+      ipcRenderer.invoke('report-error', {
+        message: `API fetch failed: ${endpoint} — ${err.message}`,
+        stack: '',
+        context: `api:${endpoint}`,
+      }).catch(() => {});
+    }
+    throw err;
+  }
+  const data = await res.json();
+  // Auto-report errors from critical endpoints
+  if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok)) {
+    ipcRenderer.invoke('report-error', {
+      message: `API error: ${endpoint} — ${data.error || `HTTP ${res.status}`}`,
+      stack: '',
+      context: `api:${endpoint}`,
+    }).catch(() => {});
+  }
+  return data;
 }
 
 contextBridge.exposeInMainWorld('plaud', {
