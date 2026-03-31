@@ -21,10 +21,12 @@ from cryptography.hazmat.primitives.serialization import (
     load_pem_public_key,
 )
 
-# Default key paths
+# Default key paths — use e2ee keys (matches official Plaud app)
+# The device caches the public key on first pair and uses it for reconnects.
+# The official app uses e2ee keys, so we must too for cross-app compatibility.
 KEYS_DIR = Path(__file__).parent.parent / "keys"
-PRIVATE_KEY_PATH = KEYS_DIR / "app_private.pem"
-PUBLIC_KEY_PATH = KEYS_DIR / "app_public.pem"
+PRIVATE_KEY_PATH = KEYS_DIR / "e2ee_private.pem"
+PUBLIC_KEY_PATH = KEYS_DIR / "e2ee_public.pem"
 
 
 def load_rsa_private_key(path: str | Path | None = None):
