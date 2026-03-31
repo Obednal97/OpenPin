@@ -55,6 +55,8 @@ def transcribe_file():
         if vocab:
             prompt_parts.append(", ".join(vocab))
         profile = config.get("profile", {})
+        if profile.get("name"):
+            prompt_parts.append(profile["name"])
         if profile.get("industry"):
             prompt_parts.append(f"Industry: {profile['industry']}")
         if profile.get("job"):
@@ -331,6 +333,8 @@ def summarize_transcript():
         profile_context = ""
         if any(profile.values()):
             parts = []
+            if profile.get("name"):
+                parts.append(f"User's name: {profile['name']}")
             if profile.get("job"):
                 parts.append(f"Job: {profile['job']}")
             if profile.get("industry"):
