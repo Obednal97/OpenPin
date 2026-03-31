@@ -265,46 +265,64 @@ async def connect_device(address=None):
     # Connect with disconnect callback
     from bleak import BleakClient as BC
 
-    cl = BC(address, timeout=30.0, disconnected_callback=_on_disconnect)
+    # Connect with retry — includes service discovery (bleak 3.x does it inside connect())
+    # Note: cl.services is a property that RAISES BleakError if services aren't discovered,
+    # so we must use _has_services() to check safely.
+    def _has_services(client):
+        try:
+            return bool(client.services)
+        except Exception:
+            return False
 
-    # Connect with retry — device may disappear between scan and connect
+    cl = None
     for attempt in range(3):
         try:
+            cl = BC(address, timeout=30.0, disconnected_callback=_on_disconnect)
             await cl.connect()
-            break
+            await asyncio.sleep(1)
+
+            if _has_services(cl):
+                break  # Success — services discovered
+
+            # Services empty after connect — disconnect and retry
+            print(f"[BLE] Connect attempt {attempt + 1}/3: connected but service discovery failed, retrying...")
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+            cl = None
+            await asyncio.sleep(2 + attempt)
+
         except Exception as e:
-            if attempt < 2 and "not found" in str(e).lower():
-                print(f"[BLE] Connect attempt {attempt + 1} failed (device not found), retrying...")
+            err_msg = str(e).lower()
+            print(f"[BLE] Connect attempt {attempt + 1}/3 failed: {e}")
+            if cl:
+                try:
+                    await cl.disconnect()
+                except Exception:
+                    pass
+                cl = None
+
+            if attempt < 2 and "not found" in err_msg:
                 await asyncio.sleep(2)
-                # Re-scan to refresh the macOS Bluetooth peripheral cache
                 scan_result = await scan_device()
                 if scan_result["found"]:
                     address = scan_result["address"]
-                    cl = BC(address, timeout=30.0, disconnected_callback=_on_disconnect)
                 else:
                     raise
-            else:
+            elif attempt == 2:
                 raise
+            else:
+                await asyncio.sleep(2 + attempt)
 
-    # Service discovery with retry — CoreBluetooth may need time to enumerate services
-    for attempt in range(5):
-        await asyncio.sleep(1 + attempt)
-        if cl.services:
-            break
-        try:
-            await cl.get_services()
-            if cl.services:
-                break
-        except Exception:
-            print(f"[BLE] Service discovery attempt {attempt + 1}/5 failed, retrying...")
-
-    if not cl.services:
-        try:
-            await cl.disconnect()
-        except Exception:
-            pass
+    if not cl or not _has_services(cl):
+        if cl:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
         sn = _device_state.get("serial_number", "unknown")
-        return {"connected": False, "error": f"Service discovery failed after 5 attempts (device: {sn}). Try moving the device closer and reconnecting."}
+        return {"connected": False, "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting."}
 
     _device_state["client"] = cl
 
