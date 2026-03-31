@@ -233,6 +233,18 @@ function getMacOSName() {
   return names[major] || `Darwin ${os.release()}`;
 }
 
+// Anonymous device ID — SHA-256 hash of hardware UUID, first 8 chars
+// Unique per machine, consistent across restarts, not personally identifying
+let _deviceId = 'unknown';
+try {
+  const crypto = require('crypto');
+  const ioregOut = execSync('ioreg -rd1 -c IOPlatformExpertDevice', { stdio: 'pipe' }).toString();
+  const uuidMatch = ioregOut.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+  if (uuidMatch) {
+    _deviceId = crypto.createHash('sha256').update(uuidMatch[1]).digest('hex').slice(0, 8);
+  }
+} catch {}
+
 const _appStartTime = Date.now();
 
 // Gather Python environment details (cached after first call)
@@ -288,6 +300,7 @@ async function reportError(error, context = 'main') {
     const search = await githubApi(`/search/issues?q=${query}&per_page=5`);
 
     const systemInfo = [
+      `- **Device:** \`${_deviceId}\``,
       `- **App version:** ${version}`,
       `- **Electron:** ${electronVersion} (Node ${nodeVersion})`,
       `- **macOS:** ${getMacOSName()} (${os.release()})`,
@@ -1067,6 +1080,7 @@ ipcMain.handle('report-bug', async (event, { expected, actual, steps }) => {
     const electronVersion = process.versions.electron;
 
     const systemInfo = [
+      `- **Device:** \`${_deviceId}\``,
       `- **Version:** ${version}`,
       `- **Electron:** ${electronVersion}`,
       `- **macOS:** ${getMacOSName()} (${os.release()})`,
