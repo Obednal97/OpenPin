@@ -248,7 +248,13 @@
 .transcript-summary h1:first-child, .transcript-summary h2:first-child, .transcript-summary h3:first-child { margin-top: 0; }
 .transcript-summary p { margin: var(--sp-2) 0; }
 .transcript-summary ul, .transcript-summary ol { margin: var(--sp-2) 0; padding-left: var(--sp-5); }
-.transcript-summary li { margin: var(--sp-1) 0; }
+.transcript-summary ul ul { margin: var(--sp-1) 0; padding-left: var(--sp-4); }
+.transcript-summary li { margin: var(--sp-1) 0; line-height: 1.6; }
+.transcript-summary li input[type="checkbox"] {
+  margin-right: var(--sp-1);
+  vertical-align: middle;
+  accent-color: var(--accent);
+}
 .transcript-summary strong { font-weight: var(--weight-semibold); }
 .transcript-summary em { font-style: italic; color: var(--text-secondary); }
 .transcript-summary blockquote {
