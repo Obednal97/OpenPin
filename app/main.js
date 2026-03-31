@@ -1055,12 +1055,7 @@ ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
 
-// IPC: bug reporter (from renderer)
-ipcMain.handle('report-error', (event, { message, stack, context }) => {
-  const err = new Error(message);
-  err.stack = stack || '';
-  reportError(err, context || 'renderer');
-});
+// IPC: bug reporter (from renderer) — handled above near get-api-info
 
 // IPC: manual bug report (from renderer)
 ipcMain.handle('report-bug', async (event, { expected, actual, steps }) => {
