@@ -295,7 +295,7 @@
       <div class="settings-tab-content active" data-tab="general">
         <div class="settings-section">
           <h3>Language</h3>
-          <p class="settings-desc">Default language for transcription.</p>
+          <p class="settings-desc">Default language for transcription and summaries.</p>
           <select id="language-select" class="settings-select">
             <option value="auto">Auto-detect</option>
             <option value="en">English</option>
@@ -316,6 +316,14 @@
             <option value="no">Norwegian</option>
             <option value="fi">Finnish</option>
           </select>
+          <div id="english-variant-group" class="mt-3">
+            <label class="settings-label">English Variant</label>
+            <select id="english-variant-select" class="settings-select">
+              <option value="us">American English</option>
+              <option value="gb">British English</option>
+            </select>
+            <p class="settings-hint">Affects spelling and phrasing in transcriptions and summaries (e.g. colour vs color, organisation vs organization).</p>
+          </div>
         </div>
         <div class="settings-section">
           <h3>Automation</h3>
