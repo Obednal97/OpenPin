@@ -49,7 +49,7 @@ def transcribe_groq(audio_path, api_key, language="en", vocab_prompt=None):
     return r.json()
 
 
-def transcribe_deepgram(audio_path, api_key, language="en", diarize=False):
+def transcribe_deepgram(audio_path, api_key, language="en", diarize=False, keywords=None):
     """Transcribe using Deepgram Nova-3. Returns OpenAI-compatible result shape."""
     params = {
         "model": "nova-3",
@@ -63,6 +63,10 @@ def transcribe_deepgram(audio_path, api_key, language="en", diarize=False):
         params["detect_language"] = "true"
     if diarize:
         params["diarize"] = "true"
+    if keywords:
+        # Deepgram keywords parameter — boost recognition of specific terms
+        # Format: keywords=word1:boost&keywords=word2:boost (boost 0-10, default high)
+        params["keywords"] = [f"{kw}:5" for kw in keywords]
 
     with open(audio_path, "rb") as f:
         r = http_requests.post(

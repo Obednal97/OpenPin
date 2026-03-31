@@ -67,7 +67,7 @@ def transcribe_file():
             try:
                 nonlocal result
                 if name == "deepgram":
-                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize)
+                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize, keywords=vocab)
                     _cloud_has_speakers = bool(result.get("speakers"))
                 elif name == "groq":
                     result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
