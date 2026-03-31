@@ -3,12 +3,20 @@
 import json
 import re
 import time as _time
+import traceback
 
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
 from app.utils.config import load_config, save_config
 from app.utils.constants import TRANSCRIPTS_DIR
+
+
+def _error_json(base, exc):
+    """Return error JSON with traceback for debugging (auto-reported to GitHub)."""
+    base["error"] = str(exc)
+    base["traceback"] = traceback.format_exc()
+    return base
 
 bp = Blueprint("notion", __name__, url_prefix="/notion")
 
@@ -35,7 +43,7 @@ def connect():
         auth_url = notion.start_connect()
         return jsonify({"url": auth_url})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/disconnect", methods=["POST"])
@@ -98,7 +106,7 @@ def databases():
 
         return jsonify({"databases": dbs})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/set-database-url", methods=["POST"])
@@ -145,7 +153,7 @@ def set_database_url():
 
         return jsonify({"saved": True, "database_id": db_id, "database_name": title})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/set-database", methods=["POST"])
@@ -298,4 +306,4 @@ def push():
                 _save_notion_page_url(session_id, page_url)
             return jsonify({"pushed": True, "updated": False, "url": page_url or "", "result": result})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500

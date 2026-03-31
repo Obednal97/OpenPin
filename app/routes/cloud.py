@@ -1,9 +1,18 @@
 """Cloud routes: Plaud Cloud login, sync, upload, trash."""
 
+import traceback
+
 from flask import Blueprint, jsonify, request
 
 from app.state import cloud
 from app.utils.config import load_config
+
+
+def _error_json(base, exc):
+    """Return error JSON with traceback for debugging (auto-reported to GitHub)."""
+    base["error"] = str(exc)
+    base["traceback"] = traceback.format_exc()
+    return base
 
 bp = Blueprint("cloud", __name__, url_prefix="/cloud")
 
@@ -44,7 +53,7 @@ def exchange_token():
             return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/login-token", methods=["POST"])
@@ -108,7 +117,7 @@ def sync():
             }
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/devices")

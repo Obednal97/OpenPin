@@ -3,6 +3,7 @@
 import json
 import logging
 import threading
+import traceback
 from pathlib import Path
 
 import requests as http_requests
@@ -14,6 +15,13 @@ from app.providers.validate import validate_key as do_validate_key
 from app.utils.config import load_config, save_config
 from app.utils.constants import TRANSCRIPTS_DIR
 from app.utils.webhooks import fire_webhooks
+
+
+def _error_json(base, exc):
+    """Return error JSON with traceback for debugging (auto-reported to GitHub)."""
+    base["error"] = str(exc)
+    base["traceback"] = traceback.format_exc()
+    return base
 
 bp = Blueprint("transcribe", __name__)
 
@@ -282,7 +290,7 @@ def transcribe_file():
         else:
             return jsonify({"session_id": session_id, "text": "", "message": "No speech detected"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/summarize", methods=["POST"])
@@ -425,7 +433,7 @@ def summarize_transcript():
         )
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/validate-key", methods=["POST"])
