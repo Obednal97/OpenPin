@@ -112,6 +112,21 @@ def transcribe_file():
             duration = result.get("duration", 0)
             lang = result.get("language", language or "en")
             speakers = result.get("speakers", [])
+
+            # Merge/group segments by speaker + sentence boundaries
+            # (same logic used for local diarization — produces clean grouped output)
+            if _cloud_has_speakers and segments:
+                from src.transcribe import Transcript, TranscriptSegment, _merge_speaker_segments
+                t_obj = Transcript(text=text, language=lang, duration=duration)
+                for s in segments:
+                    t_obj.segments.append(
+                        TranscriptSegment(start=s["start"], end=s["end"], text=s["text"], speaker=s.get("speaker", ""))
+                    )
+                t_obj.segments = _merge_speaker_segments(t_obj.segments)
+                segments = [
+                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
+                    for s in t_obj.segments
+                ]
             prov = _cloud_provider
 
             t_data = {
