@@ -46,6 +46,9 @@ def get_settings():
             "auto_summarise": config.get("auto_summarise", False),
             "notion_auto_push": config.get("notion_auto_push", False),
             "auto_prefer_wifi": config.get("auto_prefer_wifi", False),
+            "transcription_provider": config.get("transcription_provider", "deepgram"),
+            "diarization_provider": config.get("diarization_provider", "deepgram"),
+            "summarization_provider": config.get("summarization_provider", "anthropic"),
             "has_paired_devices": bool(config.get("paired_devices", {})),
             "setup_dismissed": config.get("setup_dismissed", False),
         }
@@ -87,6 +90,12 @@ def save_settings():
         config["auto_prefer_wifi"] = data["auto_prefer_wifi"]
     if "setup_dismissed" in data:
         config["setup_dismissed"] = data["setup_dismissed"]
+    if "transcription_provider" in data:
+        config["transcription_provider"] = data["transcription_provider"]
+    if "diarization_provider" in data:
+        config["diarization_provider"] = data["diarization_provider"]
+    if "summarization_provider" in data:
+        config["summarization_provider"] = data["summarization_provider"]
     if "remove_openai_key" in data:
         config.pop("openai_api_key", None)
     if "remove_anthropic_key" in data:
