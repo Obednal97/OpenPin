@@ -129,9 +129,12 @@ dom.scanBtn.addEventListener('click', async () => {
       toast(`Found ${result.name}`, 'success');
       dom.statusText.textContent = 'Connecting...';
 
-      // Auto-bind to cloud if logged in (gets per-device BIND_TOKEN)
+      // Auto-bind to cloud if logged in (gets per-device BIND_TOKEN + SN_SIG)
       if (result.serial_number) {
-        try { await window.plaud.cloudBindDevice(result.serial_number, result.name); } catch {}
+        try {
+          await window.plaud.cloudBindDevice(result.serial_number, result.name);
+          await window.plaud.cloudSnSign(result.serial_number);
+        } catch {}
       }
       const conn = await window.plaud.connect(result.address, result.serial_number);
       if (conn.connected) {
