@@ -298,9 +298,18 @@ $('#search-clear').addEventListener('click', () => {
   renderRecordingsList();
 });
 
-// OAuth callback listener
+// OAuth callback listener — routes to setup flow or settings depending on context
 window.plaud.onOAuthCallback(async (authCode) => {
   if (!authCode) return;
+
+  // If setup flow has a handler, route there
+  if (window._setupOAuthHandler) {
+    window._setupOAuthHandler(authCode);
+    window._setupOAuthHandler = null;
+    return;
+  }
+
+  // Normal settings flow
   toast('Received login callback, authenticating...', 'info');
   try {
     const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
