@@ -462,3 +462,31 @@
   transform: rotate(45deg);
   margin-bottom: 2px;
 }
+
+/* === COMPONENT: Tooltip === */
+.app-tooltip {
+  position: fixed;
+  width: 280px;
+  padding: var(--sp-2) var(--sp-3);
+  background: #fff;
+  border: 1px solid #d0d0d0;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: #1a1a1a;
+  line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--duration) var(--ease), transform var(--duration) var(--ease);
+}
+.app-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+[data-theme="dark"] .app-tooltip {
+  background: #2a2a2a;
+  border-color: #444;
+  color: #e0e0e0;
+}

@@ -175,44 +175,34 @@ def summarize_local(full_text):
 
 
 def summarize(full_text, config, tag_context=""):
-    """Run the summarization cascade. Returns (summary, title, provider, errors)."""
-    attempts = []
+    """Run the summarization cascade. Returns (summary, title, provider, errors).
+
+    Respects config['summarization_provider'] preference — tries the preferred
+    provider first, then falls back to others.
+    """
+    preferred = config.get("summarization_provider", "anthropic")
     or_key = config.get("openrouter_api_key")
+
+    # Build all available providers
+    all_providers = []
     if config.get("anthropic_api_key"):
-        attempts.append(
-            (
-                "Anthropic (Claude Sonnet 4.6)",
-                "anthropic",
-                lambda: summarize_anthropic(full_text, config["anthropic_api_key"], tag_context),
-            )
-        )
-    elif or_key:
-        # No direct Anthropic key — use OpenRouter to access Claude
-        attempts.append(
-            (
-                "OpenRouter (Claude Sonnet 4.6)",
-                "openrouter-claude",
-                lambda: summarize_openrouter(full_text, or_key, "anthropic/claude-sonnet-4.6", tag_context),
-            )
-        )
+        all_providers.append(("Anthropic (Claude Sonnet 4.6)", "anthropic",
+            lambda: summarize_anthropic(full_text, config["anthropic_api_key"], tag_context)))
+    elif or_key and preferred in ("anthropic", "openrouter"):
+        all_providers.append(("OpenRouter (Claude Sonnet 4.6)", "openrouter-claude",
+            lambda: summarize_openrouter(full_text, or_key, "anthropic/claude-sonnet-4.6", tag_context)))
     if config.get("openai_api_key"):
-        attempts.append(
-            (
-                "OpenAI (GPT-5.4 mini)",
-                "openai",
-                lambda: summarize_openai(full_text, config["openai_api_key"], tag_context),
-            )
-        )
+        all_providers.append(("OpenAI (GPT-5.4 mini)", "openai",
+            lambda: summarize_openai(full_text, config["openai_api_key"], tag_context)))
     elif or_key:
-        # No direct OpenAI key — use OpenRouter to access GPT
-        attempts.append(
-            (
-                "OpenRouter (GPT-5.4 mini)",
-                "openrouter-gpt",
-                lambda: summarize_openrouter(full_text, or_key, "openai/gpt-5.4-mini", tag_context),
-            )
-        )
-    attempts.append(("Local (DistilBART)", "local", lambda: (summarize_local(full_text), "")))
+        all_providers.append(("OpenRouter (GPT-5.4 mini)", "openrouter-gpt",
+            lambda: summarize_openrouter(full_text, or_key, "openai/gpt-5.4-mini", tag_context)))
+    all_providers.append(("Local (DistilBART)", "local", lambda: (summarize_local(full_text), "")))
+
+    # Sort so preferred provider is first
+    prov_order = {"anthropic": 0, "openrouter-claude": 0, "openai": 1, "openrouter-gpt": 1, "openrouter": 0, "local": 2}
+    preferred_rank = {"anthropic": 0, "openai": 1, "openrouter": 0, "local": 2}.get(preferred, 0)
+    attempts = sorted(all_providers, key=lambda p: (0 if prov_order.get(p[1], 9) == preferred_rank else 1, prov_order.get(p[1], 9)))
 
     errors = []
     for display_name, prov_name, fn in attempts:

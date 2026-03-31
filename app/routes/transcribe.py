@@ -48,70 +48,54 @@ def transcribe_file():
         _cloud_error = None
         _cloud_provider = None
         _cloud_has_speakers = False
+        vocab = config.get("custom_vocabulary", [])
+        vocab_prompt = ", ".join(vocab) if vocab else None
 
-        # Try Deepgram first (has built-in diarization — no pyannote needed)
-        if config.get("deepgram_api_key"):
+        # Build provider order based on user preference (preferred first, then fallbacks)
+        preferred = config.get("transcription_provider", "deepgram")
+        cloud_providers = ["deepgram", "groq", "openai"]
+        if preferred in cloud_providers:
+            cloud_providers.remove(preferred)
+            cloud_providers.insert(0, preferred)
+
+        def _try_provider(name):
+            nonlocal _used_cloud, _cloud_provider, _cloud_has_speakers, _cloud_error
+            key = config.get(f"{name}_api_key")
+            if not key:
+                return False
             try:
-                result = transcribe_deepgram(path, config["deepgram_api_key"], language or "en", diarize=diarize)
+                nonlocal result
+                if name == "deepgram":
+                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize)
+                    _cloud_has_speakers = bool(result.get("speakers"))
+                elif name == "groq":
+                    result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
+                elif name == "openai":
+                    result = transcribe_openai(path, key, language or "en", vocab_prompt=vocab_prompt)
                 _used_cloud = True
-                _cloud_provider = "deepgram"
-                _cloud_has_speakers = bool(result.get("speakers"))
+                _cloud_provider = name
+                return True
             except http_requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else 0
+                label = {"deepgram": "Deepgram", "groq": "Groq", "openai": "OpenAI"}[name]
                 if status == 401:
-                    _cloud_error = "Deepgram: Invalid API key — check your key in Settings"
+                    _cloud_error = f"{label}: Invalid API key — check your key in Settings"
                 elif status == 429:
-                    _cloud_error = "Deepgram: Rate limited — falling back"
+                    _cloud_error = f"{label}: Rate limited — falling back"
                 else:
-                    _cloud_error = f"Deepgram: HTTP {status} — falling back"
-                logging.warning(f"Deepgram transcription failed ({status}): {e}")
+                    _cloud_error = f"{label}: HTTP {status} — falling back"
+                logging.warning(f"{label} transcription failed ({status}): {e}")
             except Exception as e:
-                _cloud_error = f"Deepgram: {str(e)[:100]} — falling back"
-                logging.warning(f"Deepgram transcription failed: {e}")
+                label = {"deepgram": "Deepgram", "groq": "Groq", "openai": "OpenAI"}[name]
+                _cloud_error = f"{label}: {str(e)[:100]} — falling back"
+                logging.warning(f"{label} transcription failed: {e}")
+            return False
 
-        # Try Groq Whisper (same as OpenAI format, ~10x faster)
-        if not _used_cloud and config.get("groq_api_key"):
-            try:
-                vocab = config.get("custom_vocabulary", [])
-                result = transcribe_groq(
-                    path, config["groq_api_key"], language or "en", vocab_prompt=", ".join(vocab) if vocab else None
-                )
-                _used_cloud = True
-                _cloud_provider = "groq"
-            except http_requests.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response is not None else 0
-                if status == 401:
-                    _cloud_error = "Groq: Invalid API key — check your key in Settings"
-                elif status == 429:
-                    _cloud_error = "Groq: Rate limited — falling back"
-                else:
-                    _cloud_error = f"Groq: HTTP {status} — falling back"
-                logging.warning(f"Groq transcription failed ({status}): {e}")
-            except Exception as e:
-                _cloud_error = f"Groq: {str(e)[:100]} — falling back"
-                logging.warning(f"Groq transcription failed: {e}")
-
-        # Try OpenAI Whisper
-        if not _used_cloud and config.get("openai_api_key"):
-            try:
-                vocab = config.get("custom_vocabulary", [])
-                result = transcribe_openai(
-                    path, config["openai_api_key"], language or "en", vocab_prompt=", ".join(vocab) if vocab else None
-                )
-                _used_cloud = True
-                _cloud_provider = "openai"
-            except http_requests.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response is not None else 0
-                if status == 401:
-                    _cloud_error = "OpenAI: Invalid API key — check your key in Settings"
-                elif status == 429:
-                    _cloud_error = "OpenAI: Rate limited — falling back to local Whisper"
-                else:
-                    _cloud_error = f"OpenAI: HTTP {status} — falling back to local Whisper"
-                logging.warning(f"OpenAI transcription failed ({status}): {e}")
-            except Exception as e:
-                _cloud_error = f"OpenAI: {str(e)[:100]} — falling back to local Whisper"
-                logging.warning(f"OpenAI transcription failed: {e}")
+        # Try preferred provider first, then fall back to others
+        if preferred != "local":
+            for prov in cloud_providers:
+                if _try_provider(prov):
+                    break
 
         if _used_cloud:
             text = result.get("text", "")

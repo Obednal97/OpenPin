@@ -98,6 +98,121 @@
 .model-size { font-size: var(--text-xs); color: var(--text-secondary); }
 .ram-info { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-2); }
 
+/* === MODULE: Processing Sections === */
+.proc-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.proc-section-header h3 { margin: 0; }
+.proc-subtitle {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-weight: var(--weight-normal);
+}
+.proc-info-icon {
+  position: relative;
+  color: var(--text-tertiary);
+  cursor: help;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  transition: color var(--duration) var(--ease);
+}
+.proc-info-icon:hover { color: var(--text-secondary); }
+/* Tooltip is rendered as a JS-managed element (.app-tooltip in utils.js) */
+
+.proc-provider-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.proc-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  min-width: 60px;
+}
+.proc-select {
+  flex: 1;
+  padding: var(--sp-1_5) var(--sp-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-2) center;
+  padding-right: var(--sp-6);
+  transition: border-color var(--duration) var(--ease);
+}
+.proc-select:hover { border-color: var(--border-strong); }
+.proc-select:focus { border-color: var(--accent); outline: none; }
+
+.proc-recommended {
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px var(--sp-1_5);
+  border-radius: var(--radius-full);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.proc-recommended.hidden { display: none; }
+
+.proc-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--sp-2);
+  font-size: var(--text-sm);
+}
+
+/* Inline key input within processing sections */
+.proc-key-inline {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.proc-key-inline .ai-key-get-link { margin-bottom: var(--sp-1); }
+
+/* API Keys overview section */
+.api-keys-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.api-key-overview-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.api-key-overview-item.connected { border-color: var(--green); }
+.api-key-overview-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.api-key-overview-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 /* === MODULE: AI Key UX === */
 .ai-key-get-link {
   font-size: var(--text-xs);

@@ -11,9 +11,120 @@ async function loadSettings() {
   }
 }
 
+// Provider metadata — capabilities and key info
+const PROVIDERS = {
+  deepgram: { name: 'Deepgram', prefix: '', url: 'https://console.deepgram.com/', placeholder: 'Paste API key', caps: ['transcription', 'diarization'] },
+  groq: { name: 'Groq', prefix: 'gsk_', url: 'https://console.groq.com/keys', placeholder: 'Paste API key (gsk_...)', caps: ['transcription'] },
+  openai: { name: 'OpenAI', prefix: 'sk-', url: 'https://platform.openai.com/api-keys', placeholder: 'Paste API key (sk-...)', caps: ['transcription', 'summarization'] },
+  anthropic: { name: 'Anthropic', prefix: 'sk-ant-', url: 'https://console.anthropic.com/settings/keys', placeholder: 'Paste API key (sk-ant-...)', caps: ['summarization'] },
+  openrouter: { name: 'OpenRouter', prefix: 'sk-or-', url: 'https://openrouter.ai/settings/keys', placeholder: 'Paste API key (sk-or-...)', caps: ['summarization'] },
+};
+
 function renderSettings() {
-  // Model selector
+  // Language
+  $('#language-select').value = app.settings.language || 'en';
+
+  // Auto-pipeline toggles — must be set here (not just initSettingsEvents)
+  // because settings load async after init
+  const syncToggle = $('#auto-sync-toggle');
+  const transcribeToggle = $('#auto-transcribe-toggle');
+  const summariseToggle = $('#auto-summarise-toggle');
+  if (syncToggle) syncToggle.checked = app.settings.auto_sync !== false;
+  if (transcribeToggle) transcribeToggle.checked = app.settings.auto_transcribe !== false;
+  if (summariseToggle) summariseToggle.checked = app.settings.auto_summarise || false;
+  const wifiToggle = $('#auto-wifi-toggle');
+  if (wifiToggle) wifiToggle.checked = app.settings.auto_prefer_wifi || false;
+  updateAutoPipelineState();
+
+  // Processing sections (replaces old model selector + AI key groups)
+  renderProcessingSections();
+
+  // Subsections
+  renderProfile();
+  renderWebhooks();
+  renderDeviceManager();
+  renderNotion();
+  renderCloudAccount();
+}
+
+// ---- Processing Sections ----
+
+function renderProcessingSections() {
+  const s = app.settings;
+
+  // 1. Transcription provider dropdown
+  const transProv = s.transcription_provider || 'deepgram';
+  const transSelect = $('#transcription-provider');
+  if (transSelect) transSelect.value = transProv;
+
+  // Show/hide local whisper options
+  const localOpts = $('#local-whisper-options');
+  if (localOpts) localOpts.classList.toggle('hidden', transProv !== 'local');
+
+  // Show recommended badge only for deepgram
+  const transRec = $('#transcription-rec');
+  if (transRec) transRec.classList.toggle('hidden', transProv !== 'deepgram');
+
+  // Render model selector if local
+  if (transProv === 'local') renderModelSelector();
+
+  // Render inline key input for cloud provider
+  renderInlineKey('transcription-key-area', transProv);
+
+  // 2. Diarization
+  const diarizeEnabled = s.diarize || false;
+  const diarizeToggle = $('#diarize-toggle');
+  if (diarizeToggle) diarizeToggle.checked = diarizeEnabled;
+  const diarOpts = $('#diarization-options');
+
+  // If transcription is set to Deepgram and the key is connected,
+  // auto-select Deepgram for diarization and hide the provider choice
+  const deepgramHandlesDiarization = transProv === 'deepgram' && s.deepgram_key_set;
+
+  if (diarOpts) diarOpts.classList.toggle('hidden', !diarizeEnabled || deepgramHandlesDiarization);
+
+  // Show a simple note when Deepgram handles it automatically
+  const diarAutoNote = $('#diarization-auto-note');
+  if (diarAutoNote) diarAutoNote.classList.toggle('hidden', !diarizeEnabled || !deepgramHandlesDiarization);
+
+  if (deepgramHandlesDiarization) {
+    // Silently set diarization provider to deepgram
+    s.diarization_provider = 'deepgram';
+    renderInlineKey('diarization-key-area', 'local'); // clear the key area
+  } else if (diarizeEnabled) {
+    const diarProv = s.diarization_provider || 'deepgram';
+    const diarSelect = $('#diarization-provider');
+    if (diarSelect) diarSelect.value = diarProv;
+
+    const diarRec = $('#diarization-rec');
+    if (diarRec) diarRec.classList.toggle('hidden', diarProv !== 'deepgram');
+
+    const localNote = $('#diarization-local-note');
+    if (localNote) localNote.classList.toggle('hidden', diarProv !== 'local');
+
+    renderInlineKey('diarization-key-area', diarProv);
+  }
+
+  // 3. Summarization
+  const sumProv = s.summarization_provider || 'anthropic';
+  const sumSelect = $('#summarization-provider');
+  if (sumSelect) sumSelect.value = sumProv;
+
+  const sumRec = $('#summarization-rec');
+  if (sumRec) sumRec.classList.toggle('hidden', sumProv !== 'anthropic');
+
+  renderInlineKey('summarization-key-area', sumProv);
+
+  // 4. API keys overview
+  renderAPIKeysOverview();
+
+  // Bind tooltips (info icons with data-tooltip attributes)
+  initTooltips();
+}
+
+function renderModelSelector() {
   const modelSelector = $('#model-selector');
+  if (!modelSelector) return;
   const models = app.settings.models || {};
   modelSelector.innerHTML = Object.entries(models)
     .map(([name, info]) => {
@@ -37,41 +148,151 @@ function renderSettings() {
       const model = opt.dataset.model;
       app.settings.model = model;
       await window.plaud.saveSettings({ model });
-      renderSettings();
+      renderModelSelector();
       toast(`Model set to ${model}`, 'success');
     });
   });
 
-  // RAM info
-  $('#ram-info').textContent = app.settings.ram_total_gb
-    ? `System: ${app.settings.ram_total_gb} GB total, ${app.settings.ram_used_gb} GB used, ${app.settings.ram_headroom_gb} GB available`
-    : '';
+  const ramInfo = $('#ram-info');
+  if (ramInfo) {
+    ramInfo.textContent = app.settings.ram_total_gb
+      ? `System: ${app.settings.ram_total_gb} GB total, ${app.settings.ram_used_gb} GB used, ${app.settings.ram_headroom_gb} GB available`
+      : '';
+  }
+}
 
-  // Language
-  $('#language-select').value = app.settings.language || 'en';
+function renderInlineKey(containerId, provider) {
+  const container = $(`#${containerId}`);
+  if (!container) return;
 
-  // Diarize toggle
-  $('#diarize-toggle').checked = app.settings.diarize || false;
+  // Local providers don't need a key
+  if (provider === 'local') {
+    container.innerHTML = '';
+    return;
+  }
 
-  // Auto-pipeline toggles — must be set here (not just initSettingsEvents)
-  // because settings load async after init
-  const syncToggle = $('#auto-sync-toggle');
-  const transcribeToggle = $('#auto-transcribe-toggle');
-  const summariseToggle = $('#auto-summarise-toggle');
-  if (syncToggle) syncToggle.checked = app.settings.auto_sync !== false;
-  if (transcribeToggle) transcribeToggle.checked = app.settings.auto_transcribe !== false;
-  if (summariseToggle) summariseToggle.checked = app.settings.auto_summarise || false;
-  const wifiToggle = $('#auto-wifi-toggle');
-  if (wifiToggle) wifiToggle.checked = app.settings.auto_prefer_wifi || false;
-  updateAutoPipelineState();
+  const meta = PROVIDERS[provider];
+  if (!meta) { container.innerHTML = ''; return; }
 
-  // Subsections
-  renderProfile();
-  renderWebhooks();
-  renderAIKeys();
-  renderDeviceManager();
-  renderNotion();
-  renderCloudAccount();
+  const isSet = app.settings[`${provider}_key_set`];
+
+  if (isSet) {
+    container.innerHTML = `
+      <div class="ai-provider-card">
+        <div class="ai-provider-card-left">
+          <div class="ai-provider-name">${meta.name}</div>
+          <div class="ai-provider-detail">API key connected</div>
+        </div>
+        <div class="ai-provider-card-right">
+          <span class="ai-key-badge connected">Connected</span>
+          <button class="ai-provider-remove proc-key-remove" data-provider="${provider}" title="Remove key">&times;</button>
+        </div>
+      </div>`;
+    container.querySelector('.proc-key-remove').addEventListener('click', async () => {
+      await window.plaud.saveSettings({ [`remove_${provider}_key`]: true });
+      app.settings[`${provider}_key_set`] = false;
+      toast(`${meta.name} key removed`, 'info');
+      renderProcessingSections();
+    });
+  } else {
+    container.innerHTML = `
+      <div class="proc-key-inline">
+        <a href="#" class="ai-key-get-link proc-key-link" data-url="${meta.url}">
+          Get key from ${meta.name}
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" class="valign-mid"><path d="M4 1h7v7M11 1L5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <div class="token-input-row">
+          <input type="password" class="settings-input proc-key-input" data-provider="${provider}" placeholder="${meta.placeholder}">
+        </div>
+        <p class="ai-key-status hidden proc-key-status"></p>
+      </div>`;
+    const link = container.querySelector('.proc-key-link');
+    link.addEventListener('click', (e) => { e.preventDefault(); window.plaud.openExternal(meta.url); });
+
+    const input = container.querySelector('.proc-key-input');
+    input.addEventListener('paste', () => {
+      setTimeout(() => {
+        const val = input.value.trim();
+        if (val && val.startsWith(meta.prefix)) handleInlineKeyPaste(container, provider, val);
+      }, 50);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const val = input.value.trim();
+        if (val) handleInlineKeyPaste(container, provider, val);
+      }
+    });
+  }
+}
+
+async function handleInlineKeyPaste(container, provider, key) {
+  const statusEl = container.querySelector('.proc-key-status');
+  const input = container.querySelector('.proc-key-input');
+
+  statusEl.textContent = 'Validating key...';
+  statusEl.className = 'ai-key-status validating proc-key-status';
+  statusEl.classList.remove('hidden');
+
+  try {
+    const result = await window.plaud.validateKey(provider, key);
+    if (result.valid) {
+      statusEl.textContent = 'Key valid — saving...';
+      statusEl.className = 'ai-key-status success proc-key-status';
+      await window.plaud.saveSettings({ [`${provider}_api_key`]: key });
+      app.settings[`${provider}_key_set`] = true;
+      input.value = '';
+      toast(`${PROVIDERS[provider]?.name || provider} key connected`, 'success');
+      renderProcessingSections();
+    } else {
+      statusEl.textContent = result.error || 'Invalid key';
+      statusEl.className = 'ai-key-status error proc-key-status';
+    }
+  } catch (err) {
+    statusEl.textContent = `Validation failed: ${err.message}`;
+    statusEl.className = 'ai-key-status error proc-key-status';
+  }
+}
+
+function renderAPIKeysOverview() {
+  const container = $('#api-keys-overview');
+  if (!container) return;
+
+  const section = container.closest('.settings-section');
+  const connected = [];
+  for (const [id, meta] of Object.entries(PROVIDERS)) {
+    if (app.settings[`${id}_key_set`]) {
+      connected.push({ id, ...meta });
+    }
+  }
+
+  // Hide entire section if no keys are set
+  if (connected.length === 0) {
+    if (section) section.classList.add('hidden');
+    return;
+  }
+  if (section) section.classList.remove('hidden');
+
+  container.innerHTML = `<div class="api-keys-list">
+    ${connected.map(p => `
+      <div class="api-key-overview-item connected">
+        <span class="api-key-overview-name">${p.name}</span>
+        <div class="api-key-overview-right">
+          <span class="ai-key-badge connected">Connected</span>
+          <button class="ai-provider-remove proc-overview-remove" data-provider="${p.id}" title="Remove">&times;</button>
+        </div>
+      </div>
+    `).join('')}
+  </div>`;
+
+  container.querySelectorAll('.proc-overview-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider;
+      await window.plaud.saveSettings({ [`remove_${provider}_key`]: true });
+      app.settings[`${provider}_key_set`] = false;
+      toast(`${PROVIDERS[provider]?.name || provider} key removed`, 'info');
+      renderProcessingSections();
+    });
+  });
 }
 
 // ---- Profile & Vocabulary ----
@@ -147,58 +368,7 @@ function renderWebhooks() {
   });
 }
 
-// ---- Cloud AI Keys ----
-
-function renderAIKeys() {
-  for (const provider of ['deepgram', 'groq', 'openai', 'anthropic', 'openrouter']) {
-    const isSet = app.settings[`${provider}_key_set`];
-    const badge = $(`#${provider}-key-badge`);
-    const form = $(`#${provider}-key-form`);
-    const connected = $(`#${provider}-key-connected`);
-
-    if (isSet) {
-      badge.textContent = 'Connected';
-      badge.className = 'ai-key-badge connected';
-      form.classList.add('hidden');
-      connected.classList.remove('hidden');
-    } else {
-      badge.textContent = 'Not set';
-      badge.className = 'ai-key-badge none';
-      form.classList.remove('hidden');
-      connected.classList.add('hidden');
-    }
-  }
-}
-
-async function handleKeyPaste(provider, key) {
-  const statusEl = $(`#${provider}-key-status`);
-  const input = $(`#${provider}-key-input`);
-
-  statusEl.textContent = 'Validating key...';
-  statusEl.className = 'ai-key-status validating';
-  statusEl.classList.remove('hidden');
-
-  try {
-    const result = await window.plaud.validateKey(provider, key);
-    if (result.valid) {
-      statusEl.textContent = 'Key valid — saving...';
-      statusEl.className = 'ai-key-status success';
-      await window.plaud.saveSettings({ [`${provider}_api_key`]: key });
-      app.settings[`${provider}_key_set`] = true;
-      input.value = '';
-      statusEl.classList.add('hidden');
-      const names = { deepgram: 'Deepgram', groq: 'Groq', openai: 'OpenAI', anthropic: 'Anthropic', openrouter: 'OpenRouter' };
-      toast(`${names[provider] || provider} key connected`, 'success');
-      renderAIKeys();
-    } else {
-      statusEl.textContent = result.error || 'Invalid key';
-      statusEl.className = 'ai-key-status error';
-    }
-  } catch (err) {
-    statusEl.textContent = `Validation failed: ${err.message}`;
-    statusEl.className = 'ai-key-status error';
-  }
-}
+// renderAIKeys and handleKeyPaste are now part of renderProcessingSections/renderInlineKey above
 
 // ---- Notion ----
 
@@ -630,6 +800,7 @@ function initSettingsEvents() {
     app.settings.diarize = e.target.checked;
     await window.plaud.saveSettings({ diarize: e.target.checked });
     toast(e.target.checked ? 'Diarization enabled' : 'Diarization disabled', 'success');
+    renderProcessingSections();
   });
 
   // Automation pipeline toggles with cascade disable
@@ -755,89 +926,23 @@ function initSettingsEvents() {
     renderWebhooks();
   });
 
-  // AI key auto-paste + validation
-  const keyPrefixes = { deepgram: '', groq: 'gsk_', openai: 'sk-', anthropic: 'sk-ant-', openrouter: 'sk-or-' };
-  for (const provider of ['deepgram', 'groq', 'openai', 'anthropic', 'openrouter']) {
-    const input = $(`#${provider}-key-input`);
-    const prefix = keyPrefixes[provider];
-
-    input.addEventListener('paste', (e) => {
-      setTimeout(() => {
-        const val = input.value.trim();
-        if (val && val.startsWith(prefix)) {
-          handleKeyPaste(provider, val);
-        }
-      }, 50);
-    });
-
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        const val = input.value.trim();
-        if (val) handleKeyPaste(provider, val);
-      }
-    });
-  }
-
-  // Remove key buttons
-  $('#deepgram-key-remove').addEventListener('click', async () => {
-    await window.plaud.saveSettings({ remove_deepgram_key: true });
-    app.settings.deepgram_key_set = false;
-    toast('Deepgram key removed', 'info');
-    renderAIKeys();
+  // Processing section — provider dropdown change handlers
+  $('#transcription-provider').addEventListener('change', async (e) => {
+    app.settings.transcription_provider = e.target.value;
+    await window.plaud.saveSettings({ transcription_provider: e.target.value });
+    renderProcessingSections();
   });
 
-  $('#groq-key-remove').addEventListener('click', async () => {
-    await window.plaud.saveSettings({ remove_groq_key: true });
-    app.settings.groq_key_set = false;
-    toast('Groq key removed', 'info');
-    renderAIKeys();
+  $('#diarization-provider').addEventListener('change', async (e) => {
+    app.settings.diarization_provider = e.target.value;
+    await window.plaud.saveSettings({ diarization_provider: e.target.value });
+    renderProcessingSections();
   });
 
-  $('#openai-key-remove').addEventListener('click', async () => {
-    await window.plaud.saveSettings({ remove_openai_key: true });
-    app.settings.openai_key_set = false;
-    toast('OpenAI key removed', 'info');
-    renderAIKeys();
-  });
-
-  $('#anthropic-key-remove').addEventListener('click', async () => {
-    await window.plaud.saveSettings({ remove_anthropic_key: true });
-    app.settings.anthropic_key_set = false;
-    toast('Anthropic key removed', 'info');
-    renderAIKeys();
-  });
-
-  $('#openrouter-key-remove').addEventListener('click', async () => {
-    await window.plaud.saveSettings({ remove_openrouter_key: true });
-    app.settings.openrouter_key_set = false;
-    toast('OpenRouter key removed', 'info');
-    renderAIKeys();
-  });
-
-  // External links
-  $('#deepgram-key-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.plaud.openExternal('https://console.deepgram.com/');
-  });
-
-  $('#groq-key-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.plaud.openExternal('https://console.groq.com/keys');
-  });
-
-  $('#openai-key-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.plaud.openExternal('https://platform.openai.com/api-keys');
-  });
-
-  $('#anthropic-key-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.plaud.openExternal('https://console.anthropic.com/settings/keys');
-  });
-
-  $('#openrouter-key-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    window.plaud.openExternal('https://openrouter.ai/settings/keys');
+  $('#summarization-provider').addEventListener('change', async (e) => {
+    app.settings.summarization_provider = e.target.value;
+    await window.plaud.saveSettings({ summarization_provider: e.target.value });
+    renderProcessingSections();
   });
 
   // Notion connect/disconnect
