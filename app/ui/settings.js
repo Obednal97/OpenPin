@@ -299,6 +299,7 @@ function renderAPIKeysOverview() {
 
 function renderProfile() {
   const p = app.settings.profile || {};
+  $('#profile-name').value = p.name || '';
   $('#profile-job').value = p.job || '';
   $('#profile-industry').value = p.industry || '';
   $('#profile-seniority').value = p.seniority || '';
@@ -841,6 +842,7 @@ function initSettingsEvents() {
   // Profile save
   $('#profile-save-btn').addEventListener('click', async () => {
     const profile = {
+      name: $('#profile-name').value.trim(),
       job: $('#profile-job').value.trim(),
       industry: $('#profile-industry').value.trim(),
       seniority: $('#profile-seniority').value,
