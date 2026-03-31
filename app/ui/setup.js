@@ -86,11 +86,11 @@ function _showCloudLogin() {
       <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Having trouble with browser login?</div>
       <div style="font-size:var(--text-xs);color:var(--text-tertiary);line-height:1.5;">
         If the browser opens the official Plaud app instead:<br>
-        1. Open <strong>web.plaud.ai</strong> in your browser<br>
-        2. Sign in to your Plaud account<br>
-        3. Open browser Developer Tools (F12) → Application → Cookies<br>
-        4. Find the <strong>access_token</strong> cookie and copy its value<br>
-        5. Paste it below
+        1. Open <strong>web.plaud.ai</strong> in your browser and sign in<br>
+        2. Open Developer Tools (Cmd+Option+I) → Application tab<br>
+        3. In the left sidebar: Local Storage → plaud.ai<br>
+        4. Find <strong>tokenstr</strong> and copy its value<br>
+        5. Paste it below (works with or without the "Bearer" prefix)
       </div>
       <div class="token-input-row" style="margin-top:var(--sp-2);">
         <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste bearer token...">
@@ -156,6 +156,10 @@ function _showCloudLogin() {
 
 async function _handleTokenLogin(token) {
   token = (token || '').trim();
+  // Strip "Bearer " or "bearer " prefix if pasted from local storage
+  if (token.toLowerCase().startsWith('bearer ')) {
+    token = token.slice(7).trim();
+  }
   if (!token) { toast('Please paste a token', 'error'); return; }
   try {
     const res = await window.plaud.cloudLoginToken(token, 'eu');

@@ -1129,7 +1129,8 @@ function initSettingsEvents() {
           </div>
         `;
         $('#cloud-token-login-btn-waiting').addEventListener('click', async () => {
-          const token = $('#cloud-token-input-waiting').value.trim();
+          let token = $('#cloud-token-input-waiting').value.trim();
+          if (token.toLowerCase().startsWith('bearer ')) token = token.slice(7).trim();
           if (!token) {
             toast('Please paste a token', 'error');
             return;
@@ -1159,7 +1160,8 @@ function initSettingsEvents() {
 
   // Direct token login
   $('#cloud-token-login-btn').addEventListener('click', async () => {
-    const token = $('#cloud-token-input').value.trim();
+    let token = $('#cloud-token-input').value.trim();
+    if (token.toLowerCase().startsWith('bearer ')) token = token.slice(7).trim();
     if (!token) {
       toast('Please paste a token', 'error');
       return;
