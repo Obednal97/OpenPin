@@ -50,7 +50,16 @@ def transcribe_file():
         _cloud_has_speakers = False
         result = None
         vocab = config.get("custom_vocabulary", [])
-        vocab_prompt = ", ".join(vocab) if vocab else None
+        # Build transcription prompt: vocab + profile context for Groq/OpenAI Whisper
+        prompt_parts = []
+        if vocab:
+            prompt_parts.append(", ".join(vocab))
+        profile = config.get("profile", {})
+        if profile.get("industry"):
+            prompt_parts.append(f"Industry: {profile['industry']}")
+        if profile.get("job"):
+            prompt_parts.append(f"Role: {profile['job']}")
+        vocab_prompt = ". ".join(prompt_parts) if prompt_parts else None
 
         # Build provider order based on user preference (preferred first, then fallbacks)
         preferred = config.get("transcription_provider", "deepgram")
@@ -67,7 +76,11 @@ def transcribe_file():
             try:
                 nonlocal result
                 if name == "deepgram":
-                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize, keywords=vocab)
+                    # Combine custom vocab with profile-derived terms for Deepgram keywords
+                    dg_keywords = list(vocab)
+                    if profile.get("industry"):
+                        dg_keywords.append(profile["industry"])
+                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize, keywords=dg_keywords or None)
                     _cloud_has_speakers = bool(result.get("speakers"))
                 elif name == "groq":
                     result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
