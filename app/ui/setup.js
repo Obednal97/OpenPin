@@ -112,12 +112,21 @@ function _showCloudLogin() {
           <div class="setup-spinner"></div>
           <h2>Waiting for Login</h2>
           <p>Sign into your Plaud account in the browser. You'll be redirected back automatically.</p>
-          <div class="cloud-divider" style="margin:12px 0;"><span>or paste your bearer token</span></div>
-          <div class="token-input-row" style="margin-top:8px;">
-            <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste bearer token...">
+          <div style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg-input);border-radius:var(--radius-sm);text-align:left;">
+            <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Redirected to the official Plaud app instead?</div>
+            <div style="font-size:var(--text-xs);color:var(--text-tertiary);line-height:1.5;">
+              1. Open <strong>web.plaud.ai</strong> in your browser and sign in<br>
+              2. Open Developer Tools (Cmd+Option+I) → Application tab<br>
+              3. In the left sidebar: Local Storage → plaud.ai<br>
+              4. Find <strong>tokenstr</strong> and copy its value<br>
+              5. Paste it below (works with or without the "Bearer" prefix)
+            </div>
+            <div class="token-input-row" style="margin-top:var(--sp-2);">
+              <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste bearer token...">
+            </div>
+            <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Login with Token</button>
           </div>
-          <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:8px;width:100%;justify-content:center;">Login with Token</button>
-          <button class="setup-skip" id="setup-cancel-cloud">Cancel</button>
+          <button class="setup-skip" id="setup-cancel-cloud" style="margin-top:var(--sp-2);">Cancel</button>
         `);
 
         $('#setup-cloud-token-btn-waiting').addEventListener('click', () => _handleTokenLogin($('#setup-cloud-token-waiting').value));
