@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 WS_PORT = 8081
-BIND_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NjllNzgwNDE4ZDg0OWRhOGFmMDU2MzIzOTljMjVhZSIsImF1ZCI6IiIsImV4cCI6MjAzMzczMzY5NSwiaWF0IjoxNzc0NTMzNjk1LCJjbGllbnRfaWQiOiJkZXZpY2UiLCJzbiI6Ijg4MjBCNTAyNTY5NDczMTcifQ.UJH_zwN0Imyc4W8dropHXy1_j7kN09aJf-2ZUtyLEJs"
+BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
 
 def status(msg, pct):
@@ -320,11 +320,16 @@ async def ble_connect_and_setup():
 
 
 async def main():
+    global BIND_TOKEN
     args = json.loads(sys.argv[1])
     sn = args["sn"]
     recordings_dir = Path(args["recordings_dir"])
     app_key_path = Path(args["app_key_path"])
     dismissed = set(args.get("dismissed", []))
+    BIND_TOKEN = args.get("bind_token")
+    if not BIND_TOKEN:
+        print(json.dumps({"error": "No BIND_TOKEN — user must log into Plaud cloud first"}))
+        return
 
     # Do our own BLE connection (device invalidates sessions when BLE drops)
     ble = await ble_connect_and_setup()

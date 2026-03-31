@@ -17,7 +17,6 @@ from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
 from app.utils.config import load_config, save_config
 from app.utils.constants import (
     APP_KEY_PATH,
-    BIND_TOKEN,
     BLE_BATTERY_UUID,
     PROJECT_ROOT,
     RECORDINGS_DIR,
@@ -450,10 +449,16 @@ async def connect_device(address=None):
     _device_state["file_done"] = file_done
     _device_state["connected"] = True
 
-    # Initial commands
-    token32 = BIND_TOKEN[:32].encode("ascii")
-    await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
-    await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
+    # Initial commands — use per-device BIND_TOKEN from cloud API
+    from app.state.cloud import get_device_bind_token
+    sn = _device_state.get("serial_number", "")
+    device_token = get_device_bind_token(sn) if sn else None
+    if not device_token:
+        logging.warning(f"No BIND_TOKEN for device {sn} — user needs to log into Plaud cloud")
+    token32 = (device_token or "")[:32].encode("ascii")
+    if token32:
+        await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
+        await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
     await send_cmd(bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
@@ -814,11 +819,16 @@ def do_wifi_sync_blocking():
         _reset_state()
 
         # Build worker args — worker does its own BLE connect + handshake
+        from app.state.cloud import get_device_bind_token
+        device_token = get_device_bind_token(sn) if sn else None
+        if not device_token:
+            return {"error": "No BIND_TOKEN for this device. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps({
             "sn": sn,
             "recordings_dir": str(RECORDINGS_DIR),
             "app_key_path": str(APP_KEY_PATH),
             "dismissed": list(load_config().get("deleted_ids", [])),
+            "bind_token": device_token,
         })
 
         # Find the worker script

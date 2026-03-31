@@ -132,6 +132,27 @@ def devices():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/bind-device", methods=["POST"])
+def bind_device():
+    """Bind a device to the user's Plaud cloud account and get its BIND_TOKEN."""
+    if not cloud.is_logged_in():
+        return jsonify({"error": "Not logged in"}), 401
+    data = request.get_json(silent=True) or {}
+    sn = data.get("sn", "")
+    if not sn:
+        return jsonify({"error": "No serial number provided"}), 400
+    try:
+        result = cloud.bind_device(
+            sn=sn,
+            name=data.get("name", "Plaud NotePin S"),
+            model=data.get("model", "882"),
+            version_number=data.get("version_number", 65546),
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(_error_json({}, e)), 500
+
+
 @bp.route("/trash", methods=["POST"])
 def trash():
     """Move files to trash on Plaud Cloud."""

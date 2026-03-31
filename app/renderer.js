@@ -129,6 +129,10 @@ dom.scanBtn.addEventListener('click', async () => {
       toast(`Found ${result.name}`, 'success');
       dom.statusText.textContent = 'Connecting...';
 
+      // Auto-bind to cloud if logged in (gets per-device BIND_TOKEN)
+      if (result.serial_number) {
+        try { await window.plaud.cloudBindDevice(result.serial_number, result.name); } catch {}
+      }
       const conn = await window.plaud.connect(result.address, result.serial_number);
       if (conn.connected) {
         toast(`Connected to ${conn.device_name || 'Plaud NotePin S'}`, 'success');
