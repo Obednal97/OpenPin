@@ -203,7 +203,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     return {"restored": False, "need_manual": True, "ssid": original_ssid, "message": msg}
 
 
-SN_SIG = "TOb4HuuFPMhEB8bMCR3SFlqTRO9ihuhsHp0Jp3bwBGDYpew7FI9rFykg2JUKGLfe50BJS4z6Esm2Mt7Bqv6e5nz0j6jRCKWVWTuNiFY6a2iGY2lAvghwP8+JrqHb2RlTgoCj+vYXxAlMpZ5eMFCmTudiCmJt4aPzrJFURyM8OJfVJ8IHZi2/WbkR/i0vLrVuuLO3aShZrFjR7Enw0MQYUl4RMnHxk4qEwr7MV7qSTjyA7qeYcZY09gfS9+GmbVhwU4ZS4doiD+8gk6AmOn4zn20C3sCS1EOo3KGJgTNzSdZA59d/YQLql3bTjL3VsJYVvQlP5Zzfa5nHLcd3fN588w=="
+SN_SIG = None  # Set from args — per-device signature from cloud API
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
@@ -320,15 +320,19 @@ async def ble_connect_and_setup():
 
 
 async def main():
-    global BIND_TOKEN
+    global BIND_TOKEN, SN_SIG
     args = json.loads(sys.argv[1])
     sn = args["sn"]
     recordings_dir = Path(args["recordings_dir"])
     app_key_path = Path(args["app_key_path"])
     dismissed = set(args.get("dismissed", []))
     BIND_TOKEN = args.get("bind_token")
+    SN_SIG = args.get("sn_sig")
     if not BIND_TOKEN:
         print(json.dumps({"error": "No BIND_TOKEN — user must log into Plaud cloud first"}))
+        return
+    if not SN_SIG:
+        print(json.dumps({"error": "No SN_SIG — user must log into Plaud cloud first"}))
         return
 
     # Do our own BLE connection (device invalidates sessions when BLE drops)

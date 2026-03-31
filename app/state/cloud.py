@@ -661,5 +661,39 @@ def get_device_bind_token(sn):
     return config.get("device_bind_tokens", {}).get(sn)
 
 
+def fetch_sn_signature(sn):
+    """Fetch the SN_SIG (snSignature) for a device from the cloud API.
+
+    POST /device/sn-sign with {"sns": ["<serial_number>"]}
+    Returns the per-device RSA signature needed for BLE handshake.
+    Stores it in config for offline use.
+    """
+    if not _cloud_state["logged_in"] or not _cloud_state["token"]:
+        return {"error": "Not logged in to Plaud cloud"}
+
+    try:
+        data = cloud_api("/device/sn-sign", method="POST", json_body={"sns": [sn]})
+        if data.get("status") == 0:
+            signatures = data.get("data", {}).get("signature", {})
+            sig = signatures.get(sn)
+            if sig:
+                config = load_config()
+                device_sigs = config.get("device_sn_signatures", {})
+                device_sigs[sn] = sig
+                config["device_sn_signatures"] = device_sigs
+                save_config(config)
+                return {"signature": sig, "sn": sn}
+            return {"error": "No signature returned for this device"}
+        return {"error": data.get("msg", "Failed to get signature"), "raw": data}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_device_sn_signature(sn):
+    """Get the stored SN_SIG for a device, or None if not available."""
+    config = load_config()
+    return config.get("device_sn_signatures", {}).get(sn)
+
+
 # Load cloud token on import
 load_cloud_token()

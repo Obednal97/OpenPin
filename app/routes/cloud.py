@@ -153,6 +153,22 @@ def bind_device():
         return jsonify(_error_json({}, e)), 500
 
 
+@bp.route("/sn-sign", methods=["POST"])
+def sn_sign():
+    """Fetch the SN signature for a device from the Plaud cloud."""
+    if not cloud.is_logged_in():
+        return jsonify({"error": "Not logged in"}), 401
+    data = request.get_json(silent=True) or {}
+    sn = data.get("sn", "")
+    if not sn:
+        return jsonify({"error": "No serial number provided"}), 400
+    try:
+        result = cloud.fetch_sn_signature(sn)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(_error_json({}, e)), 500
+
+
 @bp.route("/trash", methods=["POST"])
 def trash():
     """Move files to trash on Plaud Cloud."""
