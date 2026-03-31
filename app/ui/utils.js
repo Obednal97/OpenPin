@@ -168,21 +168,87 @@ function escapeHtml(text) {
 }
 
 function renderMarkdown(md) {
-  let html = escapeHtml(md);
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/^---$/gm, '<hr>');
-  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/^(?!<[hublio]|<\/|<hr)(.+)$/gm, '<p>$1</p>');
-  html = html.replace(/<p>\s*<\/p>/g, '');
-  return html;
+  // Process line by line for proper list nesting
+  const lines = md.split('\n');
+  const output = [];
+  let inList = false;
+  let listDepth = 0;
+
+  function closeList() {
+    while (listDepth > 0) { output.push('</ul>'); listDepth--; }
+    inList = false;
+  }
+
+  for (const raw of lines) {
+    let line = escapeHtml(raw);
+
+    // Headings
+    if (/^### (.+)$/.test(line)) { closeList(); output.push(line.replace(/^### (.+)$/, '<h3>$1</h3>')); continue; }
+    if (/^## (.+)$/.test(line)) { closeList(); output.push(line.replace(/^## (.+)$/, '<h2>$1</h2>')); continue; }
+    if (/^# (.+)$/.test(line)) { closeList(); output.push(line.replace(/^# (.+)$/, '<h1>$1</h1>')); continue; }
+
+    // Horizontal rule
+    if (/^---$/.test(line)) { closeList(); output.push('<hr>'); continue; }
+
+    // Blockquote
+    if (/^&gt; (.+)$/.test(line)) { closeList(); output.push(line.replace(/^&gt; (.+)$/, '<blockquote>$1</blockquote>')); continue; }
+
+    // List items (with nesting support)
+    const listMatch = line.match(/^(\s*)-\s+(.+)$/);
+    if (listMatch) {
+      const indent = Math.floor(listMatch[1].length / 2) + 1; // 0 spaces = depth 1, 2 spaces = depth 2
+      let content = listMatch[2];
+
+      // Checkbox: - [ ] or - [x]
+      content = content.replace(/^\[ \]\s*/, '<input type="checkbox" disabled> ');
+      content = content.replace(/^\[x\]\s*/i, '<input type="checkbox" checked disabled> ');
+
+      if (!inList) { inList = true; listDepth = 0; }
+      while (listDepth < indent) { output.push('<ul>'); listDepth++; }
+      while (listDepth > indent) { output.push('</ul>'); listDepth--; }
+      // Inline formatting
+      content = content.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+      content = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      content = content.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      content = content.replace(/`([^`]+)`/g, '<code>$1</code>');
+      output.push(`<li>${content}</li>`);
+      continue;
+    }
+
+    // Bullet with * syntax
+    const starMatch = line.match(/^(\s*)\*\s+(.+)$/);
+    if (starMatch && !line.match(/^\*[^*]+\*$/)) { // Don't match *italic*
+      const indent = Math.floor(starMatch[1].length / 2) + 1;
+      let content = starMatch[2];
+      content = content.replace(/^\[ \]\s*/, '<input type="checkbox" disabled> ');
+      content = content.replace(/^\[x\]\s*/i, '<input type="checkbox" checked disabled> ');
+      if (!inList) { inList = true; listDepth = 0; }
+      while (listDepth < indent) { output.push('<ul>'); listDepth++; }
+      while (listDepth > indent) { output.push('</ul>'); listDepth--; }
+      content = content.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+      content = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      content = content.replace(/`([^`]+)`/g, '<code>$1</code>');
+      output.push(`<li>${content}</li>`);
+      continue;
+    }
+
+    // Not a list item — close any open list
+    closeList();
+
+    // Empty line
+    if (!line.trim()) continue;
+
+    // Inline formatting for paragraphs
+    line = line.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    line = line.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    line = line.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    output.push(`<p>${line}</p>`);
+  }
+
+  closeList();
+  return output.join('\n');
 }
 
 function openSettings() {
