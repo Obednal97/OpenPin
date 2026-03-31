@@ -63,19 +63,22 @@ def transcribe_deepgram(audio_path, api_key, language="en", diarize=False, keywo
         params["detect_language"] = "true"
     if diarize:
         params["diarize"] = "true"
+    # Build query string manually — keywords need special handling
+    # (repeated params with colons that shouldn't be encoded by requests lib)
+    from urllib.parse import quote
+    qs_parts = [f"{k}={v}" for k, v in params.items()]
     if keywords:
-        # Deepgram keywords parameter — boost recognition of specific terms
-        # Format: keywords=word1:boost&keywords=word2:boost (boost 0-10, default high)
-        params["keywords"] = [f"{kw}:5" for kw in keywords]
+        for kw in keywords:
+            qs_parts.append(f"keywords={quote(kw)}:5")
+    query_string = "&".join(qs_parts)
 
     with open(audio_path, "rb") as f:
         r = http_requests.post(
-            "https://api.deepgram.com/v1/listen",
+            f"https://api.deepgram.com/v1/listen?{query_string}",
             headers={
                 "Authorization": f"Token {api_key}",
                 "Content-Type": "audio/ogg",
             },
-            params=params,
             data=f,
             timeout=120,
         )
