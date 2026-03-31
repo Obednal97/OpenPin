@@ -209,6 +209,9 @@ def exchange_token(auth_code, desktop_uuid=None):
 
 def login_with_token(token, region="eu"):
     """Login with a manually provided bearer token."""
+    # Strip "Bearer " prefix if pasted from browser local storage
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
     api_domain = PLAUD_API_DOMAINS.get(region, PLAUD_API_DOMAINS["eu"])
     _cloud_state["api_domain"] = api_domain
     _cloud_state["token"] = token
