@@ -22,10 +22,11 @@ BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
 BLE_NOTIFY_UUID = "00002bb0-0000-1000-8000-00805f9b34fb"
 BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 
-# Device authentication
-SN_SIG = "<REDACTED_SN_SIGNATURE>"
-# BIND_TOKEN is now per-device — obtained from cloud API /device/bind
-# Stored in config as device_bind_tokens[sn]
+# Device authentication — both SN_SIG and BIND_TOKEN are now per-device
+# SN_SIG: obtained from POST /device/sn-sign with {"sns": ["<sn>"]}
+#         Stored in config as device_sn_signatures[sn]
+# BIND_TOKEN: obtained from POST /device/bind
+#             Stored in config as device_bind_tokens[sn]
 
 # Directory paths — user data lives in DATA_DIR, keys stay in the app bundle
 RECORDINGS_DIR = DATA_DIR / "recordings"

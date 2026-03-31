@@ -21,7 +21,6 @@ from app.utils.constants import (
     PROJECT_ROOT,
     RECORDINGS_DIR,
     SESSIONS_DIR,
-    SN_SIG,
 )
 from app.utils.constants import (
     BLE_NOTIFY_UUID as N,
@@ -344,7 +343,17 @@ async def connect_device(address=None):
                     done.set()
 
         await cl.start_notify(N, h)
-        sig = base64.b64decode(SN_SIG)
+        # Get per-device SN_SIG from cloud API (stored in config)
+        from app.state.cloud import get_device_sn_signature
+        sn = _device_state.get("serial_number", "")
+        sn_sig_b64 = get_device_sn_signature(sn) if sn else None
+        if not sn_sig_b64:
+            try:
+                await cl.stop_notify(N)
+            except Exception:
+                pass
+            return {"connected": False, "error": "No SN signature for this device. Log into Plaud Cloud in Settings to register your device."}
+        sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
         # Send SN_SIG 3 times for reliability on weak connections
         for _ in range(3):
@@ -551,19 +560,25 @@ async def depair_device():
                     verify_ack.set()
 
         await cl.start_notify(N, verify_handler)
-        sig = base64.b64decode(SN_SIG)
-        tc = (len(sig) + 99) // 100
-        for i in range(tc):
-            await cl.write_gatt_char(
-                W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
-            )
-            await asyncio.sleep(0.02)
+        from app.state.cloud import get_device_sn_signature
+        sn_for_verify = _device_state.get("serial_number", "")
+        sn_sig_verify = get_device_sn_signature(sn_for_verify)
+        if not sn_sig_verify:
+            logging.warning("No SN signature for depair verification — skipping")
+        else:
+            sig = base64.b64decode(sn_sig_verify)
+            tc = (len(sig) + 99) // 100
+            for i in range(tc):
+                await cl.write_gatt_char(
+                    W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
+                )
+                await asyncio.sleep(0.02)
 
-        try:
-            await asyncio.wait_for(verify_ack.wait(), timeout=5)
-            depair_verified = True
-        except TimeoutError:
-            depair_verified = False
+            try:
+                await asyncio.wait_for(verify_ack.wait(), timeout=5)
+                depair_verified = True
+            except TimeoutError:
+                depair_verified = False
 
         await cl.stop_notify(N)
     except Exception as e:
@@ -819,16 +834,18 @@ def do_wifi_sync_blocking():
         _reset_state()
 
         # Build worker args — worker does its own BLE connect + handshake
-        from app.state.cloud import get_device_bind_token
+        from app.state.cloud import get_device_bind_token, get_device_sn_signature
         device_token = get_device_bind_token(sn) if sn else None
-        if not device_token:
-            return {"error": "No BIND_TOKEN for this device. Log into Plaud Cloud in Settings to bind your device."}
+        device_sig = get_device_sn_signature(sn) if sn else None
+        if not device_token or not device_sig:
+            return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps({
             "sn": sn,
             "recordings_dir": str(RECORDINGS_DIR),
             "app_key_path": str(APP_KEY_PATH),
             "dismissed": list(load_config().get("deleted_ids", [])),
             "bind_token": device_token,
+            "sn_sig": device_sig,
         })
 
         # Find the worker script
