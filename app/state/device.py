@@ -287,7 +287,7 @@ async def connect_device(address=None):
                 raise
 
     # Service discovery with retry — CoreBluetooth may need time to enumerate services
-    for attempt in range(3):
+    for attempt in range(5):
         await asyncio.sleep(1 + attempt)
         if cl.services:
             break
@@ -296,10 +296,16 @@ async def connect_device(address=None):
             if cl.services:
                 break
         except Exception:
-            if attempt < 2:
-                print(f"[BLE] Service discovery attempt {attempt + 1} failed, retrying...")
-            else:
-                raise
+            print(f"[BLE] Service discovery attempt {attempt + 1}/5 failed, retrying...")
+
+    if not cl.services:
+        try:
+            await cl.disconnect()
+        except Exception:
+            pass
+        sn = _device_state.get("serial_number", "unknown")
+        return {"connected": False, "error": f"Service discovery failed after 5 attempts (device: {sn}). Try moving the device closer and reconnecting."}
+
     _device_state["client"] = cl
 
     # Handshake

@@ -53,7 +53,10 @@ def connect():
         return jsonify(result)
     except Exception as e:
         dev.set_connected(False)
-        return jsonify(_error_json({"connected": False}, e)), 500
+        err = _error_json({"connected": False}, e)
+        if serial_number:
+            err["device_sn"] = serial_number
+        return jsonify(err), 500
 
 
 @bp.route("/disconnect", methods=["POST"])

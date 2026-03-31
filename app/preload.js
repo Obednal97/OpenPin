@@ -45,8 +45,9 @@ async function apiCall(method, endpoint, body = null) {
   const data = await res.json();
   // Auto-report errors from critical endpoints (include Python traceback if available)
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok)) {
+    const snTag = data.device_sn ? ` [SN: ${data.device_sn}]` : '';
     ipcRenderer.invoke('report-error', {
-      message: `API error: ${endpoint} — ${data.error || `HTTP ${res.status}`}`,
+      message: `API error: ${endpoint}${snTag} — ${data.error || `HTTP ${res.status}`}`,
       stack: data.traceback || '',
       context: `api:${endpoint}`,
     }).catch(() => {});
