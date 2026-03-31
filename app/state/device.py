@@ -326,56 +326,74 @@ async def connect_device(address=None):
 
     _device_state["client"] = cl
 
-    # Handshake
-    ack = asyncio.Event()
-    rsa = {}
-    done = asyncio.Event()
+    # Handshake — wrapped to catch BLE disconnects mid-handshake
+    try:
+        ack = asyncio.Event()
+        rsa = {}
+        done = asyncio.Event()
 
-    def h(s, d):
-        d = bytes(d)
-        cid = struct.unpack_from("<H", d, 0)[0] if len(d) >= 2 else 0
-        if cid == 65041:
-            ack.set()
-        elif cid == 65042 and len(d) >= 4:
-            idx = d[3]
-            if idx not in rsa:
-                rsa[idx] = d[4:]
-            if len(rsa) >= d[2]:
-                done.set()
+        def h(s, d):
+            d = bytes(d)
+            cid = struct.unpack_from("<H", d, 0)[0] if len(d) >= 2 else 0
+            if cid == 65041:
+                ack.set()
+            elif cid == 65042 and len(d) >= 4:
+                idx = d[3]
+                if idx not in rsa:
+                    rsa[idx] = d[4:]
+                if len(rsa) >= d[2]:
+                    done.set()
 
-    await cl.start_notify(N, h)
-    sig = base64.b64decode(SN_SIG)
-    tc = (len(sig) + 99) // 100
-    for _ in range(2):
-        for i in range(tc):
-            await cl.write_gatt_char(
-                W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
-            )
-            await asyncio.sleep(0.02)
-    for _ in range(50):
-        await asyncio.sleep(0.1)
-        if ack.is_set() or done.is_set():
-            break
-    if ack.is_set() and not done.is_set():
-        pem = get_public_key_full_pem().encode()
-        pc = (len(pem) + 99) // 100
-        for i in range(pc):
-            await cl.write_gatt_char(
-                W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i * 100 : (i + 1) * 100], response=True
-            )
-            await asyncio.sleep(0.02)
-        await asyncio.wait_for(done.wait(), timeout=15)
-    elif not done.is_set():
-        await cl.stop_notify(N)
-        return {"connected": False, "error": "Handshake failed - device did not respond"}
+        await cl.start_notify(N, h)
+        sig = base64.b64decode(SN_SIG)
+        tc = (len(sig) + 99) // 100
+        for _ in range(2):
+            for i in range(tc):
+                await cl.write_gatt_char(
+                    W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
+                )
+                await asyncio.sleep(0.02)
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if ack.is_set() or done.is_set():
+                break
+        if ack.is_set() and not done.is_set():
+            pem = get_public_key_full_pem().encode()
+            pc = (len(pem) + 99) // 100
+            for i in range(pc):
+                await cl.write_gatt_char(
+                    W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i * 100 : (i + 1) * 100], response=True
+                )
+                await asyncio.sleep(0.02)
+            await asyncio.wait_for(done.wait(), timeout=15)
+        elif not done.is_set():
+            try:
+                await cl.stop_notify(N)
+            except Exception:
+                pass
+            return {"connected": False, "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting."}
 
-    blob = bytearray()
-    for i in sorted(rsa.keys()):
-        blob.extend(rsa[i])
-    dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
-    key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
-    assert ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI"
-    await cl.stop_notify(N)
+        blob = bytearray()
+        for i in sorted(rsa.keys()):
+            blob.extend(rsa[i])
+        dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
+        key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
+        assert ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI"
+        try:
+            await cl.stop_notify(N)
+        except Exception:
+            pass
+    except Exception as e:
+        _reset_state()
+        err_msg = str(e)
+        # Translate raw BLE errors to user-friendly messages
+        if "service discovery" in err_msg.lower():
+            return {"connected": False, "error": "Connection was lost during setup. Try moving the device closer and reconnecting."}
+        if "disconnected" in err_msg.lower() or "not connected" in err_msg.lower():
+            return {"connected": False, "error": "Device disconnected during setup. Try reconnecting."}
+        if "timeout" in err_msg.lower():
+            return {"connected": False, "error": "Device took too long to respond. Try moving it closer and reconnecting."}
+        return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
 
     # Save session
     SESSIONS_DIR.mkdir(exist_ok=True)
