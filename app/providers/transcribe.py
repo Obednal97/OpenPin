@@ -69,7 +69,7 @@ def transcribe_deepgram(audio_path, api_key, language="en", diarize=False, keywo
     qs_parts = [f"{k}={v}" for k, v in params.items()]
     if keywords:
         for kw in keywords:
-            qs_parts.append(f"keywords={quote(kw)}:5")
+            qs_parts.append(f"keyterm={quote(kw)}")
     query_string = "&".join(qs_parts)
 
     with open(audio_path, "rb") as f:
