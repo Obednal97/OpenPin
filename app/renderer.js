@@ -390,16 +390,63 @@ async function startWifiSync() {
   overlay.classList.add('visible');
 }
 
-async function executeWifiSync() {
+// WiFi sync stage icons (SVG paths)
+const _wifiIcons = {
+  preparing: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 2v4m0 12v4m-7.07-3.93l2.83-2.83m8.48-8.48l2.83-2.83M2 12h4m12 0h4m-3.93 7.07l-2.83-2.83M6.34 6.34L3.51 3.51" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  wifi: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12.55a11 11 0 0114 0M8.53 16.11a6 6 0 016.95 0M12 20h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  lock: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="5" y="11" width="14" height="10" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 11V7a4 4 0 118 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  folder: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  download: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  check: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M6 12l4 4 8-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  error: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M4.93 19h14.14c1.34 0 2.17-1.46 1.5-2.62L13.5 4.38c-.67-1.16-2.33-1.16-3 0L3.43 16.38c-.67 1.16.16 2.62 1.5 2.62z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+};
+
+function _wifiSyncStageFromMessage(msg, pct) {
+  if (!msg) return { icon: 'preparing', title: 'Preparing...', detail: '' };
+  const m = msg.toLowerCase();
+  if (pct <= 5) return { icon: 'preparing', title: 'Preparing device...', detail: msg };
+  if (m.includes('hotspot') && m.includes('open')) return { icon: 'wifi', title: 'Enabling device hotspot...', detail: '' };
+  if (m.includes('connecting to') || m.includes('hotspot')) return { icon: 'wifi', title: 'Connecting to device hotspot...', detail: 'Internet will be temporarily disconnected' };
+  if (m.includes('handshake') || m.includes('secure')) return { icon: 'lock', title: 'Establishing secure connection...', detail: '' };
+  if (m.includes('file list') || m.includes('discover')) return { icon: 'folder', title: 'Discovering recordings...', detail: '' };
+  if (m.includes('download') || m.includes('file')) return { icon: 'download', title: 'Downloading recordings...', detail: msg };
+  if (m.includes('restor') || m.includes('wifi')) return { icon: 'wifi', title: 'Restoring internet...', detail: msg };
+  return { icon: 'preparing', title: msg, detail: '' };
+}
+
+function _renderWifiProgress(icon, title, detail, pct, state = 'syncing') {
   const overlay = $('#wifi-confirm-overlay');
+  if (!overlay) return;
+  const panel = overlay.querySelector('.modal-panel');
+  const iconClass = state === 'success' ? 'success' : state === 'error' ? 'error' : 'syncing';
+  const barClass = state === 'success' ? 'success' : state === 'error' ? 'error' : '';
+
+  panel.innerHTML = `
+    <div class="wifi-sync-progress">
+      <div class="wifi-sync-stage-icon ${iconClass}">${_wifiIcons[icon] || _wifiIcons.preparing}</div>
+      <h3 class="wifi-sync-stage-title">${escapeHtml(title)}</h3>
+      <p class="wifi-sync-stage-detail">${escapeHtml(detail)}</p>
+      <div class="wifi-sync-bar"><div class="wifi-sync-bar-fill ${barClass}" style="width: ${Math.round(pct)}%"></div></div>
+      <p class="wifi-sync-percent">${Math.round(pct)}%</p>
+    </div>
+  `;
+}
+
+function _closeWifiModal() {
+  const overlay = $('#wifi-confirm-overlay');
+  if (!overlay) return;
   overlay.classList.remove('visible');
   overlay.addEventListener('transitionend', function h() {
     overlay.classList.add('hidden');
     overlay.removeEventListener('transitionend', h);
   });
+}
+
+async function executeWifiSync() {
+  // Keep the modal open — transform into progress view
+  _renderWifiProgress('preparing', 'Preparing...', '', 2);
 
   app.syncing = true;
-  showProgress('WiFi sync — starting...', 5);
 
   // Poll for progress updates while sync runs
   let pollActive = true;
@@ -408,76 +455,97 @@ async function executeWifiSync() {
       try {
         const s = await window.plaud.wifiSyncStatus();
         if (s && s.message) {
-          showProgress(`WiFi: ${s.message}`, s.percent || 5);
+          const stage = _wifiSyncStageFromMessage(s.message, s.percent || 5);
+          _renderWifiProgress(stage.icon, stage.title, stage.detail, s.percent || 5);
         }
       } catch {}
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 1000));
     }
   };
-  const pollPromise = pollProgress();
+  pollProgress();
 
   try {
     const result = await window.plaud.wifiSync();
     pollActive = false;
+
     if (result.error) {
-      toast(`WiFi sync failed: ${result.error}`, 'error');
-    } else {
-      // Check if WiFi restore needs manual intervention
-      if (result.wifi_restore && result.wifi_restore.need_manual) {
-        const ssidName = result.wifi_restore.ssid || 'your WiFi';
-        toast(`Please reconnect to ${ssidName}`, 'info');
-        window.plaud.showNotification(
-          'WiFi transfer complete',
-          `Please reconnect to "${ssidName}" in the WiFi settings panel that just opened.`,
-        );
-      }
+      _renderWifiProgress('error', 'Transfer failed', result.error, 0, 'error');
+      const panel = $('#wifi-confirm-overlay .modal-panel');
+      panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
+        '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
+      panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
+      return;
+    }
 
-      const newFiles = (result.files || []).filter((f) => f.status === 'new');
-      if (newFiles.length > 0) {
-        toast(`WiFi sync complete: ${newFiles.length} recording(s)`, 'success');
+    // Check if WiFi restore needs manual intervention
+    if (result.wifi_restore && result.wifi_restore.need_manual) {
+      const ssidName = result.wifi_restore.ssid || 'your WiFi';
+      _renderWifiProgress('wifi', 'Reconnect to WiFi', `Please reconnect to "${ssidName}" — WiFi settings should be open.`, 95, 'error');
+      window.plaud.showNotification(
+        'WiFi transfer complete',
+        `Please reconnect to "${ssidName}" in the WiFi settings panel.`,
+      );
+    }
 
-        // Auto-transcribe if enabled
-        if (app.settings.auto_transcribe !== false) {
-          showProgress('Transcribing...', 60);
-          for (const f of newFiles) {
+    const newFiles = (result.files || []).filter((f) => f.status === 'new');
+
+    if (newFiles.length > 0) {
+      // Auto-transcribe if enabled
+      if (app.settings.auto_transcribe !== false) {
+        for (let i = 0; i < newFiles.length; i++) {
+          _renderWifiProgress('preparing', 'Transcribing...', `Recording ${i + 1} of ${newFiles.length}`, 60 + (25 * i / newFiles.length));
+          const f = newFiles[i];
+          if (f.ogg_path) {
+            try {
+              await window.plaud.transcribe(
+                f.ogg_path,
+                app.settings.model || 'small',
+                app.settings.diarize || false,
+                app.settings.language || 'en',
+              );
+            } catch {}
+          }
+        }
+        if (app.settings.auto_summarise) {
+          for (let i = 0; i < newFiles.length; i++) {
+            _renderWifiProgress('preparing', 'Summarising...', `Recording ${i + 1} of ${newFiles.length}`, 85 + (10 * i / newFiles.length));
+            const f = newFiles[i];
             if (f.ogg_path) {
               try {
-                await window.plaud.transcribe(
-                  f.ogg_path,
-                  app.settings.model || 'small',
-                  app.settings.diarize || false,
-                  app.settings.language || 'en',
-                );
+                const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
+                await window.plaud.summarize(sid);
               } catch {}
             }
           }
-          if (app.settings.auto_summarise) {
-            showProgress('Summarising...', 90);
-            for (const f of newFiles) {
-              if (f.ogg_path) {
-                try {
-                  const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
-                  await window.plaud.summarize(sid);
-                } catch {}
-              }
-            }
-          }
         }
-        await loadRecordings();
-      } else {
-        toast('WiFi sync: no new recordings', 'info');
       }
+      await loadRecordings();
+
+      // Show success
+      _renderWifiProgress('check', 'Transfer complete!', `${newFiles.length} recording(s) synced`, 100, 'success');
+    } else {
+      _renderWifiProgress('check', 'Transfer complete', 'No new recordings found', 100, 'success');
     }
+
+    // Add done button
+    const panel = $('#wifi-confirm-overlay .modal-panel');
+    panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
+      '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Done</button>');
+    panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
+
   } catch (err) {
     pollActive = false;
-    toast(`WiFi sync error: ${err.message}`, 'error');
+    _renderWifiProgress('error', 'Transfer failed', err.message, 0, 'error');
+    const panel = $('#wifi-confirm-overlay .modal-panel');
+    panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
+      '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
+    panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
   } finally {
     pollActive = false;
     app.syncing = false;
     hideProgress();
 
     // Reconnect BLE (worker disconnected it to do its own BLE session)
-    toast('Reconnecting to device...', 'info');
     try {
       const scan = await window.plaud.scanKnown();
       if (scan.found) {
