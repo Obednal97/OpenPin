@@ -3,12 +3,20 @@
 import logging
 import threading
 import time
+import traceback
 
 from flask import Blueprint, jsonify, request
 
 from app.state import device as dev
 from app.utils.config import load_config
 from app.utils.constants import RECORDINGS_DIR
+
+
+def _error_json(base, exc):
+    """Return error JSON with traceback for debugging (auto-reported to GitHub)."""
+    base["error"] = str(exc)
+    base["traceback"] = traceback.format_exc()
+    return base
 
 bp = Blueprint("device", __name__, url_prefix="/device")
 
@@ -19,7 +27,7 @@ def scan():
         result = dev.run_async(dev.scan_device())
         return jsonify(result)
     except Exception as e:
-        return jsonify({"found": False, "error": str(e)}), 500
+        return jsonify(_error_json({"found": False}, e)), 500
 
 
 @bp.route("/scan-all", methods=["POST"])
@@ -45,7 +53,7 @@ def connect():
         return jsonify(result)
     except Exception as e:
         dev.set_connected(False)
-        return jsonify({"connected": False, "error": str(e)}), 500
+        return jsonify(_error_json({"connected": False}, e)), 500
 
 
 @bp.route("/disconnect", methods=["POST"])
@@ -54,7 +62,7 @@ def disconnect():
         result = dev.run_async(dev.disconnect_device())
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/depair", methods=["POST"])
@@ -64,7 +72,7 @@ def depair():
         result = dev.run_async(dev.depair_device())
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/status")
@@ -259,7 +267,7 @@ def sync():
         result = dev.run_async(dev.sync_files(), timeout=1800)  # 30 min for large multi-file syncs
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/abort-sync", methods=["POST"])
@@ -279,7 +287,7 @@ def wifi_sync():
         result = dev.do_wifi_sync_blocking()
         return jsonify(result)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify(_error_json({}, e)), 500
 
 
 @bp.route("/wifi-sync-status")

@@ -974,6 +974,13 @@ ipcMain.handle('get-api-info', () => {
   return { port: API_PORT, url: API_URL, error: _startupError, status: _startupStatus };
 });
 
+// IPC: Report errors from renderer/preload (runtime API errors, BLE failures, etc.)
+ipcMain.handle('report-error', async (event, { message, stack, context }) => {
+  const err = new Error(message);
+  if (stack) err.stack = stack;
+  await reportError(err, context);
+});
+
 // IPC: theme cycling
 ipcMain.handle('cycle-theme', () => {
   const cycle = { auto: 'light', light: 'dark', dark: 'auto' };

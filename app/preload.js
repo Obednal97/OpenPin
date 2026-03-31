@@ -15,6 +15,8 @@ const REPORT_ENDPOINTS = new Set([
   '/cloud/sync', '/cloud/exchange-token',
   '/notion/push', '/notion/connect',
 ]);
+// Suppress "Failed to fetch" reports during the first 15s (server may still be starting)
+const _appStartTime = Date.now();
 
 async function apiCall(method, endpoint, body = null) {
   // Wait for the dynamic port to be resolved before first API call
@@ -30,8 +32,8 @@ async function apiCall(method, endpoint, body = null) {
   try {
     res = await fetch(`${_apiUrl}${endpoint}`, opts);
   } catch (err) {
-    // Network error (server down, etc.)
-    if (REPORT_ENDPOINTS.has(endpoint)) {
+    // Network error (server down, etc.) — suppress during startup grace period
+    if (REPORT_ENDPOINTS.has(endpoint) && Date.now() - _appStartTime > 15000) {
       ipcRenderer.invoke('report-error', {
         message: `API fetch failed: ${endpoint} — ${err.message}`,
         stack: '',
@@ -41,11 +43,11 @@ async function apiCall(method, endpoint, body = null) {
     throw err;
   }
   const data = await res.json();
-  // Auto-report errors from critical endpoints
+  // Auto-report errors from critical endpoints (include Python traceback if available)
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok)) {
     ipcRenderer.invoke('report-error', {
       message: `API error: ${endpoint} — ${data.error || `HTTP ${res.status}`}`,
-      stack: '',
+      stack: data.traceback || '',
       context: `api:${endpoint}`,
     }).catch(() => {});
   }
