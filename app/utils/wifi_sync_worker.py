@@ -519,7 +519,9 @@ async def main():
         try:
             await asyncio.wait_for(all_downloads_done.wait(), timeout=dl_timeout)
         except TimeoutError:
-            pass
+            done_so_far = sum(1 for f in new_files if f["status"] == "new")
+            total_expected = len(wifi_files)
+            status(f"Download timed out: got {done_so_far}/{total_expected} files", 88)
 
         done_count = sum(1 for f in new_files if f["status"] == "new")
         status(f"Download complete: {done_count} file(s)", 90)
@@ -544,7 +546,7 @@ async def main():
             pass
 
     result = {"files": new_files, "method": "wifi"}
-    if restore_result and restore_result.get("need_manual"):
+    if restore_result:
         result["wifi_restore"] = restore_result
     print(json.dumps(result))
 

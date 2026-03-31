@@ -470,6 +470,7 @@ async function executeWifiSync() {
 
     if (result.error) {
       _renderWifiProgress('error', 'Transfer failed', result.error, 0, 'error');
+      window.plaud.reportError(`WiFi sync failed: ${result.error}`, '', 'wifi-sync-error');
       const panel = $('#wifi-confirm-overlay .modal-panel');
       panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
         '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
@@ -481,6 +482,7 @@ async function executeWifiSync() {
     if (result.wifi_restore && result.wifi_restore.need_manual) {
       const ssidName = result.wifi_restore.ssid || 'your WiFi';
       _renderWifiProgress('wifi', 'Reconnect to WiFi', `Please reconnect to "${ssidName}" — WiFi settings should be open.`, 95, 'error');
+      window.plaud.reportError(`WiFi restore failed — manual reconnect needed for ${ssidName}`, '', 'wifi-restore-failed');
       window.plaud.showNotification(
         'WiFi transfer complete',
         `Please reconnect to "${ssidName}" in the WiFi settings panel.`,
@@ -536,6 +538,7 @@ async function executeWifiSync() {
   } catch (err) {
     pollActive = false;
     _renderWifiProgress('error', 'Transfer failed', err.message, 0, 'error');
+    window.plaud.reportError(`WiFi sync exception: ${err.message}`, err.stack || '', 'wifi-sync-exception');
     const panel = $('#wifi-confirm-overlay .modal-panel');
     panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
       '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
