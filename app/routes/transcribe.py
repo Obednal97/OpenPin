@@ -48,6 +48,7 @@ def transcribe_file():
         _cloud_error = None
         _cloud_provider = None
         _cloud_has_speakers = False
+        result = None
         vocab = config.get("custom_vocabulary", [])
         vocab_prompt = ", ".join(vocab) if vocab else None
 
