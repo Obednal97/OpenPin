@@ -418,6 +418,17 @@
   100% { transform: scale(1); opacity: 1; }
 }
 
+.setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+  text-align: left;
+}
+.setup-field { display: flex; flex-direction: column; gap: var(--sp-0_5); }
+.setup-field .settings-label { font-size: var(--text-xs); }
+.setup-field .settings-input { font-size: var(--text-sm); }
+
 .setup-perm-icon {
   width: 48px;
   height: 48px;
