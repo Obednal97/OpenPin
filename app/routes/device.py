@@ -56,6 +56,17 @@ def connect():
         err = _error_json({"connected": False}, e)
         if serial_number:
             err["device_sn"] = serial_number
+        # Translate raw BLE errors to friendly messages for the UI
+        raw = str(e).lower()
+        if "service discovery" in raw:
+            err["error"] = "Couldn't establish a stable connection. Try moving the device closer and restarting Bluetooth."
+            err["raw_error"] = str(e)
+        elif "not found" in raw:
+            err["error"] = "Device went out of range before connecting. Try moving it closer and scanning again."
+            err["raw_error"] = str(e)
+        elif "timeout" in raw:
+            err["error"] = "Connection timed out. Try moving the device closer and reconnecting."
+            err["raw_error"] = str(e)
         return jsonify(err), 500
 
 
