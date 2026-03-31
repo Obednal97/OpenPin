@@ -624,5 +624,42 @@ def list_cloud_devices():
     return data.get("data_devices", [])
 
 
+def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
+    """Bind a device to the user's Plaud cloud account.
+
+    Returns the device-specific access_token (BIND_TOKEN) which is needed
+    for the BLE handshake. Each device needs its own token containing
+    the user's account ID and device serial number.
+    """
+    if not _cloud_state["logged_in"] or not _cloud_state["token"]:
+        return {"error": "Not logged in to Plaud cloud"}
+
+    try:
+        data = cloud_api("/device/bind", method="POST", json_body={
+            "sn": sn,
+            "name": name,
+            "model": model,
+            "version_number": version_number,
+        })
+        if data.get("status") == 0 and data.get("data", {}).get("access_token"):
+            token = data["data"]["access_token"]
+            # Save per-device token in config
+            config = load_config()
+            device_tokens = config.get("device_bind_tokens", {})
+            device_tokens[sn] = token
+            config["device_bind_tokens"] = device_tokens
+            save_config(config)
+            return {"token": token, "sn": sn}
+        return {"error": data.get("msg", "Bind failed"), "raw": data}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_device_bind_token(sn):
+    """Get the stored BIND_TOKEN for a device, or None if not available."""
+    config = load_config()
+    return config.get("device_bind_tokens", {}).get(sn)
+
+
 # Load cloud token on import
 load_cloud_token()

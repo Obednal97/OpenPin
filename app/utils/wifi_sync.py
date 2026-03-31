@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
 from app.utils.config import load_config
-from app.utils.constants import APP_KEY_PATH, BIND_TOKEN, RECORDINGS_DIR
+from app.utils.constants import APP_KEY_PATH, RECORDINGS_DIR
 
 WS_PORT = 8081
 WIFI_SIZE_THRESHOLD = 500_000  # Use WiFi if total new files > 500KB
@@ -212,7 +212,7 @@ async def _restore_internet(ssid, hotspot_ip="", original_ip=""):
 # ── WiFi file transfer ──
 
 
-async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_callback=None):
+async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_callback=None, bind_token=None):
     """Download all files from device via WiFi.
 
     Args:
@@ -220,6 +220,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
         serial_number: device serial number string
         send_ble_cmd: async callable to send encrypted BLE commands
         status_callback: optional callable(message, percent) for progress updates
+        bind_token: per-device BIND_TOKEN from cloud API
 
     Returns:
         dict with "files" list (same format as BLE sync) or "error"
@@ -298,7 +299,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
                 if cmd_id == 2:
                     # SayHello — respond with handshake
                     stamp = int(time.time())
-                    response = build_wifi_packet(1, {"token": BIND_TOKEN, "stamp": stamp})
+                    response = build_wifi_packet(1, {"token": bind_token, "stamp": stamp})
                     await websocket.send(ws_encrypt(response))
 
                 elif cmd_id == 1:

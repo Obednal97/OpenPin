@@ -1306,6 +1306,12 @@ function initSettingsEvents() {
             const sn = row.dataset.sn;
             results.innerHTML = `<div class="dm-scanning">Connecting to ${name}</div>`;
             try {
+              // Auto-bind device to cloud account if logged in (gets per-device BIND_TOKEN)
+              if (sn) {
+                try {
+                  await window.plaud.cloudBindDevice(sn, name);
+                } catch {}
+              }
               const conn = await window.plaud.connect(address, sn);
               if (conn.connected) {
                 toast(`Connected to ${name}`, 'success');
