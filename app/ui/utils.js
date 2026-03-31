@@ -193,6 +193,53 @@ function openSettings() {
   dom.settingsOverlay.classList.add('visible');
 }
 
+// ---- Tooltip ----
+
+const _tooltipEl = document.createElement('div');
+_tooltipEl.className = 'app-tooltip';
+_tooltipEl.setAttribute('role', 'tooltip');
+document.body.appendChild(_tooltipEl);
+
+function showTooltip(anchor, text) {
+  _tooltipEl.textContent = text;
+  _tooltipEl.classList.add('visible');
+  // Position below the anchor, right-aligned
+  const rect = anchor.getBoundingClientRect();
+  _tooltipEl.style.top = `${rect.bottom + 6}px`;
+  _tooltipEl.style.right = `${window.innerWidth - rect.right}px`;
+  _tooltipEl.style.left = '';
+}
+
+function hideTooltip() {
+  _tooltipEl.classList.remove('visible');
+}
+
+/**
+ * Create an info icon that shows a tooltip on hover.
+ * Returns an HTMLElement. Usage: container.appendChild(infoTip('Helpful text'));
+ */
+function infoTip(text) {
+  const icon = document.createElement('span');
+  icon.className = 'proc-info-icon';
+  icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><text x="8" y="12" text-anchor="middle" fill="currentColor" font-size="11" font-weight="600">i</text></svg>';
+  icon.addEventListener('mouseenter', () => showTooltip(icon, text));
+  icon.addEventListener('mouseleave', hideTooltip);
+  return icon;
+}
+
+/**
+ * Initialize all tooltip triggers on the page (elements with data-tooltip attribute).
+ * Call once after DOM is ready, or after rendering new tooltip triggers.
+ */
+function initTooltips(root = document) {
+  root.querySelectorAll('[data-tooltip]').forEach(el => {
+    if (el._tooltipBound) return;
+    el._tooltipBound = true;
+    el.addEventListener('mouseenter', () => showTooltip(el, el.dataset.tooltip));
+    el.addEventListener('mouseleave', hideTooltip);
+  });
+}
+
 function closeSettings() {
   dom.settingsPanel.classList.remove('visible');
   dom.settingsOverlay.classList.remove('visible');
