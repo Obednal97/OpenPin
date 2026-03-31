@@ -26,6 +26,7 @@ def get_settings():
             "model": config.get("whisper_model", "small"),
             "diarize": config.get("diarize", False),
             "language": config.get("language", "auto"),
+            "english_variant": config.get("english_variant", "us"),
             "models": models,
             "ram_total_gb": round(total_gb, 1),
             "ram_used_gb": round(used_gb, 1),
@@ -66,6 +67,8 @@ def save_settings():
         config["diarize"] = data["diarize"]
     if "language" in data:
         config["language"] = data["language"]
+    if "english_variant" in data:
+        config["english_variant"] = data["english_variant"]
     if "custom_tags" in data:
         config["custom_tags"] = data["custom_tags"]
     if "profile" in data:
