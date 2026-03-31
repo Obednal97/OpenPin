@@ -222,10 +222,58 @@ function _showSuccess(deviceName) {
       <strong>${escapeHtml(deviceName)}</strong><br>
       Recordings will sync automatically when your device is nearby.
     </p>
-    <button class="action-btn primary" id="setup-finish">Get Started</button>
+    <button class="action-btn primary" id="setup-next">Continue</button>
   `);
 
-  $('#setup-finish').addEventListener('click', completeSetup);
+  $('#setup-next').addEventListener('click', _showProfileSetup);
+}
+
+// ---- Step 7: Profile Setup ----
+
+function _showProfileSetup() {
+  _renderSetup(`
+    <h2>About You</h2>
+    <p>Help the AI personalise transcriptions and summaries for you. You can always change this later in Settings.</p>
+    <div class="setup-form">
+      <div class="setup-field">
+        <label class="settings-label">Your Name</label>
+        <input type="text" id="setup-name" class="settings-input" placeholder="e.g. John, John Doe, Johnny">
+      </div>
+      <div class="setup-field">
+        <label class="settings-label">Job Function</label>
+        <input type="text" id="setup-job" class="settings-input" placeholder="e.g. Product Manager, Software Engineer">
+      </div>
+      <div class="setup-field">
+        <label class="settings-label">Industry</label>
+        <input type="text" id="setup-industry" class="settings-input" placeholder="e.g. Technology, Healthcare, Finance">
+      </div>
+      <div class="setup-field">
+        <label class="settings-label">Primary Use</label>
+        <input type="text" id="setup-usecases" class="settings-input" placeholder="e.g. Meeting notes, interviews, brainstorming">
+      </div>
+    </div>
+    <button class="action-btn primary" id="setup-profile-save">Get Started</button>
+    <button class="action-btn ghost" id="setup-profile-skip" style="margin-top:8px;">Skip for now</button>
+  `);
+
+  $('#setup-profile-save').addEventListener('click', async () => {
+    const profile = {
+      name: ($('#setup-name').value || '').trim(),
+      job: ($('#setup-job').value || '').trim(),
+      industry: ($('#setup-industry').value || '').trim(),
+      usecases: ($('#setup-usecases').value || '').trim(),
+    };
+    // Only save if they filled in at least one field
+    if (Object.values(profile).some(v => v)) {
+      try {
+        await window.plaud.saveSettings({ profile });
+        if (typeof app !== 'undefined') app.settings.profile = profile;
+      } catch {}
+    }
+    completeSetup();
+  });
+
+  $('#setup-profile-skip').addEventListener('click', completeSetup);
 }
 
 // ---- Dismiss & Complete ----
