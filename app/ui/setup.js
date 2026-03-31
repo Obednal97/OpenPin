@@ -49,11 +49,107 @@ function showSetupWelcome() {
 
   _showOverlay();
 
-  $('#setup-get-started').addEventListener('click', _showPermissions);
+  $('#setup-get-started').addEventListener('click', _showCloudLogin);
   $('#setup-skip-welcome').addEventListener('click', dismissSetup);
 }
 
-// ---- Step 2: Permissions ----
+// ---- Step 2: Plaud Cloud Login ----
+
+function _showCloudLogin() {
+  _renderSetup(`
+    <div class="setup-perm-icon">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h2>Sign into Plaud</h2>
+    <p>Your Plaud account is needed to register your device. This is a one-time setup — after this, the app works fully offline.</p>
+    <button class="action-btn primary" id="setup-cloud-login">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="margin-right:4px;">
+        <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Sign in with Browser
+    </button>
+    <div class="cloud-divider" style="margin:12px 0;"><span>or paste your bearer token</span></div>
+    <div class="token-input-row" style="margin-top:8px;">
+      <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste bearer token...">
+    </div>
+    <button class="action-btn subtle" id="setup-cloud-token-btn" style="margin-top:8px;width:100%;justify-content:center;">Login with Token</button>
+    <button class="setup-skip" id="setup-skip-cloud">Skip for now</button>
+  `);
+
+  // Browser OAuth flow
+  $('#setup-cloud-login').addEventListener('click', async () => {
+    try {
+      const result = await window.plaud.cloudLoginUrl('eu');
+      if (result.url) {
+        app.pendingDesktopUuid = result.desktop_uuid;
+        window.plaud.openExternal(result.url);
+
+        _renderSetup(`
+          <div class="setup-spinner"></div>
+          <h2>Waiting for Login</h2>
+          <p>Sign into your Plaud account in the browser. You'll be redirected back automatically.</p>
+          <div class="cloud-divider" style="margin:12px 0;"><span>or paste your bearer token</span></div>
+          <div class="token-input-row" style="margin-top:8px;">
+            <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste bearer token...">
+          </div>
+          <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:8px;width:100%;justify-content:center;">Login with Token</button>
+          <button class="setup-skip" id="setup-cancel-cloud">Cancel</button>
+        `);
+
+        $('#setup-cloud-token-btn-waiting').addEventListener('click', () => _handleTokenLogin($('#setup-cloud-token-waiting').value));
+        $('#setup-cancel-cloud').addEventListener('click', _showCloudLogin);
+
+        // Listen for OAuth callback
+        const origCallback = window._setupOAuthHandler;
+        window._setupOAuthHandler = async (authCode) => {
+          if (!authCode) return;
+          try {
+            const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
+            if (res.logged_in) {
+              app.cloudState = { logged_in: true, user: res.user };
+              toast('Plaud account connected!', 'success');
+              _showPermissions();
+            } else {
+              toast(res.error || 'Login failed', 'error');
+              _showCloudLogin();
+            }
+          } catch (err) {
+            toast(`Error: ${err.message}`, 'error');
+            _showCloudLogin();
+          }
+          app.pendingDesktopUuid = null;
+        };
+      }
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    }
+  });
+
+  // Direct token login
+  $('#setup-cloud-token-btn').addEventListener('click', () => _handleTokenLogin($('#setup-cloud-token').value));
+  $('#setup-skip-cloud').addEventListener('click', _showPermissions);
+}
+
+async function _handleTokenLogin(token) {
+  token = (token || '').trim();
+  if (!token) { toast('Please paste a token', 'error'); return; }
+  try {
+    const res = await window.plaud.cloudLoginToken(token, 'eu');
+    if (res.logged_in) {
+      app.cloudState = { logged_in: true, user: res.user };
+      toast('Plaud account connected!', 'success');
+      _showPermissions();
+    } else {
+      toast(res.error || 'Token invalid', 'error');
+    }
+  } catch (err) {
+    toast(`Error: ${err.message}`, 'error');
+  }
+}
+
+// ---- Step 3: Permissions ----
 
 function _showPermissions() {
   _renderSetup(`
