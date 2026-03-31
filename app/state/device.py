@@ -347,13 +347,15 @@ async def connect_device(address=None):
         await cl.start_notify(N, h)
         sig = base64.b64decode(SN_SIG)
         tc = (len(sig) + 99) // 100
-        for _ in range(2):
+        # Send SN_SIG 3 times for reliability on weak connections
+        for _ in range(3):
             for i in range(tc):
                 await cl.write_gatt_char(
                     W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
                 )
                 await asyncio.sleep(0.02)
-        for _ in range(50):
+        # Wait up to 10 seconds for device response (was 5s — too tight for weak signals)
+        for _ in range(100):
             await asyncio.sleep(0.1)
             if ack.is_set() or done.is_set():
                 break
