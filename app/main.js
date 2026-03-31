@@ -222,7 +222,12 @@ function githubApiPost(urlPath, body) {
 
 function errorFingerprint(error) {
   // Create a short fingerprint from the error for deduplication
-  const msg = String(error.message || error).replace(/[0-9]+/g, 'N').slice(0, 100);
+  // Strip BLE addresses (macOS UUIDs rotate per connection), hex strings, and numbers
+  const msg = String(error.message || error)
+    .replace(/[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/gi, 'ADDR') // BLE UUID
+    .replace(/[0-9a-f]{8,}/gi, 'HEX') // long hex strings
+    .replace(/[0-9]+/g, 'N')
+    .slice(0, 100);
   return msg;
 }
 
