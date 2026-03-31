@@ -110,12 +110,13 @@ def get_preferred_networks(exclude):
 async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     """Restore internet after Plaud hotspot.
 
-    Strategy:
-    1. Power-cycle WiFi (10s off) to reset stuck radio
-    2. Try CoreWLAN scan + associateToNetwork to rejoin saved SSID
-    3. If -3900, second power-cycle + retry
-    4. If still fails, open WiFi settings + tell user which network to click
+    Strategy (ordered by least disruption first):
+    1. Remove Plaud hotspot from preferred, try networksetup rejoin (uses keychain password)
+    2. If that fails, power-cycle WiFi (10s off) + CoreWLAN scan + associate
+    3. Second power-cycle (5s off) + networksetup again
+    4. If all fail, open WiFi settings for manual reconnection
     """
+    # Step 0: Remove Plaud hotspot from preferred networks
     subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", ssid], capture_output=True)
 
     try:
@@ -124,42 +125,69 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     except Exception:
         iface = None
 
+    # Step 1: Try networksetup first (uses saved keychain password, no power-cycle needed)
+    if original_ssid:
+        status(f"Reconnecting to {original_ssid}...", 92)
+        subprocess.run(
+            ["networksetup", "-setairportnetwork", "en0", original_ssid],
+            capture_output=True, timeout=15,
+        )
+        await asyncio.sleep(5)
+        ip = get_en0_ip()
+        if ip and ip != hotspot_ip:
+            status(f"Restored to {original_ssid} ({ip})", 98)
+            return {"restored": True, "ssid": original_ssid, "ip": ip}
+
+    # Step 2-3: Power-cycle WiFi radio + try multiple rejoin methods
     for cycle in range(2):
         off_time = 10 if cycle == 0 else 5
         settle_time = 5 if cycle == 0 else 8
-        status(f"Restoring WiFi (cycle {cycle + 1}/2)...", 92 + cycle * 2)
+        status(f"Power-cycling WiFi (attempt {cycle + 1}/2)...", 93 + cycle * 2)
         subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
         await asyncio.sleep(off_time)
         subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
         await asyncio.sleep(settle_time)
 
-        # Try CoreWLAN scan + join for the original network
-        if original_ssid and iface:
-            status(f"Scanning for {original_ssid}...", 93 + cycle * 2)
-            networks, _ = iface.scanForNetworksWithName_error_(original_ssid, None)
-            if networks:
-                best = None
-                enumerator = networks.objectEnumerator()
-                while True:
-                    obj = enumerator.nextObject()
-                    if obj is None:
-                        break
-                    if obj.ssid() and str(obj.ssid()) == original_ssid:
-                        if best is None or obj.rssiValue() > best.rssiValue():
-                            best = obj
-                if best:
-                    status(f"Joining {original_ssid}...", 95 + cycle)
-                    success, error = iface.associateToNetwork_password_error_(best, None, None)
-                    if success:
-                        await asyncio.sleep(3)
-                        ip = get_en0_ip()
-                        if ip and ip != hotspot_ip:
-                            status(f"Restored to {original_ssid} ({ip})", 98)
-                            return {"restored": True, "ssid": original_ssid, "ip": ip}
-                    elif "-3900" in str(error):
-                        continue  # Try another power-cycle
+        # Try networksetup rejoin (uses keychain)
+        if original_ssid:
+            status(f"Rejoining {original_ssid}...", 94 + cycle * 2)
+            subprocess.run(
+                ["networksetup", "-setairportnetwork", "en0", original_ssid],
+                capture_output=True, timeout=15,
+            )
+            await asyncio.sleep(3)
+            ip = get_en0_ip()
+            if ip and ip != hotspot_ip:
+                status(f"Restored to {original_ssid} ({ip})", 98)
+                return {"restored": True, "ssid": original_ssid, "ip": ip}
 
-        # Check if auto-join worked
+        # Try CoreWLAN scan + join as fallback
+        if original_ssid and iface:
+            status(f"Scanning for {original_ssid}...", 95 + cycle)
+            try:
+                networks, _ = iface.scanForNetworksWithName_error_(original_ssid, None)
+                if networks:
+                    best = None
+                    enumerator = networks.objectEnumerator()
+                    while True:
+                        obj = enumerator.nextObject()
+                        if obj is None:
+                            break
+                        if obj.ssid() and str(obj.ssid()) == original_ssid:
+                            if best is None or obj.rssiValue() > best.rssiValue():
+                                best = obj
+                    if best:
+                        success, error = iface.associateToNetwork_password_error_(best, None, None)
+                        if success:
+                            await asyncio.sleep(3)
+                            ip = get_en0_ip()
+                            if ip and ip != hotspot_ip:
+                                status(f"Restored to {original_ssid} ({ip})", 98)
+                                return {"restored": True, "ssid": original_ssid, "ip": ip}
+            except Exception:
+                pass
+
+        # Check if macOS auto-joined on its own
         ip = get_en0_ip()
         if ip and ip != hotspot_ip:
             current = str(iface.ssid()) if iface and iface.ssid() else ""

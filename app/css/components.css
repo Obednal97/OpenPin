@@ -429,6 +429,81 @@
 .setup-field .settings-label { font-size: var(--text-xs); }
 .setup-field .settings-input { font-size: var(--text-sm); }
 
+/* === COMPONENT: WiFi Sync Progress === */
+.wifi-sync-progress {
+  text-align: center;
+  padding: var(--sp-4) 0;
+}
+.wifi-sync-stage-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  margin: 0 auto var(--sp-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+}
+.wifi-sync-stage-icon.syncing {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  animation: wifiPulse 2s ease-in-out infinite;
+}
+.wifi-sync-stage-icon.success {
+  background: var(--green-subtle);
+  color: var(--green);
+}
+.wifi-sync-stage-icon.error {
+  background: var(--destructive-subtle);
+  color: var(--destructive);
+}
+@keyframes wifiPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+}
+.wifi-sync-stage-title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  margin-bottom: var(--sp-1);
+}
+.wifi-sync-stage-detail {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--sp-4);
+}
+.wifi-sync-bar {
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin-bottom: var(--sp-2);
+}
+.wifi-sync-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width 0.5s ease;
+  min-width: 2%;
+}
+.wifi-sync-bar-fill.success { background: var(--green); }
+.wifi-sync-bar-fill.error { background: var(--destructive); }
+.wifi-sync-percent {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.wifi-sync-stages {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.wifi-sync-stages span { display: flex; align-items: center; gap: var(--sp-1); }
+.wifi-sync-stages span.active { color: var(--accent); font-weight: var(--weight-semibold); }
+.wifi-sync-stages span.done { color: var(--green); }
+
 .setup-perm-icon {
   width: 48px;
   height: 48px;
