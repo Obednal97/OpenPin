@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('plaud', {
   cloudRecordings: () => apiCall('GET', '/cloud/recordings'),
   cloudSync: (direction) => apiCall('POST', '/cloud/sync', { direction }),
   cloudDevices: () => apiCall('GET', '/cloud/devices'),
+  cloudBindDevice: (sn, name, model) => apiCall('POST', '/cloud/bind-device', { sn, name, model }),
 
   // Audio URL builder (port resolved by the time UI calls this — after init())
   audioUrl: (filename) => `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}`,

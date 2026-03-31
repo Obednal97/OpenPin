@@ -24,7 +24,8 @@ BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 
 # Device authentication
 SN_SIG = "<REDACTED_SN_SIGNATURE>"
-BIND_TOKEN = "<REDACTED_JWT>"
+# BIND_TOKEN is now per-device — obtained from cloud API /device/bind
+# Stored in config as device_bind_tokens[sn]
 
 # Directory paths — user data lives in DATA_DIR, keys stay in the app bundle
 RECORDINGS_DIR = DATA_DIR / "recordings"
