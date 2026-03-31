@@ -70,13 +70,26 @@ function _showCloudLogin() {
       </svg>
       Sign in with Browser
     </button>
-    <div class="cloud-divider" style="margin:12px 0;"><span>or paste your bearer token</span></div>
+    <p class="settings-hint" style="margin-top:8px;">If the browser redirects to the official Plaud app instead, copy your bearer token from the browser and paste it below.</p>
     <div class="token-input-row" style="margin-top:8px;">
       <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste bearer token...">
     </div>
     <button class="action-btn subtle" id="setup-cloud-token-btn" style="margin-top:8px;width:100%;justify-content:center;">Login with Token</button>
     <button class="setup-skip" id="setup-skip-cloud">Skip for now</button>
   `);
+
+  // Try auto-detecting token from official Plaud desktop app
+  (async () => {
+    try {
+      const status = await window.plaud.cloudStatus();
+      if (status.logged_in) {
+        toast('Found existing Plaud account!', 'success');
+        app.cloudState = { logged_in: true, user: status.user };
+        _showPermissions();
+        return;
+      }
+    } catch {}
+  })();
 
   // Browser OAuth flow
   $('#setup-cloud-login').addEventListener('click', async () => {
