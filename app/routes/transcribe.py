@@ -39,6 +39,11 @@ def transcribe_file():
     language = data.get("language", config.get("language", "en"))
     if language == "auto":
         language = None
+    # For Deepgram: use regional variant (en-GB vs en-US) when language is English
+    eng_variant = config.get("english_variant", "us")
+    deepgram_language = language
+    if language == "en":
+        deepgram_language = f"en-{'GB' if eng_variant == 'gb' else 'US'}"
     session_id = Path(path).stem
     transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
@@ -82,7 +87,7 @@ def transcribe_file():
                     dg_keywords = list(vocab)
                     if profile.get("industry"):
                         dg_keywords.append(profile["industry"])
-                    result = transcribe_deepgram(path, key, language or "en", diarize=diarize, keywords=dg_keywords or None)
+                    result = transcribe_deepgram(path, key, deepgram_language or "en", diarize=diarize, keywords=dg_keywords or None)
                     _cloud_has_speakers = bool(result.get("speakers"))
                 elif name == "groq":
                     result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
@@ -346,6 +351,11 @@ def summarize_transcript():
             if profile.get("instructions"):
                 parts.append(f"Custom instructions: {profile['instructions']}")
             profile_context = "\n\nUser context: " + "; ".join(parts)
+
+        # English variant preference
+        eng_variant = config.get("english_variant", "us")
+        if eng_variant == "gb":
+            profile_context += "\n\nIMPORTANT: Use British English spelling and phrasing throughout (e.g. colour, organisation, summarise, centre, analysed)."
 
         # Get tags for context-aware summarization
         rec_tags = config.get("recording_tags", {}).get(session_id, [])

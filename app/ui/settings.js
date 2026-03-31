@@ -24,6 +24,13 @@ function renderSettings() {
   // Language
   $('#language-select').value = app.settings.language || 'en';
 
+  // English variant — show only when language is English or auto
+  const engVariant = $('#english-variant-group');
+  const lang = app.settings.language || 'en';
+  if (engVariant) engVariant.classList.toggle('hidden', lang !== 'en' && lang !== 'auto');
+  const engSelect = $('#english-variant-select');
+  if (engSelect) engSelect.value = app.settings.english_variant || 'us';
+
   // Auto-pipeline toggles — must be set here (not just initSettingsEvents)
   // because settings load async after init
   const syncToggle = $('#auto-sync-toggle');
@@ -794,7 +801,16 @@ function initSettingsEvents() {
   $('#language-select').addEventListener('change', async (e) => {
     app.settings.language = e.target.value;
     await window.plaud.saveSettings({ language: e.target.value });
+    // Show/hide English variant selector
+    const engVariant = $('#english-variant-group');
+    if (engVariant) engVariant.classList.toggle('hidden', e.target.value !== 'en' && e.target.value !== 'auto');
     toast('Language saved', 'success');
+  });
+
+  $('#english-variant-select').addEventListener('change', async (e) => {
+    app.settings.english_variant = e.target.value;
+    await window.plaud.saveSettings({ english_variant: e.target.value });
+    toast(`English variant set to ${e.target.value === 'gb' ? 'British' : 'American'}`, 'success');
   });
 
   $('#diarize-toggle').addEventListener('change', async (e) => {
