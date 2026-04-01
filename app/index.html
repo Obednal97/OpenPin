@@ -598,6 +598,10 @@
               <div class="settings-section mt-4 mb-0">
                 <h3>Sync Direction</h3>
                 <label class="toggle-label mb-2">
+                  <input type="radio" name="sync-direction" id="sync-none" value="none" class="toggle-input inline mr-1">
+                  <span>No sync — don't sync with Plaud cloud</span>
+                </label>
+                <label class="toggle-label mb-2">
                   <input type="radio" name="sync-direction" id="sync-download" value="download" checked class="toggle-input inline mr-1">
                   <span>Download only — pull recordings from Plaud cloud</span>
                 </label>
@@ -606,7 +610,18 @@
                   <span>Two-way — also upload local recordings to Plaud cloud</span>
                 </label>
               </div>
-              <div class="dm-actions mt-3">
+              <div class="settings-section mt-3 mb-0">
+                <h3>Sync Interval</h3>
+                <select id="cloud-sync-interval" class="settings-select">
+                  <option value="manual">Manual only</option>
+                  <option value="300">Every 5 minutes</option>
+                  <option value="1800">Every 30 minutes</option>
+                  <option value="3600">Every hour</option>
+                  <option value="14400">Every 4 hours</option>
+                  <option value="86400">Every 24 hours</option>
+                </select>
+              </div>
+              <div class="dm-actions mt-3" id="cloud-sync-actions">
                 <button id="cloud-sync-btn" class="action-btn accent flex-1">
                   <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
                     <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>

@@ -421,12 +421,23 @@ function renderCloudAccount() {
   const loggedIn = $('#cloud-logged-in');
 
   const savedDirection = app.settings.cloud_sync_direction || 'download';
+  const noneRadio = $('#sync-none');
   const dlRadio = $('#sync-download');
   const twRadio = $('#sync-twoway');
-  if (dlRadio && twRadio) {
+  if (noneRadio && dlRadio && twRadio) {
+    noneRadio.checked = savedDirection === 'none';
     dlRadio.checked = savedDirection === 'download';
     twRadio.checked = savedDirection === 'twoway';
   }
+  // Hide sync button and interval when "none" selected
+  const syncActions = $('#cloud-sync-actions');
+  const syncIntervalSection = $('#cloud-sync-interval');
+  if (syncActions) syncActions.classList.toggle('hidden', savedDirection === 'none');
+  if (syncIntervalSection) syncIntervalSection.closest('.settings-section').classList.toggle('hidden', savedDirection === 'none');
+
+  // Sync interval
+  const savedInterval = app.settings.cloud_sync_interval || 'manual';
+  if (syncIntervalSection) syncIntervalSection.value = savedInterval;
 
   if (app.cloudState.logged_in) {
     loggedOut.classList.add('hidden');
@@ -1181,11 +1192,24 @@ function initSettingsEvents() {
   });
 
   // Sync direction
-  $('#sync-download').addEventListener('change', async () => {
-    await window.plaud.saveSettings({ cloud_sync_direction: 'download' });
-  });
-  $('#sync-twoway').addEventListener('change', async () => {
-    await window.plaud.saveSettings({ cloud_sync_direction: 'twoway' });
+  for (const radio of ['sync-none', 'sync-download', 'sync-twoway']) {
+    $(`#${radio}`).addEventListener('change', async (e) => {
+      const dir = e.target.value;
+      app.settings.cloud_sync_direction = dir;
+      await window.plaud.saveSettings({ cloud_sync_direction: dir });
+      // Show/hide sync button and interval
+      const syncActions = $('#cloud-sync-actions');
+      const syncIntervalEl = $('#cloud-sync-interval');
+      if (syncActions) syncActions.classList.toggle('hidden', dir === 'none');
+      if (syncIntervalEl) syncIntervalEl.closest('.settings-section').classList.toggle('hidden', dir === 'none');
+    });
+  }
+
+  // Sync interval
+  $('#cloud-sync-interval').addEventListener('change', async (e) => {
+    app.settings.cloud_sync_interval = e.target.value;
+    await window.plaud.saveSettings({ cloud_sync_interval: e.target.value });
+    toast(`Sync interval set to ${e.target.options[e.target.selectedIndex].text}`, 'success');
   });
 
   // Cloud sync button
