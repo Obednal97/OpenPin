@@ -332,7 +332,7 @@ async function reportError(error, context = 'main') {
     if (openIssue) {
       await githubApiPost(`/repos/${UPDATE_REPO}/issues/${openIssue.number}/comments`, {
         body: [
-          '### Another occurrence',
+          `### Another occurrence${isPackaged ? '' : ' (DEV)'}`,
           '',
           '**System**',
           systemInfo,
@@ -352,7 +352,8 @@ async function reportError(error, context = 'main') {
       });
       console.log(`[BugReporter] Commented on existing issue #${openIssue.number}`);
     } else {
-      const title = `[Auto] ${errorMsg.slice(0, 80)}`;
+      const envTag = isPackaged ? '' : '[DEV] ';
+      const title = `[Auto] ${envTag}${errorMsg.slice(0, 80)}`;
       const body = [
         '## Auto-generated bug report',
         '',
