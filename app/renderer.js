@@ -791,6 +791,7 @@ function _startBgPoll() {
   let _deviceConnected = false;
   let _statusTimer = null;
   let _bgTimer = null;
+  let _cloudSyncTimer = null;
 
   function _getIntervals() {
     if (_appFocused && _deviceConnected) return { status: 10000, bg: 45000 };
@@ -803,8 +804,36 @@ function _startBgPoll() {
     const intervals = _getIntervals();
     if (_statusTimer) clearInterval(_statusTimer);
     if (_bgTimer) clearInterval(_bgTimer);
+    if (_cloudSyncTimer) clearInterval(_cloudSyncTimer);
     _statusTimer = intervals.status > 0 ? setInterval(updateDeviceStatus, intervals.status) : null;
     _bgTimer = setInterval(bgDevicePoll, intervals.bg);
+    // Cloud sync timer — respects the user's interval setting
+    _cloudSyncTimer = null;
+    const syncInterval = app.settings?.cloud_sync_interval;
+    const syncDirection = app.settings?.cloud_sync_direction;
+    if (syncInterval && syncInterval !== 'manual' && syncDirection && syncDirection !== 'none') {
+      const ms = parseInt(syncInterval, 10) * 1000;
+      if (ms > 0) {
+        _cloudSyncTimer = setInterval(cloudSyncPoll, ms);
+      }
+    }
+  }
+
+  async function cloudSyncPoll() {
+    if (app.syncing) return;
+    try {
+      const status = await window.plaud.cloudStatus();
+      if (!status.logged_in) return;
+      const direction = app.settings?.cloud_sync_direction || 'download';
+      if (direction === 'none') return;
+      const result = await window.plaud.cloudSync(direction);
+      if (result.error) return;
+      const downloaded = result.download?.files?.filter(f => f.status === 'new') || [];
+      if (downloaded.length > 0) {
+        toast(`Cloud sync: ${downloaded.length} new recording(s)`, 'info');
+        await loadRecordings();
+      }
+    } catch {}
   }
 
   // Track focus changes
@@ -961,6 +990,9 @@ function _startBgPoll() {
   _restartTimers();
   // First attempt after 5s
   setTimeout(bgDevicePoll, 5000);
+
+  // Allow settings to trigger timer restart when sync interval/direction changes
+  app.restartPollingTimers = _restartTimers;
 }
 
 init();

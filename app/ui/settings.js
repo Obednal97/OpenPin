@@ -1202,6 +1202,8 @@ function initSettingsEvents() {
       const syncIntervalEl = $('#cloud-sync-interval');
       if (syncActions) syncActions.classList.toggle('hidden', dir === 'none');
       if (syncIntervalEl) syncIntervalEl.closest('.settings-section').classList.toggle('hidden', dir === 'none');
+      // Restart polling timers to apply new sync direction
+      if (app.restartPollingTimers) app.restartPollingTimers();
     });
   }
 
@@ -1210,6 +1212,8 @@ function initSettingsEvents() {
     app.settings.cloud_sync_interval = e.target.value;
     await window.plaud.saveSettings({ cloud_sync_interval: e.target.value });
     toast(`Sync interval set to ${e.target.options[e.target.selectedIndex].text}`, 'success');
+    // Restart polling timers to apply new interval
+    if (app.restartPollingTimers) app.restartPollingTimers();
   });
 
   // Cloud sync button
