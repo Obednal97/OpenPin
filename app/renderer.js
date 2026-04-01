@@ -731,6 +731,10 @@ async function init() {
     return;
   }
 
+  // Server is ready — reset empty state text to default
+  dom.emptyState.querySelector('h2').textContent = 'No recordings yet';
+  dom.emptyState.querySelector('p').textContent = 'Connect your Plaud NotePin S and sync recordings, or start a new recording from the device.';
+
   // Init sub-modules
   initAudioPlayer();
 
