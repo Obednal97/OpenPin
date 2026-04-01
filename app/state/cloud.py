@@ -104,25 +104,35 @@ def _extract_plaud_desktop_token():
 
 
 def load_cloud_token():
-    """Load Plaud cloud token. Priority: 1) our saved config, 2) Plaud desktop app."""
+    """Load Plaud cloud token. Priority: 1) our saved config, 2) Plaud desktop app.
+
+    Trusts saved tokens without online validation — they'll be checked
+    lazily when an API call actually needs them. This allows offline
+    startup and avoids losing login state due to network issues.
+    """
     if PLAUD_CONFIG_PATH.exists():
         try:
             data = json.loads(PLAUD_CONFIG_PATH.read_text())
             token = data.get("token", "")
             api_domain = data.get("api_domain", PLAUD_API_DOMAINS["eu"])
             if token:
-                user_data = _try_token(token, api_domain)
-                if user_data:
-                    _cloud_state["token"] = token
-                    _cloud_state["api_domain"] = api_domain
-                    _cloud_state["logged_in"] = True
-                    _cloud_state["user"] = user_data
-                    return True
+                _cloud_state["token"] = token
+                _cloud_state["api_domain"] = api_domain
+                _cloud_state["logged_in"] = True
+                # Validate in background — update user info if available
+                try:
+                    user_data = _try_token(token, api_domain)
+                    if user_data:
+                        _cloud_state["user"] = user_data
+                except Exception:
+                    pass
+                return True
         except Exception:
             pass
 
     token, api_domain = _extract_plaud_desktop_token()
     if token:
+        # For auto-detected tokens, validate before trusting
         user_data = _try_token(token, api_domain)
         if user_data:
             _cloud_state["token"] = token
