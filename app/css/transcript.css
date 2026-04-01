@@ -102,6 +102,38 @@
   gap: var(--sp-2);
   flex-wrap: wrap;
 }
+.export-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+  min-width: 160px;
+  padding: var(--sp-1) 0;
+}
+[data-theme="dark"] .export-dropdown {
+  background: #2a2a2a;
+  border-color: #444;
+}
+.export-dropdown.hidden { display: none; }
+.export-option {
+  display: block;
+  width: 100%;
+  padding: var(--sp-1_5) var(--sp-3);
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+}
+.export-option:hover {
+  background: var(--bg-hover);
+}
 .actions-divider {
   width: 1px;
   height: 20px;
