@@ -350,17 +350,24 @@ async def connect_device(address=None):
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
         if not sn_sig_b64 and sn and is_logged_in():
             try:
-                bind_device(sn)
-                fetch_sn_signature(sn)
+                bind_result = bind_device(sn)
+                sig_result = fetch_sn_signature(sn)
                 sn_sig_b64 = get_device_sn_signature(sn)
-            except Exception:
-                pass
+                if not sn_sig_b64:
+                    logging.warning(f"Auto-fetch failed: bind={bind_result}, sig={sig_result}")
+            except Exception as e:
+                logging.warning(f"Auto-fetch exception: {e}")
         if not sn_sig_b64:
             try:
                 await cl.stop_notify(N)
             except Exception:
                 pass
-            return {"connected": False, "error": "No SN signature for this device. Log into Plaud Cloud in Settings to register your device."}
+            # Specific error message depending on what's missing
+            if not sn:
+                return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
+            if not is_logged_in():
+                return {"connected": False, "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again."}
+            return {"connected": False, "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again."}
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
         # Send SN_SIG 3 times for reliability on weak connections
