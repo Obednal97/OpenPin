@@ -751,20 +751,23 @@ async function init() {
     return; // completeSetup() will resume polling after onboarding finishes
   }
 
-  // Immediately try to connect to a known device on startup
-  try {
-    const status = await window.plaud.status();
-    if (!status.connected) {
-      const scan = await window.plaud.scanKnown();
-      if (scan.found) {
-        const conn = await window.plaud.connect(scan.address, scan.serial_number);
-        if (conn.connected) {
-          toast(`Connected to ${scan.name}`, 'success');
-          await updateDeviceStatus();
+  // Try to reconnect to known device on startup
+  // Only scan if we have paired devices (avoids unnecessary BLE permission prompts)
+  if (app.settings.has_paired_devices) {
+    try {
+      const status = await window.plaud.status();
+      if (!status.connected) {
+        const scan = await window.plaud.scanKnown();
+        if (scan.found) {
+          const conn = await window.plaud.connect(scan.address, scan.serial_number);
+          if (conn.connected) {
+            toast(`Connected to ${scan.name}`, 'success');
+            await updateDeviceStatus();
+          }
         }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   _startBgPoll();
 }
