@@ -14,6 +14,73 @@ from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR
 bp = Blueprint("recordings", __name__)
 
 
+def recover_metadata_from_transcripts():
+    """Recover tags, custom names, and auto_titles from transcript files.
+
+    Runs on startup — if the config was reset/wiped, this restores
+    metadata that was persisted in the transcript JSON files.
+    """
+    if not TRANSCRIPTS_DIR.exists():
+        return
+
+    config = load_config()
+    rec_tags = config.get("recording_tags", {})
+    rec_names = config.get("recording_names", {})
+    custom_tags = set(config.get("custom_tags", []))
+    recovered = 0
+
+    for f in TRANSCRIPTS_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            sid = f.stem
+
+            # Recover tags
+            tags = data.get("tags", [])
+            if tags and sid not in rec_tags:
+                rec_tags[sid] = tags
+                recovered += 1
+                # Discover custom tags not in defaults
+                from app.utils.constants import DEFAULT_TAGS
+                for t in tags:
+                    if t not in DEFAULT_TAGS:
+                        custom_tags.add(t)
+
+            # Recover custom name
+            name = data.get("custom_name", "")
+            if name and sid not in rec_names:
+                rec_names[sid] = name
+                recovered += 1
+
+            # Recover auto_title as name if no custom name
+            auto_title = data.get("auto_title", "")
+            if auto_title and sid not in rec_names and not name:
+                rec_names[sid] = auto_title
+
+        except Exception:
+            pass
+
+    # Recover deleted_ids from .deleted marker files
+    dismissed = set(config.get("deleted_ids", []))
+    if RECORDINGS_DIR.exists():
+        for marker in RECORDINGS_DIR.glob("*.deleted"):
+            sid = marker.stem
+            if sid not in dismissed:
+                dismissed.add(sid)
+                recovered += 1
+
+    if recovered > 0:
+        config["recording_tags"] = rec_tags
+        config["recording_names"] = rec_names
+        config["custom_tags"] = list(custom_tags)
+        config["deleted_ids"] = list(dismissed)
+        save_config(config)
+        print(f"[Recovery] Recovered {recovered} metadata entries from transcript/marker files")
+
+
+# Run recovery on import (server startup)
+recover_metadata_from_transcripts()
+
+
 def _extract_recording_date(stem):
     """Extract the actual recording timestamp from the session ID or filename."""
     import re
@@ -95,6 +162,19 @@ def tag_recording():
     rec_tags[session_id] = tags
     config["recording_tags"] = rec_tags
     save_config(config)
+
+    # Also persist tags in the transcript JSON for recovery after config resets
+    from app.utils.constants import TRANSCRIPTS_DIR
+    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    if transcript_path.exists():
+        try:
+            import json as _json
+            t_data = _json.loads(transcript_path.read_text())
+            t_data["tags"] = tags
+            transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
     return jsonify({"saved": True})
 
 
@@ -114,6 +194,21 @@ def rename_recording():
         del names[session_id]
     config["recording_names"] = names
     save_config(config)
+
+    # Also persist name in the transcript JSON for recovery after config resets
+    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    if transcript_path.exists():
+        try:
+            import json as _json
+            t_data = _json.loads(transcript_path.read_text())
+            if title:
+                t_data["custom_name"] = title
+            else:
+                t_data.pop("custom_name", None)
+            transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
     return jsonify({"saved": True})
 
 
@@ -180,6 +275,12 @@ def delete_recordings():
     deleted = []
     for sid in session_ids:
         dismissed.add(sid)
+        # Write .deleted marker so config reset doesn't re-sync
+        marker = RECORDINGS_DIR / f"{sid}.deleted"
+        try:
+            marker.write_text("")
+        except Exception:
+            pass
         for ext in ["ogg", "mp3", "raw"]:
             p = RECORDINGS_DIR / f"{sid}.{ext}"
             if p.exists():
