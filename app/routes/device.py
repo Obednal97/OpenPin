@@ -46,9 +46,11 @@ def connect():
         data = request.get_json(silent=True) or {}
         address = data.get("address")
         serial_number = data.get("serial_number")
+        # Set SN before connect so handshake can look up per-device credentials
+        if serial_number:
+            dev.set_serial_number(serial_number)
         result = dev.run_async(dev.connect_device(address))
         if result.get("connected"):
-            dev.set_serial_number(serial_number)
             dev.save_known_device(address, result.get("device_name"), serial_number)
         return jsonify(result)
     except Exception as e:
