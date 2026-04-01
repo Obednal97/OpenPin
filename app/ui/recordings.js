@@ -141,6 +141,13 @@ function renderRecordingsList() {
         openTranscript(sid);
       }
     });
+
+    // Right-click context menu
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      _showContextMenu(e.clientX, e.clientY, card.dataset.sid);
+    });
   });
 
   dom.recordingsList.querySelectorAll('.recording-play-btn').forEach((btn) => {
@@ -364,4 +371,105 @@ function showDeleteDialog(ids, count, onDeleted) {
       toast(`Delete failed: ${err.message}`, 'error');
     }
   });
+}
+
+
+// ---- Context Menu ----
+
+let _ctxMenu = null;
+
+function _removeContextMenu() {
+  if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; }
+}
+
+function _showContextMenu(x, y, sessionId) {
+  _removeContextMenu();
+
+  const t = app.transcripts[sessionId];
+  const hasTranscript = t && t.text;
+  const hasSummary = t && t.summary;
+
+  const items = [];
+
+  if (hasTranscript) {
+    items.push({ label: 'Copy Transcript', icon: 'copy', action: () => {
+      const text = (t.segments || []).map(s => {
+        const speaker = s.speaker ? `[${s.speaker}] ` : '';
+        return `${speaker}${s.text}`;
+      }).join('\n') || t.text;
+      navigator.clipboard.writeText(text).then(() => toast('Transcript copied', 'success')).catch(() => toast('Copy failed', 'error'));
+    }});
+  }
+
+  if (hasSummary) {
+    items.push({ label: 'Copy Summary', icon: 'copy', action: () => {
+      navigator.clipboard.writeText(t.summary).then(() => toast('Summary copied', 'success')).catch(() => toast('Copy failed', 'error'));
+    }});
+  }
+
+  // Notion — check if page exists
+  if (app.notionState && app.notionState.connected) {
+    items.push({ label: 'Push to Notion', icon: 'notion', action: async () => {
+      try {
+        const pageCheck = await window.plaud.notionPageUrl(sessionId);
+        if (pageCheck.has_page && pageCheck.url) {
+          window.plaud.openExternal(pageCheck.url);
+        } else if (hasTranscript) {
+          toast('Pushing to Notion...', 'info');
+          const result = await window.plaud.notionPush(sessionId);
+          if (result.pushed) {
+            toast('Pushed to Notion', 'success');
+            if (result.url) window.plaud.openExternal(result.url);
+          } else {
+            toast(result.error || 'Push failed', 'error');
+          }
+        }
+      } catch (err) {
+        toast(`Notion error: ${err.message}`, 'error');
+      }
+    }});
+  }
+
+  if (items.length > 0) {
+    items.push({ divider: true });
+  }
+
+  items.push({ label: 'Delete', icon: 'delete', destructive: true, action: () => {
+    showDeleteDialog([sessionId], 1, () => { loadRecordings(); });
+  }});
+
+  // Build menu DOM
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  menu.innerHTML = items.map(item => {
+    if (item.divider) return '<div class="ctx-menu-divider"></div>';
+    const cls = item.destructive ? ' ctx-menu-item-destructive' : '';
+    return `<button class="ctx-menu-item${cls}">${escapeHtml(item.label)}</button>`;
+  }).join('');
+
+  // Position — keep within viewport
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const maxX = window.innerWidth - rect.width - 8;
+  const maxY = window.innerHeight - rect.height - 8;
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+  _ctxMenu = menu;
+
+  // Bind actions
+  let actionIdx = 0;
+  menu.querySelectorAll('.ctx-menu-item').forEach(btn => {
+    // Find the matching non-divider item
+    while (items[actionIdx] && items[actionIdx].divider) actionIdx++;
+    if (items[actionIdx]) {
+      const action = items[actionIdx].action;
+      btn.addEventListener('click', () => { _removeContextMenu(); action(); });
+      actionIdx++;
+    }
+  });
+
+  // Close on click outside
+  setTimeout(() => {
+    document.addEventListener('click', _removeContextMenu, { once: true });
+  }, 10);
 }
