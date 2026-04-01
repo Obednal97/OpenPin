@@ -149,6 +149,20 @@ function openTranscript(sessionId, autoPlay = false) {
       </svg>
       <span>Copy</span>
     </button>
+    <div class="export-dropdown-wrap" style="position:relative;display:inline-block;">
+      <button class="action-btn subtle" id="export-transcript-btn" title="Export">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 2v8m0 0L5 7m3 3l3-3M3 12v1.5a1 1 0 001 1h8a1 1 0 001-1V12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Export</span>
+      </button>
+      <div id="export-dropdown" class="export-dropdown hidden">
+        <button class="export-option" data-format="md">Markdown (.md)</button>
+        <button class="export-option" data-format="txt">Plain Text (.txt)</button>
+        <button class="export-option" data-format="pdf">PDF (.pdf)</button>
+        <button class="export-option" data-format="json">JSON (.json)</button>
+      </div>
+    </div>
     <button class="action-btn subtle" id="notion-push-btn" title="Push to Notion">
       <img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;">
       <span>Notion</span>
@@ -201,6 +215,106 @@ function openTranscript(sessionId, autoPlay = false) {
           }, 2000);
         })
         .catch(() => toast('Failed to copy', 'error'));
+    });
+  }
+
+  // Export dropdown
+  const exportBtn = $('#export-transcript-btn');
+  const exportDropdown = $('#export-dropdown');
+  if (exportBtn && exportDropdown && t) {
+    exportBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      exportDropdown.classList.toggle('hidden');
+    });
+    // Close dropdown on click outside (use capture + check to avoid leaking listeners)
+    const _closeExportDropdown = () => { if (exportDropdown) exportDropdown.classList.add('hidden'); };
+    document.addEventListener('click', _closeExportDropdown);
+
+    exportDropdown.querySelectorAll('.export-option').forEach((opt) => {
+      opt.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const format = opt.dataset.format;
+        exportDropdown.classList.add('hidden');
+
+        const isSum = app.activeTab === 'summary' && t.summary;
+        const label = isSum ? 'Summary' : 'Transcript';
+        const customName = app.settings.recording_names?.[sessionId] || t.auto_title || sessionId;
+        const safeName = customName.replace(/[/\\:*?"<>|]/g, '-').slice(0, 80);
+
+        // Build content based on format
+        let content, filename, mimeType;
+
+        if (format === 'json') {
+          content = JSON.stringify(isSum ? { title: t.auto_title, summary: t.summary, segments: t.segments } : { text: t.text, segments: t.segments, duration: t.duration, language: t.language, speakers: t.speakers }, null, 2);
+          filename = `${safeName}.json`;
+          mimeType = 'application/json';
+        } else if (format === 'md') {
+          if (isSum) {
+            content = `# ${t.auto_title || customName}\n\n${t.summary}`;
+          } else if (t.segments && t.segments.length > 0) {
+            const lines = t.segments.map(s => {
+              const time = formatTime(s.start);
+              const speaker = s.speaker ? `**${s.speaker}**: ` : '';
+              return `[${time}] ${speaker}${s.text}`;
+            });
+            content = `# ${customName}\n\n${lines.join('\n\n')}`;
+          } else {
+            content = `# ${customName}\n\n${t.text || ''}`;
+          }
+          filename = `${safeName}.md`;
+          mimeType = 'text/markdown';
+        } else if (format === 'txt') {
+          if (isSum) {
+            content = `${t.auto_title || customName}\n${'='.repeat(40)}\n\n${t.summary}`;
+          } else if (t.segments && t.segments.length > 0) {
+            content = t.segments.map(s => {
+              const time = formatTime(s.start);
+              const speaker = s.speaker ? `[${s.speaker}] ` : '';
+              return `[${time}] ${speaker}${s.text}`;
+            }).join('\n');
+          } else {
+            content = t.text || '';
+          }
+          filename = `${safeName}.txt`;
+          mimeType = 'text/plain';
+        } else if (format === 'pdf') {
+          // Generate PDF via a simple HTML→print approach
+          let html;
+          if (isSum) {
+            html = `<h1>${escapeHtml(t.auto_title || customName)}</h1>${renderMarkdown(t.summary)}`;
+          } else if (t.segments && t.segments.length > 0) {
+            html = `<h1>${escapeHtml(customName)}</h1>` + t.segments.map(s => {
+              const time = formatTime(s.start);
+              const speaker = s.speaker ? `<strong>${escapeHtml(s.speaker)}:</strong> ` : '';
+              return `<p><small>[${time}]</small> ${speaker}${escapeHtml(s.text)}</p>`;
+            }).join('');
+          } else {
+            html = `<h1>${escapeHtml(customName)}</h1><p>${escapeHtml(t.text || '')}</p>`;
+          }
+
+          const printWin = window.open('', '_blank', 'width=800,height=600');
+          printWin.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title>
+            <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222;}
+            h1{font-size:20px;margin-bottom:24px;}h2{font-size:16px;margin-top:24px;}h3{font-size:14px;}
+            ul{padding-left:20px;}li{margin:4px 0;}small{color:#888;}p{margin:8px 0;}</style>
+            </head><body>${html}</body></html>`);
+          printWin.document.close();
+          printWin.focus();
+          setTimeout(() => { printWin.print(); printWin.close(); }, 500);
+          toast(`Opening PDF print dialog...`, 'info');
+          return;
+        }
+
+        // Download file for non-PDF formats
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast(`Exported ${label} as ${filename}`, 'success');
+      });
     });
   }
 
