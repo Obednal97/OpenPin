@@ -875,12 +875,14 @@ def do_wifi_sync_blocking():
         # Read stderr for progress updates in a thread
         import threading
 
+        _worker_stderr = []
         def _read_progress():
             for line in proc.stderr:
                 line = line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 print(f"[WiFi Worker] {line}")
+                _worker_stderr.append(line)
                 try:
                     update = json.loads(line)
                     if "status" in update:
@@ -901,7 +903,8 @@ def do_wifi_sync_blocking():
 
         if proc.returncode != 0:
             _on_status("WiFi transfer failed", 0)
-            return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200]}
+            stderr_tail = "\n".join(_worker_stderr[-15:])
+            return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200], "traceback": stderr_tail}
 
         if stdout_str:
             result = json.loads(stdout_str)
