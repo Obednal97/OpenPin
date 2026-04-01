@@ -344,9 +344,17 @@ async def connect_device(address=None):
 
         await cl.start_notify(N, h)
         # Get per-device SN_SIG from cloud API (stored in config)
-        from app.state.cloud import get_device_sn_signature
+        # If not cached, try fetching from cloud on the spot
+        from app.state.cloud import get_device_sn_signature, get_device_bind_token, is_logged_in, fetch_sn_signature, bind_device
         sn = _device_state.get("serial_number", "")
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
+        if not sn_sig_b64 and sn and is_logged_in():
+            try:
+                bind_device(sn)
+                fetch_sn_signature(sn)
+                sn_sig_b64 = get_device_sn_signature(sn)
+            except Exception:
+                pass
         if not sn_sig_b64:
             try:
                 await cl.stop_notify(N)
@@ -459,11 +467,10 @@ async def connect_device(address=None):
     _device_state["connected"] = True
 
     # Initial commands — use per-device BIND_TOKEN from cloud API
-    from app.state.cloud import get_device_bind_token
-    sn = _device_state.get("serial_number", "")
+    # (already fetched during SN_SIG phase above, but check again)
     device_token = get_device_bind_token(sn) if sn else None
     if not device_token:
-        logging.warning(f"No BIND_TOKEN for device {sn} — user needs to log into Plaud cloud")
+        logging.warning(f"No BIND_TOKEN for device {sn}")
     token32 = (device_token or "")[:32].encode("ascii")
     if token32:
         await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
