@@ -365,22 +365,34 @@ function _showProfileSetup() {
   _renderSetup(`
     <h2>About You</h2>
     <p>Help the AI personalise transcriptions and summaries for you. You can always change this later in Settings.</p>
-    <div class="setup-form">
+    <div class="setup-form" style="width:100%;">
       <div class="setup-field">
         <label class="settings-label">Your Name</label>
-        <input type="text" id="setup-name" class="settings-input" placeholder="e.g. John, John Doe, Johnny">
+        <input type="text" id="setup-name" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. John, John Doe, Johnny">
       </div>
       <div class="setup-field">
         <label class="settings-label">Job Function</label>
-        <input type="text" id="setup-job" class="settings-input" placeholder="e.g. Product Manager, Software Engineer">
+        <input type="text" id="setup-job" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Product Manager, Software Engineer">
       </div>
       <div class="setup-field">
         <label class="settings-label">Industry</label>
-        <input type="text" id="setup-industry" class="settings-input" placeholder="e.g. Technology, Healthcare, Finance">
+        <input type="text" id="setup-industry" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Technology, Healthcare, Finance">
+      </div>
+      <div class="setup-field">
+        <label class="settings-label">Seniority</label>
+        <select id="setup-seniority" class="settings-select" style="width:100%;box-sizing:border-box;">
+          <option value="">Not set</option>
+          <option value="individual">Individual Contributor</option>
+          <option value="lead">Team Lead</option>
+          <option value="manager">Manager</option>
+          <option value="director">Director</option>
+          <option value="vp">VP</option>
+          <option value="c-level">C-Level / Founder</option>
+        </select>
       </div>
       <div class="setup-field">
         <label class="settings-label">Primary Use</label>
-        <input type="text" id="setup-usecases" class="settings-input" placeholder="e.g. Meeting notes, interviews, brainstorming">
+        <input type="text" id="setup-usecases" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Meeting notes, interviews, brainstorming">
       </div>
     </div>
     <button class="action-btn primary" id="setup-profile-save">Get Started</button>
@@ -392,6 +404,7 @@ function _showProfileSetup() {
       name: ($('#setup-name').value || '').trim(),
       job: ($('#setup-job').value || '').trim(),
       industry: ($('#setup-industry').value || '').trim(),
+      seniority: ($('#setup-seniority').value || ''),
       usecases: ($('#setup-usecases').value || '').trim(),
     };
     // Only save if they filled in at least one field
