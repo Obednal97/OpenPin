@@ -26,6 +26,7 @@ def recover_metadata_from_transcripts():
     config = load_config()
     rec_tags = config.get("recording_tags", {})
     rec_names = config.get("recording_names", {})
+    notion_urls = config.get("notion_page_urls", {})
     custom_tags = set(config.get("custom_tags", []))
     recovered = 0
 
@@ -56,6 +57,12 @@ def recover_metadata_from_transcripts():
             if auto_title and sid not in rec_names and not name:
                 rec_names[sid] = auto_title
 
+            # Recover Notion page URL
+            notion_url = data.get("notion_page_url", "")
+            if notion_url and sid not in notion_urls:
+                notion_urls[sid] = notion_url
+                recovered += 1
+
         except Exception:
             pass
 
@@ -71,6 +78,7 @@ def recover_metadata_from_transcripts():
     if recovered > 0:
         config["recording_tags"] = rec_tags
         config["recording_names"] = rec_names
+        config["notion_page_urls"] = notion_urls
         config["custom_tags"] = list(custom_tags)
         config["deleted_ids"] = list(dismissed)
         save_config(config)
