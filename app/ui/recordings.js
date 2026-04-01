@@ -44,6 +44,16 @@ function renderRecordingsList() {
   const filtered = getFilteredRecordings();
   if (app.recordings.length === 0) {
     dom.emptyState.classList.remove('hidden');
+    // Context-aware empty state message
+    const h2 = dom.emptyState.querySelector('h2');
+    const p = dom.emptyState.querySelector('p');
+    if (app.deviceStateCache && app.deviceStateCache.connected) {
+      h2.textContent = 'No recordings yet';
+      p.textContent = 'Your device is connected. Sync recordings or start a new recording from the device.';
+    } else {
+      h2.textContent = 'No recordings yet';
+      p.textContent = 'Connect your Plaud NotePin S to sync recordings.';
+    }
     dom.recordingsList.innerHTML = '';
     updateSelectBar();
     return;
