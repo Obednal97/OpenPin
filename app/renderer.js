@@ -770,8 +770,62 @@ async function init() {
 }
 
 function _startBgPoll() {
-  // Poll device status every 10 seconds
-  app.pollInterval = setInterval(updateDeviceStatus, 10000);
+  // ---- Adaptive polling ----
+  // Adjusts frequency based on app focus + device connection state
+  // to minimize battery drain on the Plaud device.
+  //
+  // | State                        | Status poll | Reconnect/sync |
+  // |------------------------------|-------------|----------------|
+  // | Focused + connected          | 10s         | 45s            |
+  // | Focused + disconnected       | off         | 30s            |
+  // | Background + connected       | 60s         | 5 min          |
+  // | Background + disconnected    | off         | 5 min          |
+
+  let _appFocused = document.hasFocus();
+  let _deviceConnected = false;
+  let _statusTimer = null;
+  let _bgTimer = null;
+
+  function _getIntervals() {
+    if (_appFocused && _deviceConnected) return { status: 10000, bg: 45000 };
+    if (_appFocused && !_deviceConnected) return { status: 0, bg: 30000 };
+    if (!_appFocused && _deviceConnected) return { status: 60000, bg: 300000 };
+    return { status: 0, bg: 300000 }; // background + disconnected
+  }
+
+  function _restartTimers() {
+    const intervals = _getIntervals();
+    if (_statusTimer) clearInterval(_statusTimer);
+    if (_bgTimer) clearInterval(_bgTimer);
+    _statusTimer = intervals.status > 0 ? setInterval(updateDeviceStatus, intervals.status) : null;
+    _bgTimer = setInterval(bgDevicePoll, intervals.bg);
+  }
+
+  // Track focus changes
+  document.addEventListener('visibilitychange', () => {
+    const wasFocused = _appFocused;
+    _appFocused = !document.hidden;
+    if (_appFocused !== wasFocused) {
+      _restartTimers();
+      // When app becomes active again, immediately check status + sync
+      if (_appFocused) {
+        updateDeviceStatus();
+        bgDevicePoll();
+      }
+    }
+  });
+  window.addEventListener('focus', () => {
+    if (!_appFocused) {
+      _appFocused = true;
+      _restartTimers();
+      updateDeviceStatus();
+      bgDevicePoll();
+    }
+  });
+  window.addEventListener('blur', () => {
+    _appFocused = false;
+    _restartTimers();
+  });
 
   // Background device polling
   let _bgBusy = false;
@@ -780,6 +834,18 @@ function _startBgPoll() {
     _bgBusy = true;
     try {
       const status = await window.plaud.status();
+      const wasConnected = _deviceConnected;
+      _deviceConnected = status.connected;
+
+      // Connection state changed — adjust polling frequency
+      if (_deviceConnected !== wasConnected) {
+        _restartTimers();
+        // Just reconnected — trigger immediate sync check
+        if (_deviceConnected && !wasConnected) {
+          toast(`Device reconnected`, 'success');
+          await updateDeviceStatus();
+        }
+      }
 
       // Skip reconnect/sync if a sync is already running server-side
       if (status.syncing) {
@@ -792,11 +858,12 @@ function _startBgPoll() {
         if (scan.found) {
           const conn = await window.plaud.connect(scan.address, scan.serial_number);
           if (conn.connected) {
+            _deviceConnected = true;
+            _restartTimers();
             toast(`Auto-connected to ${scan.name}`, 'success');
             await updateDeviceStatus();
           }
         }
-        // Don't spam toasts about device not found — user can see "Disconnected" in header
         _bgBusy = false;
         return;
       }
@@ -884,9 +951,10 @@ function _startBgPoll() {
     _bgBusy = false;
   }
 
-  // First attempt after 5s, then every 45s (reduced from 30s to minimize BLE contention)
+  // Start with initial timers
+  _restartTimers();
+  // First attempt after 5s
   setTimeout(bgDevicePoll, 5000);
-  setInterval(bgDevicePoll, 45000);
 }
 
 init();
