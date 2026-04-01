@@ -233,11 +233,38 @@ def _save_notion_page_url(session_id, url):
     config["notion_page_urls"] = pages
     save_config(config)
 
+    # Also persist in transcript JSON for recovery after config resets
+    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    if transcript_path.exists():
+        try:
+            t_data = json.loads(transcript_path.read_text())
+            t_data["notion_page_url"] = url
+            transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
 
 def _get_notion_page_url(session_id):
     """Get the saved Notion page URL for a recording, if any."""
     config = load_config()
-    return config.get("notion_page_urls", {}).get(session_id, "")
+    url = config.get("notion_page_urls", {}).get(session_id, "")
+    if not url:
+        # Try recovering from transcript JSON
+        transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+        if transcript_path.exists():
+            try:
+                t_data = json.loads(transcript_path.read_text())
+                url = t_data.get("notion_page_url", "")
+                if url:
+                    # Re-save to config for future lookups
+                    config = load_config()
+                    pages = config.get("notion_page_urls", {})
+                    pages[session_id] = url
+                    config["notion_page_urls"] = pages
+                    save_config(config)
+            except Exception:
+                pass
+    return url
 
 
 @bp.route("/page-url/<session_id>")
