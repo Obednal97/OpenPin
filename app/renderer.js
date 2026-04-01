@@ -769,7 +769,10 @@ async function init() {
   _startBgPoll();
 }
 
+let _bgPollStarted = false;
 function _startBgPoll() {
+  if (_bgPollStarted) return;
+  _bgPollStarted = true;
   // ---- Adaptive polling ----
   // Adjusts frequency based on app focus + device connection state
   // to minimize battery drain on the Plaud device.
@@ -789,7 +792,7 @@ function _startBgPoll() {
   function _getIntervals() {
     if (_appFocused && _deviceConnected) return { status: 10000, bg: 45000 };
     if (_appFocused && !_deviceConnected) return { status: 0, bg: 30000 };
-    if (!_appFocused && _deviceConnected) return { status: 60000, bg: 300000 };
+    if (!_appFocused && _deviceConnected) return { status: 0, bg: 300000 };
     return { status: 0, bg: 300000 }; // background + disconnected
   }
 
