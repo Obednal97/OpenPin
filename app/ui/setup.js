@@ -432,10 +432,9 @@ async function dismissSetup() {
 
 async function completeSetup() {
   _closeSetup();
-  // Resume normal init — update status, start polling
+  // Resume normal init — update status, start adaptive polling
   await updateDeviceStatus();
   await loadRecordings();
-  app.pollInterval = setInterval(updateDeviceStatus, 10000);
   _startBgPoll();
 
   // Auto-sync after first pairing — check for recordings on device
