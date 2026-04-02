@@ -442,6 +442,10 @@ function openTranscript(sessionId, autoPlay = false) {
     });
   }
 
+  // Crop audio
+  closeCropEditor();
+  initCropEditor(sessionId);
+
   // Download audio
   const dlBtn = $('#download-audio-btn');
   dlBtn.onclick = async () => {
@@ -734,4 +738,288 @@ function initAudioPlayer() {
       dom.audioEl.currentTime = pct * dom.audioEl.duration;
     }
   });
+}
+
+/* ============================================================
+   Audio Crop Editor
+   ============================================================ */
+
+let cropState = null;
+
+function initCropEditor(sessionId) {
+  const cropBtn = $('#crop-audio-btn');
+  const editor = $('#crop-editor');
+
+  cropBtn.onclick = () => {
+    if (!editor.classList.contains('hidden')) {
+      closeCropEditor();
+      return;
+    }
+    openCropEditor(sessionId);
+  };
+}
+
+async function openCropEditor(sessionId) {
+  const editor = $('#crop-editor');
+  const canvas = $('#crop-waveform');
+  const audio = dom.audioEl;
+
+  if (!audio.duration) {
+    toast('Audio not loaded yet', 'error');
+    return;
+  }
+
+  editor.classList.remove('hidden');
+  $('#crop-audio-btn').classList.add('active');
+
+  const duration = audio.duration;
+
+  cropState = {
+    sessionId,
+    duration,
+    startPct: 0,
+    endPct: 1,
+    dragging: null,
+  };
+
+  // Draw waveform
+  await drawWaveform(canvas, audio.src);
+
+  // Set initial region
+  updateCropRegion();
+
+  // Handle dragging
+  const container = canvas.parentElement;
+
+  const onPointerDown = (e) => {
+    const leftHandle = $('#crop-handle-left');
+    const rightHandle = $('#crop-handle-right');
+    if (leftHandle.contains(e.target)) {
+      cropState.dragging = 'left';
+    } else if (rightHandle.contains(e.target)) {
+      cropState.dragging = 'right';
+    } else {
+      return;
+    }
+    e.preventDefault();
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  };
+
+  const onPointerMove = (e) => {
+    if (!cropState || !cropState.dragging) return;
+    const rect = container.getBoundingClientRect();
+    let pct = (e.clientX - rect.left) / rect.width;
+    pct = Math.max(0, Math.min(1, pct));
+
+    if (cropState.dragging === 'left') {
+      cropState.startPct = Math.min(pct, cropState.endPct - 0.01);
+    } else {
+      cropState.endPct = Math.max(pct, cropState.startPct + 0.01);
+    }
+    updateCropRegion();
+  };
+
+  const onPointerUp = () => {
+    if (cropState) cropState.dragging = null;
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+  };
+
+  container.addEventListener('pointerdown', onPointerDown);
+  cropState._cleanup = () => {
+    container.removeEventListener('pointerdown', onPointerDown);
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+  };
+
+  // Playhead tracking during preview
+  const onTimeUpdate = () => {
+    if (!cropState) return;
+    const playhead = $('#crop-playhead');
+    const pct = audio.currentTime / cropState.duration;
+    if (pct >= cropState.startPct && pct <= cropState.endPct) {
+      playhead.style.display = 'block';
+      const regionPct = (pct - cropState.startPct) / (cropState.endPct - cropState.startPct);
+      const containerRect = container.getBoundingClientRect();
+      playhead.style.left = `${pct * 100}%`;
+    } else {
+      playhead.style.display = 'none';
+    }
+  };
+  audio.addEventListener('timeupdate', onTimeUpdate);
+  cropState._cleanupPlayhead = () => audio.removeEventListener('timeupdate', onTimeUpdate);
+
+  // Button handlers
+  $('#crop-preview-btn').onclick = () => {
+    if (!cropState) return;
+    audio.currentTime = cropState.startPct * cropState.duration;
+    audio.play().catch(() => {});
+    // Stop at end of crop region
+    const checkEnd = () => {
+      if (!cropState) { audio.removeEventListener('timeupdate', checkEnd); return; }
+      if (audio.currentTime >= cropState.endPct * cropState.duration) {
+        audio.pause();
+        audio.removeEventListener('timeupdate', checkEnd);
+      }
+    };
+    audio.addEventListener('timeupdate', checkEnd);
+  };
+
+  $('#crop-cancel-btn').onclick = closeCropEditor;
+
+  // Save crop dropdown
+  const saveBtn = $('#crop-save-btn');
+  const saveMenu = $('#crop-save-menu');
+
+  saveBtn.onclick = () => {
+    saveMenu.classList.toggle('hidden');
+  };
+
+  // Close menu when clicking outside
+  const closeSaveMenu = (e) => {
+    if (!saveMenu.contains(e.target) && e.target !== saveBtn) {
+      saveMenu.classList.add('hidden');
+    }
+  };
+  document.addEventListener('click', closeSaveMenu);
+  cropState._cleanupMenu = () => document.removeEventListener('click', closeSaveMenu);
+
+  const executeCrop = async (mode) => {
+    if (!cropState) return;
+    const startTime = cropState.startPct * cropState.duration;
+    const endTime = cropState.endPct * cropState.duration;
+
+    if (endTime - startTime < 1) {
+      toast('Selection too short (min 1 second)', 'error');
+      return;
+    }
+
+    saveMenu.classList.add('hidden');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+      const result = await window.plaud.cropRecording(cropState.sessionId, startTime, endTime, mode);
+      if (result.error) {
+        toast(`Crop failed: ${result.error}`, 'error');
+      } else {
+        toast(mode === 'new' ? 'Saved as new recording' : 'Audio cropped successfully', 'success');
+        closeCropEditor();
+        await loadRecordings();
+        // Reload audio for the active recording
+        const targetId = result.session_id || sessionId;
+        audio.src = window.plaud.audioUrl(`${targetId}.ogg`) + '?t=' + Date.now();
+        audio.load();
+        if (result.session_id && result.session_id !== sessionId) {
+          openTranscript(result.session_id);
+        }
+      }
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save crop';
+    }
+  };
+
+  $('#crop-save-overwrite').onclick = () => executeCrop('overwrite');
+  $('#crop-save-new').onclick = () => executeCrop('new');
+}
+
+function closeCropEditor() {
+  const editor = $('#crop-editor');
+  editor.classList.add('hidden');
+  $('#crop-audio-btn').classList.remove('active');
+  if (cropState) {
+    if (cropState._cleanup) cropState._cleanup();
+    if (cropState._cleanupPlayhead) cropState._cleanupPlayhead();
+    if (cropState._cleanupMenu) cropState._cleanupMenu();
+    cropState = null;
+  }
+  $('#crop-save-menu').classList.add('hidden');
+  $('#crop-playhead').style.display = 'none';
+}
+
+function updateCropRegion() {
+  if (!cropState) return;
+  const region = $('#crop-region');
+  const overlayLeft = $('#crop-overlay-left');
+  const overlayRight = $('#crop-overlay-right');
+
+  region.style.left = `${cropState.startPct * 100}%`;
+  region.style.width = `${(cropState.endPct - cropState.startPct) * 100}%`;
+  overlayLeft.style.width = `${cropState.startPct * 100}%`;
+  overlayRight.style.width = `${(1 - cropState.endPct) * 100}%`;
+
+  $('#crop-start-time').textContent = formatTime(cropState.startPct * cropState.duration);
+  $('#crop-end-time').textContent = formatTime(cropState.endPct * cropState.duration);
+}
+
+async function drawWaveform(canvas, audioSrc) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  try {
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const response = await fetch(audioSrc);
+    const arrayBuffer = await response.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const channelData = audioBuffer.getChannelData(0);
+    const barCount = Math.floor(rect.width / 3);
+    const samplesPerBar = Math.floor(channelData.length / barCount);
+    const barWidth = 2;
+    const gap = 1;
+    const midY = rect.height / 2;
+    const maxAmp = rect.height / 2 - 4;
+
+    // Compute peaks
+    const peaks = [];
+    for (let i = 0; i < barCount; i++) {
+      let peak = 0;
+      const start = i * samplesPerBar;
+      for (let j = start; j < start + samplesPerBar && j < channelData.length; j++) {
+        const abs = Math.abs(channelData[j]);
+        if (abs > peak) peak = abs;
+      }
+      peaks.push(peak);
+    }
+
+    // Normalize
+    const maxPeak = Math.max(...peaks, 0.01);
+
+    // Get accent color from CSS
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+
+    for (let i = 0; i < barCount; i++) {
+      const amp = (peaks[i] / maxPeak) * maxAmp;
+      const h = Math.max(2, amp);
+      ctx.fillStyle = accent;
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath();
+      ctx.roundRect(i * (barWidth + gap), midY - h, barWidth, h * 2, 1);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+    audioContext.close();
+  } catch {
+    // Fallback: draw placeholder bars
+    const barCount = Math.floor(rect.width / 3);
+    const midY = rect.height / 2;
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    ctx.fillStyle = accent;
+    ctx.globalAlpha = 0.3;
+    for (let i = 0; i < barCount; i++) {
+      const h = 4 + Math.random() * 20;
+      ctx.fillRect(i * 3, midY - h, 2, h * 2);
+    }
+    ctx.globalAlpha = 1;
+  }
 }

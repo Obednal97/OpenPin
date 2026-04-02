@@ -209,12 +209,57 @@
             <span id="player-duration">00:00</span>
           </div>
         </div>
+        <button id="crop-audio-btn" class="icon-btn" title="Crop audio">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+            <line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/>
+            <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+          </svg>
+        </button>
         <button id="download-audio-btn" class="icon-btn" title="Download audio">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
             <path d="M9 2v10M5 8l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M2 14h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
+      </div>
+      <!-- Audio crop editor -->
+      <div id="crop-editor" class="crop-editor hidden">
+        <div class="crop-waveform-container">
+          <canvas id="crop-waveform" class="crop-waveform"></canvas>
+          <div id="crop-region" class="crop-region">
+            <div id="crop-handle-left" class="crop-handle crop-handle-left">
+              <div class="crop-handle-grip"></div>
+            </div>
+            <div id="crop-handle-right" class="crop-handle crop-handle-right">
+              <div class="crop-handle-grip"></div>
+            </div>
+          </div>
+          <div id="crop-overlay-left" class="crop-overlay crop-overlay-left"></div>
+          <div id="crop-overlay-right" class="crop-overlay crop-overlay-right"></div>
+          <div id="crop-playhead" class="crop-playhead"></div>
+        </div>
+        <div class="crop-controls">
+          <div class="crop-times">
+            <span class="crop-time-label">Start</span>
+            <span id="crop-start-time" class="crop-time-value">00:00</span>
+          </div>
+          <div class="crop-buttons">
+            <button id="crop-preview-btn" class="action-btn subtle">Preview</button>
+            <button id="crop-cancel-btn" class="action-btn subtle">Cancel</button>
+            <div class="crop-save-group">
+              <button id="crop-save-btn" class="action-btn accent">Save crop</button>
+              <div id="crop-save-menu" class="crop-save-menu hidden">
+                <button id="crop-save-overwrite" class="crop-save-option">Overwrite original</button>
+                <button id="crop-save-new" class="crop-save-option">Save as new recording</button>
+              </div>
+            </div>
+          </div>
+          <div class="crop-times">
+            <span class="crop-time-label">End</span>
+            <span id="crop-end-time" class="crop-time-value">00:00</span>
+          </div>
+        </div>
       </div>
       <div id="transcript-actions" class="transcript-actions"></div>
       <div id="transcript-tabs" class="transcript-tabs hidden">
