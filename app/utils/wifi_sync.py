@@ -350,7 +350,9 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
                         if frames:
                             ogg = wrap_opus_ogg(frames)
                             ogg_path = RECORDINGS_DIR / f"{current_sid}.ogg"
-                            ogg_path.write_bytes(ogg)
+                            tmp_path = RECORDINGS_DIR / f"{current_sid}.ogg.partial"
+                            tmp_path.write_bytes(ogg)
+                            tmp_path.rename(ogg_path)
                             duration = len(frames) // 80 * 0.02
                             new_files.append(
                                 {"session_id": current_sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
