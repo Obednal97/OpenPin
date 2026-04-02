@@ -370,7 +370,7 @@ def download_cloud_recordings():
 
         try:
             url_data = cloud_api(f"/file/temp-url/{fid}", params={"is_opus": 1})
-            url = url_data.get("temp_url_opus", url_data.get("temp_url", ""))
+            url = url_data.get("temp_url_opus") or url_data.get("temp_url") or ""
             if not url:
                 results.append({"session_id": session_id, "status": "no_url", "cloud_name": name})
                 continue
