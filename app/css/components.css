@@ -173,6 +173,7 @@
   letter-spacing: 0.2px;
 }
 .badge-new { background: var(--accent-subtle); color: var(--accent); }
+.badge-partial { background: var(--yellow-subtle); color: var(--yellow); }
 .badge-transcribed { background: var(--green-subtle); color: var(--green); }
 .badge-transcribing { background: var(--yellow-subtle); color: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
 .badge-processing {
