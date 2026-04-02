@@ -474,15 +474,13 @@ async def connect_device(address=None):
     _device_state["file_done"] = file_done
     _device_state["connected"] = True
 
-    # Initial commands — use per-device BIND_TOKEN from cloud API
-    # (already fetched during SN_SIG phase above, but check again)
-    device_token = get_device_bind_token(sn) if sn else None
-    if not device_token:
-        logging.warning(f"No BIND_TOKEN for device {sn}")
-    token32 = (device_token or "")[:32].encode("ascii")
-    if token32:
-        await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
-        await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
+    # Send APP_KEY handshake (cmd_id=1) — required for device to complete pairing.
+    # Format: [cmd_type=1][cmd_id=1 LE] + APP_KEY (32B) + audioChannel (1B) + SN
+    # Without this, the device stays in pairing mode even though the encrypted
+    # channel works. The APP_KEY is a static key proving we're a legitimate Plaud client.
+    from src.constants import APP_KEY
+    handshake_cmd = bytes([1, 1, 0]) + APP_KEY.encode("ascii") + bytes([1]) + sn.encode("ascii")
+    await send_cmd(handshake_cmd)
     await send_cmd(bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
