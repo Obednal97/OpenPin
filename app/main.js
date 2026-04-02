@@ -433,7 +433,11 @@ if (process.defaultApp) {
 
 // Ensure PATH includes common Python install locations
 // macOS apps launched from Finder/Dock get a minimal PATH that misses Homebrew etc.
-const EXTRA_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+// Also include bundled bin/ (contains ffmpeg) — in packaged app it's in Resources/bin/
+const bundledBinDir = app.isPackaged
+  ? path.join(process.resourcesPath, 'bin')
+  : path.join(__dirname, '..', 'bin');
+const EXTRA_PATHS = [bundledBinDir, '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
 const systemPath = process.env.PATH || '';
 const fullPath = [...new Set([...EXTRA_PATHS, ...systemPath.split(':')])].join(':');
 

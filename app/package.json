@@ -5,7 +5,9 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "prebuild": "bash ../scripts/download-ffmpeg.sh",
     "build": "electron-builder --mac",
+    "prepublish": "bash ../scripts/download-ffmpeg.sh",
     "publish": "export $(cat ../.env | grep -v '^#' | xargs) && electron-builder --mac --publish always",
     "dev": "NODE_ENV=development electron .",
     "lint": "eslint renderer.js main.js preload.js ui/*.js && stylelint 'css/*.css'",
@@ -61,6 +63,10 @@
       {
         "from": "../keys",
         "to": "keys"
+      },
+      {
+        "from": "../bin",
+        "to": "bin"
       }
     ]
   },
