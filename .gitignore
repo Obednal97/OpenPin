@@ -15,6 +15,9 @@ transcripts/
 sessions/
 ble_capture/
 
+# Bundled binaries (downloaded by scripts/download-ffmpeg.sh)
+bin/
+
 # Build artifacts
 __pycache__/
 *.pyc
