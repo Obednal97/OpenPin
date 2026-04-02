@@ -73,37 +73,53 @@ def _get_current_ssid():
     return ""
 
 
+def remove_preferred_networks():
+    """Remove all preferred WiFi networks. Returns list for later restore."""
+    saved = []
+    try:
+        r = subprocess.run(
+            ["networksetup", "-listpreferredwirelessnetworks", "en0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        saved = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
+        if saved:
+            subprocess.run(
+                ["networksetup", "-removeallpreferredwirelessnetworks", "en0"],
+                capture_output=True, timeout=5,
+            )
+            status(f"Cleared {len(saved)} preferred networks", 15)
+    except Exception as e:
+        status(f"Could not clear preferred networks: {e}", 15)
+    return saved
+
+
+def restore_preferred_networks(saved):
+    """Restore previously saved preferred networks."""
+    if not saved:
+        return
+    try:
+        for net_ssid in saved:
+            subprocess.run(
+                ["networksetup", "-addpreferredwirelessnetworkatindex", "en0", net_ssid, "0", "WPA2"],
+                capture_output=True, timeout=5,
+            )
+        status(f"Restored {len(saved)} preferred networks", 15)
+    except Exception:
+        pass
+
+
 def connect_to_hotspot(ssid, password, original_ip, timeout=45):
     """Connect to device hotspot via networksetup.
 
-    The Plaud hotspot doesn't report its SSID via CoreWLAN or networksetup
-    -getairportnetwork, so we verify by checking for a new IP that differs
-    from the original. networksetup -setairportnetwork is the only method
-    that works (CoreWLAN associateToNetwork fails with -3900).
+    Caller must remove preferred networks BEFORE calling this, and restore
+    them AFTER the entire transfer is done (not just after connecting).
+    The Plaud hotspot gives IPs on 192.168.84.x — we verify this subnet.
     """
     from CoreWLAN import CWWiFiClient
     iface = CWWiFiClient.sharedWiFiClient().interface()
     if not iface:
         status("No WiFi interface found", 15)
         return None
-
-    # Save and remove preferred networks — prevents macOS from auto-rejoining
-    # a known network instead of staying on the hotspot
-    saved_networks = []
-    try:
-        r = subprocess.run(
-            ["networksetup", "-listpreferredwirelessnetworks", "en0"],
-            capture_output=True, text=True, timeout=5,
-        )
-        saved_networks = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
-        if saved_networks:
-            subprocess.run(
-                ["networksetup", "-removeallpreferredwirelessnetworks", "en0"],
-                capture_output=True, timeout=5,
-            )
-            status(f"Cleared {len(saved_networks)} preferred networks", 15)
-    except Exception as e:
-        status(f"Could not clear preferred networks: {e}", 15)
 
     # Disassociate from current network
     iface.disassociate()
@@ -114,49 +130,37 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
 
     deadline = time.time() + timeout
     attempt = 0
-    try:
-        while time.time() < deadline:
-            attempt += 1
-            status(f"WiFi join attempt {attempt} for {ssid}...", 15)
+    while time.time() < deadline:
+        attempt += 1
+        status(f"WiFi join attempt {attempt} for {ssid}...", 15)
 
-            try:
-                r = subprocess.run(
-                    ["networksetup", "-setairportnetwork", "en0", ssid, password],
-                    capture_output=True, text=True, timeout=20,
-                )
-            except subprocess.TimeoutExpired:
-                continue
+        try:
+            r = subprocess.run(
+                ["networksetup", "-setairportnetwork", "en0", ssid, password],
+                capture_output=True, text=True, timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            continue
 
-            if r.returncode == 0:
-                # networksetup reported success — wait for IP assignment
-                # The hotspot SSID doesn't report via CoreWLAN/networksetup,
-                # so we verify by checking for a new IP different from original
-                for wait in range(12):
-                    time.sleep(1)
-                    ip = get_en0_ip()
-                    if ip and ip != original_ip:
-                        status(f"Connected to {ssid} ({ip})", 20)
-                        return ip
-                status(f"Join reported success but no new IP after 12s, retrying...", 15)
-                iface.disassociate()
+        if r.returncode == 0:
+            # Wait for IP on the hotspot subnet (192.168.84.x)
+            # Reject IPs from other networks (e.g. 172.20.10.x = iPhone hotspot)
+            for wait in range(15):
                 time.sleep(1)
-            else:
-                status(f"networksetup error: {r.stderr.strip()}", 15)
-                time.sleep(2)
+                ip = get_en0_ip()
+                if ip and ip != original_ip and ip.startswith("192.168."):
+                    status(f"Connected to {ssid} ({ip})", 20)
+                    return ip
+                if ip and ip != original_ip:
+                    status(f"Got IP {ip} but not on hotspot subnet, waiting...", 15)
+            status(f"No hotspot IP after 15s, retrying...", 15)
+            iface.disassociate()
+            time.sleep(1)
+        else:
+            status(f"networksetup error: {r.stderr.strip()}", 15)
+            time.sleep(2)
 
-        return None
-    finally:
-        # Restore preferred networks
-        if saved_networks:
-            try:
-                for net_ssid in saved_networks:
-                    subprocess.run(
-                        ["networksetup", "-addpreferredwirelessnetworkatindex", "en0", net_ssid, "0", "WPA2"],
-                        capture_output=True, timeout=5,
-                    )
-                status(f"Restored {len(saved_networks)} preferred networks", 15)
-            except Exception:
-                pass
+    return None
 
 
 def get_preferred_networks(exclude):
@@ -597,6 +601,9 @@ async def main():
     hotspot_ip = None
     server = None
     restore_result = None
+    # Remove preferred networks for the ENTIRE transfer duration —
+    # if restored too early, macOS auto-rejoins a known network mid-transfer
+    saved_networks = remove_preferred_networks()
     try:
         status("Starting WebSocket server...", 5)
         server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
@@ -611,7 +618,7 @@ async def main():
             pass
 
         status(f"Connecting to {wifi_ssid}...", 15)
-        hotspot_ip = connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=25)
+        hotspot_ip = connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=45)
         if not hotspot_ip:
             print(json.dumps({"error": "Could not connect to hotspot", "files": new_files}))
             return
@@ -646,6 +653,11 @@ async def main():
         if server:
             await asyncio.sleep(1)
             server.close()
+
+        # Restore preferred networks BEFORE internet restore — restore_internet
+        # needs them to reconnect to the original network
+        restore_preferred_networks(saved_networks)
+
         if hotspot_ip:
             restore_result = await restore_internet(wifi_ssid, hotspot_ip, original_ip, original_ssid)
 
