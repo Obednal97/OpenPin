@@ -120,17 +120,15 @@ def _extract_recording_date(stem):
 @bp.route("/recordings")
 def list_recordings():
     RECORDINGS_DIR.mkdir(exist_ok=True)
-    # Clean up partial downloads from interrupted transfers — they'll be re-downloaded
-    for p in RECORDINGS_DIR.glob("*.partial"):
-        try:
-            p.unlink()
-        except Exception:
-            pass
     config = load_config()
     custom_names = config.get("recording_names", {})
     rec_tags = config.get("recording_tags", {})
     recordings = []
+
+    # Collect session IDs that have complete .ogg files
+    complete_ids = set()
     for f in sorted(RECORDINGS_DIR.glob("*.ogg"), reverse=True):
+        complete_ids.add(f.stem)
         size = f.stat().st_size
         raw_audio_size = max(size - 2000, 0)
         duration = raw_audio_size / 80 * 0.02
@@ -159,6 +157,37 @@ def list_recordings():
                 "cloud_id": cloud_id,
             }
         )
+
+    # Include partial downloads (interrupted transfers) — shown with warning in UI
+    for f in sorted(RECORDINGS_DIR.glob("*.ogg.partial"), reverse=True):
+        stem = f.name.replace(".ogg.partial", "")
+        if stem in complete_ids:
+            # Complete version exists, clean up the partial
+            try:
+                f.unlink()
+            except Exception:
+                pass
+            continue
+        size = f.stat().st_size
+        rec_date = _extract_recording_date(stem)
+        if rec_date is None:
+            rec_date = datetime.fromtimestamp(f.stat().st_mtime)
+        recordings.append(
+            {
+                "session_id": stem,
+                "ogg_path": None,
+                "duration": 0,
+                "size": size,
+                "date": rec_date.isoformat(),
+                "has_transcript": False,
+                "title": custom_names.get(stem, ""),
+                "tags": [],
+                "cloud_synced": False,
+                "cloud_id": "",
+                "partial": True,
+            }
+        )
+
     recordings.sort(key=lambda r: r["date"], reverse=True)
     return jsonify(recordings)
 

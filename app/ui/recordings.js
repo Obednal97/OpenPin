@@ -83,7 +83,10 @@ function renderRecordingsList() {
       let badgeClass = 'badge-new';
       let badgeText = 'New';
       const processing = app.processingIds.get(rec.session_id);
-      if (processing) {
+      if (rec.partial) {
+        badgeClass = 'badge-partial';
+        badgeText = 'Incomplete';
+      } else if (processing) {
         badgeClass = 'badge-processing';
         badgeText = processing === 'transcribing' ? 'Transcribing' : 'Summarizing';
       } else if (hasTranscript) {
@@ -94,16 +97,24 @@ function renderRecordingsList() {
       const isSelected = app.selectedIds.has(rec.session_id);
 
       return `
-      <div class="recording-card ${app.selectMode ? 'select-mode' : ''} ${isSelected ? 'selected' : ''}" data-sid="${rec.session_id}">
+      <div class="recording-card ${app.selectMode ? 'select-mode' : ''} ${isSelected ? 'selected' : ''} ${rec.partial ? 'recording-partial' : ''}" data-sid="${rec.session_id}">
         ${
-          app.selectMode
+          rec.partial
             ? `
+          <div class="recording-partial-icon" title="Incomplete transfer — sync again to complete">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 10.5a.75.75 0 110-1.5.75.75 0 010 1.5zM8.75 4v4.5h-1.5V4h1.5z"/>
+            </svg>
+          </div>
+        `
+            : app.selectMode
+              ? `
           <label class="select-checkbox" data-sid="${rec.session_id}">
             <input type="checkbox" ${isSelected ? 'checked' : ''}>
             <span class="checkbox-mark"></span>
           </label>
         `
-            : `
+              : `
           <button class="recording-play-btn" data-sid="${rec.session_id}" title="Play">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M4 2l10 6-10 6z"/>
@@ -114,7 +125,7 @@ function renderRecordingsList() {
         <div class="recording-info">
           ${rec.title ? `<div class="recording-title">${rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(rec.title)}</div>` : ''}
           <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${date}</div>
-          <div class="recording-duration">${dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
+          <div class="recording-duration">${rec.partial ? 'Sync again to complete transfer' : dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
           ${preview ? `<div class="recording-preview">${escapeHtml(preview)}</div>` : ''}
         </div>
         <div class="recording-right">
@@ -129,6 +140,7 @@ function renderRecordingsList() {
   // Bind click handlers
   dom.recordingsList.querySelectorAll('.recording-card').forEach((card) => {
     card.addEventListener('click', (e) => {
+      if (card.classList.contains('recording-partial')) return;
       if (e.target.closest('.recording-play-btn')) return;
       if (e.target.closest('.select-checkbox')) {
         toggleSelection(card.dataset.sid);
