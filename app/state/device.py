@@ -869,13 +869,29 @@ def do_wifi_sync_blocking():
         _reset_state()
 
         # Build worker args — worker does its own BLE connect + handshake
-        from app.state.cloud import get_device_bind_token, get_device_sn_signature
+        from app.state.cloud import get_device_bind_token, get_device_sn_signature, is_logged_in, bind_device, fetch_sn_signature
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
+        if (not device_token or not device_sig) and sn and is_logged_in():
+            _wlog("Credentials missing — attempting auto-fetch from cloud...")
+            try:
+                if not device_token:
+                    bind_result = bind_device(sn)
+                    _wlog(f"bind_device result: {bind_result}")
+                    device_token = get_device_bind_token(sn)
+                if not device_sig:
+                    sig_result = fetch_sn_signature(sn)
+                    _wlog(f"fetch_sn_signature result: {sig_result}")
+                    device_sig = get_device_sn_signature(sn)
+            except Exception as e:
+                _wlog(f"Auto-fetch failed: {e}")
         _wlog(f"Credentials: bind_token={'yes' if device_token else 'NO'}, sn_sig={'yes' if device_sig else 'NO'}")
         if not device_token or not device_sig:
             _on_status("Device not registered", 0)
             _wlog("ABORT: missing credentials")
+            if not is_logged_in():
+                return {"error": "Log into Plaud Cloud in Settings first, then try again."}
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps({
             "sn": sn,
