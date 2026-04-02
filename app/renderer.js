@@ -225,6 +225,8 @@ dom.syncBtn.addEventListener('click', async () => {
       }
 
       await loadRecordings();
+      // Refresh settings — transcription may have added spoken tags to available_tags
+      await loadSettings();
 
       const syncDir = app.settings.cloud_sync_direction || 'download';
       if (syncDir === 'twoway' && app.cloudState.logged_in) {
@@ -538,6 +540,7 @@ async function executeWifiSync() {
         }
       }
       await loadRecordings();
+      await loadSettings();
 
       // Show success
       _renderWifiProgress('check', 'Transfer complete!', `${newFiles.length} recording(s) synced`, 100, 'success');
@@ -963,6 +966,7 @@ function _startBgPoll() {
               }
 
               await loadRecordings();
+              await loadSettings();
 
               const bgSyncDir = app.settings.cloud_sync_direction || 'download';
               if (bgSyncDir === 'twoway' && app.cloudState.logged_in) {

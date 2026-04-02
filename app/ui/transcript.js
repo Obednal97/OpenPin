@@ -633,6 +633,7 @@ async function transcribeRecording(oggPath, sessionId) {
       if (result.warning) toast(result.warning, 'info');
       toast('Transcription complete', 'success');
       await loadRecordings();
+      await loadSettings();
       openTranscript(sessionId);
 
       if (result.diarizing) {
