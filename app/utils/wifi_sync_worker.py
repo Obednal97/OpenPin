@@ -73,39 +73,37 @@ def _get_current_ssid():
     return ""
 
 
-def connect_to_hotspot(ssid, password, original_ip, timeout=40):
-    """Connect to device hotspot using CoreWLAN scan+associate.
+def connect_to_hotspot(ssid, password, original_ip, timeout=45):
+    """Connect to device hotspot via networksetup.
 
-    macOS aggressively reconnects to preferred networks with internet,
-    so we: (1) remove auto-join from preferred networks, (2) scan for
-    the hotspot SSID, (3) associate directly via CoreWLAN.
+    The Plaud hotspot doesn't report its SSID via CoreWLAN or networksetup
+    -getairportnetwork, so we verify by checking for a new IP that differs
+    from the original. networksetup -setairportnetwork is the only method
+    that works (CoreWLAN associateToNetwork fails with -3900).
     """
     from CoreWLAN import CWWiFiClient
-    from Foundation import NSError
     iface = CWWiFiClient.sharedWiFiClient().interface()
     if not iface:
         status("No WiFi interface found", 15)
         return None
 
-    # Save current preferred networks' auto-join state, then disable auto-join
-    # so macOS doesn't immediately reconnect to them after we disassociate
-    saved_autojoin = {}
+    # Save and remove preferred networks — prevents macOS from auto-rejoining
+    # a known network instead of staying on the hotspot
+    saved_networks = []
     try:
-        configs = iface.configuration().networkProfiles()
-        if configs:
-            mutable = iface.configuration().mutableCopy()
-            profiles = list(mutable.networkProfiles())
-            for p in profiles:
-                if p.ssid() and str(p.ssid()) != ssid:
-                    saved_autojoin[str(p.ssid())] = True
-            # Remove all preferred networks temporarily
+        r = subprocess.run(
+            ["networksetup", "-listpreferredwirelessnetworks", "en0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        saved_networks = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
+        if saved_networks:
             subprocess.run(
                 ["networksetup", "-removeallpreferredwirelessnetworks", "en0"],
                 capture_output=True, timeout=5,
             )
-            status("Disabled auto-join on preferred networks", 15)
+            status(f"Cleared {len(saved_networks)} preferred networks", 15)
     except Exception as e:
-        status(f"Could not disable auto-join: {e}", 15)
+        status(f"Could not clear preferred networks: {e}", 15)
 
     # Disassociate from current network
     iface.disassociate()
@@ -114,7 +112,6 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=40):
         if not get_en0_ip():
             break
 
-    connected_ip = None
     deadline = time.time() + timeout
     attempt = 0
     try:
@@ -122,66 +119,42 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=40):
             attempt += 1
             status(f"WiFi join attempt {attempt} for {ssid}...", 15)
 
-            # Strategy 1: CoreWLAN scan + associate (most reliable)
-            try:
-                scan_results, err = iface.scanForNetworksWithName_error_(ssid, None)
-                if scan_results and len(scan_results) > 0:
-                    network = list(scan_results)[0]
-                    status(f"Found {ssid} via scan, associating...", 17)
-                    ok, err = iface.associateToNetwork_password_error_(network, password, None)
-                    if ok:
-                        for _ in range(10):
-                            time.sleep(1)
-                            ip = get_en0_ip()
-                            current = _get_current_ssid()
-                            if ip and current == ssid:
-                                status(f"Connected to {ssid} ({ip})", 20)
-                                connected_ip = ip
-                                return ip
-                    else:
-                        err_str = str(err) if err else "unknown"
-                        status(f"CoreWLAN associate failed: {err_str}", 15)
-                else:
-                    status(f"Scan did not find {ssid}", 15)
-            except Exception as e:
-                status(f"CoreWLAN scan error: {e}", 15)
-
-            # Strategy 2: networksetup fallback
             try:
                 r = subprocess.run(
                     ["networksetup", "-setairportnetwork", "en0", ssid, password],
-                    capture_output=True, text=True, timeout=15,
+                    capture_output=True, text=True, timeout=20,
                 )
-                if r.returncode == 0:
-                    for _ in range(8):
-                        time.sleep(1)
-                        ip = get_en0_ip()
-                        current = _get_current_ssid()
-                        if ip and current == ssid:
-                            status(f"Connected to {ssid} ({ip})", 20)
-                            connected_ip = ip
-                            return ip
             except subprocess.TimeoutExpired:
-                pass
+                continue
 
-            # Still wrong network — disassociate and retry
-            current = _get_current_ssid()
-            if current and current != ssid:
-                status(f"On wrong network ({current}), disassociating...", 15)
+            if r.returncode == 0:
+                # networksetup reported success — wait for IP assignment
+                # The hotspot SSID doesn't report via CoreWLAN/networksetup,
+                # so we verify by checking for a new IP different from original
+                for wait in range(12):
+                    time.sleep(1)
+                    ip = get_en0_ip()
+                    if ip and ip != original_ip:
+                        status(f"Connected to {ssid} ({ip})", 20)
+                        return ip
+                status(f"Join reported success but no new IP after 12s, retrying...", 15)
                 iface.disassociate()
                 time.sleep(1)
+            else:
+                status(f"networksetup error: {r.stderr.strip()}", 15)
+                time.sleep(2)
 
         return None
     finally:
-        # Restore preferred networks (even if connection failed)
-        if saved_autojoin:
+        # Restore preferred networks
+        if saved_networks:
             try:
-                for net_ssid in saved_autojoin:
+                for net_ssid in saved_networks:
                     subprocess.run(
                         ["networksetup", "-addpreferredwirelessnetworkatindex", "en0", net_ssid, "0", "WPA2"],
                         capture_output=True, timeout=5,
                     )
-                status("Restored preferred networks", 15)
+                status(f"Restored {len(saved_networks)} preferred networks", 15)
             except Exception:
                 pass
 
