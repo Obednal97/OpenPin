@@ -1,6 +1,7 @@
 """Plaud Cloud account state and operations."""
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -156,21 +157,50 @@ def save_cloud_token(token, api_domain=None):
 
 
 def cloud_api(endpoint, method="GET", params=None, json_body=None):
-    """Make authenticated request to Plaud cloud API."""
+    """Make authenticated request to Plaud cloud API.
+
+    Auto-recovers from region mismatch errors by switching to the correct
+    API domain indicated in the error response and retrying once.
+    """
     headers = {
         "Authorization": f"bearer {_cloud_state['token']}",
         "Content-Type": "application/json",
         "app-platform": "desktop",
         "app-language": "en",
     }
-    if method == "GET":
-        r = http_requests.get(f"{_cloud_state['api_domain']}{endpoint}", headers=headers, params=params, timeout=30)
-    else:
-        r = http_requests.post(
-            f"{_cloud_state['api_domain']}{endpoint}", headers=headers, params=params, json=json_body, timeout=30
-        )
-    r.raise_for_status()
-    return r.json()
+
+    for attempt in range(2):
+        domain = _cloud_state["api_domain"]
+        if method == "GET":
+            r = http_requests.get(f"{domain}{endpoint}", headers=headers, params=params, timeout=30)
+        else:
+            r = http_requests.post(
+                f"{domain}{endpoint}", headers=headers, params=params, json=json_body, timeout=30
+            )
+
+        # Check for region mismatch before raise_for_status
+        if attempt == 0:
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            if body.get("msg") == "user region mismatch" or body.get("status") == -302:
+                correct_domain = (body.get("data") or {}).get("domains", {}).get("api")
+                if correct_domain and correct_domain != domain:
+                    logging.info(f"Region mismatch: switching API domain from {domain} to {correct_domain}")
+                    _cloud_state["api_domain"] = correct_domain
+                    # Update saved config so it persists
+                    if PLAUD_CONFIG_PATH.exists():
+                        try:
+                            cfg = json.loads(PLAUD_CONFIG_PATH.read_text())
+                            cfg["api_domain"] = correct_domain
+                            PLAUD_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+                        except Exception:
+                            pass
+                    continue  # retry with correct domain
+
+        r.raise_for_status()
+        return r.json()
 
 
 def get_login_url(region="eu"):
