@@ -147,18 +147,15 @@ def summarize_local(full_text):
     """Summarize using local distilbart model."""
     try:
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        from transformers import pipeline as tf_pipeline
     except ImportError:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", "transformers", "sentencepiece"]
         )
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        from transformers import pipeline as tf_pipeline
 
     model_name = "sshleifer/distilbart-cnn-12-6"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    summarizer = tf_pipeline("summarization", model=model, tokenizer=tokenizer, device=-1, truncation=True)
 
     max_chunk = 2500
     chunks = []
@@ -179,8 +176,9 @@ def summarize_local(full_text):
     for chunk in chunks:
         if len(chunk.strip()) < 30:
             continue
-        result = summarizer(chunk, max_length=120, min_length=20, do_sample=False)
-        summaries.append(result[0]["summary_text"])
+        inputs = tokenizer(chunk, return_tensors="pt", max_length=1024, truncation=True)
+        output_ids = model.generate(inputs["input_ids"], max_length=120, min_length=20, do_sample=False)
+        summaries.append(tokenizer.decode(output_ids[0], skip_special_tokens=True))
 
     return " ".join(summaries).strip()
 

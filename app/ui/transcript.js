@@ -546,16 +546,16 @@ function showTranscriptTab(tabName, sessionId, rec, t) {
   if (tabName === 'summary' && t && t.summary) {
     segContainer.classList.add('hidden');
     sumContainer.classList.remove('hidden');
-    sumContainer.innerHTML = renderMarkdown(t.summary);
+    renderEditableSummary(sumContainer, t, sessionId);
     tabsEl.classList.remove('hidden');
   } else {
     sumContainer.classList.add('hidden');
     segContainer.classList.remove('hidden');
-    renderTranscriptSegments(segContainer, t);
+    renderTranscriptSegments(segContainer, t, sessionId);
   }
 }
 
-function renderTranscriptSegments(container, t) {
+function renderTranscriptSegments(container, t, sessionId) {
   if (t && t.segments && t.segments.length > 0) {
     container.innerHTML = t.segments
       .map(
@@ -563,23 +563,57 @@ function renderTranscriptSegments(container, t) {
       <div class="segment" data-index="${i}" data-start="${seg.start}">
         <span class="segment-time">${formatTime(seg.start)}</span>
         ${seg.speaker ? `<span class="segment-speaker">${escapeHtml(seg.speaker)}</span>` : ''}
-        <span class="segment-text">${escapeHtml(seg.text)}</span>
+        <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
+        <button class="segment-delete" data-index="${i}" title="Remove segment">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
     `,
       )
       .join('');
 
-    container.querySelectorAll('.segment').forEach((el) => {
-      el.addEventListener('click', () => {
-        const start = parseFloat(el.dataset.start);
+    // Click timestamp to seek audio
+    container.querySelectorAll('.segment-time').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const start = parseFloat(el.parentElement.dataset.start);
         if (!isNaN(start)) {
           dom.audioEl.currentTime = start;
           dom.audioEl.play().catch(() => {});
         }
       });
     });
+
+    // Edit segment text — save on blur
+    container.querySelectorAll('.segment-text[contenteditable]').forEach((el) => {
+      el.addEventListener('blur', () => saveSegmentEdit(sessionId, t));
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          el.blur();
+        }
+      });
+    });
+
+    // Delete segment
+    container.querySelectorAll('.segment-delete').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index);
+        t.segments.splice(idx, 1);
+        saveSegments(sessionId, t);
+        renderTranscriptSegments(container, t, sessionId);
+      });
+    });
   } else if (t && t.text) {
-    container.innerHTML = `<div class="segment"><span class="segment-text">${escapeHtml(t.text)}</span></div>`;
+    container.innerHTML = `<div class="segment"><span class="segment-text" contenteditable="true" data-plain="1">${escapeHtml(t.text)}</span></div>`;
+    container.querySelector('.segment-text').addEventListener('blur', async (e) => {
+      const newText = e.target.textContent.trim();
+      if (newText !== t.text) {
+        t.text = newText;
+        await window.plaud.updateTranscript(sessionId, { segments: [{ text: newText, start: 0 }] });
+      }
+    });
   } else {
     container.innerHTML = `
       <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
@@ -587,6 +621,98 @@ function renderTranscriptSegments(container, t) {
       </div>
     `;
   }
+}
+
+function saveSegmentEdit(sessionId, t) {
+  const els = $$('.segment-text[contenteditable]');
+  let changed = false;
+  els.forEach((el) => {
+    const idx = parseInt(el.dataset.index);
+    if (isNaN(idx) || !t.segments[idx]) return;
+    const newText = el.textContent.trim();
+    if (newText !== t.segments[idx].text) {
+      t.segments[idx].text = newText;
+      changed = true;
+    }
+  });
+  if (changed) saveSegments(sessionId, t);
+}
+
+async function saveSegments(sessionId, t) {
+  t.text = t.segments.map((s) => s.text).join(' ');
+  t.text_preview = t.text.length > 150 ? t.text.slice(0, 150) + '...' : t.text;
+  await window.plaud.updateTranscript(sessionId, { segments: t.segments });
+  // Update in-memory cache
+  if (app.transcripts[sessionId]) {
+    app.transcripts[sessionId].segments = t.segments;
+    app.transcripts[sessionId].text = t.text;
+    app.transcripts[sessionId].text_preview = t.text_preview;
+  }
+}
+
+function renderEditableSummary(container, t, sessionId) {
+  let editing = false;
+  const render = () => {
+    container.innerHTML = renderMarkdown(t.summary);
+    // Add edit hint
+    const editHint = document.createElement('button');
+    editHint.className = 'summary-edit-btn';
+    editHint.textContent = 'Edit';
+    editHint.addEventListener('click', () => startEditing());
+    container.prepend(editHint);
+  };
+
+  const startEditing = () => {
+    editing = true;
+    const textarea = document.createElement('textarea');
+    textarea.className = 'summary-editor';
+    textarea.value = t.summary;
+    textarea.rows = Math.max(10, t.summary.split('\n').length + 2);
+
+    const actions = document.createElement('div');
+    actions.className = 'summary-editor-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'action-btn accent';
+    saveBtn.textContent = 'Save';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'action-btn subtle';
+    cancelBtn.textContent = 'Cancel';
+
+    actions.append(cancelBtn, saveBtn);
+    container.innerHTML = '';
+    container.append(textarea, actions);
+    textarea.focus();
+
+    saveBtn.addEventListener('click', async () => {
+      const newSummary = textarea.value.trim();
+      if (newSummary !== t.summary) {
+        t.summary = newSummary;
+        await window.plaud.updateTranscript(sessionId, { summary: newSummary });
+        if (app.transcripts[sessionId]) {
+          app.transcripts[sessionId].summary = newSummary;
+        }
+      }
+      editing = false;
+      render();
+    });
+
+    cancelBtn.addEventListener('click', () => {
+      editing = false;
+      render();
+    });
+
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 's' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        saveBtn.click();
+      }
+      if (e.key === 'Escape') {
+        cancelBtn.click();
+      }
+    });
+  };
+
+  render();
 }
 
 async function transcribeRecording(oggPath, sessionId) {
