@@ -322,6 +322,82 @@ def export_recording():
         )
 
 
+@bp.route("/recordings/crop", methods=["POST"])
+def crop_recording():
+    """Crop a recording to a time range using FFmpeg."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    start = data.get("start", 0)
+    end = data.get("end", 0)
+    mode = data.get("mode", "overwrite")  # "overwrite" or "new"
+
+    if not session_id:
+        return jsonify({"error": "No session_id"}), 400
+    if end <= start:
+        return jsonify({"error": "Invalid time range"}), 400
+
+    ogg_path = RECORDINGS_DIR / f"{session_id}.ogg"
+    if not ogg_path.exists():
+        return jsonify({"error": "Recording not found"}), 404
+
+    if mode == "new":
+        new_id = str(int(datetime.now().timestamp()))
+        out_path = RECORDINGS_DIR / f"{new_id}.ogg"
+    else:
+        new_id = None
+        # Back up original before overwriting
+        backup_path = RECORDINGS_DIR / f"{session_id}_uncropped.ogg"
+        if not backup_path.exists():
+            shutil.copy2(str(ogg_path), str(backup_path))
+        out_path = RECORDINGS_DIR / f"{session_id}_crop_tmp.ogg"
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(ogg_path),
+                "-ss", str(start),
+                "-to", str(end),
+                "-c", "copy",
+                str(out_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            out_path.unlink(missing_ok=True)
+            return jsonify({"error": f"FFmpeg error: {result.stderr[:200]}"}), 500
+
+        if mode == "new":
+            # Save a title for the new recording
+            config = load_config()
+            original_name = config.get("recording_names", {}).get(session_id, session_id)
+            config.setdefault("recording_names", {})[new_id] = f"{original_name} (cropped)"
+            save_config(config)
+            return jsonify({
+                "cropped": True,
+                "session_id": new_id,
+                "duration": round(end - start, 2),
+            })
+        else:
+            out_path.replace(ogg_path)
+            # Delete existing transcript — it no longer matches the audio
+            for ext in (".json", ".txt"):
+                t_path = TRANSCRIPTS_DIR / f"{session_id}{ext}"
+                t_path.unlink(missing_ok=True)
+            return jsonify({
+                "cropped": True,
+                "session_id": session_id,
+                "duration": round(end - start, 2),
+            })
+    except FileNotFoundError:
+        return jsonify({"error": "ffmpeg not found — install ffmpeg to crop audio"}), 500
+    except subprocess.TimeoutExpired:
+        out_path.unlink(missing_ok=True)
+        return jsonify({"error": "Crop timed out"}), 500
+
+
 @bp.route("/recordings/delete", methods=["POST"])
 def delete_recordings():
     """Delete one or more recordings and their transcripts."""

@@ -308,6 +308,151 @@
   margin: var(--sp-4) 0;
 }
 
+/* === MODULE: Audio Crop Editor === */
+.crop-editor {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-4);
+  animation: slideDown 0.2s var(--ease);
+}
+.crop-editor.hidden { display: none; }
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.crop-waveform-container {
+  position: relative;
+  height: 96px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  overflow: hidden;
+  user-select: none;
+}
+.crop-waveform {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.crop-region {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  z-index: 2;
+}
+.crop-handle {
+  position: absolute;
+  top: 0;
+  width: 16px;
+  height: 100%;
+  cursor: ew-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+}
+.crop-handle-left { left: -9px; }
+.crop-handle-right { right: -9px; }
+.crop-handle-grip {
+  width: 4px;
+  height: 28px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 4px rgba(0,0,0,0.2);
+}
+.crop-handle:hover .crop-handle-grip,
+.crop-handle:active .crop-handle-grip {
+  background: var(--accent-hover);
+  height: 36px;
+}
+
+.crop-overlay {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--bg-card);
+  opacity: 0.6;
+  z-index: 1;
+  pointer-events: none;
+}
+.crop-overlay-left { left: 0; }
+.crop-overlay-right { right: 0; }
+
+.crop-playhead {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--text);
+  z-index: 4;
+  pointer-events: none;
+  display: none;
+}
+
+.crop-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--sp-3);
+}
+.crop-times {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.crop-time-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  font-weight: var(--weight-medium);
+}
+.crop-time-value {
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+.crop-buttons {
+  display: flex;
+  gap: var(--sp-2);
+}
+.crop-save-group {
+  position: relative;
+}
+.crop-save-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  background: var(--bg-card-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+  min-width: 180px;
+  padding: var(--sp-1) 0;
+}
+.crop-save-menu.hidden { display: none; }
+.crop-save-option {
+  display: block;
+  width: 100%;
+  padding: var(--sp-1_5) var(--sp-3);
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+}
+.crop-save-option:hover { background: var(--bg-hover); }
+
 /* === MODULE: Transcript Segments === */
 .transcript-segments { display: flex; flex-direction: column; gap: 1px; }
 .segment {

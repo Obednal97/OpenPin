@@ -16,6 +16,7 @@
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
 .icon-btn:active { transform: scale(0.94); }
+.icon-btn.active { color: var(--accent); background: var(--accent-subtle); }
 
 /* Theme toggle */
 .theme-toggle { position: relative; overflow: hidden; }
