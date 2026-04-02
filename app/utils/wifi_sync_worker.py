@@ -426,6 +426,7 @@ async def main():
                 f = file_queue.pop(0)
                 sid = f["session_id"]
                 ogg_path = recordings_dir / f"{sid}.ogg"
+                partial_path = recordings_dir / f"{sid}.ogg.partial"
                 if str(sid) in dismissed or ogg_path.exists():
                     new_files.append({"session_id": sid, "ogg_path": str(ogg_path) if ogg_path.exists() else None, "duration": 0, "status": "exists"})
                     continue
@@ -500,10 +501,14 @@ async def main():
                         frames = decrypt_ble_file(raw, app_rsa_key)
                         if frames:
                             ogg = wrap_opus_ogg(frames)
-                            ogg_path = recordings_dir / f"{current_sid}.ogg"
-                            ogg_path.write_bytes(ogg)
+                            final_path = recordings_dir / f"{current_sid}.ogg"
+                            tmp_path = recordings_dir / f"{current_sid}.ogg.partial"
+                            # Write to .partial first, rename on success — incomplete
+                            # files stay as .partial (hidden from UI, re-downloaded next sync)
+                            tmp_path.write_bytes(ogg)
+                            tmp_path.rename(final_path)
                             duration = len(frames) // 80 * 0.02
-                            new_files.append({"session_id": current_sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"})
+                            new_files.append({"session_id": current_sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"})
                             done = sum(1 for f in new_files if f["status"] == "new")
                             total = len(wifi_files)
                             pct = 35 + int(55 * done / max(total, 1))

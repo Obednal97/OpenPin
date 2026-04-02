@@ -404,7 +404,9 @@ def download_cloud_recordings():
                 continue
             elif len(raw) % 80 == 0:
                 ogg = wrap_opus_ogg(raw)
-                ogg_path.write_bytes(ogg)
+                tmp_path = ogg_path.with_suffix(".ogg.partial")
+                tmp_path.write_bytes(ogg)
+                tmp_path.rename(ogg_path)
                 duration = (len(raw) // 80) * 0.02
             else:
                 raw_path = RECORDINGS_DIR / f"{session_id}.raw"
