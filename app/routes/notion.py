@@ -1,6 +1,7 @@
 """Notion MCP integration routes."""
 
 import json
+import logging
 import re
 import time as _time
 import traceback
@@ -274,63 +275,211 @@ def page_url(session_id):
     return jsonify({"url": url, "has_page": bool(url)})
 
 
-@bp.route("/push", methods=["POST"])
-def push():
-    """Push or update a recording's transcript and summary in Notion."""
-    if not notion.is_connected():
-        return jsonify({"error": "Not connected to Notion"}), 401
-    if not notion.get_database_id():
-        return jsonify({"error": "No database selected — configure in Settings"}), 400
-
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    if not session_id:
-        return jsonify({"error": "No session_id"}), 400
-
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if not transcript_path.exists():
-        return jsonify({"error": "Transcript not found"}), 404
-
-    t_data = json.loads(transcript_path.read_text())
+def _save_notion_pushed_title(session_id, title):
+    """Store the title we last pushed to Notion for this recording."""
     config = load_config()
+    titles = config.get("notion_pushed_titles", {})
+    titles[session_id] = title
+    config["notion_pushed_titles"] = titles
+    save_config(config)
+
+
+def _get_notion_pushed_title(session_id):
+    """Get the title we last pushed to Notion, or empty string."""
+    return load_config().get("notion_pushed_titles", {}).get(session_id, "")
+
+
+def _fetch_notion_page_title(page_url):
+    """Fetch the current title of a Notion page. Returns title string or None on error."""
+    try:
+        result = notion.mcp_call("notion-fetch", {"id": page_url})
+        # The fetch result contains page content — extract title from the response
+        content = result.get("content", []) if isinstance(result, dict) else []
+        for item in content if isinstance(content, list) else []:
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            # The MCP response includes the title in the page metadata
+            if "title" in str(item).lower():
+                return text
+        # Fallback: try to find title in the raw result text
+        result_str = json.dumps(result) if isinstance(result, dict) else str(result)
+        # Look for title property in the result
+        if '"title"' in result_str:
+            import re as _re
+            # Match title in various Notion MCP response formats
+            m = _re.search(r'#\s+(.+?)(?:\n|$)', result_str)
+            if m:
+                return m.group(1).strip()
+    except Exception as e:
+        logging.warning(f"Could not fetch Notion page title: {e}")
+    return None
+
+
+def _build_notion_properties(title, tags=None):
+    """Build Notion page properties dict with title and optional tags.
+
+    Title can be None to skip title update (preserves Notion-side custom title).
+    Tags are passed as a multi-select property — comma-separated strings.
+    """
+    props = {}
+    if title is not None:
+        props["title"] = title
+    if tags:
+        props["Tags"] = ", ".join(tags)
+    return props
+
+
+def _ensure_tags_property():
+    """Ensure the Notion database has a Tags multi-select property.
+
+    Called once on first push with tags. Creates the property if missing.
+    """
+    db_id = notion.get_database_id()
+    if not db_id:
+        return
+    try:
+        notion.mcp_call(
+            "notion-update-data-source",
+            {
+                "data_source_id": db_id,
+                "statements": 'ADD COLUMN "Tags" MULTI_SELECT()',
+            },
+        )
+    except Exception as e:
+        # Property may already exist — that's fine
+        err = str(e).lower()
+        if "already" not in err and "exists" not in err and "duplicate" not in err:
+            logging.warning(f"Could not create Tags property: {e}")
+
+
+# Track whether we've verified the Tags property exists this session
+_tags_property_checked = False
+
+
+def _push_with_tags_fallback(call_fn, tags):
+    """Execute a Notion MCP call, creating Tags property if needed on first failure."""
+    global _tags_property_checked
+    try:
+        return call_fn()
+    except Exception as e:
+        if tags and not _tags_property_checked and "tags" in str(e).lower():
+            # Tags property likely doesn't exist — create it and retry
+            _tags_property_checked = True
+            _ensure_tags_property()
+            return call_fn()
+        raise
+
+
+def _resolve_title_for_update(session_id, app_title, page_url):
+    """Decide what title to send when updating an existing Notion page.
+
+    If the user renamed the page on Notion's side, we don't overwrite it.
+    We compare the current Notion title against what we last pushed.
+    - If Notion title == last pushed title → user hasn't changed it on Notion → safe to update
+    - If Notion title != last pushed title → user customised it on Notion → keep Notion's title
+    """
+    last_pushed = _get_notion_pushed_title(session_id)
+    if not last_pushed:
+        # First update after this feature was added — assume safe to update
+        return app_title
+
+    if last_pushed == app_title:
+        # Title hasn't changed in our app — no update needed, use current
+        return app_title
+
+    # Title changed in our app — check if user also changed it on Notion
+    notion_title = _fetch_notion_page_title(page_url)
+    if notion_title is None:
+        # Couldn't fetch — play it safe, update with our title
+        return app_title
+    if notion_title == last_pushed:
+        # Notion still has what we pushed last time → user didn't change it → safe to update
+        return app_title
+    else:
+        # User changed the title on Notion — don't overwrite
+        logging.info(f"Notion title differs from last push ('{notion_title}' vs '{last_pushed}'), keeping Notion title")
+        return None  # Signal: don't include title in properties
+
+
+def push_to_notion(session_id, t_data=None, config=None):
+    """Push or update a recording in Notion. Used by both manual push and auto-push.
+
+    Returns dict with keys: pushed, updated, url, error (if any).
+    """
+    global _tags_property_checked
+    if not notion.is_connected():
+        return {"error": "Not connected to Notion"}
+    if not notion.get_database_id():
+        return {"error": "No database selected — configure in Settings"}
+
+    if t_data is None:
+        transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+        if not transcript_path.exists():
+            return {"error": "Transcript not found"}
+        t_data = json.loads(transcript_path.read_text())
+
+    if config is None:
+        config = load_config()
+
     custom_title = config.get("recording_names", {}).get(session_id, "")
-    title = custom_title or t_data.get("auto_title", "") or session_id
+    app_title = custom_title or t_data.get("auto_title", "") or session_id
+    tags = config.get("recording_tags", {}).get(session_id, [])
     full_content = _build_notion_content(t_data)
 
-    # Check if we already have a page for this recording
     existing_url = _get_notion_page_url(session_id)
 
-    try:
-        if existing_url:
-            # Update existing page
-            result = notion.mcp_call(
+    if existing_url:
+        # Updating existing page — protect Notion-side title changes
+        resolved_title = _resolve_title_for_update(session_id, app_title, existing_url)
+        properties = _build_notion_properties(resolved_title, tags) if resolved_title else _build_notion_properties(None, tags)
+        result = _push_with_tags_fallback(
+            lambda: notion.mcp_call(
                 "notion-update-page",
-                {
-                    "url": existing_url,
-                    "properties": {"title": title},
-                    "content": full_content,
-                },
-            )
-            return jsonify({"pushed": True, "updated": True, "url": existing_url, "result": result})
-        else:
-            # Create new page
-            result = notion.mcp_call(
+                {"url": existing_url, "properties": properties, "content": full_content},
+            ),
+            tags,
+        )
+        if resolved_title:
+            _save_notion_pushed_title(session_id, resolved_title)
+        return {"pushed": True, "updated": True, "url": existing_url, "result": result}
+    else:
+        # Creating new page — always use app title
+        properties = _build_notion_properties(app_title, tags)
+        result = _push_with_tags_fallback(
+            lambda: notion.mcp_call(
                 "notion-create-pages",
                 {
                     "parent": {"database_id": notion.get_database_id()},
                     "pages": [
                         {
-                            "properties": {"title": title},
+                            "properties": properties,
                             "content": full_content,
                             "icon": "\U0001f399\ufe0f",
                         }
                     ],
                 },
-            )
-            # Extract and save the page URL
-            page_url = _extract_page_url(result)
-            if page_url:
-                _save_notion_page_url(session_id, page_url)
-            return jsonify({"pushed": True, "updated": False, "url": page_url or "", "result": result})
+            ),
+            tags,
+        )
+        page_url = _extract_page_url(result)
+        if page_url:
+            _save_notion_page_url(session_id, page_url)
+        _save_notion_pushed_title(session_id, app_title)
+        return {"pushed": True, "updated": False, "url": page_url or "", "result": result}
+
+
+@bp.route("/push", methods=["POST"])
+def push():
+    """Push or update a recording's transcript and summary in Notion."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "No session_id"}), 400
+
+    try:
+        result = push_to_notion(session_id)
+        if result.get("error"):
+            code = 401 if "Not connected" in result["error"] else 400
+            return jsonify(result), code
+        return jsonify(result)
     except Exception as e:
         return jsonify(_error_json({}, e)), 500

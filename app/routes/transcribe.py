@@ -17,6 +17,69 @@ from app.utils.constants import TRANSCRIPTS_DIR
 from app.utils.webhooks import fire_webhooks
 
 
+def _extract_spoken_tags(text):
+    """Extract tags from spoken trigger phrases at the start of a recording.
+
+    Scans the first ~500 characters for phrases like:
+    - "Tag: X, Y, Z"
+    - "Tags: X, Y"
+    - "Add tag X"
+    - "Add tags X, Y, Z"
+    - "Add the tag X"
+    - "Add the tags X, Y, Z"
+
+    Returns list of tag strings, or empty list if no triggers found.
+    """
+    import re
+    if not text:
+        return []
+    # Only scan the first ~500 chars (roughly first 30 seconds of speech)
+    prefix = text[:500].strip()
+    tags = []
+    # Match various trigger patterns (case-insensitive)
+    patterns = [
+        r"(?:add\s+)?(?:the\s+)?tags?\s*[:\-]\s*(.+?)(?:\.|$)",
+        r"(?:add\s+)?(?:the\s+)?tags?\s+(.+?)(?:\.|$)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, prefix, re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            # Split on commas or "and"
+            parts = re.split(r"\s*,\s*|\s+and\s+", raw)
+            for part in parts:
+                tag = part.strip().rstrip(".")
+                if tag and len(tag) < 50:
+                    tags.append(tag)
+            break
+    return tags
+
+
+def _apply_spoken_tags(session_id, text):
+    """Detect and apply spoken tags from transcript text. Returns list of applied tags."""
+    tags = _extract_spoken_tags(text)
+    if not tags:
+        return []
+    config = load_config()
+    existing = config.get("recording_tags", {}).get(session_id, [])
+    # Merge — don't duplicate
+    merged = list(existing)
+    custom_tags = set(config.get("custom_tags", []))
+    for t in tags:
+        if t not in merged:
+            merged.append(t)
+        # Auto-add to custom tags list if not already there
+        if t not in custom_tags:
+            custom_tags.add(t)
+    rec_tags = config.get("recording_tags", {})
+    rec_tags[session_id] = merged
+    config["recording_tags"] = rec_tags
+    config["custom_tags"] = sorted(custom_tags)
+    save_config(config)
+    logging.info(f"Auto-tagged {session_id} with spoken tags: {tags}")
+    return tags
+
+
 def _error_json(base, exc):
     """Return error JSON with traceback for debugging (auto-reported to GitHub)."""
     base["error"] = str(exc)
@@ -163,6 +226,9 @@ def transcribe_file():
             txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
             txt_path.write_text(text, encoding="utf-8")
 
+            # Auto-detect spoken tags from the beginning of the transcript
+            spoken_tags = _apply_spoken_tags(session_id, text)
+
             if diarize and text and not _cloud_has_speakers:
                 _bg_path = str(path)
                 _bg_segs = list(segments)
@@ -248,20 +314,21 @@ def transcribe_file():
                     },
                 )
 
-            return jsonify(
-                {
-                    "session_id": session_id,
-                    "text": text,
-                    "duration": duration,
-                    "language": lang,
-                    "speakers": speakers,
-                    "segments": segments,
-                    "path": str(transcript_path),
-                    "provider": prov,
-                    "warning": _cloud_error,
-                    "diarizing": diarize and not _cloud_has_speakers,
-                }
-            )
+            resp = {
+                "session_id": session_id,
+                "text": text,
+                "duration": duration,
+                "language": lang,
+                "speakers": speakers,
+                "segments": segments,
+                "path": str(transcript_path),
+                "provider": prov,
+                "warning": _cloud_error,
+                "diarizing": diarize and not _cloud_has_speakers,
+            }
+            if spoken_tags:
+                resp["spoken_tags"] = spoken_tags
+            return jsonify(resp)
 
         # Local transcription via Whisper
         vocab = config.get("custom_vocabulary", [])
@@ -275,6 +342,9 @@ def transcribe_file():
             t.save(str(transcript_path))
             txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
             txt_path.write_text(t.formatted, encoding="utf-8")
+
+            # Auto-detect spoken tags
+            local_spoken_tags = _apply_spoken_tags(session_id, t.text)
 
             speakers = list({s.speaker for s in t.segments if s.speaker})
             local_segments = [
@@ -292,21 +362,22 @@ def transcribe_file():
                 },
             )
 
-            return jsonify(
-                {
-                    "session_id": session_id,
-                    "text": t.text,
-                    "duration": t.duration,
-                    "language": t.language,
-                    "speakers": speakers,
-                    "segments": [
-                        {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
-                    ],
-                    "path": str(transcript_path),
-                    "provider": "local",
-                    "warning": _cloud_error,
-                }
-            )
+            resp = {
+                "session_id": session_id,
+                "text": t.text,
+                "duration": t.duration,
+                "language": t.language,
+                "speakers": speakers,
+                "segments": [
+                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
+                ],
+                "path": str(transcript_path),
+                "provider": "local",
+                "warning": _cloud_error,
+            }
+            if local_spoken_tags:
+                resp["spoken_tags"] = local_spoken_tags
+            return jsonify(resp)
         else:
             return jsonify({"session_id": session_id, "text": "", "message": "No speech detected"})
     except Exception as e:
@@ -417,45 +488,13 @@ def summarize_transcript():
         notion_error = ""
         if config.get("notion_auto_push"):
             try:
-                from app.routes.notion import (
-                    _build_notion_content,
-                    _extract_page_url,
-                    _get_notion_page_url,
-                    _save_notion_page_url,
-                )
-                from app.state import notion as notion_state
+                from app.routes.notion import push_to_notion
 
-                if notion_state.is_connected() and notion_state.get_database_id():
-                    content = _build_notion_content(t_data)
-                    existing = _get_notion_page_url(session_id)
-                    if existing:
-                        notion_state.mcp_call(
-                            "notion-update-page",
-                            {"url": existing, "properties": {"title": title}, "content": content},
-                        )
-                        notion_url = existing
-                    else:
-                        result = notion_state.mcp_call(
-                            "notion-create-pages",
-                            {
-                                "parent": {"database_id": notion_state.get_database_id()},
-                                "pages": [
-                                    {
-                                        "properties": {"title": title},
-                                        "content": content,
-                                        "icon": "\U0001f399\ufe0f",
-                                    }
-                                ],
-                            },
-                        )
-                        page_url = _extract_page_url(result)
-                        if page_url:
-                            _save_notion_page_url(session_id, page_url)
-                            notion_url = page_url
-                elif not notion_state.is_connected():
-                    notion_error = "Notion not connected"
-                elif not notion_state.get_database_id():
-                    notion_error = "No Notion database selected"
+                result = push_to_notion(session_id, t_data=t_data, config=config)
+                if result.get("error"):
+                    notion_error = result["error"]
+                else:
+                    notion_url = result.get("url", "")
             except Exception as e:
                 notion_error = f"Notion push failed: {e}"
                 logging.warning(f"Notion auto-push failed: {e}")
