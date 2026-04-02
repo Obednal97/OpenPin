@@ -1,6 +1,6 @@
 {
   "name": "plaud-v2",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "description": "Plaud NotePin S — Local sync, decrypt & transcribe",
   "main": "main.js",
   "scripts": {
@@ -38,6 +38,12 @@
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "icon.icns",
+      "identity": "Oliver Bednal (4SN93PWF7Z)",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "notarize": true,
       "target": [
         "dmg",
         "zip"
