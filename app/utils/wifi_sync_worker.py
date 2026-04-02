@@ -61,6 +61,18 @@ def get_en0_ip():
         return ""
 
 
+def _get_current_ssid():
+    """Get the SSID we're actually connected to."""
+    try:
+        from CoreWLAN import CWWiFiClient
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+        if iface and iface.ssid():
+            return str(iface.ssid())
+    except Exception:
+        pass
+    return ""
+
+
 def connect_to_hotspot(ssid, password, original_ip, timeout=25):
     from CoreWLAN import CWWiFiClient
     iface = CWWiFiClient.sharedWiFiClient().interface()
@@ -75,6 +87,7 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=25):
     attempt = 0
     while time.time() < deadline:
         attempt += 1
+        status(f"WiFi join attempt {attempt} for {ssid}...", 15)
         try:
             r = subprocess.run(
                 ["networksetup", "-setairportnetwork", "en0", ssid, password],
@@ -86,15 +99,23 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=25):
             for _ in range(8):
                 time.sleep(1)
                 ip = get_en0_ip()
-                if ip and ip != original_ip:
+                current = _get_current_ssid()
+                if ip and current == ssid:
+                    status(f"Connected to {ssid} ({ip})", 20)
                     return ip
+            # Final check
             ip = get_en0_ip()
-            if ip and ip != original_ip:
+            current = _get_current_ssid()
+            if ip and current == ssid:
+                status(f"Connected to {ssid} ({ip})", 20)
                 return ip
+            # Wrong network — macOS auto-joined a known network instead
+            status(f"Connected to wrong network ({current}), retrying...", 15)
             if iface:
                 iface.disassociate()
             time.sleep(1)
         else:
+            status(f"networksetup failed: {r.stderr.strip()}", 15)
             time.sleep(1)
     return None
 
