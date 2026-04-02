@@ -120,6 +120,12 @@ def _extract_recording_date(stem):
 @bp.route("/recordings")
 def list_recordings():
     RECORDINGS_DIR.mkdir(exist_ok=True)
+    # Clean up partial downloads from interrupted transfers — they'll be re-downloaded
+    for p in RECORDINGS_DIR.glob("*.partial"):
+        try:
+            p.unlink()
+        except Exception:
+            pass
     config = load_config()
     custom_names = config.get("recording_names", {})
     rec_tags = config.get("recording_tags", {})

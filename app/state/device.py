@@ -1064,7 +1064,9 @@ async def _sync_files_inner(progress_callback=None):
         opus_frames = decrypt_ble_file(raw_data, app_rsa_key)
         if opus_frames:
             ogg = wrap_opus_ogg(opus_frames)
-            ogg_path.write_bytes(ogg)
+            tmp_path = ogg_path.with_suffix(".ogg.partial")
+            tmp_path.write_bytes(ogg)
+            tmp_path.rename(ogg_path)
             duration = len(opus_frames) // 80 * 0.02
             new_files.append(
                 {
