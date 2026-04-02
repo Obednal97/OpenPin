@@ -483,10 +483,11 @@ async def main():
         ws_seq = 0
         download_buf = bytearray()
         current_sid = 0
+        current_expected_size = 0
         file_queue = []
 
         async def download_next():
-            nonlocal current_sid
+            nonlocal current_sid, current_expected_size
             download_buf.clear()
             while file_queue:
                 f = file_queue.pop(0)
@@ -497,6 +498,7 @@ async def main():
                     new_files.append({"session_id": sid, "ogg_path": str(ogg_path) if ogg_path.exists() else None, "duration": 0, "status": "exists"})
                     continue
                 current_sid = sid
+                current_expected_size = f["size"]
                 dl_req = build_wifi_packet(12, {"session": sid, "scene": 0, "start": 0, "end": f["size"]})
                 await websocket.send(ws_encrypt(dl_req))
                 status(f"Downloading session {sid}...", 40)
@@ -560,6 +562,13 @@ async def main():
                         raw = bytes(download_buf)
                         recordings_dir.mkdir(exist_ok=True)
 
+                        # Check if we got the full file — device may send is_last
+                        # on a partial stream if the connection is dropping
+                        raw_size = len(raw)
+                        is_partial = current_expected_size > 0 and raw_size < current_expected_size * 0.9
+                        if is_partial:
+                            status(f"Partial download for {current_sid}: got {raw_size}/{current_expected_size} bytes ({raw_size*100//current_expected_size}%)", 40)
+
                         # Import decrypt from project
                         sys.path.insert(0, str(app_key_path.parent.parent))
                         from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
@@ -567,14 +576,19 @@ async def main():
                         frames = decrypt_ble_file(raw, app_rsa_key)
                         if frames:
                             ogg = wrap_opus_ogg(frames)
-                            final_path = recordings_dir / f"{current_sid}.ogg"
-                            tmp_path = recordings_dir / f"{current_sid}.ogg.partial"
-                            # Write to .partial first, rename on success — incomplete
-                            # files stay as .partial (hidden from UI, re-downloaded next sync)
-                            tmp_path.write_bytes(ogg)
-                            tmp_path.rename(final_path)
-                            duration = len(frames) // 80 * 0.02
-                            new_files.append({"session_id": current_sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"})
+                            if is_partial:
+                                # Save as .partial — won't show in recordings, re-downloaded next sync
+                                partial_path = recordings_dir / f"{current_sid}.ogg.partial"
+                                partial_path.write_bytes(ogg)
+                                new_files.append({"session_id": current_sid, "ogg_path": None, "duration": 0, "status": "partial"})
+                                status(f"Saved partial {current_sid} ({raw_size*100//current_expected_size}%) — will retry next sync", 40)
+                            else:
+                                final_path = recordings_dir / f"{current_sid}.ogg"
+                                tmp_path = recordings_dir / f"{current_sid}.ogg.partial"
+                                tmp_path.write_bytes(ogg)
+                                tmp_path.rename(final_path)
+                                duration = len(frames) // 80 * 0.02
+                                new_files.append({"session_id": current_sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"})
                             done = sum(1 for f in new_files if f["status"] == "new")
                             total = len(wifi_files)
                             pct = 35 + int(55 * done / max(total, 1))
