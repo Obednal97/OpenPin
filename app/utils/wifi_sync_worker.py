@@ -268,7 +268,10 @@ async def ble_connect_and_setup():
             await asyncio.sleep(0.02)
         await asyncio.wait_for(done.wait(), timeout=15)
     elif not done.is_set():
-        await cl.stop_notify(N)
+        try:
+            await cl.stop_notify(N)
+        except Exception:
+            pass
         return None
     blob = bytearray()
     for i in sorted(rsa.keys()):
@@ -277,7 +280,10 @@ async def ble_connect_and_setup():
     key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
     cipher = ChaCha20Poly1305(key)
     assert cipher.decrypt(nonce, ct, aad) == b"PLAUD.AI"
-    await cl.stop_notify(N)
+    try:
+        await cl.stop_notify(N)
+    except Exception:
+        pass
 
     # Setup encrypted command channel
     seq = [0]
