@@ -13,6 +13,36 @@ def sanitize_for_json(text):
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", "").replace("\t", " ")
 
 
+def _extract_summary_json(content):
+    """Parse AI response to extract (summary, title) from various formats.
+
+    Handles: raw JSON, code-fenced JSON, JSON with leading text,
+    and plain markdown responses.
+    """
+    content = content.strip()
+    # Strip code fences
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        content = content.rsplit("```", 1)[0].strip()
+    # Try parsing as JSON
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed.get("summary", content), parsed.get("title", "")
+    except json.JSONDecodeError:
+        pass
+    # Try extracting JSON from within the text (AI sometimes adds preamble)
+    idx = content.find("{")
+    if idx > 0:
+        try:
+            parsed = json.loads(content[idx:])
+            if isinstance(parsed, dict) and "summary" in parsed:
+                return parsed["summary"], parsed.get("title", "")
+        except json.JSONDecodeError:
+            pass
+    return content, ""
+
+
 def summarize_anthropic(full_text, api_key, tag_context=""):
     """Summarize using Claude Sonnet 4.6."""
     safe_text = sanitize_for_json(full_text[:15000])
@@ -52,15 +82,8 @@ def summarize_anthropic(full_text, api_key, tag_context=""):
     )
     r.raise_for_status()
     content = r.json()["content"][0]["text"]
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        content = content.rsplit("```", 1)[0]
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return content, ""
-    return parsed.get("summary", content), parsed.get("title", "")
+    content = _extract_summary_json(content)
+    return content
 
 
 def summarize_openai(full_text, api_key, tag_context=""):
@@ -88,11 +111,7 @@ def summarize_openai(full_text, api_key, tag_context=""):
     )
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return content, ""
-    return parsed.get("summary", content), parsed.get("title", "")
+    return _extract_summary_json(content)
 
 
 def summarize_openrouter(full_text, api_key, model, tag_context=""):
@@ -121,15 +140,7 @@ def summarize_openrouter(full_text, api_key, model, tag_context=""):
     )
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"]
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-        content = content.rsplit("```", 1)[0]
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return content, ""
-    return parsed.get("summary", content), parsed.get("title", "")
+    return _extract_summary_json(content)
 
 
 def summarize_local(full_text):
