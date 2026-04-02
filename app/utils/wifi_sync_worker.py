@@ -494,9 +494,22 @@ async def main():
                 sid = f["session_id"]
                 ogg_path = recordings_dir / f"{sid}.ogg"
                 partial_path = recordings_dir / f"{sid}.ogg.partial"
-                if str(sid) in dismissed or ogg_path.exists():
-                    new_files.append({"session_id": sid, "ogg_path": str(ogg_path) if ogg_path.exists() else None, "duration": 0, "status": "exists"})
+                if str(sid) in dismissed:
+                    new_files.append({"session_id": sid, "ogg_path": None, "duration": 0, "status": "exists"})
                     continue
+                if ogg_path.exists():
+                    # Re-download if existing file is suspiciously small (<90% of expected)
+                    existing_size = ogg_path.stat().st_size
+                    expected = f["size"]
+                    if expected > 0 and existing_size < expected * 0.5:
+                        status(f"Re-downloading {sid} (existing {existing_size} bytes, expected ~{expected})", 35)
+                        ogg_path.unlink()
+                    else:
+                        new_files.append({"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"})
+                        continue
+                # Also remove stale .partial files so we start fresh
+                if partial_path.exists():
+                    partial_path.unlink()
                 current_sid = sid
                 current_expected_size = f["size"]
                 dl_req = build_wifi_packet(12, {"session": sid, "scene": 0, "start": 0, "end": f["size"]})
