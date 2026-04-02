@@ -380,6 +380,17 @@ def summarize_transcript():
             error_detail = " → ".join(errors) if errors else "Unknown error"
             return jsonify({"error": f"Summarization failed. {error_detail}"}), 500
 
+        # Safety net: if provider returned raw JSON string, try to parse it
+        if summary_text and summary_text.strip().startswith("{"):
+            try:
+                parsed = json.loads(summary_text)
+                if isinstance(parsed, dict):
+                    summary_text = parsed.get("summary", summary_text)
+                    if not title:
+                        title = parsed.get("title", "")
+            except json.JSONDecodeError:
+                pass
+
         if not title:
             title = summary_text.split(".")[0].strip()
             if len(title) > 60:

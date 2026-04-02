@@ -435,31 +435,45 @@
   padding: var(--sp-4) 0;
 }
 .wifi-sync-stage-icon {
-  width: 56px;
-  height: 56px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
   margin: 0 auto var(--sp-4);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 24px;
+  position: relative;
 }
 .wifi-sync-stage-icon.syncing {
   background: var(--accent-subtle);
   color: var(--accent);
-  animation: wifiPulse 2s ease-in-out infinite;
+}
+.wifi-sync-stage-icon.syncing::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  animation: wifiSpin 1s linear infinite;
 }
 .wifi-sync-stage-icon.success {
   background: var(--green-subtle);
   color: var(--green);
+  animation: wifiPop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 .wifi-sync-stage-icon.error {
   background: var(--destructive-subtle);
   color: var(--destructive);
 }
-@keyframes wifiPulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.05); opacity: 0.8; }
+@keyframes wifiSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes wifiPop {
+  0% { transform: scale(0.8); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
 }
 .wifi-sync-stage-title {
   font-size: var(--text-base);
