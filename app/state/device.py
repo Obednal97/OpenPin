@@ -18,6 +18,7 @@ from app.utils.config import load_config, save_config
 from app.utils.constants import (
     APP_KEY_PATH,
     BLE_BATTERY_UUID,
+    DATA_DIR,
     PROJECT_ROOT,
     RECORDINGS_DIR,
     SESSIONS_DIR,
@@ -805,8 +806,10 @@ def do_wifi_sync_blocking():
     """
     global _syncing, _sync_abort
     if not _device_state.get("serial_number"):
+        _wifi_sync_status.update({"message": "Device serial number unknown", "percent": 0})
         return {"error": "Device serial number unknown"}
     if not _device_state.get("session_keys"):
+        _wifi_sync_status.update({"message": "No BLE session", "percent": 0})
         return {"error": "No BLE session — connect device first"}
 
     # Force-abort any running BLE sync and take over the lock
@@ -833,25 +836,40 @@ def do_wifi_sync_blocking():
 
     _on_status("Starting WiFi transfer...", 5)
 
+    # Log WiFi sync to file for production debugging
+    _wifi_log = DATA_DIR / "wifi_sync.log" if DATA_DIR else None
+    def _wlog(msg):
+        print(f"[WiFi] {msg}")
+        if _wifi_log:
+            try:
+                with open(_wifi_log, "a") as f:
+                    f.write(f"{__import__('datetime').datetime.now().isoformat()} {msg}\n")
+            except Exception:
+                pass
+
     try:
         # Disconnect BLE first — the worker needs to make its own connection.
         # The device invalidates crypto sessions when BLE drops, so the worker
         # must do the full BLE handshake → WiFi flow in one process.
         _on_status("Preparing for WiFi transfer...", 5)
+        _wlog(f"Starting WiFi sync for SN={sn}")
         try:
             cl = _device_state.get("client")
             if cl:
                 run_async(cl.disconnect(), timeout=5)
-                print("[WiFi] Disconnected existing BLE")
-        except Exception:
-            pass
+                _wlog("Disconnected existing BLE")
+        except Exception as e:
+            _wlog(f"BLE disconnect failed (ok): {e}")
         _reset_state()
 
         # Build worker args — worker does its own BLE connect + handshake
         from app.state.cloud import get_device_bind_token, get_device_sn_signature
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        _wlog(f"Credentials: bind_token={'yes' if device_token else 'NO'}, sn_sig={'yes' if device_sig else 'NO'}")
         if not device_token or not device_sig:
+            _on_status("Device not registered", 0)
+            _wlog("ABORT: missing credentials")
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps({
             "sn": sn,
@@ -867,7 +885,8 @@ def do_wifi_sync_blocking():
         from pathlib import Path as _Path
         worker_path = _Path(importlib.util.find_spec("app.utils.wifi_sync_worker").origin)
         python_bin = sys.executable
-        print(f"[WiFi] Spawning worker: {python_bin} {worker_path}")
+        _wlog(f"Spawning worker: {python_bin} {worker_path}")
+        _wlog(f"CWD: {APP_KEY_PATH.parent.parent}")
 
         # Run worker as subprocess — it has its own clean asyncio.run()
         import subprocess as sp
@@ -878,6 +897,7 @@ def do_wifi_sync_blocking():
             cwd=str(APP_KEY_PATH.parent.parent),  # project root
             env={**__import__("os").environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
         )
+        _wlog(f"Worker PID: {proc.pid}")
 
         # Read stdout and stderr in separate threads to avoid pipe deadlocks.
         # stderr carries JSON progress updates; stdout carries the final result.
@@ -891,7 +911,7 @@ def do_wifi_sync_blocking():
                 line = line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
-                print(f"[WiFi Worker] {line}")
+                _wlog(f"Worker stderr: {line}")
                 _worker_stderr.append(line)
                 try:
                     update = json.loads(line)
@@ -899,9 +919,11 @@ def do_wifi_sync_blocking():
                         _on_status(update["status"], update.get("percent", 0))
                 except Exception:
                     pass
+            _wlog("Worker stderr EOF")
 
         def _read_stdout():
             _worker_stdout.append(proc.stdout.read())
+            _wlog("Worker stdout EOF")
 
         stderr_thread = threading.Thread(target=_read_progress, daemon=True)
         stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
@@ -909,18 +931,21 @@ def do_wifi_sync_blocking():
         stdout_thread.start()
 
         # Wait for process exit (up to 10 minutes)
+        _wlog("Waiting for worker to finish...")
         proc.wait(timeout=600)
+        _wlog(f"Worker exited with code {proc.returncode}")
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=5)
 
         # Parse result from stdout
         stdout_bytes = _worker_stdout[0] if _worker_stdout else b""
         stdout_str = stdout_bytes.decode("utf-8", errors="replace").strip()
-        print(f"[WiFi] Worker stdout: {stdout_str[:500]}")
+        _wlog(f"Worker stdout: {stdout_str[:500]}")
 
         if proc.returncode != 0:
             _on_status("WiFi transfer failed", 0)
             stderr_tail = "\n".join(_worker_stderr[-15:])
+            _wlog(f"Worker FAILED: code={proc.returncode} stderr={stderr_tail[:300]}")
             return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200], "traceback": stderr_tail}
 
         if stdout_str:
@@ -932,7 +957,7 @@ def do_wifi_sync_blocking():
         return {"error": "WiFi worker produced no output"}
 
     except Exception as e:
-        print(f"[WiFi] ERROR: {e}")
+        _wlog(f"EXCEPTION: {e}")
         import traceback
         traceback.print_exc()
         _on_status(f"WiFi transfer failed: {e}", 0)
