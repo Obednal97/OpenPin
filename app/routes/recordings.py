@@ -466,6 +466,34 @@ def list_transcripts():
     return jsonify(transcripts)
 
 
+@bp.route("/transcripts/update", methods=["POST"])
+def update_transcript():
+    """Update transcript segments and/or summary."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "No session_id provided"}), 400
+
+    json_path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
+    if not json_path.exists():
+        return jsonify({"error": "Transcript not found"}), 404
+
+    transcript = json.loads(json_path.read_text())
+
+    if "segments" in data:
+        transcript["segments"] = data["segments"]
+        transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
+
+    if "summary" in data:
+        transcript["summary"] = data["summary"]
+
+    json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
+    txt_path.write_text(transcript.get("text", ""))
+
+    return jsonify({"saved": True})
+
+
 @bp.route("/transcripts/delete", methods=["POST"])
 def delete_transcript():
     """Delete just the transcript for a recording (keeps the audio)."""

@@ -457,11 +457,12 @@
 .transcript-segments { display: flex; flex-direction: column; gap: 1px; }
 .segment {
   display: flex;
+  align-items: flex-start;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-sm);
   transition: background var(--duration) var(--ease);
-  cursor: pointer;
+  position: relative;
 }
 .segment:hover { background: var(--bg-hover); }
 .segment.active { background: var(--accent-subtle); }
@@ -473,7 +474,9 @@
   padding-top: 2px;
   min-width: 44px;
   font-family: var(--font-mono);
+  cursor: pointer;
 }
+.segment-time:hover { color: var(--accent); }
 .segment-speaker {
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
@@ -482,4 +485,72 @@
   padding-top: 2px;
   min-width: 68px;
 }
-.segment-text { font-size: var(--text-base); line-height: 1.6; color: var(--text); user-select: text; cursor: text; }
+.segment-text {
+  font-size: var(--text-base);
+  line-height: 1.6;
+  color: var(--text);
+  user-select: text;
+  cursor: text;
+  flex: 1;
+}
+.segment-text[contenteditable] {
+  outline: none;
+  border-radius: var(--radius-sm);
+  padding: 0 2px;
+  margin: 0 -2px;
+  transition: background var(--duration) var(--ease);
+}
+.segment-text[contenteditable]:hover { background: var(--bg-input); }
+.segment-text[contenteditable]:focus { background: var(--bg-input); }
+.segment-delete {
+  opacity: 0;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  margin-top: 2px;
+  transition: all var(--duration) var(--ease);
+}
+.segment:hover .segment-delete { opacity: 1; }
+.segment-delete:hover { color: var(--destructive); background: var(--bg-hover); }
+
+/* === MODULE: Editable Summary === */
+.summary-edit-btn {
+  float: right;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-family: var(--font);
+  font-weight: var(--weight-medium);
+  padding: var(--sp-0_5) var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.summary-edit-btn:hover { border-color: var(--accent); color: var(--accent); }
+.summary-editor {
+  width: 100%;
+  min-height: 200px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--duration) var(--ease);
+}
+.summary-editor:focus { border-color: var(--accent); }
+.summary-editor-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  margin-top: var(--sp-2);
+}

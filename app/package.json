@@ -1,6 +1,6 @@
 {
   "name": "plaud-v2",
-  "version": "1.10.3",
+  "version": "1.10.4",
   "description": "Plaud NotePin S — Local sync, decrypt & transcribe",
   "main": "main.js",
   "scripts": {
@@ -45,7 +45,7 @@
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist",
-      "notarize": true,
+      "notarize": false,
       "target": [
         "dmg",
         "zip"

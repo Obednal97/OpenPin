@@ -91,6 +91,7 @@ contextBridge.exposeInMainWorld('plaud', {
   renameRecording: (session_id, title) => apiCall('POST', '/recordings/rename', { session_id, title }),
   exportRecording: (session_id) => apiCall('POST', '/recordings/export', { session_id }),
   cropRecording: (session_id, start, end, mode) => apiCall('POST', '/recordings/crop', { session_id, start, end, mode }),
+  updateTranscript: (session_id, updates) => apiCall('POST', '/transcripts/update', { session_id, ...updates }),
   summarize: (session_id) => apiCall('POST', '/summarize', { session_id }),
 
   // Settings
