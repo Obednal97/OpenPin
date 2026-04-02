@@ -218,7 +218,25 @@ def tag_recording():
         except Exception:
             pass
 
-    return jsonify({"saved": True})
+    # Sync tags to Notion if page already exists (tags-only update, no title change)
+    notion_synced = False
+    try:
+        from app.routes.notion import _get_notion_page_url, _build_notion_properties
+        from app.state import notion
+        existing_url = _get_notion_page_url(session_id)
+        if existing_url and notion.is_connected():
+            # Only update tags, not title — avoids overwriting Notion-side title changes
+            properties = _build_notion_properties(None, tags)
+            if properties:  # Only call if there's something to update
+                notion.mcp_call(
+                    "notion-update-page",
+                    {"url": existing_url, "properties": properties},
+                )
+                notion_synced = True
+    except Exception:
+        pass
+
+    return jsonify({"saved": True, "notion_synced": notion_synced})
 
 
 @bp.route("/recordings/rename", methods=["POST"])
