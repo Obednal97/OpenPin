@@ -879,10 +879,13 @@ def do_wifi_sync_blocking():
             env={**__import__("os").environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
         )
 
-        # Read stderr for progress updates in a thread
+        # Read stdout and stderr in separate threads to avoid pipe deadlocks.
+        # stderr carries JSON progress updates; stdout carries the final result.
         import threading
 
         _worker_stderr = []
+        _worker_stdout = []
+
         def _read_progress():
             for line in proc.stderr:
                 line = line.decode("utf-8", errors="replace").strip()
@@ -897,15 +900,22 @@ def do_wifi_sync_blocking():
                 except Exception:
                     pass
 
-        progress_thread = threading.Thread(target=_read_progress, daemon=True)
-        progress_thread.start()
+        def _read_stdout():
+            _worker_stdout.append(proc.stdout.read())
 
-        # Wait for completion (up to 10 minutes)
-        stdout, _ = proc.communicate(timeout=600)
-        progress_thread.join(timeout=5)
+        stderr_thread = threading.Thread(target=_read_progress, daemon=True)
+        stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+        stderr_thread.start()
+        stdout_thread.start()
+
+        # Wait for process exit (up to 10 minutes)
+        proc.wait(timeout=600)
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=5)
 
         # Parse result from stdout
-        stdout_str = stdout.decode("utf-8", errors="replace").strip()
+        stdout_bytes = _worker_stdout[0] if _worker_stdout else b""
+        stdout_str = stdout_bytes.decode("utf-8", errors="replace").strip()
         print(f"[WiFi] Worker stdout: {stdout_str[:500]}")
 
         if proc.returncode != 0:
@@ -918,12 +928,14 @@ def do_wifi_sync_blocking():
             done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
             _on_status(f"Complete: {done_count} file(s)", 100)
             return result
+        _on_status("WiFi transfer failed — no output", 0)
         return {"error": "WiFi worker produced no output"}
 
     except Exception as e:
         print(f"[WiFi] ERROR: {e}")
         import traceback
         traceback.print_exc()
+        _on_status(f"WiFi transfer failed: {e}", 0)
         return {"error": str(e)}
     finally:
         _syncing = False
