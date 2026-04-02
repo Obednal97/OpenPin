@@ -856,8 +856,16 @@ def do_wifi_sync_blocking():
         try:
             cl = _device_state.get("client")
             if cl:
-                run_async(cl.disconnect(), timeout=5)
-                _wlog("Disconnected existing BLE")
+                # Don't use run_async here — it acquires _ble_lock which may be
+                # held by a background poll. Fire-and-forget the disconnect instead.
+                _wlog("Disconnecting BLE (fire-and-forget)...")
+                loop = _get_loop()
+                fut = asyncio.run_coroutine_threadsafe(cl.disconnect(), loop)
+                try:
+                    fut.result(timeout=3)
+                except Exception:
+                    pass
+                _wlog("BLE disconnect done")
         except Exception as e:
             _wlog(f"BLE disconnect failed (ok): {e}")
         _reset_state()
