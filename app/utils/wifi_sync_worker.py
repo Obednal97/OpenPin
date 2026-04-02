@@ -249,9 +249,15 @@ async def ble_connect_and_setup():
                 rsa[idx] = d[4:]
             if len(rsa) >= d[2]:
                 done.set()
-    await cl.start_notify(N, h)
+    try:
+        await cl.start_notify(N, h)
+        status("BLE notifications started", 3)
+    except Exception as e:
+        status(f"BLE start_notify failed: {e}", 3)
+        return None
     sig = base64.b64decode(SN_SIG)
     tc = (len(sig) + 99) // 100
+    status(f"Sending SN_SIG ({len(sig)} bytes, {tc} chunks)...", 3)
     for _ in range(2):
         for i in range(tc):
             await cl.write_gatt_char(W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i*100:(i+1)*100], response=False)
@@ -260,14 +266,17 @@ async def ble_connect_and_setup():
         await asyncio.sleep(0.1)
         if ack.is_set() or done.is_set():
             break
+    status(f"Handshake: ack={ack.is_set()}, done={done.is_set()}", 3)
     if ack.is_set() and not done.is_set():
         pem = get_public_key_full_pem().encode()
         pc = (len(pem) + 99) // 100
+        status(f"Sending public key ({len(pem)} bytes, {pc} chunks)...", 3)
         for i in range(pc):
             await cl.write_gatt_char(W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i*100:(i+1)*100], response=True)
             await asyncio.sleep(0.02)
         await asyncio.wait_for(done.wait(), timeout=15)
     elif not done.is_set():
+        status("Handshake failed — device did not respond to SN_SIG", 0)
         try:
             await cl.stop_notify(N)
         except Exception:
