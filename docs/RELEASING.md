@@ -2,7 +2,7 @@
 
 ## How Auto-Updates Work
 
-The app uses a custom updater that checks GitHub Releases directly (no code signing required). Squirrel.Mac / electron-updater were dropped because they require Apple code signatures.
+The app uses a custom updater that checks GitHub Releases directly via a read-only PAT.
 
 ### Update flow (from the user's perspective)
 
@@ -19,8 +19,10 @@ The app uses a custom updater that checks GitHub Releases directly (no code sign
 |------|---------|
 | `Plaud-V2-{version}.dmg` | For first-time installs (drag to Applications) |
 | `Plaud-V2-{version}-mac.zip` | For auto-updates (downloaded by the custom updater) |
+| `latest-mac.yml` | Version metadata for update checks |
+| `*.blockmap` | Delta update block maps |
 
-electron-builder generates both automatically.
+electron-builder generates all of these automatically.
 
 ### How the install works (under the hood)
 
@@ -33,8 +35,9 @@ When the user clicks "Restart to Update":
 5. Safe swap: renames old `.app` to `.app.old`, moves new one into place
 6. If swap fails, restores the old app automatically
 7. Strips macOS quarantine with `xattr -dr com.apple.quarantine`
-8. Ad-hoc signs with `codesign --sign -` (preserves Bluetooth/mic permissions)
-9. Relaunches the app
+8. Relaunches the app
+
+Since the app is signed with a Developer ID certificate, macOS trusts it across updates and preserves Bluetooth/location permissions.
 
 ---
 
@@ -42,24 +45,88 @@ When the user clicks "Restart to Update":
 
 ### Prerequisites
 
-- The publish token is stored in `.env` at the project root (gitignored)
+- `.env` at project root contains `GH_TOKEN`, `APPLE_TEAM_ID`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`
+- FFmpeg binary in `bin/` (auto-downloaded by the prebuild script)
+- Apple Developer ID Application certificate installed in Keychain
 
 ### Steps
 
 ```bash
 # 1. Bump the version in app/package.json
 #    Follow semver: major.minor.patch
-#    e.g. 1.0.0 → 1.1.0 (new feature) or 1.0.1 (bug fix)
 
-# 2. Build and publish
+# 2. Commit the version bump
+git add app/package.json
+git commit -m "Bump v{version}"
+git push
+
+# 3. Build, sign, notarize, and publish
 cd app
-GH_TOKEN=$(grep GH_TOKEN ../.env | cut -d= -f2) npx electron-builder --mac --publish always
-
-# 3. The release is created as a draft — publish it:
-gh release edit v{version} --repo Obednal97/Plaud-V2 --draft=false --title "v{version}" --notes "Release notes here"
+pnpm run publish
 ```
 
+The `publish` script:
+1. Runs `scripts/download-ffmpeg.sh` (downloads FFmpeg if not present)
+2. Loads env vars from `.env` (GH_TOKEN + Apple credentials)
+3. Packages the Electron app with ASAR (Python files unpacked)
+4. Code signs with Developer ID certificate + hardened runtime
+5. Submits to Apple for notarization (typically 2-5 minutes)
+6. Builds DMG + ZIP
+7. Uploads to GitHub Releases
+
 Every running instance of the app will pick up the update within 4 hours (or immediately if the user clicks "Check for Updates").
+
+---
+
+## Code Signing & Notarization
+
+The app is signed with a Developer ID Application certificate and notarized with Apple.
+
+### What this means for users
+
+- **Double-click to install** — no Gatekeeper warnings, no right-click > Open needed
+- **Permissions persist** — Bluetooth, location, and other permissions survive across updates because the signing identity is consistent
+- **Trusted by macOS** — Apple has scanned and approved the binary
+
+### Configuration (in `app/package.json`)
+
+```json
+"mac": {
+  "identity": "<Developer Name> (<Team ID>)",
+  "hardenedRuntime": true,
+  "entitlements": "entitlements.mac.plist",
+  "entitlementsInherit": "entitlements.mac.plist",
+  "notarize": true
+}
+```
+
+### Entitlements (`entitlements.mac.plist`)
+
+| Entitlement | Reason |
+|-------------|--------|
+| `cs.allow-jit` | Electron requires JIT compilation |
+| `cs.allow-unsigned-executable-memory` | Electron/Chromium requirement |
+| `cs.allow-dyld-environment-variables` | Electron requirement |
+| `device.bluetooth` | BLE communication with Plaud device |
+| `network.client` | HTTP API calls, cloud sync |
+| `files.user-selected.read-write` | Audio export to Downloads |
+
+### Apple credentials (in `.env`)
+
+```
+APPLE_TEAM_ID=<your-team-id>
+APPLE_ID=<your-apple-id-email>
+APPLE_APP_SPECIFIC_PASSWORD=<app-specific-password>
+```
+
+Generate an app-specific password at [appleid.apple.com](https://appleid.apple.com) > Sign-In and Security > App-Specific Passwords.
+
+### If notarization is slow or failing
+
+- First submission to a new Apple Developer account can take hours
+- Subsequent submissions typically take 2-5 minutes
+- If Apple's timestamp servers are down, codesign will fail — retry later
+- To publish without notarization temporarily: set `"notarize": false` in package.json, publish, then restore
 
 ---
 
@@ -95,8 +162,9 @@ The repo is **private**, so two fine-grained PATs are used:
 1. Go to the [latest GitHub Release](https://github.com/Obednal97/Plaud-V2/releases/latest)
 2. Download `Plaud-V2-{version}.dmg`
 3. Open the DMG, drag Plaud V2 to Applications
-4. First launch: right-click the app > Open (bypasses Gatekeeper since it's unsigned)
-5. All future updates happen automatically through the app
+4. Double-click to open — it just works (signed + notarized)
+5. Grant Bluetooth permission when prompted (one time only)
+6. All future updates happen automatically through the app
 
 ---
 
@@ -107,46 +175,8 @@ Unhandled errors in both the main process and renderer are automatically reporte
 - Searches existing issues by error fingerprint to avoid duplicates
 - Creates new issues with the `auto-bug` label
 - Comments on existing open issues if the same error recurs
-- Includes: app version, macOS version, architecture, stack trace, error context
+- Includes: app version, macOS version, architecture, Python environment, stack trace, error context
 - Never crashes the app — all reporting is fire-and-forget
-
----
-
-## Architecture
-
-```
-main.js
-├── Custom updater (no code signing required)
-│   ├── checkForUpdates() — GitHub Releases API, called 5s after launch + every 4h
-│   ├── downloadFile() — streams ZIP to ~/Library/Application Support/updates/
-│   ├── installUpdate() — detached bash: ditto, safe-swap, xattr, codesign, relaunch
-│   └── IPC events → renderer: update-status { available | downloading | ready | error }
-├── Auto bug reporter
-│   ├── reportError() — searches/creates GitHub Issues with auto-bug label
-│   ├── process.on('uncaughtException') — main process errors
-│   └── IPC 'report-error' — renderer errors forwarded from window.onerror
-├── IPC handlers:
-│   ├── 'install-update' → installUpdate()
-│   ├── 'check-for-updates' → checkForUpdates()
-│   ├── 'get-app-version' → app.getVersion()
-│   └── 'report-error' → reportError()
-
-preload.js
-├── plaud.installUpdate()
-├── plaud.checkForUpdates()
-├── plaud.getAppVersion()
-├── plaud.onUpdateStatus(callback)
-└── plaud.reportError(message, stack, context)
-
-ui/utils.js
-├── window.onerror → plaud.reportError()
-└── window.onunhandledrejection → plaud.reportError()
-
-renderer.js
-├── Listens for update-status events via app.updateListeners
-├── Shows/hides #update-banner with download progress
-└── "Restart to Update" button → plaud.installUpdate()
-```
 
 ---
 
@@ -156,24 +186,8 @@ renderer.js
 |---------|-------|-----|
 | Update check fails | Token expired or revoked | Regenerate `plaud-v2-updater-readonly` PAT, update in `main.js`, publish new release |
 | "Restart to Update" doesn't work | App Management permission on macOS Ventura+ | User may need to approve in System Settings > Privacy > App Management |
-| DMG blocked by Gatekeeper | App is unsigned | Right-click > Open on first launch |
-| Python server won't start from Dock | PATH doesn't include Homebrew | Fixed in v1.0.5+ — `main.js` adds common Python paths |
-| Bluetooth permissions lost after update | TCC invalidation | Fixed in v1.0.9+ — ad-hoc `codesign --sign -` after replacement |
-| `npm run publish` fails | Missing GH_TOKEN | Check `.env` file at project root |
-
-## Code Signing (future)
-
-If you ever want to remove the Gatekeeper friction:
-
-1. Get an Apple Developer account ($99/year)
-2. Add signing config to `package.json`:
-   ```json
-   "mac": {
-     "identity": "Developer ID Application: Your Name (TEAM_ID)",
-     "hardenedRuntime": true,
-     "notarize": true
-   }
-   ```
-3. electron-builder handles signing + notarization automatically during build
-4. Users can double-click to install without the right-click workaround
-5. Could switch back to electron-updater (Squirrel.Mac works with signed apps)
+| Notarization fails | Apple timestamp server down or credentials wrong | Retry later, or check APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD in `.env` |
+| Codesign fails repeatedly | Apple timestamp server rate limiting | Wait a few minutes and retry |
+| Python server won't start from Dock | PATH doesn't include Homebrew | Fixed — `main.js` adds common Python paths + bundled bin dir |
+| `pnpm run publish` fails | Missing env vars | Check `.env` file at project root has GH_TOKEN + Apple credentials |
+| FFmpeg not found in build | `bin/` is gitignored | Run `scripts/download-ffmpeg.sh` (or just `pnpm run build` which runs it automatically) |
