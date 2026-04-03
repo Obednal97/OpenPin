@@ -30,7 +30,15 @@
   "build": {
     "appId": "com.plaud.v2",
     "productName": "Plaud V2",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "**/*.py",
+      "routes/**",
+      "state/**",
+      "providers/**",
+      "utils/**",
+      "**/*.node"
+    ],
     "publish": {
       "provider": "github",
       "owner": "Obednal97",
@@ -45,7 +53,7 @@
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist",
-      "notarize": false,
+      "notarize": true,
       "target": [
         "dmg",
         "zip"
