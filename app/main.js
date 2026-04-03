@@ -113,6 +113,41 @@ async function checkForUpdates() {
     }
 
     console.log(`[Updater] Update available: v${latest}`);
+
+    // Major version jump (e.g., 1.x → 2.x) = framework change, cannot auto-update
+    // Download the DMG to ~/Downloads/ for manual install
+    if (lMaj > cMaj) {
+      console.log(`[Updater] Major version jump (${cMaj}.x → ${lMaj}.x) — downloading DMG`);
+      const dmgAsset = release.assets.find((a) => a.name.endsWith('.dmg'));
+      if (!dmgAsset) {
+        sendUpdateStatus('error', { message: 'No DMG found for major update' });
+        return;
+      }
+
+      const downloadsDir = app.getPath('downloads');
+      const dmgPath = path.join(downloadsDir, dmgAsset.name);
+
+      // Skip if already downloaded
+      if (fs.existsSync(dmgPath) && fs.statSync(dmgPath).size === dmgAsset.size) {
+        console.log('[Updater] Major update DMG already in Downloads');
+        sendUpdateStatus('major-update', { version: latest, dmgPath });
+        return;
+      }
+
+      sendUpdateStatus('major-update-downloading', { version: latest });
+      try {
+        await downloadFile(dmgAsset.url, dmgPath, (percent) => {
+          sendUpdateStatus('major-update-downloading', { version: latest, percent });
+        });
+        console.log(`[Updater] Major update DMG downloaded to ${dmgPath}`);
+        sendUpdateStatus('major-update', { version: latest, dmgPath });
+      } catch (err) {
+        console.error('[Updater] DMG download failed:', err.message);
+        sendUpdateStatus('error', { message: `Download failed: ${err.message}` });
+      }
+      return;
+    }
+
     sendUpdateStatus('available', { version: latest });
 
     // Find the ZIP asset
@@ -1063,7 +1098,12 @@ ipcMain.handle('set-dock-visible', async (event, visible) => {
 
 // IPC handlers for opening external links
 ipcMain.handle('open-external', (event, url) => {
-  shell.openExternal(url);
+  // file:// URLs need shell.openPath (openExternal rejects file:// for security)
+  if (url.startsWith('file://')) {
+    shell.openPath(url.replace('file://', ''));
+  } else {
+    shell.openExternal(url);
+  }
 });
 
 // IPC: auto-updater
