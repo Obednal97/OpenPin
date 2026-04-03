@@ -350,6 +350,25 @@ window.plaud.onUpdateStatus((data) => {
     message.textContent = `v${data.version} ready to install`;
     actionBtn.style.display = '';
     actionBtn.textContent = 'Restart to Update';
+  } else if (data.status === 'major-update-downloading') {
+    // Major version DMG downloading
+    banner.classList.remove('hidden');
+    const pct = data.percent ? ` ${data.percent}%` : '...';
+    message.textContent = `Downloading v${data.version} (major upgrade)${pct}`;
+    actionBtn.style.display = 'none';
+  } else if (data.status === 'major-update') {
+    // Major version DMG ready in Downloads folder
+    banner.classList.remove('hidden');
+    message.textContent = `v${data.version} downloaded — open DMG to install`;
+    actionBtn.style.display = '';
+    actionBtn.textContent = 'Open DMG';
+    actionBtn.disabled = false;
+    actionBtn.onclick = (e) => {
+      e.preventDefault();
+      if (data.dmgPath) {
+        window.plaud.openExternal(`file://${data.dmgPath}`);
+      }
+    };
   } else if (data.status === 'error') {
     console.error('[Updater]', data.message);
   } else if (data.status === 'up-to-date') {
