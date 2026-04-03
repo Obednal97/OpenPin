@@ -706,8 +706,10 @@ function startPythonServer() {
   }
 
   sendStartupStatus('Starting server...');
-  const serverScript = path.join(__dirname, 'api_server.py');
-  const cwd = path.join(__dirname, '..');
+  // Python files are asarUnpacked — resolve to the real filesystem path
+  const appDir = __dirname.replace('app.asar', 'app.asar.unpacked');
+  const serverScript = path.join(appDir, 'api_server.py');
+  const cwd = path.join(appDir, '..');
 
   console.log(`[Python] Script: ${serverScript}`);
   console.log(`[Python] CWD: ${cwd}`);
