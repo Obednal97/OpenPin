@@ -4,7 +4,7 @@
 
 <p align="center">
 An open-source desktop companion for the <b>Plaud NotePin S</b> voice recorder.<br>
-Syncs recordings via BLE, decrypts audio locally, transcribes with Whisper, and summarises with AI — no cloud required.
+Syncs recordings via BLE or WiFi, decrypts audio locally, transcribes with Whisper, and summarises with AI — no cloud required.
 </p>
 
 Built as a replacement for the official Plaud app. All processing happens on your Mac unless you explicitly connect cloud AI providers.
@@ -12,15 +12,19 @@ Built as a replacement for the official Plaud app. All processing happens on you
 ## Features
 
 - **BLE sync** — Connect to your NotePin S, download recordings over Bluetooth
+- **WiFi sync** — High-speed file transfer via the device's WiFi hotspot
 - **Local decryption** — Audio is decrypted entirely on-device (RSA + ChaCha20)
 - **Transcription** — Local Whisper or OpenAI Whisper API, with custom vocabulary
 - **Speaker diarization** — 3-tier cascade: diarize (fast) -> pyannote-onnx -> pyannote standard
 - **AI summaries** — Anthropic Claude / OpenAI GPT / local DistilBART fallback chain
+- **Audio cropping** — Waveform editor with draggable handles, save as new or overwrite
+- **Editable transcripts** — Edit segment text inline, delete rows, edit summaries as markdown
 - **Plaud Cloud sync** — Two-way sync with your existing Plaud account
 - **Notion integration** — Push transcripts and summaries to a Notion database via MCP
 - **Webhooks** — Trigger external services on transcribe/summarise/sync events
 - **Auto-updates** — App checks for new versions and updates itself
 - **Apple-style UI** — Glass design, light/dark/auto theme, squircle corners
+- **Signed & notarized** — Proper Apple Developer ID signing, no Gatekeeper warnings
 
 ---
 
@@ -53,11 +57,7 @@ Go to the [latest release](https://github.com/Obednal97/Plaud-V2/releases/latest
 
 1. Open the DMG
 2. Drag **Plaud V2** to your **Applications** folder
-3. Open the app — macOS will block it the first time since it's unsigned:
-   - **Right-click** (or Control-click) the app in Applications
-   - Click **Open**
-   - Click **Open** again on the dialog
-   - You only need to do this once
+3. Double-click to open — the app is signed and notarized, so it just works
 
 ### 4. First launch
 
@@ -110,7 +110,7 @@ Sync recordings with your existing Plaud account:
 
 ```
 app/
-  api_server.py          # Flask API (51 lines — app factory)
+  api_server.py          # Flask API (app factory)
   main.js                # Electron main process + auto-updater
   renderer.js            # Frontend orchestrator
   index.html             # UI markup
@@ -119,13 +119,15 @@ app/
   routes/                # Flask blueprints (core, device, cloud, notion, recordings, transcribe, settings)
   state/                 # State managers (device, cloud, notion)
   providers/             # AI providers (summarize, transcribe, validate)
-  utils/                 # Shared utilities (config, constants, audio, webhooks, system)
+  utils/                 # Shared utilities (config, constants, audio, webhooks, system, wifi_sync)
   css/                   # Design system (tokens, components, layouts, recordings, transcript, settings, utilities)
+bin/
+  ffmpeg                 # Bundled static FFmpeg binary (downloaded by scripts/download-ffmpeg.sh)
 src/
   transcribe.py          # Whisper transcription + diarization cascade
   crypto.py              # RSA key management
   scanner.py             # BLE manufacturer data parser
-tests/                   # 58 tests (pytest)
+tests/                   # 112 tests (pytest)
 docs/
   ARCHITECTURE.md        # Detailed architecture docs
   RELEASING.md           # Release workflow + auto-update system
@@ -136,37 +138,41 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture docum
 
 ## How It Works
 
-1. **BLE connection** — Scans for nearby NotePin S devices, identifies by serial number (macOS randomises BLE addresses). Performs RSA handshake to establish encrypted ChaCha20-Poly1305 session.
+1. **BLE connection** — Scans for nearby NotePin S devices, identifies by serial number (macOS randomises BLE addresses). Performs RSA handshake to establish encrypted ChaCha20-Poly1305 session, then sends APP_KEY handshake to complete pairing.
 
-2. **File sync** — Downloads encrypted `.asr` files over BLE (~33 KB/s). Each file contains an RSA-encrypted file key + ChaCha20-XOR'd Opus frames.
+2. **File sync (BLE)** — Downloads encrypted `.asr` files over BLE (~33 KB/s). Each file contains an RSA-encrypted file key + ChaCha20-XOR'd Opus frames.
 
-3. **Decryption** — RSA-decrypts the per-file key, generates ChaCha20 keystream, XORs each 80-byte Opus frame. Wraps raw frames in OGG container.
+3. **File sync (WiFi)** — For faster transfers: disconnects BLE, enables the device's WiFi hotspot, connects the Mac, transfers files over TCP, then restores the original WiFi connection.
 
-4. **Transcription** — Routes to OpenAI Whisper API (if key provided) or local Whisper. Background diarization runs in a separate thread.
+4. **Decryption** — RSA-decrypts the per-file key, generates ChaCha20 keystream, XORs each 80-byte Opus frame. Wraps raw frames in OGG container.
 
-5. **Summarisation** — Cascade: Anthropic Claude > OpenAI GPT > local DistilBART. Injects user profile context and recording tags into prompts.
+5. **Transcription** — Routes to OpenAI Whisper API (if key provided) or local Whisper. FFmpeg is bundled for audio decoding. Background diarization runs in a separate thread.
+
+6. **Summarisation** — Cascade: Anthropic Claude > OpenAI GPT > local DistilBART. Injects user profile context and recording tags into prompts.
+
+7. **Audio editing** — Crop recordings with a waveform editor. Backend uses FFmpeg stream-copy for lossless cropping. Edit transcript text inline or delete segments. Edit summaries as markdown.
 
 ## Development
 
 ```bash
 # Run in dev mode
-cd app && npm run dev
+cd app && pnpm run dev
 
 # Run Python tests
 cd .. && python3 -m pytest tests/ -v
 
 # Lint
-cd app && npm run lint          # eslint + stylelint
+cd app && pnpm run lint          # eslint + stylelint
 cd .. && ruff check app/ src/ tests/   # Python
 
 # Format
-cd app && npm run format        # prettier + ruff
+cd app && pnpm run format        # prettier + ruff
 
 # Build DMG
-cd app && npm run build
+cd app && pnpm run build
 
 # Publish a new release (see docs/RELEASING.md)
-cd app && npm run publish
+cd app && pnpm run publish
 ```
 
 ## Reverse Engineering
