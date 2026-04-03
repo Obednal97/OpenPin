@@ -10,8 +10,26 @@ import sys
 from pathlib import Path
 
 # Ensure we can import from the parent project
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+# In dev: api_server.py is in app/, PROJECT_ROOT is one level up
+# In packaged (ASAR): api_server.py is in app.asar.unpacked/ alongside routes/, utils/, etc.
+#   but imports use "from app.routes import ..." so we need an "app" package.
+_this_dir = Path(__file__).parent
+PROJECT_ROOT = _this_dir.parent
+
+# If running from ASAR-unpacked (no app/ subdirectory), create a virtual package
+# by adding the parent AND making this directory importable as "app"
+if not (PROJECT_ROOT / "app").exists() and (_this_dir / "routes").exists():
+    # We're in the unpacked layout — this dir IS the app package
+    sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(_this_dir.parent))
+    # Make this directory importable as "app" by creating a symlink or using sys.modules
+    import types
+    app_module = types.ModuleType("app")
+    app_module.__path__ = [str(_this_dir)]
+    app_module.__file__ = str(_this_dir / "__init__.py")
+    sys.modules["app"] = app_module
+else:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Auto-install core dependencies if missing (diarize is optional, lazy-imported at transcription time)
 from app.utils.system import ensure_installed
