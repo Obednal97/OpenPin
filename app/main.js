@@ -130,6 +130,7 @@ async function checkForUpdates() {
       // Skip if already downloaded
       if (fs.existsSync(dmgPath) && fs.statSync(dmgPath).size === dmgAsset.size) {
         console.log('[Updater] Major update DMG already in Downloads');
+        shell.openPath(dmgPath);
         sendUpdateStatus('major-update', { version: latest, dmgPath });
         return;
       }
@@ -140,6 +141,8 @@ async function checkForUpdates() {
           sendUpdateStatus('major-update-downloading', { version: latest, percent });
         });
         console.log(`[Updater] Major update DMG downloaded to ${dmgPath}`);
+        // Auto-open the DMG so the user just needs to drag to Applications
+        shell.openPath(dmgPath);
         sendUpdateStatus('major-update', { version: latest, dmgPath });
       } catch (err) {
         console.error('[Updater] DMG download failed:', err.message);
