@@ -357,11 +357,11 @@ window.plaud.onUpdateStatus((data) => {
     message.textContent = `Downloading v${data.version} (major upgrade)${pct}`;
     actionBtn.style.display = 'none';
   } else if (data.status === 'major-update') {
-    // Major version DMG ready in Downloads folder
+    // Major version DMG ready — auto-opened by main process
     banner.classList.remove('hidden');
-    message.textContent = `v${data.version} downloaded — open DMG to install`;
+    message.textContent = `v${data.version} ready — drag to Applications to install`;
     actionBtn.style.display = '';
-    actionBtn.textContent = 'Open DMG';
+    actionBtn.textContent = 'Open DMG Again';
     actionBtn.disabled = false;
     actionBtn.onclick = (e) => {
       e.preventDefault();
