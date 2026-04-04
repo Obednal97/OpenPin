@@ -200,6 +200,18 @@ window.plaud = {
   notionPush: (session_id) => apiCall('POST', '/notion/push', { session_id }),
   notionPageUrl: (session_id) => apiCall('GET', `/notion/page-url/${session_id}`),
 
+  // Google Drive
+  gdriveStatus: () => apiCall('GET', '/gdrive/status'),
+  gdriveConnect: (client_id, client_secret) => apiCall('POST', '/gdrive/connect', { client_id, client_secret }),
+  gdriveDisconnect: () => apiCall('POST', '/gdrive/disconnect'),
+  gdriveFolders: (q) => apiCall('GET', `/gdrive/folders${q ? '?q=' + encodeURIComponent(q) : ''}`),
+  gdriveCreateFolder: (name) => apiCall('POST', '/gdrive/create-folder', { name }),
+  gdriveSetFolder: (folder_id, folder_name) => apiCall('POST', '/gdrive/set-folder', { folder_id, folder_name }),
+  gdriveUpload: (session_id) => apiCall('POST', '/gdrive/upload', { session_id }),
+  gdriveSync: () => apiCall('POST', '/gdrive/sync'),
+  gdriveSyncStatus: () => apiCall('GET', '/gdrive/sync-status'),
+  gdriveUploadProgress: () => apiCall('GET', '/gdrive/upload-progress'),
+
   // Theme — IPC to Rust, then apply to DOM (in Electron, main.js did this via executeJavaScript)
   cycleTheme: async () => {
     const result = await invoke('cycle_theme');
