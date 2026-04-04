@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bluetooth permission prompt message -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Plaud V2 uses Bluetooth to connect to your Plaud NotePin S and sync recordings.</string>
+    <!-- Location permission (some BLE operations require this on macOS) -->
+    <key>NSLocationUsageDescription</key>
+    <string>Plaud V2 uses your location to help discover nearby Bluetooth devices.</string>
+</dict>
+</plist>

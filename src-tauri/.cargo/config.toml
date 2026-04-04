@@ -1,0 +1,6 @@
+[build]
+jobs = 1
+
+[target.aarch64-apple-darwin]
+# Use fewer threads in rustc itself
+rustflags = ["-C", "codegen-units=16"]

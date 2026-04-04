@@ -14,6 +14,7 @@
   justify-content: center;
   -webkit-app-region: no-drag;
 }
+.icon-btn svg { pointer-events: none; }
 .icon-btn:hover { color: var(--text); background: var(--bg-hover); }
 .icon-btn:active { transform: scale(0.94); }
 .icon-btn.active { color: var(--accent); background: var(--accent-subtle); }
@@ -131,6 +132,11 @@
   font-size: var(--text-sm);
   cursor: pointer;
   transition: border-color var(--duration) var(--ease);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--sp-2) center;
+  padding-right: var(--sp-6);
 }
 .settings-select:focus { outline: none; border-color: var(--accent); }
 

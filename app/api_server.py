@@ -37,7 +37,7 @@ from app.utils.system import ensure_installed
 ensure_installed("flask")
 ensure_installed("requests")
 
-from flask import Flask
+from flask import Flask, jsonify, request
 
 from app.routes import cloud, core, device, notion, recordings, settings, transcribe
 
@@ -48,11 +48,69 @@ log.setLevel(logging.WARNING)
 
 @app.after_request
 def add_cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    # Restrict CORS to localhost origins only (Tauri uses tauri://localhost or http://localhost)
+    origin = request.headers.get("Origin", "")
+    if origin and ("localhost" in origin or "127.0.0.1" in origin or "tauri://" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "http://127.0.0.1"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return response
 
+
+# JSON error handlers — prevent Flask returning HTML error pages
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({"error": "Method not allowed"}), 405
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
+# Recover WiFi if app previously crashed during WiFi sync (left on Plaud hotspot)
+def _recover_wifi():
+    """Check if we're stuck on a Plaud hotspot from a crashed WiFi sync and restore internet."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["networksetup", "-getairportnetwork", "en0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        current_ssid = result.stdout.strip().split(": ", 1)[-1] if ": " in result.stdout else ""
+        if current_ssid.startswith("Plaud") or current_ssid.startswith("PLAUD"):
+            logging.warning(f"[WiFi Recovery] Stuck on Plaud hotspot '{current_ssid}', power-cycling WiFi...")
+            subprocess.run(["networksetup", "-setairportpower", "en0", "off"], timeout=5)
+            import time
+            time.sleep(3)
+            subprocess.run(["networksetup", "-setairportpower", "en0", "on"], timeout=5)
+            logging.info("[WiFi Recovery] WiFi power-cycled, should reconnect to preferred network")
+    except Exception as e:
+        logging.error(f"[WiFi Recovery] Check failed: {e}")
+
+_recover_wifi()
+
+
+# Clean up partial files from interrupted syncs
+def _clean_partial_files():
+    """Remove .ogg.partial files left by interrupted BLE syncs."""
+    try:
+        from app.utils.constants import RECORDINGS_DIR
+        if RECORDINGS_DIR.exists():
+            for f in RECORDINGS_DIR.glob("*.partial"):
+                logging.info(f"[Cleanup] Removing partial file: {f.name}")
+                f.unlink(missing_ok=True)
+    except Exception as e:
+        logging.error(f"[Cleanup] Failed: {e}")
+
+_clean_partial_files()
 
 # Register blueprints
 app.register_blueprint(core.bp)
