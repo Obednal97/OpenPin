@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Blueprint, abort, jsonify, request, send_file
 
-from app.utils.constants import RECORDINGS_DIR
+from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
 from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("core", __name__)
@@ -34,8 +34,15 @@ def health():
 
 @bp.route("/audio/<path:filepath>")
 def serve_audio(filepath):
-    full_path = RECORDINGS_DIR / filepath
-    if not full_path.exists():
+    # Search all known recording directories for the file
+    full_path = None
+    for rec_dir in get_all_recordings_dirs():
+        candidate = rec_dir / filepath
+        if candidate.exists():
+            full_path = candidate
+            break
+    if full_path is None:
+        # Try as absolute path
         full_path = Path(filepath)
     if not full_path.exists():
         abort(404)

@@ -547,6 +547,10 @@
 }
 .delete-dialog-actions .action-btn { width: 100%; justify-content: center; }
 
+/* Move dialog */
+.move-destinations { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-4); }
+.move-destinations .action-btn { gap: var(--sp-2); }
+
 /* === MODULE: Progress Bar === */
 .progress-bar {
   position: absolute;

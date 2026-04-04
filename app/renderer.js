@@ -280,6 +280,7 @@ $('#select-all-btn').addEventListener('click', () => {
 });
 
 $('#delete-selected-btn').addEventListener('click', deleteSelected);
+$('#move-selected-btn').addEventListener('click', moveSelected);
 
 // Search
 $('#search-input').addEventListener('input', (e) => {

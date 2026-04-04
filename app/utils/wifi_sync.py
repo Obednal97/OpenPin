@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
 from app.utils.config import load_config
-from app.utils.constants import APP_KEY_PATH, RECORDINGS_DIR
+from app.utils.constants import APP_KEY_PATH, RECORDINGS_DIR, get_all_recordings_dirs, get_recordings_dir
 
 WS_PORT = 8081
 WIFI_SIZE_THRESHOLD = 500_000  # Use WiFi if total new files > 500KB
@@ -269,8 +269,11 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
             while file_queue:
                 f = file_queue.pop(0)
                 sid = f["session_id"]
-                ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
-                if str(sid) in dismissed or ogg_path.exists():
+                # Check all dirs for existing file, save new files to active dir
+                active_dir = get_recordings_dir()
+                ogg_path = active_dir / f"{sid}.ogg"
+                exists = ogg_path.exists() or any((d / f"{sid}.ogg").exists() for d in get_all_recordings_dirs())
+                if str(sid) in dismissed or exists:
                     print(f"[WiFi] skipping {sid} (exists={ogg_path.exists()}, dismissed={str(sid) in dismissed})")
                     new_files.append(
                         {"session_id": sid, "ogg_path": str(ogg_path) if ogg_path.exists() else None, "duration": 0, "status": "exists"}
@@ -345,12 +348,13 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
                     if is_last:
                         # File complete — decrypt and save
                         raw = bytes(download_buf)
-                        RECORDINGS_DIR.mkdir(exist_ok=True)
+                        save_dir = get_recordings_dir()
+                        save_dir.mkdir(exist_ok=True)
                         frames = decrypt_ble_file(raw, app_rsa_key)
                         if frames:
                             ogg = wrap_opus_ogg(frames)
-                            ogg_path = RECORDINGS_DIR / f"{current_sid}.ogg"
-                            tmp_path = RECORDINGS_DIR / f"{current_sid}.ogg.partial"
+                            ogg_path = save_dir / f"{current_sid}.ogg"
+                            tmp_path = save_dir / f"{current_sid}.ogg.partial"
                             tmp_path.write_bytes(ogg)
                             tmp_path.rename(ogg_path)
                             duration = len(frames) // 80 * 0.02
@@ -359,7 +363,7 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
                             )
                             print(f"[WiFi] saved {current_sid}.ogg ({len(raw)} → {len(ogg)} bytes, {duration:.1f}s)")
                         else:
-                            raw_path = RECORDINGS_DIR / f"{current_sid}_encrypted.bin"
+                            raw_path = save_dir / f"{current_sid}_encrypted.bin"
                             raw_path.write_bytes(raw)
                             new_files.append({"session_id": current_sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed"})
                             print(f"[WiFi] WARNING: decrypt failed for {current_sid}")
@@ -420,7 +424,8 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
             return {"error": "WiFi file list timed out", "files": new_files}
 
         total_size = sum(f["size"] for f in wifi_files)
-        total_new = sum(1 for f in wifi_files if str(f["session_id"]) not in dismissed and not (RECORDINGS_DIR / f"{f['session_id']}.ogg").exists())
+        all_dirs = get_all_recordings_dirs()
+        total_new = sum(1 for f in wifi_files if str(f["session_id"]) not in dismissed and not any((d / f"{f['session_id']}.ogg").exists() for d in all_dirs))
         _status(f"Downloading {total_new} file(s)...", 35)
 
         dl_timeout = max(total_size / 50000, 60)

@@ -102,11 +102,12 @@ _recover_wifi()
 def _clean_partial_files():
     """Remove .ogg.partial files left by interrupted BLE syncs."""
     try:
-        from app.utils.constants import RECORDINGS_DIR
-        if RECORDINGS_DIR.exists():
-            for f in RECORDINGS_DIR.glob("*.partial"):
-                logging.info(f"[Cleanup] Removing partial file: {f.name}")
-                f.unlink(missing_ok=True)
+        from app.utils.constants import get_all_recordings_dirs
+        for rec_dir in get_all_recordings_dirs():
+            if rec_dir.exists():
+                for f in rec_dir.glob("*.partial"):
+                    logging.info(f"[Cleanup] Removing partial file: {f.name}")
+                    f.unlink(missing_ok=True)
     except Exception as e:
         logging.error(f"[Cleanup] Failed: {e}")
 

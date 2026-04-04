@@ -148,6 +148,7 @@ window.plaud = {
   transcripts: () => apiCall('GET', '/transcripts'),
   recordings: () => apiCall('GET', '/recordings'),
   deleteRecordings: (session_ids) => apiCall('POST', '/recordings/delete', { session_ids }),
+  moveRecordings: (session_ids, destination) => apiCall('POST', '/recordings/move', { session_ids, destination }),
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
   deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
   tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),
@@ -232,6 +233,9 @@ window.plaud = {
   showNotification: (title, body, actionLabel) =>
     invoke('show_notification', { title, body, actionLabel }),
   onNotificationAction: (callback) => addListener('notification-action', callback),
+
+  // Directory picker
+  selectDirectory: () => invoke('select_directory'),
 
   // Auto-updater — IPC to Rust
   installUpdate: () => invoke('install_update'),

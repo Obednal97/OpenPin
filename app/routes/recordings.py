@@ -9,10 +9,19 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.utils.config import load_config, save_config
-from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR
+from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
 from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("recordings", __name__)
+
+
+def _find_recording(session_id, ext="ogg"):
+    """Find a recording file across all known directories."""
+    for d in get_all_recordings_dirs():
+        p = d / f"{session_id}.{ext}"
+        if p.exists():
+            return p
+    return None
 
 
 def recover_metadata_from_transcripts():
@@ -69,8 +78,8 @@ def recover_metadata_from_transcripts():
 
     # Recover deleted_ids from .deleted marker files
     dismissed = set(config.get("deleted_ids", []))
-    if RECORDINGS_DIR.exists():
-        for marker in RECORDINGS_DIR.glob("*.deleted"):
+    for rec_dir in get_all_recordings_dirs():
+        for marker in rec_dir.glob("*.deleted"):
             sid = marker.stem
             if sid not in dismissed:
                 dismissed.add(sid)
@@ -120,74 +129,80 @@ def _extract_recording_date(stem):
 
 @bp.route("/recordings")
 def list_recordings():
-    RECORDINGS_DIR.mkdir(exist_ok=True)
     config = load_config()
     custom_names = config.get("recording_names", {})
     rec_tags = config.get("recording_tags", {})
     recordings = []
 
-    # Collect session IDs that have complete .ogg files
+    # Aggregate from all known recording directories
+    all_dirs = get_all_recordings_dirs()
     complete_ids = set()
-    for f in sorted(RECORDINGS_DIR.glob("*.ogg"), reverse=True):
-        complete_ids.add(f.stem)
-        size = f.stat().st_size
-        raw_audio_size = max(size - 2000, 0)
-        duration = raw_audio_size / 80 * 0.02
 
-        rec_date = _extract_recording_date(f.stem)
-        if rec_date is None:
-            rec_date = datetime.fromtimestamp(f.stat().st_mtime)
+    for rec_dir in all_dirs:
+        rec_dir.mkdir(exist_ok=True)
+        for f in sorted(rec_dir.glob("*.ogg"), reverse=True):
+            if f.stem in complete_ids:
+                continue  # Already seen from another directory
+            complete_ids.add(f.stem)
+            size = f.stat().st_size
+            raw_audio_size = max(size - 2000, 0)
+            duration = raw_audio_size / 80 * 0.02
 
-        transcript_path = TRANSCRIPTS_DIR / f"{f.stem}.json"
-        has_transcript = transcript_path.exists()
+            rec_date = _extract_recording_date(f.stem)
+            if rec_date is None:
+                rec_date = datetime.fromtimestamp(f.stat().st_mtime)
 
-        is_cloud = f.stem.startswith("cloud_") or f.stem in set(config.get("uploaded_session_ids", []))
-        cloud_id = config.get("cloud_file_ids", {}).get(f.stem, "")
+            transcript_path = TRANSCRIPTS_DIR / f"{f.stem}.json"
+            has_transcript = transcript_path.exists()
 
-        recordings.append(
-            {
-                "session_id": f.stem,
-                "ogg_path": str(f),
-                "duration": round(duration, 1),
-                "size": size,
-                "date": rec_date.isoformat(),
-                "has_transcript": has_transcript,
-                "title": custom_names.get(f.stem, ""),
-                "tags": rec_tags.get(f.stem, []),
-                "cloud_synced": is_cloud,
-                "cloud_id": cloud_id,
-            }
-        )
+            is_cloud = f.stem.startswith("cloud_") or f.stem in set(config.get("uploaded_session_ids", []))
+            cloud_id = config.get("cloud_file_ids", {}).get(f.stem, "")
+
+            recordings.append(
+                {
+                    "session_id": f.stem,
+                    "ogg_path": str(f),
+                    "duration": round(duration, 1),
+                    "size": size,
+                    "date": rec_date.isoformat(),
+                    "has_transcript": has_transcript,
+                    "title": custom_names.get(f.stem, ""),
+                    "tags": rec_tags.get(f.stem, []),
+                    "cloud_synced": is_cloud,
+                    "cloud_id": cloud_id,
+                }
+            )
 
     # Include partial downloads (interrupted transfers) — shown with warning in UI
-    for f in sorted(RECORDINGS_DIR.glob("*.ogg.partial"), reverse=True):
-        stem = f.name.replace(".ogg.partial", "")
-        if stem in complete_ids:
-            # Complete version exists, clean up the partial
-            try:
-                f.unlink()
-            except Exception:
-                pass
-            continue
-        size = f.stat().st_size
-        rec_date = _extract_recording_date(stem)
-        if rec_date is None:
-            rec_date = datetime.fromtimestamp(f.stat().st_mtime)
-        recordings.append(
-            {
-                "session_id": stem,
-                "ogg_path": None,
-                "duration": 0,
-                "size": size,
-                "date": rec_date.isoformat(),
-                "has_transcript": False,
-                "title": custom_names.get(stem, ""),
-                "tags": [],
-                "cloud_synced": False,
-                "cloud_id": "",
-                "partial": True,
-            }
-        )
+    for rec_dir in all_dirs:
+        for f in sorted(rec_dir.glob("*.ogg.partial"), reverse=True):
+            stem = f.name.replace(".ogg.partial", "")
+            if stem in complete_ids:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+                continue
+            complete_ids.add(stem)
+            size = f.stat().st_size
+            rec_date = _extract_recording_date(stem)
+            if rec_date is None:
+                rec_date = datetime.fromtimestamp(f.stat().st_mtime)
+            recordings.append(
+                {
+                    "session_id": stem,
+                    "ogg_path": None,
+                    "duration": 0,
+                    "size": size,
+                    "date": rec_date.isoformat(),
+                    "has_transcript": False,
+                    "title": custom_names.get(stem, ""),
+                    "tags": [],
+                    "cloud_synced": False,
+                    "cloud_id": "",
+                    "partial": True,
+                }
+            )
 
     recordings.sort(key=lambda r: r["date"], reverse=True)
     return jsonify(recordings)
@@ -282,8 +297,8 @@ def export_recording():
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
 
-    ogg_path = RECORDINGS_DIR / f"{session_id}.ogg"
-    if not ogg_path.exists():
+    ogg_path = _find_recording(session_id)
+    if not ogg_path:
         return jsonify({"error": "Recording not found"}), 404
 
     downloads_dir = Path.home() / "Downloads"
@@ -339,20 +354,21 @@ def crop_recording():
     if end <= start:
         return jsonify({"error": "Invalid time range"}), 400
 
-    ogg_path = RECORDINGS_DIR / f"{session_id}.ogg"
-    if not ogg_path.exists():
+    ogg_path = _find_recording(session_id)
+    if not ogg_path:
         return jsonify({"error": "Recording not found"}), 404
 
+    rec_dir = ogg_path.parent
     if mode == "new":
         new_id = str(int(datetime.now().timestamp()))
-        out_path = RECORDINGS_DIR / f"{new_id}.ogg"
+        out_path = rec_dir / f"{new_id}.ogg"
     else:
         new_id = None
         # Back up original before overwriting
-        backup_path = RECORDINGS_DIR / f"{session_id}_uncropped.ogg"
+        backup_path = rec_dir / f"{session_id}_uncropped.ogg"
         if not backup_path.exists():
             shutil.copy2(str(ogg_path), str(backup_path))
-        out_path = RECORDINGS_DIR / f"{session_id}_crop_tmp.ogg"
+        out_path = rec_dir / f"{session_id}_crop_tmp.ogg"
 
     ffmpeg = ensure_ffmpeg()
     try:
@@ -416,17 +432,20 @@ def delete_recordings():
     deleted = []
     for sid in session_ids:
         dismissed.add(sid)
-        # Write .deleted marker so config reset doesn't re-sync
-        marker = RECORDINGS_DIR / f"{sid}.deleted"
+        # Write .deleted marker in active dir so config reset doesn't re-sync
+        active_dir = get_recordings_dir()
+        marker = active_dir / f"{sid}.deleted"
         try:
             marker.write_text("")
         except Exception:
             pass
-        for ext in ["ogg", "mp3", "raw"]:
-            p = RECORDINGS_DIR / f"{sid}.{ext}"
-            if p.exists():
-                p.unlink()
-                deleted.append(str(p))
+        # Remove files from all known directories
+        for rec_dir in get_all_recordings_dirs():
+            for ext in ["ogg", "mp3", "raw"]:
+                p = rec_dir / f"{sid}.{ext}"
+                if p.exists():
+                    p.unlink()
+                    deleted.append(str(p))
         for ext in ["json", "txt"]:
             p = TRANSCRIPTS_DIR / f"{sid}.{ext}"
             if p.exists():
@@ -439,6 +458,65 @@ def delete_recordings():
     config["deleted_ids"] = list(dismissed)
     save_config(config)
     return jsonify({"deleted": deleted, "count": len(session_ids)})
+
+
+@bp.route("/recordings/move", methods=["POST"])
+def move_recordings():
+    """Move recordings to a different directory."""
+    data = request.get_json(silent=True) or {}
+    session_ids = data.get("session_ids", [])
+    destination = data.get("destination", "").strip()
+
+    if not session_ids:
+        return jsonify({"error": "No session_ids provided"}), 400
+    if not destination:
+        return jsonify({"error": "No destination provided"}), 400
+
+    dest = Path(destination)
+    if not dest.is_absolute():
+        return jsonify({"error": "Destination must be an absolute path"}), 400
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"error": f"Cannot create destination: {e}"}), 400
+
+    # Track destination in historical directories
+    config = load_config()
+    historical = config.get("historical_directories", [])
+    if destination not in historical:
+        historical.append(destination)
+        config["historical_directories"] = historical
+        save_config(config)
+
+    moved = []
+    errors = []
+    for sid in session_ids:
+        src_path = _find_recording(sid)
+        if not src_path:
+            errors.append({"session_id": sid, "error": "Not found"})
+            continue
+
+        dest_path = dest / src_path.name
+        if dest_path == src_path:
+            errors.append({"session_id": sid, "error": "Already in destination"})
+            continue
+
+        if dest_path.exists():
+            errors.append({"session_id": sid, "error": "File exists in destination"})
+            continue
+
+        try:
+            shutil.move(str(src_path), str(dest_path))
+            moved.append({"session_id": sid, "from": str(src_path), "to": str(dest_path)})
+            # Also move related files (uncropped backup, encrypted bin)
+            for suffix in ["_uncropped.ogg", "_encrypted.bin"]:
+                related = src_path.parent / f"{sid}{suffix}"
+                if related.exists():
+                    shutil.move(str(related), str(dest / related.name))
+        except OSError as e:
+            errors.append({"session_id": sid, "error": str(e)})
+
+    return jsonify({"moved": moved, "errors": errors, "count": len(moved)})
 
 
 @bp.route("/transcripts")
