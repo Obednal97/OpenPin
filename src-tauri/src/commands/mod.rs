@@ -918,3 +918,12 @@ pub fn show_notification(
         shown: result.is_ok(),
     }
 }
+
+// ---- Select Directory ----
+
+#[tauri::command]
+pub async fn select_directory(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let folder = app.dialog().file().blocking_pick_folder();
+    folder.map(|p| p.to_string())
+}

@@ -386,6 +386,107 @@ function showDeleteDialog(ids, count, onDeleted) {
 }
 
 
+// ---- Move Recordings ----
+
+function _shortenDirPath(p) {
+  const home = '/Users/' + (p.split('/Users/')[1] || '').split('/')[0];
+  if (home && home !== '/Users/' && p.startsWith(home)) return '~' + p.slice(home.length);
+  return p;
+}
+
+function showMoveDialog(ids, onMoved) {
+  const count = ids.length;
+  const s = app.settings || {};
+  const activeDir = s.save_directory || s.default_save_directory || '';
+  const defaultDir = s.default_save_directory || '';
+  const historical = (s.historical_directories || []);
+
+  // Build list of unique destination options (exclude the source dir of the first selected recording)
+  const sourceRec = app.recordings.find(r => r.session_id === ids[0]);
+  const sourceDir = sourceRec && sourceRec.ogg_path ? sourceRec.ogg_path.replace(/\/[^/]+$/, '') : '';
+
+  const destinations = [];
+  const seen = new Set();
+  for (const d of [activeDir, defaultDir, ...historical]) {
+    if (!d || seen.has(d) || d === sourceDir) continue;
+    seen.add(d);
+    destinations.push(d);
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'delete-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="delete-dialog" style="max-width:420px;">
+      <h3>Move ${count} recording${count > 1 ? 's' : ''}</h3>
+      <p class="settings-desc">Choose a destination folder.</p>
+      <div class="move-destinations">
+        ${destinations.map(d => `
+          <button class="action-btn subtle move-dest-btn" data-dir="${escapeHtml(d)}" style="width:100%;justify-content:flex-start;text-align:left;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(_shortenDirPath(d))}</span>
+            ${d === activeDir ? '<span style="margin-left:auto;font-size:var(--text-xs);color:var(--text-tertiary);">active</span>' : ''}
+          </button>
+        `).join('')}
+        <button class="action-btn subtle" id="move-browse-btn" style="width:100%;justify-content:center;">
+          Browse...
+        </button>
+      </div>
+      <button class="action-btn subtle" id="move-cancel-btn" style="width:100%;margin-top:var(--sp-2);justify-content:center;">
+        Cancel
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.offsetHeight;
+  overlay.classList.add('visible');
+
+  const cleanup = () => {
+    overlay.classList.remove('visible');
+    setTimeout(() => overlay.remove(), 300);
+  };
+
+  const doMove = async (dest) => {
+    cleanup();
+    try {
+      const result = await window.plaud.moveRecordings(ids, dest);
+      const moved = result.count || 0;
+      const errors = (result.errors || []).length;
+      if (moved > 0) toast(`Moved ${moved} recording${moved > 1 ? 's' : ''}`, 'success');
+      if (errors > 0) toast(`${errors} could not be moved`, 'error');
+      if (onMoved) onMoved();
+      exitSelectMode();
+      await loadSettings();
+      await loadRecordings();
+    } catch (err) {
+      toast(`Move failed: ${err.message}`, 'error');
+    }
+  };
+
+  overlay.querySelectorAll('.move-dest-btn').forEach(btn => {
+    btn.addEventListener('click', () => doMove(btn.dataset.dir));
+  });
+
+  document.getElementById('move-browse-btn').addEventListener('click', async () => {
+    let dir;
+    if (window.plaud.selectDirectory) {
+      dir = await window.plaud.selectDirectory();
+    } else {
+      dir = prompt('Enter the full destination path:');
+    }
+    if (dir) doMove(dir);
+    else cleanup();
+  });
+
+  document.getElementById('move-cancel-btn').addEventListener('click', cleanup);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+}
+
+async function moveSelected() {
+  if (app.selectedIds.size === 0) return;
+  showMoveDialog(Array.from(app.selectedIds));
+}
+
+
 // ---- Context Menu ----
 
 let _ctxMenu = null;
@@ -446,6 +547,9 @@ function _showContextMenu(x, y, sessionId) {
     items.push({ divider: true });
   }
 
+  items.push({ label: 'Move to...', icon: 'move', action: () => {
+    showMoveDialog([sessionId], () => { loadRecordings(); });
+  }});
   items.push({ label: 'Delete', icon: 'delete', destructive: true, action: () => {
     showDeleteDialog([sessionId], 1, () => { loadRecordings(); });
   }});

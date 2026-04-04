@@ -3,7 +3,7 @@
 from flask import Blueprint, jsonify, request
 
 from app.utils.config import load_config, save_config
-from app.utils.constants import DEFAULT_TAGS, WHISPER_MODELS
+from app.utils.constants import DEFAULT_RECORDINGS_DIR, DEFAULT_TAGS, WHISPER_MODELS, get_recordings_dir
 from app.utils.system import get_ram_info
 
 bp = Blueprint("settings", __name__)
@@ -53,6 +53,9 @@ def get_settings():
             "summarization_provider": config.get("summarization_provider", "anthropic"),
             "has_paired_devices": bool(config.get("paired_devices", {})),
             "setup_dismissed": config.get("setup_dismissed", False),
+            "save_directory": str(get_recordings_dir()),
+            "default_save_directory": str(DEFAULT_RECORDINGS_DIR),
+            "historical_directories": config.get("historical_directories", []),
         }
     )
 
@@ -127,6 +130,35 @@ def save_settings():
     if "groq_api_key" in data:
         key = data["groq_api_key"].strip()
         config["groq_api_key"] = key
+
+    if "save_directory" in data:
+        new_dir = data["save_directory"].strip()
+        if new_dir:
+            from pathlib import Path
+
+            p = Path(new_dir)
+            if not p.is_absolute():
+                return jsonify({"error": "Path must be absolute"}), 400
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return jsonify({"error": f"Cannot create directory: {e}"}), 400
+
+            # Track the old directory in historical list
+            old_dir = str(get_recordings_dir())
+            historical = config.get("historical_directories", [])
+            if old_dir not in historical:
+                historical.append(old_dir)
+            config["historical_directories"] = historical
+            config["save_directory"] = new_dir
+        else:
+            # Reset to default
+            old_dir = str(get_recordings_dir())
+            historical = config.get("historical_directories", [])
+            if old_dir not in historical:
+                historical.append(old_dir)
+            config["historical_directories"] = historical
+            config.pop("save_directory", None)
 
     save_config(config)
     return jsonify({"saved": True})

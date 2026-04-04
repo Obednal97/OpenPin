@@ -19,6 +19,8 @@ from app.utils.constants import (
     PLAUD_WEB_HOST,
     RECORDINGS_DIR,
     TRANSCRIPTS_DIR,
+    get_all_recordings_dirs,
+    get_recordings_dir,
 )
 
 # Module-level state
@@ -326,7 +328,8 @@ def download_cloud_recordings():
         return {"files": [], "message": "No recordings in cloud"}
 
     CLOUD_RECORDINGS_DIR.mkdir(exist_ok=True)
-    RECORDINGS_DIR.mkdir(exist_ok=True)
+    active_rec_dir = get_recordings_dir()
+    active_rec_dir.mkdir(exist_ok=True)
     config = load_config()
     dismissed = set(config.get("deleted_ids", []))
     uploaded_names = set(config.get("uploaded_filenames", []))
@@ -346,7 +349,7 @@ def download_cloud_recordings():
 
         date_str = dt.fromtimestamp(ts).strftime("%Y-%m-%d_%H%M") if ts > 0 else "unknown"
         session_id = f"cloud_{date_str}_{name[:40]}".replace(" ", "_")
-        ogg_path = RECORDINGS_DIR / f"{session_id}.ogg"
+        ogg_path = active_rec_dir / f"{session_id}.ogg"
 
         if session_id in dismissed:
             continue
@@ -389,7 +392,7 @@ def download_cloud_recordings():
                 ogg_path.write_bytes(raw)
                 duration = dur
             elif raw[:3] == b"ID3":
-                mp3_path = RECORDINGS_DIR / f"{session_id}.mp3"
+                mp3_path = active_rec_dir / f"{session_id}.mp3"
                 mp3_path.write_bytes(raw)
                 results.append(
                     {
@@ -409,7 +412,7 @@ def download_cloud_recordings():
                 tmp_path.rename(ogg_path)
                 duration = (len(raw) // 80) * 0.02
             else:
-                raw_path = RECORDINGS_DIR / f"{session_id}.raw"
+                raw_path = active_rec_dir / f"{session_id}.raw"
                 raw_path.write_bytes(raw)
                 results.append({"session_id": session_id, "status": "unknown_format", "cloud_name": name})
                 continue
@@ -545,12 +548,16 @@ def upload_local_recordings_to_cloud():
     except Exception:
         cloud_filenames = set()
 
-    RECORDINGS_DIR.mkdir(exist_ok=True)
     config = load_config()
     custom_names = config.get("recording_names", {})
     uploaded = []
 
-    for f in sorted(RECORDINGS_DIR.glob("*.ogg")):
+    # Scan all known recording directories for uploadable files
+    all_ogg_files = []
+    for rec_dir in get_all_recordings_dirs():
+        rec_dir.mkdir(exist_ok=True)
+        all_ogg_files.extend(rec_dir.glob("*.ogg"))
+    for f in sorted(all_ogg_files):
         session_id = f.stem
         if session_id.startswith("cloud_"):
             continue

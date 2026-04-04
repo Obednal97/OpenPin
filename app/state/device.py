@@ -22,6 +22,7 @@ from app.utils.constants import (
     PROJECT_ROOT,
     RECORDINGS_DIR,
     SESSIONS_DIR,
+    get_recordings_dir,
 )
 from app.utils.constants import (
     BLE_NOTIFY_UUID as N,
@@ -924,7 +925,7 @@ def do_wifi_sync_blocking():
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps({
             "sn": sn,
-            "recordings_dir": str(RECORDINGS_DIR),
+            "recordings_dir": str(get_recordings_dir()),
             "app_key_path": str(APP_KEY_PATH),
             "dismissed": list(load_config().get("deleted_ids", [])),
             "bind_token": device_token,
@@ -1027,7 +1028,8 @@ async def _sync_files_inner(progress_callback=None):
     if not files:
         return {"files": [], "message": "No files on device"}
 
-    RECORDINGS_DIR.mkdir(exist_ok=True)
+    active_rec_dir = get_recordings_dir()
+    active_rec_dir.mkdir(exist_ok=True)
     dismissed = set(load_config().get("deleted_ids", []))
 
     new_files = []
@@ -1041,7 +1043,7 @@ async def _sync_files_inner(progress_callback=None):
 
         sid = f["session_id"]
         fsize = f["size"]
-        ogg_path = RECORDINGS_DIR / f"{sid}.ogg"
+        ogg_path = active_rec_dir / f"{sid}.ogg"
 
         if str(sid) in dismissed:
             continue
@@ -1120,7 +1122,7 @@ async def _sync_files_inner(progress_callback=None):
                 }
             )
         else:
-            raw_path = RECORDINGS_DIR / f"{sid}_encrypted.bin"
+            raw_path = active_rec_dir / f"{sid}_encrypted.bin"
             raw_path.write_bytes(raw_data)
             new_files.append(
                 {

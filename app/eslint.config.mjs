@@ -47,6 +47,8 @@ export default [
         enterSelectMode: "writable",
         exitSelectMode: "writable",
         deleteSelected: "writable",
+        moveSelected: "writable",
+        showMoveDialog: "writable",
         toggleSelection: "writable",
         updateSelectBar: "writable",
         showDeleteDialog: "writable",

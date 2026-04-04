@@ -29,8 +29,47 @@ BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 #             Stored in config as device_bind_tokens[sn]
 
 # Directory paths — user data lives in DATA_DIR, keys stay in the app bundle
-RECORDINGS_DIR = DATA_DIR / "recordings"
+DEFAULT_RECORDINGS_DIR = DATA_DIR / "recordings"
+RECORDINGS_DIR = DEFAULT_RECORDINGS_DIR  # Legacy alias — prefer get_recordings_dir()
 CLOUD_RECORDINGS_DIR = DATA_DIR / "cloud_recordings_decoded"
+
+
+def get_recordings_dir():
+    """Return the active recordings directory (from config, or default).
+
+    New recordings are saved here. Reads from config 'save_directory'.
+    """
+    from app.utils.config import load_config
+
+    config = load_config()
+    custom = config.get("save_directory", "")
+    if custom:
+        p = Path(custom)
+        if p.is_absolute():
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+    DEFAULT_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    return DEFAULT_RECORDINGS_DIR
+
+
+def get_all_recordings_dirs():
+    """Return all directories that may contain recordings (active + historical).
+
+    Used for listing/searching — aggregates files from every known location.
+    """
+    from app.utils.config import load_config
+
+    dirs = set()
+    dirs.add(get_recordings_dir())
+    dirs.add(DEFAULT_RECORDINGS_DIR)
+
+    config = load_config()
+    for d in config.get("historical_directories", []):
+        p = Path(d)
+        if p.is_absolute() and p.is_dir():
+            dirs.add(p)
+
+    return list(dirs)
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
