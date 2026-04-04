@@ -482,9 +482,20 @@ async def connect_device(address=None):
     #   [cmd_type=1][cmd_id=1 LE][version=2][audioChannel=0][flag=0/1] + token32
     # Two commands are sent: flag=0 then flag=1 (both required).
     # The token is the per-device BIND_TOKEN from the cloud API (not the static APP_KEY).
-    from app.state.cloud import get_device_bind_token
-    device_token = get_device_bind_token(sn) or ""
-    token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
+    from app.state.cloud import get_device_bind_token, bind_device as cloud_bind_device, is_logged_in as cloud_logged_in
+    device_token = get_device_bind_token(sn)
+    if not device_token and sn and cloud_logged_in():
+        # BIND_TOKEN missing — try creating it now (handles first-time pairing)
+        logging.info(f"[BLE] No BIND_TOKEN for {sn}, attempting cloud bind...")
+        try:
+            result = cloud_bind_device(sn)
+            device_token = get_device_bind_token(sn)
+            logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
+        except Exception as e:
+            logging.warning(f"[BLE] Cloud bind failed: {e}")
+    if not device_token:
+        logging.warning(f"[BLE] No BIND_TOKEN available for {sn} — handshake may fail")
+    token32 = (device_token or "")[:32].encode("ascii").ljust(32, b"\x00")
     r1 = await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
     r2 = await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
     logging.info(f"[BLE] Handshake responses: HS1={r1 is not None}, HS2={r2 is not None}")
