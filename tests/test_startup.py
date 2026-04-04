@@ -22,10 +22,14 @@ class TestDynamicPort:
         assert "await _apiInfoReady" in src
 
     def test_csp_allows_any_localhost_port(self):
-        """index.html CSP must allow any localhost port, not just 5123."""
-        src = (Path(__file__).parent.parent / "app" / "index.html").read_text()
-        assert "127.0.0.1:*" in src
-        assert "127.0.0.1:5123" not in src
+        """CSP must allow any localhost port, not just 5123.
+        CSP may be in index.html (Electron) or tauri.conf.json (Tauri)."""
+        root = Path(__file__).parent.parent
+        html = (root / "app" / "index.html").read_text()
+        tauri_conf = (root / "src-tauri" / "tauri.conf.json").read_text() if (root / "src-tauri" / "tauri.conf.json").exists() else ""
+        combined = html + tauri_conf
+        assert "127.0.0.1:*" in combined
+        assert "127.0.0.1:5123" not in combined
 
 
 class TestPythonValidation:

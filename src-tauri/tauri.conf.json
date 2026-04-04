@@ -1,0 +1,63 @@
+{
+  "productName": "Plaud V2",
+  "version": "2.0.0",
+  "identifier": "com.plaud.v2",
+  "build": {
+    "beforeBuildCommand": "bash scripts/prepare-frontend.sh",
+    "frontendDist": "../dist-tauri"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Plaud V2",
+        "url": "index.html",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "visible": false,
+        "resizable": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: http://asset.localhost ipc: http://ipc.localhost; connect-src 'self' http://127.0.0.1:* https://* ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: asset: http://asset.localhost https://*; font-src 'self' https://fonts.gstatic.com; media-src 'self' http://127.0.0.1:* asset: http://asset.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg"],
+    "icon": [
+      "../app/icon_512.png",
+      "../app/icon.icns"
+    ],
+    "resources": {
+      "../src/*": "src/",
+      "../keys/*": "keys/",
+      "../app/api_server.py": "app/api_server.py",
+      "../app/routes/*": "app/routes/",
+      "../app/state/*": "app/state/",
+      "../app/providers/*": "app/providers/",
+      "../app/utils/*": "app/utils/"
+    },
+    "macOS": {
+      "entitlements": "./Entitlements.plist",
+      "infoPlist": "./Info.plist",
+      "hardenedRuntime": true,
+      "signingIdentity": "Oliver Bednal (4SN93PWF7Z)",
+      "providerShortName": "4SN93PWF7Z",
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["plaud-v2"]
+      }
+    }
+  }
+}

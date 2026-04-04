@@ -122,9 +122,10 @@ def test_summarize_no_session(flask_client):
 
 
 def test_cors_headers(flask_client):
-    """All responses have CORS headers."""
+    """All responses have CORS headers (restricted to localhost)."""
     r = flask_client.get("/health")
-    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    origin = r.headers.get("Access-Control-Allow-Origin", "")
+    assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin
 
 
 def test_tag_recording_no_session(flask_client):
