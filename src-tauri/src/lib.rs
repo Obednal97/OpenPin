@@ -112,6 +112,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let window = app.get_webview_window("main")
                 .expect("Main window must exist — check tauri.conf.json windows config");
@@ -316,6 +317,7 @@ pub fn run() {
             commands::check_for_updates,
             commands::install_update,
             commands::show_notification,
+            commands::select_directory,
         ])
         .on_window_event(|window, event| {
             match event {

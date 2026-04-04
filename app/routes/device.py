@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 
 from app.state import device as dev
 from app.utils.config import load_config
-from app.utils.constants import RECORDINGS_DIR
+from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
 
 
 def _error_json(base, exc):
@@ -231,8 +231,10 @@ def check_new():
         return jsonify({"new_files": 0})
     try:
         files = dev.run_async(dev.list_device_files())
-        RECORDINGS_DIR.mkdir(exist_ok=True)
-        existing = {f.stem for f in RECORDINGS_DIR.glob("*.ogg")}
+        existing = set()
+        for rec_dir in get_all_recordings_dirs():
+            rec_dir.mkdir(exist_ok=True)
+            existing.update(f.stem for f in rec_dir.glob("*.ogg"))
         dismissed = set(load_config().get("deleted_ids", []))
         new_files = [f for f in files if str(f["session_id"]) not in existing and str(f["session_id"]) not in dismissed]
         total_size = sum(f.get("size", 0) for f in new_files)

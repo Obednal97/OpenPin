@@ -52,6 +52,7 @@ function renderSettings() {
   renderDeviceManager();
   renderNotion();
   renderCloudAccount();
+  renderStorageSettings();
 }
 
 // ---- Processing Sections ----
@@ -723,6 +724,8 @@ function updateAutoPipelineState() {
 }
 
 function initSettingsEvents() {
+  initStorageEvents();
+
   // Settings tabs — translate vertical scroll to horizontal (mouse wheel)
   // but let native horizontal scroll through (trackpad two-finger swipe)
   document.querySelector('.settings-tabs').addEventListener(
@@ -1454,4 +1457,164 @@ function initSettingsEvents() {
       setLoading(btn, false);
     }
   });
+}
+
+// ---- Storage Settings ----
+
+function _shortenPath(p) {
+  const home = '/Users/' + p.split('/Users/')[1]?.split('/')[0];
+  if (home && p.startsWith(home)) return '~' + p.slice(home.length);
+  return p;
+}
+
+function renderStorageSettings() {
+  const s = app.settings;
+  const labelEl = $('#save-dir-label');
+  const fieldEl = $('#save-dir-path');
+  const resetBtn = $('#reset-save-dir-btn');
+  if (!labelEl) return;
+
+  const currentDir = s.save_directory || s.default_save_directory || '';
+  const isDefault = currentDir === s.default_save_directory;
+
+  labelEl.textContent = _shortenPath(currentDir);
+  if (fieldEl) fieldEl.title = currentDir;
+
+  if (resetBtn) resetBtn.classList.toggle('hidden', isDefault);
+
+  // Historical directories
+  const histContainer = $('#historical-dirs');
+  const histList = $('#historical-dirs-list');
+  const historical = (s.historical_directories || []).filter(d => d !== currentDir);
+  if (histContainer && histList) {
+    if (historical.length > 0) {
+      histContainer.classList.remove('hidden');
+      histList.innerHTML = historical.map(d => `<li>${d}</li>`).join('');
+    } else {
+      histContainer.classList.add('hidden');
+    }
+  }
+}
+
+function _showMigrationDialog(newDir, oldDir, isReset) {
+  const shortNew = _shortenPath(newDir);
+  const overlay = document.createElement('div');
+  overlay.className = 'delete-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="delete-dialog" style="max-width:440px;">
+      <h3>${isReset ? 'Reset save location' : 'Change save location'}</h3>
+      <p class="settings-desc">New recordings will save to <strong>${escapeHtml(shortNew)}</strong></p>
+      <p class="settings-desc" style="margin-top:var(--sp-2);">What would you like to do with your existing recordings?</p>
+      <div class="delete-dialog-actions">
+        <button class="action-btn primary" id="migrate-move-all">
+          Move all recordings to new location
+        </button>
+        <button class="action-btn subtle" id="migrate-leave">
+          Leave them where they are
+        </button>
+      </div>
+      <button class="action-btn subtle" id="migrate-cancel" style="width:100%;margin-top:var(--sp-2);justify-content:center;">
+        Cancel
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.offsetHeight;
+  overlay.classList.add('visible');
+
+  const cleanup = () => {
+    overlay.classList.remove('visible');
+    setTimeout(() => overlay.remove(), 300);
+  };
+
+  const changeDirOnly = async () => {
+    try {
+      await window.plaud.saveSettings({ save_directory: isReset ? '' : newDir });
+      toast(isReset ? 'Reset to default directory' : 'Save directory updated');
+      await loadSettings();
+      await loadRecordings();
+    } catch (err) {
+      toast(`Failed: ${err.message}`, 'error');
+    }
+  };
+
+  document.getElementById('migrate-cancel').addEventListener('click', cleanup);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+
+  document.getElementById('migrate-leave').addEventListener('click', async () => {
+    cleanup();
+    await changeDirOnly();
+  });
+
+  document.getElementById('migrate-move-all').addEventListener('click', async () => {
+    cleanup();
+    // Change the directory first so new saves go to new location
+    await changeDirOnly();
+
+    // Now move all recordings from old dir to new dir
+    const allIds = (app.recordings || [])
+      .filter(r => r.ogg_path && r.ogg_path.startsWith(oldDir))
+      .map(r => r.session_id);
+
+    if (allIds.length === 0) {
+      toast('No recordings to move');
+      return;
+    }
+
+    try {
+      toast(`Moving ${allIds.length} recording${allIds.length > 1 ? 's' : ''}...`, 'info');
+      const result = await window.plaud.moveRecordings(allIds, newDir);
+      const moved = result.count || 0;
+      const errors = (result.errors || []).length;
+      if (moved > 0) toast(`Moved ${moved} recording${moved > 1 ? 's' : ''}`, 'success');
+      if (errors > 0) toast(`${errors} could not be moved`, 'error');
+      await loadSettings();
+      await loadRecordings();
+    } catch (err) {
+      toast(`Move failed: ${err.message}`, 'error');
+    }
+  });
+}
+
+function initStorageEvents() {
+  const changeBtn = $('#change-save-dir-btn');
+  const resetBtn = $('#reset-save-dir-btn');
+  const pathEl = $('#save-dir-path');
+
+  if (changeBtn) {
+    changeBtn.addEventListener('click', async () => {
+      let dir;
+      if (window.plaud.selectDirectory) {
+        dir = await window.plaud.selectDirectory();
+      } else {
+        dir = prompt('Enter the full path for new recording saves:');
+      }
+      if (!dir) return;
+
+      const oldDir = (app.settings.save_directory || app.settings.default_save_directory || '');
+      if (dir === oldDir) return;
+
+      _showMigrationDialog(dir, oldDir);
+    });
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      const oldDir = (app.settings.save_directory || app.settings.default_save_directory || '');
+      const defaultDir = app.settings.default_save_directory || '';
+      if (oldDir === defaultDir) return;
+
+      _showMigrationDialog(defaultDir, oldDir, true);
+    });
+  }
+
+  const fieldEl = $('#save-dir-path');
+  if (fieldEl) {
+    fieldEl.addEventListener('click', () => {
+      const dir = fieldEl.title;
+      if (dir && window.plaud.openExternal) {
+        window.plaud.openExternal(`file://${dir}`);
+      }
+    });
+  }
 }
