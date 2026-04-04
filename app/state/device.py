@@ -486,7 +486,7 @@ async def connect_device(address=None):
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
-    # Read battery via cmd 9 (live value from device, not the stale BLE characteristic)
+    # Read battery — try cmd 9 first (live value), fallback to BLE characteristic
     battery = None
     charging = False
     try:
@@ -495,7 +495,9 @@ async def connect_device(address=None):
             charging = bool(r[3])
             battery = r[4]
     except Exception:
-        # Fallback to BLE characteristic (may be stale/cached from first pairing)
+        pass
+    if battery is None:
+        # Fallback to BLE characteristic (may be cached from pairing, but better than nothing)
         try:
             bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
             battery = bat[0]
