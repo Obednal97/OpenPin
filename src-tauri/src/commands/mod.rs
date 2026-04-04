@@ -268,22 +268,33 @@ pub fn check_for_updates(app: tauri::AppHandle) {
                 log::info!("[Updater] Update available: v{latest}");
                 emit("available", serde_json::json!({ "version": latest }));
 
-                // Find the ZIP asset (used for in-place updates)
-                let zip_asset = release["assets"]
+                // Find the update asset — prefer DMG (Tauri builds), fall back to ZIP (Electron)
+                let update_asset = release["assets"]
                     .as_array()
                     .and_then(|a| {
-                        a.iter().find(|a| {
-                            a["name"]
-                                .as_str()
-                                .map(|n| n.ends_with("-mac.zip"))
-                                .unwrap_or(false)
-                        })
+                        // Try DMG first (Tauri releases)
+                        a.iter()
+                            .find(|a| {
+                                a["name"]
+                                    .as_str()
+                                    .map(|n| n.ends_with(".dmg") && !n.contains("blockmap"))
+                                    .unwrap_or(false)
+                            })
+                            // Fall back to ZIP (Electron releases or bridge ZIPs)
+                            .or_else(|| {
+                                a.iter().find(|a| {
+                                    a["name"]
+                                        .as_str()
+                                        .map(|n| n.ends_with("-mac.zip"))
+                                        .unwrap_or(false)
+                                })
+                            })
                     });
 
-                let asset = match zip_asset {
+                let asset = match update_asset {
                     Some(a) => a,
                     None => {
-                        log::error!("[Updater] No ZIP asset found in release");
+                        log::error!("[Updater] No update asset found in release");
                         emit("error", serde_json::json!({ "message": "No update package found" }));
                         return;
                     }
@@ -413,40 +424,60 @@ pub fn install_update(app: tauri::AppHandle) -> UpdateResult {
         .to_string_lossy()
         .to_string();
 
-    log::info!("[Updater] Installing from {zip_path} to {app_path}");
+    let is_dmg = zip_path.ends_with(".dmg");
+    log::info!("[Updater] Installing from {zip_path} (dmg={is_dmg}) to {app_path}");
 
-    // Spawn detached bash script — same approach as Electron
+    // Spawn detached bash script that handles both DMG and ZIP formats
     let script = format!(
         r#"
 sleep 1
 rm -rf /tmp/plaud-v2-update
-ditto -xk "{zip_path}" "/tmp/plaud-v2-update"
-NEW_APP=$(find /tmp/plaud-v2-update -maxdepth 1 -name "*.app" | head -1)
+
+IS_DMG="{is_dmg}"
+if [ "$IS_DMG" = "true" ]; then
+  # DMG: mount, copy .app, unmount
+  MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | grep "/Volumes" | awk '{{print $NF}}')
+  if [ -z "$MOUNT_POINT" ]; then
+    # Try with full path parsing
+    MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | tail -1 | sed 's/.*\(\/Volumes\/.*\)/\1/')
+  fi
+  NEW_APP=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" 2>/dev/null | head -1)
+else
+  # ZIP: extract with ditto
+  ditto -xk "{zip_path}" "/tmp/plaud-v2-update"
+  NEW_APP=$(find /tmp/plaud-v2-update -maxdepth 1 -name "*.app" | head -1)
+fi
+
 if [ -n "$NEW_APP" ] && [ -d "$NEW_APP/Contents/MacOS" ]; then
-  # Verify the extracted app has a valid code signature before installing
+  # Verify code signature before installing
   SIGCHECK=$(codesign --verify --deep --strict "$NEW_APP" 2>&1)
   if [ $? -ne 0 ]; then
     echo "Update signature invalid: $SIGCHECK" >&2
+    [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
     rm -rf /tmp/plaud-v2-update
     open "{app_path}"
     exit 1
   fi
   # Safe swap: rename old, move new, only then delete old
   mv "{app_path}" "{app_path}.old" 2>/dev/null
-  mv "$NEW_APP" "{app_path}"
+  cp -R "$NEW_APP" "{app_path}"
   if [ -d "{app_path}/Contents/MacOS" ]; then
     rm -rf "{app_path}.old"
-    rm -rf /tmp/plaud-v2-update
     xattr -dr com.apple.quarantine "{app_path}"
+    [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
+    rm -rf /tmp/plaud-v2-update
     open "{app_path}"
   else
     # Swap failed — restore old app
     rm -rf "{app_path}"
     mv "{app_path}.old" "{app_path}" 2>/dev/null
+    [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
     open "{app_path}"
   fi
 else
-  # Extraction failed — just relaunch existing app
+  # Extraction/mount failed — just relaunch existing app
+  [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
+  rm -rf /tmp/plaud-v2-update
   open "{app_path}"
 fi
 "#
