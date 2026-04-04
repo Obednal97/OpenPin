@@ -98,6 +98,16 @@ NOTION_MCP_URL = "https://mcp.notion.com/mcp"
 NOTION_CONFIG_PATH = DATA_DIR / ".notion_mcp.json"
 NOTION_CALLBACK_PORT = 5124
 
+# Google Drive
+GDRIVE_CONFIG_PATH = DATA_DIR / ".gdrive_config.json"
+GDRIVE_CALLBACK_PORT = 5125
+GDRIVE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+GDRIVE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GDRIVE_API_BASE = "https://www.googleapis.com"
+GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+GDRIVE_CLIENT_ID = "364974909213-m56e0v5la7ivomclvlf22r3selcsn1b2.apps.googleusercontent.com"
+GDRIVE_CLIENT_SECRET = "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"  # Desktop app — not confidential per Google docs
+
 # Default tags
 DEFAULT_TAGS = ["Group Meeting", "1:1", "Memo", "Journal", "Interview", "Lecture"]
 

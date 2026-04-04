@@ -764,6 +764,7 @@ async function init() {
   await updateDeviceStatus();
   await loadCloudStatus();
   await loadNotionStatus();
+  await loadGdriveStatus();
   await loadSettings();
   await loadRecordings();
 

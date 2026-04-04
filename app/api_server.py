@@ -39,7 +39,7 @@ ensure_installed("requests")
 
 from flask import Flask, jsonify, request
 
-from app.routes import cloud, core, device, notion, recordings, settings, transcribe
+from app.routes import cloud, core, device, gdrive, notion, recordings, settings, transcribe
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -118,6 +118,7 @@ app.register_blueprint(core.bp)
 app.register_blueprint(device.bp)
 app.register_blueprint(cloud.bp)
 app.register_blueprint(notion.bp)
+app.register_blueprint(gdrive.bp)
 app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)

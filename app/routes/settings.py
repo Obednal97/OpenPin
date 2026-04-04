@@ -53,6 +53,7 @@ def get_settings():
             "summarization_provider": config.get("summarization_provider", "anthropic"),
             "has_paired_devices": bool(config.get("paired_devices", {})),
             "setup_dismissed": config.get("setup_dismissed", False),
+            "gdrive_auto_sync": config.get("gdrive_auto_sync", False),
             "save_directory": str(get_recordings_dir()),
             "default_save_directory": str(DEFAULT_RECORDINGS_DIR),
             "historical_directories": config.get("historical_directories", []),
@@ -99,6 +100,8 @@ def save_settings():
         config["auto_prefer_wifi"] = data["auto_prefer_wifi"]
     if "setup_dismissed" in data:
         config["setup_dismissed"] = data["setup_dismissed"]
+    if "gdrive_auto_sync" in data:
+        config["gdrive_auto_sync"] = data["gdrive_auto_sync"]
     if "transcription_provider" in data:
         config["transcription_provider"] = data["transcription_provider"]
     if "diarization_provider" in data:

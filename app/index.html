@@ -757,6 +757,55 @@
         </div>
 
         <div class="settings-section">
+          <h3>Google Drive</h3>
+          <p class="settings-desc">Back up recordings to a Google Drive folder.</p>
+          <div id="gdrive-section">
+            <div id="gdrive-disconnected">
+              <button id="gdrive-connect-btn" class="action-btn primary w-full justify-center">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span>Connect Google Drive</span>
+              </button>
+            </div>
+            <div id="gdrive-connected" class="hidden">
+              <div class="notion-db-card" id="gdrive-folder-card">
+                <div class="notion-db-card-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                </div>
+                <div class="notion-db-card-info">
+                  <div class="notion-db-card-label" id="gdrive-email"></div>
+                  <div class="notion-db-card-name" id="gdrive-folder-name">No folder selected</div>
+                </div>
+                <span class="ai-key-badge connected">Active</span>
+              </div>
+              <div class="settings-section mt-3 mb-0">
+                <label class="settings-label">Change Folder</label>
+                <div class="token-input-row">
+                  <input type="text" id="gdrive-folder-search" class="settings-input" placeholder="Search folders...">
+                </div>
+                <div id="gdrive-folder-list" class="mt-2"></div>
+                <div class="cloud-divider my-2"><span>or create new</span></div>
+                <div class="token-input-row">
+                  <input type="text" id="gdrive-new-folder-name" class="settings-input" placeholder="New folder name">
+                  <button id="gdrive-folder-create-btn" class="btn-small">Create</button>
+                </div>
+              </div>
+              <div id="gdrive-sync-info" class="settings-desc mt-3"></div>
+              <label class="toggle-label dm-toggle-row mt-3">
+                <input type="checkbox" id="gdrive-auto-sync-toggle" class="toggle-input">
+                <span class="toggle-switch"></span>
+                <span>Auto-upload new recordings</span>
+              </label>
+              <button id="gdrive-sync-btn" class="action-btn subtle mt-2 settings-btn-compact">
+                Sync All Now
+              </button>
+              <button id="gdrive-disconnect-btn" class="action-btn subtle mt-2 settings-btn-compact">
+                Disconnect Google Drive
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
           <h3>Webhooks</h3>
           <p class="settings-desc">Automatically send data to external services when recordings are processed. Works with Zapier, Make, n8n, or any URL that accepts POST requests.</p>
           <div id="webhook-list"></div>
