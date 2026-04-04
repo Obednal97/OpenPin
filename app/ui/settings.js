@@ -51,6 +51,7 @@ function renderSettings() {
   renderWebhooks();
   renderDeviceManager();
   renderNotion();
+  renderGoogleDrive();
   renderCloudAccount();
   renderStorageSettings();
 }
@@ -407,6 +408,197 @@ function renderNotion() {
   }
 }
 
+// ---- Google Drive ----
+
+async function loadGdriveStatus() {
+  try {
+    app.gdriveState = await window.plaud.gdriveStatus();
+  } catch {
+    app.gdriveState = { connected: false };
+  }
+}
+
+function renderGoogleDrive() {
+  const disconnected = $('#gdrive-disconnected');
+  const connected = $('#gdrive-connected');
+  if (!disconnected) return;
+
+  if (app.gdriveState && app.gdriveState.connected) {
+    disconnected.classList.add('hidden');
+    connected.classList.remove('hidden');
+    $('#gdrive-folder-name').textContent = app.gdriveState.folder_name || 'No folder selected';
+    $('#gdrive-email').textContent = app.gdriveState.user_email || 'Google Drive';
+
+    const syncInfo = $('#gdrive-sync-info');
+    if (syncInfo && app.gdriveState.total !== undefined) {
+      const synced = app.gdriveState.synced || 0;
+      const total = app.gdriveState.total || 0;
+      syncInfo.textContent = `${synced} of ${total} recordings synced`;
+    }
+  } else {
+    disconnected.classList.remove('hidden');
+    connected.classList.add('hidden');
+  }
+
+  const autoSync = $('#gdrive-auto-sync-toggle');
+  if (autoSync) autoSync.checked = (app.settings && app.settings.gdrive_auto_sync) || false;
+}
+
+function initGdriveEvents() {
+  // Connect
+  const connectBtn = $('#gdrive-connect-btn');
+  if (connectBtn) {
+    connectBtn.addEventListener('click', async () => {
+      setLoading(connectBtn, true);
+      try {
+        const result = await window.plaud.gdriveConnect();
+        if (result.error) {
+          toast(result.error, 'error');
+          setLoading(connectBtn, false);
+          return;
+        }
+        if (result.url) {
+          window.plaud.openExternal(result.url);
+          toast('Sign in with Google in your browser...', 'info');
+
+          const poll = setInterval(async () => {
+            const status = await window.plaud.gdriveStatus();
+            if (status.connected) {
+              clearInterval(poll);
+              app.gdriveState = status;
+              renderGoogleDrive();
+              toast('Google Drive connected!', 'success');
+              setLoading(connectBtn, false);
+            }
+          }, 2000);
+
+          setTimeout(() => { clearInterval(poll); setLoading(connectBtn, false); }, 120000);
+        }
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
+        setLoading(connectBtn, false);
+      }
+    });
+  }
+
+  // Disconnect
+  const disconnectBtn = $('#gdrive-disconnect-btn');
+  if (disconnectBtn) {
+    disconnectBtn.addEventListener('click', async () => {
+      try {
+        await window.plaud.gdriveDisconnect();
+        app.gdriveState = { connected: false };
+        renderGoogleDrive();
+        toast('Google Drive disconnected');
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
+      }
+    });
+  }
+
+  // Folder search
+  let _folderSearchTimeout;
+  const folderSearch = $('#gdrive-folder-search');
+
+  function _searchGdriveFolders() {
+    clearTimeout(_folderSearchTimeout);
+    _folderSearchTimeout = setTimeout(async () => {
+      const q = (folderSearch ? folderSearch.value.trim() : '');
+      const list = $('#gdrive-folder-list');
+      if (!list) return;
+      try {
+        list.innerHTML = '<p class="settings-hint">Searching...</p>';
+        const result = await window.plaud.gdriveFolders(q);
+        if (result.error) {
+          list.innerHTML = `<p class="settings-hint" style="color:var(--destructive);">${escapeHtml(result.error)}</p>`;
+          return;
+        }
+        const folders = result.folders || [];
+        if (folders.length === 0) {
+          list.innerHTML = '<p class="settings-hint">No folders found</p>';
+          return;
+        }
+        list.innerHTML = folders.map(f =>
+          `<button class="action-btn subtle w-full justify-start mt-1 gdrive-folder-option" data-id="${escapeHtml(f.id)}" data-name="${escapeHtml(f.name)}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            ${escapeHtml(f.name)}
+          </button>`
+        ).join('');
+        list.querySelectorAll('.gdrive-folder-option').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            await window.plaud.gdriveSetFolder(btn.dataset.id, btn.dataset.name);
+            app.gdriveState = await window.plaud.gdriveStatus();
+            renderGoogleDrive();
+            toast(`Folder set: ${btn.dataset.name}`, 'success');
+            list.innerHTML = '';
+            if (folderSearch) folderSearch.value = '';
+          });
+        });
+      } catch (err) {
+        list.innerHTML = `<p class="settings-hint" style="color:var(--destructive);">${escapeHtml(err.message)}</p>`;
+      }
+    }, 300);
+  }
+
+  if (folderSearch) {
+    folderSearch.addEventListener('input', _searchGdriveFolders);
+    folderSearch.addEventListener('focus', _searchGdriveFolders);
+  }
+
+  // Create folder
+  const createBtn = $('#gdrive-folder-create-btn');
+  if (createBtn) {
+    createBtn.addEventListener('click', async () => {
+      const nameInput = $('#gdrive-new-folder-name');
+      const name = (nameInput ? nameInput.value : '').trim();
+      if (!name) return;
+      setLoading(createBtn, true);
+      try {
+        await window.plaud.gdriveCreateFolder(name);
+        app.gdriveState = await window.plaud.gdriveStatus();
+        renderGoogleDrive();
+        toast(`Folder created: ${name}`, 'success');
+        if (nameInput) nameInput.value = '';
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
+      } finally {
+        setLoading(createBtn, false);
+      }
+    });
+  }
+
+  // Sync all
+  const syncBtn = $('#gdrive-sync-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', async () => {
+      setLoading(syncBtn, true);
+      try {
+        const result = await window.plaud.gdriveSync();
+        if (result.error) {
+          toast(result.error, 'error');
+        } else {
+          const n = result.uploaded || 0;
+          toast(`Synced ${n} recording${n !== 1 ? 's' : ''} to Google Drive`, 'success');
+        }
+        app.gdriveState = await window.plaud.gdriveStatus();
+        renderGoogleDrive();
+      } catch (err) {
+        toast(`Sync failed: ${err.message}`, 'error');
+      } finally {
+        setLoading(syncBtn, false);
+      }
+    });
+  }
+
+  // Auto-sync toggle
+  const autoToggle = $('#gdrive-auto-sync-toggle');
+  if (autoToggle) {
+    autoToggle.addEventListener('change', async () => {
+      await window.plaud.saveSettings({ gdrive_auto_sync: autoToggle.checked });
+    });
+  }
+}
+
 // ---- Cloud Account ----
 
 async function loadCloudStatus() {
@@ -725,6 +917,7 @@ function updateAutoPipelineState() {
 
 function initSettingsEvents() {
   initStorageEvents();
+  initGdriveEvents();
 
   // Settings tabs — translate vertical scroll to horizontal (mouse wheel)
   // but let native horizontal scroll through (trackpad two-finger swipe)
