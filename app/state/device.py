@@ -117,6 +117,7 @@ def get_state():
         "device_name": _device_state["device_name"],
         "device_address": _device_state["device_address"],
         "battery": _device_state["battery"],
+        "charging": _device_state.get("charging", False),
         "serial_number": _device_state.get("serial_number"),
         "rssi": _device_state.get("rssi"),
     }
@@ -485,14 +486,23 @@ async def connect_device(address=None):
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
-    # Read battery
+    # Read battery via cmd 9 (live value from device, not the stale BLE characteristic)
     battery = None
+    charging = False
     try:
-        bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
-        battery = bat[0]
+        r = await send_cmd(bytes([1, 9, 0]), timeout=3)
+        if r and len(r) >= 5:
+            charging = bool(r[3])
+            battery = r[4]
     except Exception:
-        pass
+        # Fallback to BLE characteristic (may be stale/cached from first pairing)
+        try:
+            bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
+            battery = bat[0]
+        except Exception:
+            pass
     _device_state["battery"] = battery
+    _device_state["charging"] = charging
 
     return {
         "connected": True,
