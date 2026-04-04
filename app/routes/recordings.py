@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 
 from app.utils.config import load_config, save_config
 from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR
+from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("recordings", __name__)
 
@@ -291,9 +292,11 @@ def export_recording():
     safe_name = custom_name.replace("/", "-").replace(":", "-").replace("\\", "-")
     mp3_path = downloads_dir / f"{safe_name}.mp3"
 
+    # Ensure FFmpeg is available (downloads on first use if needed)
+    ffmpeg = ensure_ffmpeg()
     try:
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(ogg_path), "-codec:a", "libmp3lame", "-q:a", "2", str(mp3_path)],
+            [ffmpeg or "ffmpeg", "-y", "-i", str(ogg_path), "-codec:a", "libmp3lame", "-q:a", "2", str(mp3_path)],
             capture_output=True,
             text=True,
             timeout=60,
@@ -351,10 +354,11 @@ def crop_recording():
             shutil.copy2(str(ogg_path), str(backup_path))
         out_path = RECORDINGS_DIR / f"{session_id}_crop_tmp.ogg"
 
+    ffmpeg = ensure_ffmpeg()
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y",
+                ffmpeg or "ffmpeg", "-y",
                 "-i", str(ogg_path),
                 "-ss", str(start),
                 "-to", str(end),

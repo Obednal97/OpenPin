@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* https://*; media-src http://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self';">
+  <!-- CSP managed by Tauri (tauri.conf.json) in Tauri builds, or by Electron preload -->
   <title>Plaud V2</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,8 +12,11 @@
 </head>
 <body>
 
+  <!-- Tauri decorum: provide the titlebar element so the plugin doesn't create a blocking overlay -->
+  <div data-tauri-decorum-tb style="position:fixed;top:0;left:0;width:100%;height:0;z-index:-1;pointer-events:none;"></div>
+
   <!-- Header -->
-  <header id="header">
+  <header id="header" data-tauri-drag-region>
     <div class="header-left">
       <span class="header-separator"></span>
       <img src="assets/wordmark-white.png" alt="Plaud V2" class="app-wordmark app-wordmark-dark" height="18">
@@ -770,6 +773,28 @@
   <!-- Toast notifications -->
   <div id="toast-container" class="toast-container"></div>
 
+  <script>
+    // Tauri: make header draggable (replaces Electron's -webkit-app-region: drag)
+    if (window.__TAURI__) {
+      document.addEventListener('mousedown', (e) => {
+        const header = document.getElementById('header');
+        if (!header || !header.contains(e.target)) return;
+        // Don't drag if clicking on interactive elements
+        const tag = e.target.tagName.toLowerCase();
+        if (['button', 'input', 'select', 'a'].includes(tag)) return;
+        if (e.target.closest('button, input, select, a, .device-status, .header-right')) return;
+        if (e.buttons === 1) {
+          if (e.detail === 2) {
+            // Double-click: toggle maximize
+            window.__TAURI__.window.getCurrentWindow().toggleMaximize();
+          } else {
+            window.__TAURI__.window.getCurrentWindow().startDragging();
+          }
+        }
+      });
+    }
+  </script>
+  <script src="tauri-bridge.js"></script>
   <script src="ui/utils.js"></script>
   <script src="ui/recordings.js"></script>
   <script src="ui/transcript.js"></script>

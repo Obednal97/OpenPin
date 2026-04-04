@@ -142,7 +142,12 @@ def transcribe_with_whisper(
     return transcript
 
 
-HF_TOKEN_PATH = Path(__file__).parent.parent / ".hf_token"
+# Use the canonical DATA_DIR for the HF token — same path the settings UI writes to
+try:
+    from app.utils.constants import HF_TOKEN_PATH
+except ImportError:
+    # Fallback when running standalone (not as part of the Flask app)
+    HF_TOKEN_PATH = Path(__file__).parent.parent / ".hf_token"
 
 
 def _get_hf_token() -> str | None:

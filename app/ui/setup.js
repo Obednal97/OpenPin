@@ -466,6 +466,17 @@ async function completeSetup() {
               }
             }
             toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
+
+            // Auto-summarize if enabled
+            if (app.settings.auto_summarise) {
+              for (const f of newFiles) {
+                const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
+                try {
+                  await window.plaud.summarize(sid);
+                } catch {}
+              }
+              toast('Summaries generated', 'success');
+            }
           }
           await loadRecordings();
         }

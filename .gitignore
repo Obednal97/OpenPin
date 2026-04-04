@@ -27,6 +27,10 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
+# Rust / Tauri build artifacts
+src-tauri/target/
+dist-tauri/
+
 # APK reverse engineering
 apk-extracted/
 jadx-output/

@@ -149,7 +149,7 @@ def summarize_local(full_text):
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     except ImportError:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", "transformers", "sentencepiece"]
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", "--user", "-q", "transformers", "sentencepiece"]
         )
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 

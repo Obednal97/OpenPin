@@ -2,6 +2,9 @@
    Plaud V2 — Transcript View Module
    ============================================================ */
 
+// Track document-level listener to prevent accumulation across openTranscript() calls
+let _exportDropdownCleanup = null;
+
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
   if (!rec) return;
@@ -226,9 +229,12 @@ function openTranscript(sessionId, autoPlay = false) {
       e.stopPropagation();
       exportDropdown.classList.toggle('hidden');
     });
-    // Close dropdown on click outside (use capture + check to avoid leaking listeners)
-    const _closeExportDropdown = () => { if (exportDropdown) exportDropdown.classList.add('hidden'); };
-    document.addEventListener('click', _closeExportDropdown);
+    // Close dropdown on click outside — remove previous listener to prevent accumulation
+    if (_exportDropdownCleanup) {
+      document.removeEventListener('click', _exportDropdownCleanup);
+    }
+    _exportDropdownCleanup = () => { if (exportDropdown) exportDropdown.classList.add('hidden'); };
+    document.addEventListener('click', _exportDropdownCleanup);
 
     exportDropdown.querySelectorAll('.export-option').forEach((opt) => {
       opt.addEventListener('click', async (e) => {
@@ -293,26 +299,53 @@ function openTranscript(sessionId, autoPlay = false) {
           }
 
           const printWin = window.open('', '_blank', 'width=800,height=600');
-          printWin.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title>
-            <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222;}
-            h1{font-size:20px;margin-bottom:24px;}h2{font-size:16px;margin-top:24px;}h3{font-size:14px;}
-            ul{padding-left:20px;}li{margin:4px 0;}small{color:#888;}p{margin:8px 0;}</style>
-            </head><body>${html}</body></html>`);
-          printWin.document.close();
-          printWin.focus();
-          setTimeout(() => { printWin.print(); printWin.close(); }, 500);
-          toast(`Opening PDF print dialog...`, 'info');
+          if (printWin) {
+            printWin.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title>
+              <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222;}
+              h1{font-size:20px;margin-bottom:24px;}h2{font-size:16px;margin-top:24px;}h3{font-size:14px;}
+              ul{padding-left:20px;}li{margin:4px 0;}small{color:#888;}p{margin:8px 0;}</style>
+              </head><body>${html}</body></html>`);
+            printWin.document.close();
+            printWin.focus();
+            setTimeout(() => { printWin.print(); printWin.close(); }, 500);
+            toast(`Opening PDF print dialog...`, 'info');
+          } else {
+            // Fallback for WebViews that block window.open — download as HTML
+            const blob = new Blob([`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title></head><body>${html}</body></html>`], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${safeName}.html`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            toast(`Exported as HTML (open in browser and print to PDF)`, 'info');
+          }
           return;
         }
 
-        // Download file for non-PDF formats
-        const blob = new Blob([content], { type: mimeType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
+        // Download file — try anchor-click, fallback to data URI for Tauri WebView
+        try {
+          const blob = new Blob([content], { type: mimeType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch {
+          // Fallback: open as data URI (prompts save dialog)
+          const encoded = btoa(unescape(encodeURIComponent(content)));
+          const a = document.createElement('a');
+          a.href = `data:${mimeType};base64,${encoded}`;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
         toast(`Exported ${label} as ${filename}`, 'success');
       });
     });
@@ -349,7 +382,10 @@ function openTranscript(sessionId, autoPlay = false) {
             titleEl.setAttribute('data-placeholder', 'Add a title...');
           }
           await loadRecordings();
-          showTranscriptTab('summary', sessionId, rec, t);
+          // Only switch tab if user is still viewing this transcript
+          if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
+            showTranscriptTab('summary', sessionId, rec, t);
+          }
         }
       } catch (err) {
         toast(`Error: ${err.message}`, 'error');
@@ -764,7 +800,10 @@ async function transcribeRecording(oggPath, sessionId) {
       toast('Transcription complete', 'success');
       await loadRecordings();
       await loadSettings();
-      openTranscript(sessionId);
+      // Only auto-navigate if user is on the recordings list or already viewing this transcript
+      if (app.currentView === 'recordings' || (app.currentView === 'transcript' && app.currentSessionId === sessionId)) {
+        openTranscript(sessionId);
+      }
 
       if (result.diarizing) {
         toast('Speaker detection running in background...', 'info');
@@ -810,22 +849,48 @@ function closeTranscript() {
 }
 
 function initAudioPlayer() {
+  // Track the previously active segment to avoid O(n) scans on every timeupdate
+  let _lastActiveSegment = null;
+
   dom.audioEl.addEventListener('timeupdate', () => {
     if (dom.audioEl.duration) {
       const pct = (dom.audioEl.currentTime / dom.audioEl.duration) * 100;
       dom.playerFill.style.width = `${pct}%`;
       dom.playerCurrent.textContent = formatTime(dom.audioEl.currentTime);
 
-      $$('.segment').forEach((el) => {
-        const start = parseFloat(el.dataset.start);
-        const nextEl = el.nextElementSibling;
+      // Efficient active segment tracking — check current/next instead of scanning all
+      const t = dom.audioEl.currentTime;
+      const segments = $$('.segment');
+      if (segments.length === 0) return;
+
+      // If current segment is still active, skip the search
+      if (_lastActiveSegment) {
+        const start = parseFloat(_lastActiveSegment.dataset.start);
+        const nextEl = _lastActiveSegment.nextElementSibling;
         const nextStart = nextEl ? parseFloat(nextEl.dataset.start) : Infinity;
-        if (dom.audioEl.currentTime >= start && dom.audioEl.currentTime < nextStart) {
-          el.classList.add('active');
+        if (t >= start && t < nextStart) return; // Still in the same segment
+        _lastActiveSegment.classList.remove('active');
+      }
+
+      // Binary search for the active segment
+      let lo = 0, hi = segments.length - 1, found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const midStart = parseFloat(segments[mid].dataset.start);
+        if (midStart <= t) {
+          found = mid;
+          lo = mid + 1;
         } else {
-          el.classList.remove('active');
+          hi = mid - 1;
         }
-      });
+      }
+
+      if (found >= 0) {
+        segments[found].classList.add('active');
+        _lastActiveSegment = segments[found];
+      } else {
+        _lastActiveSegment = null;
+      }
     }
   });
 
@@ -1129,7 +1194,21 @@ async function drawWaveform(canvas, audioSrc) {
       ctx.fillStyle = accent;
       ctx.globalAlpha = 0.7;
       ctx.beginPath();
-      ctx.roundRect(i * (barWidth + gap), midY - h, barWidth, h * 2, 1);
+      // roundRect polyfill for Safari <16 (macOS Monterey)
+      const bx = i * (barWidth + gap), by = midY - h, bw = barWidth, bh = h * 2, br = 1;
+      if (ctx.roundRect) {
+        ctx.roundRect(bx, by, bw, bh, br);
+      } else {
+        ctx.moveTo(bx + br, by);
+        ctx.lineTo(bx + bw - br, by);
+        ctx.quadraticCurveTo(bx + bw, by, bx + bw, by + br);
+        ctx.lineTo(bx + bw, by + bh - br);
+        ctx.quadraticCurveTo(bx + bw, by + bh, bx + bw - br, by + bh);
+        ctx.lineTo(bx + br, by + bh);
+        ctx.quadraticCurveTo(bx, by + bh, bx, by + bh - br);
+        ctx.lineTo(bx, by + br);
+        ctx.quadraticCurveTo(bx, by, bx + br, by);
+      }
       ctx.fill();
     }
 

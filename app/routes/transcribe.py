@@ -50,7 +50,7 @@ def _extract_spoken_tags(text):
             for part in parts:
                 tag = part.strip().rstrip(".")
                 if tag and len(tag) < 50:
-                    tags.append(tag)
+                    tags.append(tag.title())
             break
     return tags
 
@@ -62,14 +62,15 @@ def _apply_spoken_tags(session_id, text):
         return []
     config = load_config()
     existing = config.get("recording_tags", {}).get(session_id, [])
-    # Merge — don't duplicate
+    # Merge — don't duplicate (case-insensitive comparison)
     merged = list(existing)
+    existing_lower = {x.lower() for x in existing}
     custom_tags = set(config.get("custom_tags", []))
     for t in tags:
-        if t not in merged:
+        if t.lower() not in existing_lower:
             merged.append(t)
-        # Auto-add to custom tags list if not already there
-        if t not in custom_tags:
+        # Auto-add to custom tags list if not already there (case-insensitive)
+        if t.lower() not in {x.lower() for x in custom_tags}:
             custom_tags.add(t)
     rec_tags = config.get("recording_tags", {})
     rec_tags[session_id] = merged
