@@ -451,7 +451,8 @@ async def connect_device(address=None):
     def handler(s, d):
         try:
             dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
-        except Exception:
+        except Exception as e:
+            logging.warning(f"[BLE] Notification decrypt failed ({len(d)}B): {e}")
             return
         if len(dd) < 1:
             return
@@ -463,6 +464,7 @@ async def connect_device(address=None):
                 file_data.extend(dd[10 : 10 + dd[9]])
         elif dd[0] == 1:
             cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
+            logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
             if cid == 29:
                 file_done.set()
             cmd_resp[0] = dd
@@ -475,13 +477,17 @@ async def connect_device(address=None):
     _device_state["file_done"] = file_done
     _device_state["connected"] = True
 
-    # Send APP_KEY handshake (cmd_id=1) — required for device to complete pairing.
-    # Format: [cmd_type=1][cmd_id=1 LE] + APP_KEY (32B) + audioChannel (1B) + SN
-    # Without this, the device stays in pairing mode even though the encrypted
-    # channel works. The APP_KEY is a static key proving we're a legitimate Plaud client.
-    from src.constants import APP_KEY
-    handshake_cmd = bytes([1, 1, 0]) + APP_KEY.encode("ascii") + bytes([1]) + sn.encode("ascii")
-    await send_cmd(handshake_cmd)
+    # Send BIND_TOKEN handshake (cmd_id=1) — required for device to accept commands.
+    # Format matches the official Android app (nh/a0.java) and the WiFi sync worker:
+    #   [cmd_type=1][cmd_id=1 LE][version=2][audioChannel=0][flag=0/1] + token32
+    # Two commands are sent: flag=0 then flag=1 (both required).
+    # The token is the per-device BIND_TOKEN from the cloud API (not the static APP_KEY).
+    from app.state.cloud import get_device_bind_token
+    device_token = get_device_bind_token(sn) or ""
+    token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
+    r1 = await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
+    r2 = await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
+    logging.info(f"[BLE] Handshake responses: HS1={r1 is not None}, HS2={r2 is not None}")
     await send_cmd(bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
