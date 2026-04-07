@@ -522,7 +522,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    log::info!("[Python] {line}");
+                    eprintln!("[Python] {line}");
                 }
             }
         });
@@ -534,7 +534,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    log::error!("[Python] {line}");
+                    eprintln!("[Python] {line}");
                 }
             }
         });
@@ -698,7 +698,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
-                log::info!("[Python] {line}");
+                eprintln!("[Python] {line}");
             }
         });
     }
@@ -706,7 +706,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                log::error!("[Python] {line}");
+                eprintln!("[Python] {line}");
             }
         });
     }
