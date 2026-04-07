@@ -436,9 +436,9 @@ rm -rf /tmp/plaud-v2-update
 IS_DMG="{is_dmg}"
 if [ "$IS_DMG" = "true" ]; then
   # DMG: mount, copy .app, unmount
-  MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | grep "/Volumes" | awk '{{print $NF}}')
+  # Use sed to extract full /Volumes/... path (handles spaces in volume names)
+  MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/' | tail -1)
   if [ -z "$MOUNT_POINT" ]; then
-    # Try with full path parsing
     MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | tail -1 | sed 's/.*\(\/Volumes\/.*\)/\1/')
   fi
   NEW_APP=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" 2>/dev/null | head -1)
