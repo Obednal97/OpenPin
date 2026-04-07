@@ -1106,6 +1106,10 @@ async def _sync_files_inner(progress_callback=None):
             continue
 
         raw_data = bytes(file_data)
+        # Save encrypted backup for long recordings (allows re-decrypt if needed)
+        if len(raw_data) > 500_000:
+            enc_path = active_rec_dir / f"{sid}_encrypted.bin"
+            enc_path.write_bytes(raw_data)
         opus_frames = decrypt_ble_file(raw_data, app_rsa_key)
         if opus_frames:
             ogg = wrap_opus_ogg(opus_frames)
