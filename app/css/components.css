@@ -182,6 +182,7 @@
 .badge-new { background: var(--accent-subtle); color: var(--accent); }
 .badge-partial { background: var(--yellow-subtle); color: var(--yellow); }
 .badge-transcribed { background: var(--green-subtle); color: var(--green); }
+.badge-cloud { background: var(--accent-subtle); color: var(--accent); }
 .badge-transcribing { background: var(--yellow-subtle); color: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
 .badge-processing {
   background: var(--accent-subtle);

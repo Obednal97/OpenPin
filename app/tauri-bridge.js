@@ -149,6 +149,7 @@ window.plaud = {
   recordings: () => apiCall('GET', '/recordings'),
   deleteRecordings: (session_ids) => apiCall('POST', '/recordings/delete', { session_ids }),
   moveRecordings: (session_ids, destination) => apiCall('POST', '/recordings/move', { session_ids, destination }),
+  redownloadRecordings: (session_ids) => apiCall('POST', '/recordings/redownload', { session_ids }),
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
   deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
   tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),

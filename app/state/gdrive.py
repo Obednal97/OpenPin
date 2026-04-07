@@ -559,5 +559,87 @@ def get_sync_status():
     return {"total": total, "synced": synced_count, "unsynced": total - synced_count}
 
 
+# ---- Auto-Upload + Cloud Streaming ----
+
+
+def maybe_auto_upload(session_id, ogg_path):
+    """Auto-upload a recording if storage mode requires it.
+
+    Called after BLE/WiFi sync saves a new file.
+    In 'cloud' mode, deletes the local file after upload.
+    """
+    config = load_config()
+    mode = config.get("storage_mode", "local")
+    if mode == "local":
+        return
+
+    if not is_connected() or not get_folder_id():
+        return
+
+    if is_synced(session_id):
+        return
+
+    try:
+        drive_id = upload_file(str(ogg_path))
+        file_size = Path(ogg_path).stat().st_size if Path(ogg_path).exists() else 0
+        mark_synced(session_id, drive_id, file_size)
+        logging.info(f"[GDrive] Auto-uploaded {session_id} (mode={mode})")
+
+        if mode == "cloud":
+            # Delete local file to save space — transcripts stay
+            p = Path(ogg_path)
+            if p.exists():
+                p.unlink()
+                logging.info(f"[GDrive] Deleted local {session_id}.ogg (cloud mode)")
+    except Exception as e:
+        logging.warning(f"[GDrive] Auto-upload failed for {session_id}: {e}")
+
+
+def proxy_stream(drive_file_id):
+    """Stream a file from Google Drive. Returns (data_bytes, content_type)."""
+    _ensure_fresh_token()
+    r = http_requests.get(
+        f"{GDRIVE_API_BASE}/drive/v3/files/{drive_file_id}?alt=media",
+        headers={"Authorization": f"Bearer {_gdrive_state['access_token']}"},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "audio/ogg")
+
+
+def get_cloud_only_recordings():
+    """Return recordings that exist in Drive but not locally.
+
+    These need to be shown in the recording list with a cloud-only flag.
+    """
+    from app.utils.constants import get_all_recordings_dirs
+
+    synced = get_synced_files()
+    if not synced:
+        return []
+
+    # Find all local session IDs
+    local_ids = set()
+    for rec_dir in get_all_recordings_dirs():
+        if rec_dir.exists():
+            for f in rec_dir.glob("*.ogg"):
+                local_ids.add(f.stem)
+
+    config = load_config()
+    dismissed = set(config.get("deleted_ids", []))
+
+    cloud_only = []
+    for sid, info in synced.items():
+        if sid not in local_ids and sid not in dismissed:
+            cloud_only.append({
+                "session_id": sid,
+                "drive_file_id": info.get("drive_file_id", ""),
+                "synced_at": info.get("synced_at", ""),
+                "file_size": info.get("file_size", 0),
+            })
+
+    return cloud_only
+
+
 # Load saved state on import
 load()
