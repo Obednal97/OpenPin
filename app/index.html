@@ -435,6 +435,22 @@
             <p class="settings-hint mt-2">Previous locations (recordings here are still visible):</p>
             <ul id="historical-dirs-list" class="historical-dirs-list"></ul>
           </div>
+          <label class="settings-label mt-3">Storage Mode</label>
+          <div class="storage-mode-selector" id="storage-mode-selector">
+            <button class="storage-mode-btn active" data-mode="local">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/></svg>
+              Local
+            </button>
+            <button class="storage-mode-btn" data-mode="cloud">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/></svg>
+              Cloud
+            </button>
+            <button class="storage-mode-btn" data-mode="both">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/><path d="M18 14h-1.26A4 4 0 109 18h9a2.5 2.5 0 000-5z" stroke-width="1.5"/></svg>
+              Both
+            </button>
+          </div>
+          <p id="storage-mode-hint" class="settings-hint mt-1"></p>
         </div>
         <div class="settings-section">
           <h3>About</h3>

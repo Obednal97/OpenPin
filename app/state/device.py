@@ -1106,6 +1106,10 @@ async def _sync_files_inner(progress_callback=None):
             continue
 
         raw_data = bytes(file_data)
+        # Save encrypted backup for long recordings (allows re-decrypt if needed)
+        if len(raw_data) > 500_000:
+            enc_path = active_rec_dir / f"{sid}_encrypted.bin"
+            enc_path.write_bytes(raw_data)
         opus_frames = decrypt_ble_file(raw_data, app_rsa_key)
         if opus_frames:
             ogg = wrap_opus_ogg(opus_frames)
@@ -1121,6 +1125,12 @@ async def _sync_files_inner(progress_callback=None):
                     "status": "new",
                 }
             )
+            # Auto-upload to Google Drive if storage mode requires it
+            try:
+                from app.state.gdrive import maybe_auto_upload
+                maybe_auto_upload(sid, str(ogg_path))
+            except Exception:
+                pass
         else:
             raw_path = active_rec_dir / f"{sid}_encrypted.bin"
             raw_path.write_bytes(raw_data)

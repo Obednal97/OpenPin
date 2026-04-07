@@ -1687,6 +1687,34 @@ function renderStorageSettings() {
       histContainer.classList.add('hidden');
     }
   }
+
+  // Storage mode
+  const mode = s.storage_mode || 'local';
+  const gdConnected = app.gdriveState && app.gdriveState.connected && app.gdriveState.folder_id;
+  const selector = $('#storage-mode-selector');
+  if (selector) {
+    selector.querySelectorAll('.storage-mode-btn').forEach(btn => {
+      const m = btn.dataset.mode;
+      btn.classList.toggle('active', m === mode);
+      // Disable cloud/both if Drive not connected
+      if (m === 'cloud' || m === 'both') {
+        btn.disabled = !gdConnected;
+      }
+    });
+  }
+  const hint = $('#storage-mode-hint');
+  if (hint) {
+    const hints = {
+      local: 'Recordings saved locally only.',
+      cloud: 'Recordings uploaded to Google Drive. Local files removed after upload to save space.',
+      both: 'Recordings saved locally and backed up to Google Drive.',
+    };
+    let text = hints[mode] || '';
+    if ((mode === 'cloud' || mode === 'both') && !gdConnected) {
+      text = 'Connect Google Drive in Integrations to enable cloud storage.';
+    }
+    hint.textContent = text;
+  }
 }
 
 function _showMigrationDialog(newDir, oldDir, isReset) {
@@ -1770,6 +1798,30 @@ function _showMigrationDialog(newDir, oldDir, isReset) {
 }
 
 function initStorageEvents() {
+  // Storage mode selector
+  const selector = $('#storage-mode-selector');
+  if (selector) {
+    selector.querySelectorAll('.storage-mode-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        const mode = btn.dataset.mode;
+        const gdConnected = app.gdriveState && app.gdriveState.connected && app.gdriveState.folder_id;
+        if ((mode === 'cloud' || mode === 'both') && !gdConnected) {
+          toast('Connect Google Drive first in Settings > Integrations', 'error');
+          return;
+        }
+        try {
+          await window.plaud.saveSettings({ storage_mode: mode });
+          app.settings.storage_mode = mode;
+          renderStorageSettings();
+          toast(`Storage mode: ${mode}`, 'success');
+        } catch (err) {
+          toast(`Failed: ${err.message}`, 'error');
+        }
+      });
+    });
+  }
+
   const changeBtn = $('#change-save-dir-btn');
   const resetBtn = $('#reset-save-dir-btn');
   const pathEl = $('#save-dir-path');

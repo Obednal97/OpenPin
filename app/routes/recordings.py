@@ -204,6 +204,33 @@ def list_recordings():
                 }
             )
 
+    # Include cloud-only recordings (uploaded to Drive but no local file)
+    try:
+        from app.state.gdrive import get_cloud_only_recordings
+        for cr in get_cloud_only_recordings():
+            sid = cr["session_id"]
+            if sid in complete_ids:
+                continue
+            transcript_path = TRANSCRIPTS_DIR / f"{sid}.json"
+            rec_date = _extract_recording_date(sid)
+            recordings.append(
+                {
+                    "session_id": sid,
+                    "ogg_path": None,
+                    "duration": 0,
+                    "size": cr.get("file_size", 0),
+                    "date": (rec_date or cr.get("synced_at", "")).isoformat() if rec_date else cr.get("synced_at", ""),
+                    "has_transcript": transcript_path.exists(),
+                    "title": custom_names.get(sid, ""),
+                    "tags": rec_tags.get(sid, []),
+                    "cloud_synced": True,
+                    "cloud_id": cr.get("drive_file_id", ""),
+                    "cloud_only": True,
+                }
+            )
+    except Exception:
+        pass
+
     recordings.sort(key=lambda r: r["date"], reverse=True)
     return jsonify(recordings)
 
@@ -458,6 +485,46 @@ def delete_recordings():
     config["deleted_ids"] = list(dismissed)
     save_config(config)
     return jsonify({"deleted": deleted, "count": len(session_ids)})
+
+
+@bp.route("/recordings/redownload", methods=["POST"])
+def redownload_recording():
+    """Mark a recording for re-download by removing local files and clearing dismiss markers."""
+    data = request.get_json(silent=True) or {}
+    session_ids = data.get("session_ids", [])
+    if not session_ids:
+        return jsonify({"error": "No session_ids provided"}), 400
+
+    config = load_config()
+    dismissed = set(config.get("deleted_ids", []))
+    cleared = []
+
+    for sid in session_ids:
+        # Remove the .ogg, cached M4A, and any .deleted marker
+        for rec_dir in get_all_recordings_dirs():
+            for pattern in [f"{sid}.ogg", f"{sid}.ogg.partial", f"{sid}.deleted", f"{sid}_encrypted.bin"]:
+                p = rec_dir / pattern
+                if p.exists():
+                    p.unlink(missing_ok=True)
+
+        # Clear M4A cache
+        import os
+        m4a_cache = os.path.join(
+            os.path.expanduser("~"),
+            "Library", "Application Support", "com.plaud.v2", "cache", "m4a",
+            f"{sid}.m4a",
+        )
+        if os.path.exists(m4a_cache):
+            os.unlink(m4a_cache)
+
+        # Remove from deleted_ids so sync will pick it up again
+        dismissed.discard(sid)
+        cleared.append(sid)
+
+    config["deleted_ids"] = list(dismissed)
+    save_config(config)
+
+    return jsonify({"cleared": cleared, "count": len(cleared), "message": "Connect device and sync to re-download"})
 
 
 @bp.route("/recordings/move", methods=["POST"])

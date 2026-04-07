@@ -292,3 +292,25 @@
 .save-dir-field span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .historical-dirs-list { list-style: none; padding: 0; margin: var(--sp-2) 0 0 0; }
 .historical-dirs-list li { font-size: var(--text-xs); color: var(--text-tertiary); padding: var(--sp-0_5) 0; font-family: var(--font-mono); }
+
+/* Storage mode selector */
+.storage-mode-selector {
+  display: flex; gap: 1px;
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-top: var(--sp-2);
+}
+.storage-mode-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: var(--sp-1_5);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: none; cursor: pointer;
+  font-family: var(--font); font-size: var(--text-sm); font-weight: var(--weight-medium);
+  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
+}
+.storage-mode-btn:hover { background: var(--bg-hover); color: var(--text); }
+.storage-mode-btn.active { background: var(--accent); color: var(--white); }
+.storage-mode-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.storage-mode-btn svg { flex-shrink: 0; }

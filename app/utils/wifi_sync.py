@@ -362,6 +362,12 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
                                 {"session_id": current_sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
                             )
                             print(f"[WiFi] saved {current_sid}.ogg ({len(raw)} → {len(ogg)} bytes, {duration:.1f}s)")
+                            # Auto-upload to Google Drive if storage mode requires it
+                            try:
+                                from app.state.gdrive import maybe_auto_upload
+                                maybe_auto_upload(current_sid, str(ogg_path))
+                            except Exception:
+                                pass
                         else:
                             raw_path = save_dir / f"{current_sid}_encrypted.bin"
                             raw_path.write_bytes(raw)

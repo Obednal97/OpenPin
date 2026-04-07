@@ -92,6 +92,9 @@ function renderRecordingsList() {
       } else if (hasTranscript) {
         badgeClass = 'badge-transcribed';
         badgeText = 'Transcribed';
+      } else if (rec.cloud_only) {
+        badgeClass = 'badge-cloud';
+        badgeText = 'Cloud';
       }
 
       const isSelected = app.selectedIds.has(rec.session_id);
@@ -549,6 +552,15 @@ function _showContextMenu(x, y, sessionId) {
 
   items.push({ label: 'Move to...', icon: 'move', action: () => {
     showMoveDialog([sessionId], () => { loadRecordings(); });
+  }});
+  items.push({ label: 'Re-download from device', icon: 'refresh', action: async () => {
+    try {
+      await window.plaud.redownloadRecordings([sessionId]);
+      toast('Recording cleared — connect device and sync to re-download', 'info');
+      await loadRecordings();
+    } catch (err) {
+      toast(`Failed: ${err.message}`, 'error');
+    }
   }});
   items.push({ label: 'Delete', icon: 'delete', destructive: true, action: () => {
     showDeleteDialog([sessionId], 1, () => { loadRecordings(); });
