@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from flask import Blueprint, abort, jsonify, request, send_file
+from flask import Blueprint, Response, abort, jsonify, request, send_file
 
 from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
 from app.utils.system import ensure_ffmpeg
@@ -45,6 +45,34 @@ def serve_audio(filepath):
         # Try as absolute path
         full_path = Path(filepath)
     if not full_path.exists():
+        # Fall back to Google Drive streaming for cloud-only recordings
+        session_id = Path(filepath).stem
+        try:
+            from app.state import gdrive
+            synced = gdrive.get_synced_files()
+            info = synced.get(session_id)
+            if info and info.get("drive_file_id") and gdrive.is_connected():
+                data, content_type = gdrive.proxy_stream(info["drive_file_id"])
+
+                # Check if M4A transcoding needed
+                want_m4a = request.args.get("format") == "m4a"
+                if want_m4a and content_type == "audio/ogg":
+                    # Cache the OGG locally, transcode, serve M4A
+                    cache_dir = _m4a_cache_dir()
+                    ogg_cache = os.path.join(cache_dir, f"{session_id}.ogg")
+                    m4a_cache = os.path.join(cache_dir, f"{session_id}.m4a")
+                    if not os.path.exists(m4a_cache):
+                        with open(ogg_cache, "wb") as f:
+                            f.write(data)
+                        m4a_path = _get_or_transcode_m4a(Path(ogg_cache))
+                        if m4a_path and os.path.exists(m4a_path):
+                            return send_file(m4a_path, mimetype="audio/mp4")
+                    else:
+                        return send_file(m4a_cache, mimetype="audio/mp4")
+
+                return Response(data, mimetype=content_type)
+        except Exception:
+            pass
         abort(404)
 
     # WebKit (Tauri/Safari) can't play OGG — serve M4A (AAC) instead

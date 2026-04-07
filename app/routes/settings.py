@@ -54,6 +54,7 @@ def get_settings():
             "has_paired_devices": bool(config.get("paired_devices", {})),
             "setup_dismissed": config.get("setup_dismissed", False),
             "gdrive_auto_sync": config.get("gdrive_auto_sync", False),
+            "storage_mode": config.get("storage_mode", "local"),
             "save_directory": str(get_recordings_dir()),
             "default_save_directory": str(DEFAULT_RECORDINGS_DIR),
             "historical_directories": config.get("historical_directories", []),
@@ -102,6 +103,9 @@ def save_settings():
         config["setup_dismissed"] = data["setup_dismissed"]
     if "gdrive_auto_sync" in data:
         config["gdrive_auto_sync"] = data["gdrive_auto_sync"]
+    if "storage_mode" in data:
+        if data["storage_mode"] in ("local", "cloud", "both"):
+            config["storage_mode"] = data["storage_mode"]
     if "transcription_provider" in data:
         config["transcription_provider"] = data["transcription_provider"]
     if "diarization_provider" in data:
