@@ -28,6 +28,9 @@ mkdir -p "$DIST/assets"
 cp "$APP"/assets/*.png "$DIST/assets/"
 cp "$APP"/assets/*.svg "$DIST/assets/" 2>/dev/null || true
 
+# Root-level SVG icons (e.g. notion-icon.svg)
+cp "$APP"/*.svg "$DIST/" 2>/dev/null || true
+
 # App icons
 cp "$APP"/icon*.png "$DIST/" 2>/dev/null || true
 cp "$APP"/icon.icns "$DIST/" 2>/dev/null || true
