@@ -1566,41 +1566,8 @@ function initSettingsEvents() {
 
   // Device manager force sync
   $('#dm-sync-btn').addEventListener('click', async () => {
-    const btn = $('#dm-sync-btn');
-    setLoading(btn, true);
-    dom.progressBar.classList.remove('hidden');
-    dom.progressBar.classList.add('indeterminate');
-    toast('Syncing from device...', 'info');
-    try {
-      const result = await window.plaud.sync();
-      if (result.error) {
-        toast(`Sync failed: ${result.error}`, 'error');
-      } else {
-        const newFiles = (result.files || []).filter((f) => f.status === 'new');
-        toast(`Sync complete: ${newFiles.length} new recording(s)`, 'success');
-        if (newFiles.length > 0) {
-          for (const f of newFiles) {
-            if (f.ogg_path) {
-              try {
-                await window.plaud.transcribe(
-                  f.ogg_path,
-                  app.settings.model || 'small',
-                  app.settings.diarize || false,
-                  app.settings.language || 'en',
-                );
-              } catch {}
-            }
-          }
-          await loadRecordings();
-        }
-      }
-    } catch (err) {
-      toast(`Error: ${err.message}`, 'error');
-    } finally {
-      dom.progressBar.classList.remove('indeterminate');
-      hideProgress();
-      setLoading(btn, false);
-    }
+    // Delegate to shared sync handler — keeps behavior consistent with the header sync button
+    await performSync($('#dm-sync-btn'));
   });
 
   // Device manager disconnect/depair
