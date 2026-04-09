@@ -586,43 +586,6 @@ def move_recordings():
     return jsonify({"moved": moved, "errors": errors, "count": len(moved)})
 
 
-@bp.route("/recordings/redownload", methods=["POST"])
-def redownload_recording():
-    """Mark a recording for re-download by removing local files and clearing dismiss markers."""
-    data = request.get_json(silent=True) or {}
-    session_ids = data.get("session_ids", [])
-    if not session_ids:
-        return jsonify({"error": "No session_ids provided"}), 400
-
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
-    cleared = []
-
-    for sid in session_ids:
-        for rec_dir in get_all_recordings_dirs():
-            for pattern in [f"{sid}.ogg", f"{sid}.ogg.partial", f"{sid}.deleted", f"{sid}_encrypted.bin"]:
-                p = rec_dir / pattern
-                if p.exists():
-                    p.unlink(missing_ok=True)
-
-        import os
-        m4a_cache = os.path.join(
-            os.path.expanduser("~"),
-            "Library", "Application Support", "com.plaud.v2", "cache", "m4a",
-            f"{sid}.m4a",
-        )
-        if os.path.exists(m4a_cache):
-            os.unlink(m4a_cache)
-
-        dismissed.discard(sid)
-        cleared.append(sid)
-
-    config["deleted_ids"] = list(dismissed)
-    save_config(config)
-
-    return jsonify({"cleared": cleared, "count": len(cleared), "message": "Connect device and sync to re-download"})
-
-
 @bp.route("/transcripts")
 def list_transcripts():
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)

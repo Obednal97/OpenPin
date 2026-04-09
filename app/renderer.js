@@ -159,14 +159,53 @@ dom.scanBtn.addEventListener('click', async () => {
   }
 });
 
-dom.syncBtn.addEventListener('click', async () => {
-  setLoading(dom.syncBtn, true);
+function setSyncButtonMode(mode) {
+  const btn = dom.syncBtn;
+  if (!btn) return;
+  const label = btn.querySelector('span');
+  const svg = btn.querySelector('svg');
+  if (mode === 'switch-wifi') {
+    if (label) label.textContent = 'Switch to WiFi';
+    if (svg) {
+      svg.innerHTML = '<path d="M5 12a7 7 0 0 1 14 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/>';
+      svg.setAttribute('viewBox', '0 0 24 24');
+    }
+  } else {
+    if (label) label.textContent = 'Sync Recordings';
+    if (svg) {
+      svg.innerHTML = '<path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
+      svg.setAttribute('viewBox', '0 0 18 18');
+    }
+  }
+}
+
+// Unified sync entry point — called from the header sync button AND
+// Settings > Device sync button. Handles switching to WiFi mid-sync,
+// WiFi size check, BLE transfer, transcription, auto-summarise, cloud sync.
+async function performSync(triggerBtn) {
+  // If already syncing over BLE, act as "Switch to WiFi"
+  if (app.syncing) {
+    try {
+      toast('Switching to WiFi sync...', 'info');
+      await window.plaud.abortSync();
+      await new Promise(r => setTimeout(r, 500));
+      app.syncing = false;
+      setSyncButtonMode('sync');
+      executeWifiSync();
+    } catch (err) {
+      toast(`Failed to switch: ${err.message}`, 'error');
+    }
+    return;
+  }
+
+  const btn = triggerBtn || dom.syncBtn;
+  setLoading(btn, true);
 
   // Check file sizes first — offer WiFi for large transfers
   try {
     const check = await window.plaud.checkNew();
     if (check.new_files > 0 && check.total_size > WIFI_SIZE_THRESHOLD) {
-      setLoading(dom.syncBtn, false);
+      setLoading(btn, false);
       if (app.settings.auto_prefer_wifi) {
         executeWifiSync();
       } else {
@@ -179,6 +218,8 @@ dom.syncBtn.addEventListener('click', async () => {
   showProgress('Syncing recordings...', 20);
   toast('Syncing recordings from device...', 'info');
   app.syncing = true;
+  setLoading(btn, false);
+  setSyncButtonMode('switch-wifi');
 
   try {
     const result = await window.plaud.sync();
@@ -209,7 +250,6 @@ dom.syncBtn.addEventListener('click', async () => {
         }
         toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
 
-        // Auto-summarise if enabled
         if (app.settings.auto_summarise) {
           showProgress('Summarising...', 90);
           for (const f of newFiles) {
@@ -225,7 +265,6 @@ dom.syncBtn.addEventListener('click', async () => {
       }
 
       await loadRecordings();
-      // Refresh settings — transcription may have added spoken tags to available_tags
       await loadSettings();
 
       const syncDir = app.settings.cloud_sync_direction || 'download';
@@ -247,12 +286,15 @@ dom.syncBtn.addEventListener('click', async () => {
     toast(`Sync error: ${err.message}`, 'error');
   } finally {
     app.syncing = false;
+    setLoading(btn, false);
     setLoading(dom.syncBtn, false);
+    setSyncButtonMode('sync');
     hideProgress();
-    // Immediately refresh status after sync ends — catches disconnections during transfer
     await updateDeviceStatus();
   }
-});
+}
+
+dom.syncBtn.addEventListener('click', () => performSync(dom.syncBtn));
 
 dom.disconnectBtn.addEventListener('click', async () => {
   try {
