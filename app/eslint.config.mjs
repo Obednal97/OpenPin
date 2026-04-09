@@ -63,6 +63,8 @@ export default [
         renderSettings: "writable",
         initSettingsEvents: "writable",
         updateDeviceStatus: "writable",
+        setSyncButtonMode: "writable",
+        performSync: "writable",
         loadCloudStatus: "writable",
         loadNotionStatus: "writable",
         loadGdriveStatus: "writable",
