@@ -483,13 +483,27 @@ fi
 "#
     );
 
-    // Spawn detached so it survives app quit
-    let _ = std::process::Command::new("bash")
-        .args(["-c", &script])
+    // Spawn detached so it survives app.exit(0). Rust's default spawn keeps
+    // the child in the parent's session; when the Tauri process terminates,
+    // macOS can reap the still-attached bash before it finishes the swap +
+    // `open`. pre_exec runs between fork and exec — calling setsid() there
+    // makes the child a new session leader so it outlives the parent.
+    let mut cmd = std::process::Command::new("bash");
+    cmd.args(["-c", &script])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let _ = cmd.spawn();
 
     // Quit the app so the script can replace it
     crate::python::stop_python_server();

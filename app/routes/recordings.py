@@ -261,40 +261,22 @@ def tag_recording():
         except Exception:
             pass
 
-    # Sync tags to Notion if page already exists (tags-only update, no title change)
-    notion_synced = False
+    # Enqueue a Notion tag sync — the background worker owns the actual call
+    # so this endpoint returns immediately and the UI stays responsive. If
+    # Notion is offline or the token expired, the queue retries with backoff.
+    notion_queued = False
     try:
-        from app.routes.notion import (
-            _build_notion_properties,
-            _ensure_tags_property_once,
-            _extract_page_id,
-            _get_notion_page_url,
-        )
-        from app.state import notion
-        existing_url = _get_notion_page_url(session_id)
-        if existing_url and notion.is_connected():
-            page_id = _extract_page_id(existing_url)
-            if page_id:
-                _ensure_tags_property_once(tags)
-                # Notion MCP stores multi-select as a JSON-array string (see the
-                # SQLite annotation on a multi-select column from notion-fetch).
-                import json as _json
-                properties = {"Tags": _json.dumps(tags)}
-                notion.mcp_call(
-                    "notion-update-page",
-                    {
-                        "page_id": page_id,
-                        "command": "update_properties",
-                        "properties": properties,
-                        "content_updates": [],
-                    },
-                )
-                notion_synced = True
+        from app.routes.notion import _get_notion_page_url
+        from app.state import notion as _notion
+        from app.utils import notion_queue
+        if _notion.is_connected() and _get_notion_page_url(session_id):
+            notion_queue.enqueue(session_id)
+            notion_queued = True
     except Exception as e:
         import logging as _logging
-        _logging.warning(f"Notion tag sync failed: {e}")
+        _logging.warning(f"Notion tag enqueue failed: {e}")
 
-    return jsonify({"saved": True, "notion_synced": notion_synced})
+    return jsonify({"saved": True, "notion_queued": notion_queued})
 
 
 @bp.route("/recordings/rename", methods=["POST"])

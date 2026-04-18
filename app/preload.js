@@ -160,6 +160,8 @@ contextBridge.exposeInMainWorld('plaud', {
   notionSetDatabaseUrl: (url) => apiCall('POST', '/notion/set-database-url', { url }),
   notionPush: (session_id) => apiCall('POST', '/notion/push', { session_id }),
   notionPageUrl: (session_id) => apiCall('GET', `/notion/page-url/${session_id}`),
+  notionQueueStatus: () => apiCall('GET', '/notion/queue-status'),
+  notionQueueResume: () => apiCall('POST', '/notion/queue-resume'),
 
   // Theme
   cycleTheme: () => ipcRenderer.invoke('cycle-theme'),

@@ -96,6 +96,7 @@ WHISPER_MODELS = {
 # Notion MCP
 NOTION_MCP_URL = "https://mcp.notion.com/mcp"
 NOTION_CONFIG_PATH = DATA_DIR / ".notion_mcp.json"
+NOTION_QUEUE_PATH = DATA_DIR / ".notion_queue.json"
 NOTION_CALLBACK_PORT = 5124
 
 # Google Drive

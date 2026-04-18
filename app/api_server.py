@@ -123,6 +123,10 @@ app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 
+# Start background workers
+from app.utils import notion_queue as _notion_queue
+_notion_queue.start_worker()
+
 
 if __name__ == "__main__":
     import os

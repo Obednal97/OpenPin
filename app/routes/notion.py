@@ -52,6 +52,21 @@ def disconnect():
     return jsonify(notion.disconnect())
 
 
+@bp.route("/queue-status")
+def queue_status():
+    """Snapshot of the background tag-sync queue — drives the UI indicator."""
+    from app.utils import notion_queue
+    return jsonify(notion_queue.snapshot())
+
+
+@bp.route("/queue-resume", methods=["POST"])
+def queue_resume():
+    """Clear a paused queue (e.g. after the user reconnects Notion)."""
+    from app.utils import notion_queue
+    notion_queue.resume()
+    return jsonify(notion_queue.snapshot())
+
+
 @bp.route("/databases")
 def databases():
     """Search for databases. Pass ?q=term for fuzzy search."""

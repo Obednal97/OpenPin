@@ -69,7 +69,7 @@ function openTranscript(sessionId, autoPlay = false) {
         .join('') + `<input type="text" class="tag-add-input" id="tag-add-input" placeholder="+ New tag">`;
 
     tagPicker.querySelectorAll('.tag-option').forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         const tag = btn.dataset.tag;
         const idx = currentTags.indexOf(tag);
         if (idx >= 0) {
@@ -78,32 +78,34 @@ function openTranscript(sessionId, autoPlay = false) {
           currentTags.push(tag);
         }
         rec.tags = currentTags;
-        await window.plaud.tagRecording(sessionId, currentTags);
+        // Render immediately — the server-side tag endpoint just saves locally
+        // and enqueues the Notion sync, so the UI doesn't need to wait.
         renderTagPicker();
+        window.plaud.tagRecording(sessionId, currentTags).catch(() => {});
       });
     });
 
     const addInput = document.getElementById('tag-add-input');
-    addInput.addEventListener('keydown', async (e) => {
-      if (e.key === 'Enter') {
-        const newTag = addInput.value.trim();
-        if (!newTag) return;
-        e.preventDefault();
-        if (!availableTags.includes(newTag)) {
-          availableTags.push(newTag);
-          const customTags = availableTags.filter(
-            (t) => !['Group Meeting', '1:1', 'Memo', 'Journal', 'Interview', 'Lecture'].includes(t),
-          );
-          await window.plaud.saveSettings({ custom_tags: customTags });
-          app.settings.available_tags = availableTags;
-        }
-        if (!currentTags.includes(newTag)) {
-          currentTags.push(newTag);
-          rec.tags = currentTags;
-          await window.plaud.tagRecording(sessionId, currentTags);
-        }
-        renderTagPicker();
+    addInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const newTag = addInput.value.trim();
+      if (!newTag) return;
+      e.preventDefault();
+      const addedToAvailable = !availableTags.includes(newTag);
+      if (addedToAvailable) {
+        availableTags.push(newTag);
+        const customTags = availableTags.filter(
+          (t) => !['Group Meeting', '1:1', 'Memo', 'Journal', 'Interview', 'Lecture'].includes(t),
+        );
+        app.settings.available_tags = availableTags;
+        window.plaud.saveSettings({ custom_tags: customTags }).catch(() => {});
       }
+      if (!currentTags.includes(newTag)) {
+        currentTags.push(newTag);
+        rec.tags = currentTags;
+        window.plaud.tagRecording(sessionId, currentTags).catch(() => {});
+      }
+      renderTagPicker();
     });
   }
   renderTagPicker();
