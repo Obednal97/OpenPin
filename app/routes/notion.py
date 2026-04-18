@@ -344,42 +344,121 @@ def _extract_page_id(url_or_id):
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
 
-def _ensure_tags_property():
-    """Ensure the Notion database has a Tags multi-select property.
+# Session-cached view of the Tags column schema. Populated on first push that
+# carries tags (so we don't hit Notion on startup or on tagless pushes).
+_tags_schema_cache = None  # None = uninitialised; else {"exists": bool, "options": set[str]}
 
-    Creates the property if missing. Safe to call repeatedly — the ALTER
-    errors on duplicate and we swallow that case.
+
+def _fetch_tags_schema():
+    """Read the live Tags column state from the Notion data source.
+
+    Returns {"exists": bool, "options": set[str]}. Empty on error — callers
+    degrade gracefully rather than blocking the push.
     """
+    default = {"exists": False, "options": set()}
     db_id = notion.get_database_id()
     if not db_id:
-        return False
+        return default
     try:
-        notion.mcp_call(
-            "notion-update-data-source",
-            {
-                "data_source_id": db_id,
-                "statements": 'ADD COLUMN "Tags" MULTI_SELECT()',
-            },
-        )
-        return True
+        result = notion.mcp_call("notion-fetch", {"id": db_id})
     except Exception as e:
-        err = str(e).lower()
-        if "already" in err or "exists" in err or "duplicate" in err:
-            return True
-        logging.warning(f"Could not create Tags property: {e}")
-        return False
+        logging.warning(f"Could not fetch Notion schema: {e}")
+        return default
+
+    # The fetch result is MCP-wrapped markdown containing a <data-source-state>
+    # JSON blob. Pull the text out of whichever envelope MCP returned.
+    text = ""
+    if isinstance(result, dict):
+        if isinstance(result.get("text"), str):
+            text = result["text"]
+        else:
+            for item in result.get("content", []) if isinstance(result.get("content"), list) else []:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    text += item["text"]
+    if not text:
+        return default
+
+    m = re.search(r"<data-source-state>\s*(\{.*?\})\s*</data-source-state>", text, re.DOTALL)
+    if not m:
+        return default
+    try:
+        state = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return default
+
+    tags_schema = state.get("schema", {}).get("Tags")
+    if not isinstance(tags_schema, dict) or tags_schema.get("type") != "multi_select":
+        return default
+    options = {
+        opt["name"]
+        for opt in tags_schema.get("options", [])
+        if isinstance(opt, dict) and isinstance(opt.get("name"), str)
+    }
+    return {"exists": True, "options": options}
 
 
-# Ensure the Tags column exists proactively on the first push that has tags.
-# Notion silently drops unknown properties, so a reactive retry would never fire.
-_tags_property_ensured = False
+def _ensure_tags_schema(tags):
+    """Make sure the Tags MULTI_SELECT column exists AND all `tags` are
+    registered as options on it.
+
+    Notion MCP rejects page writes whose multi_select values aren't already
+    declared in the column schema — it does NOT auto-create new options on
+    write. So before every write we reconcile the schema: ADD the column if
+    missing, then ALTER SET with (existing ∪ needed) options so we preserve
+    any options the user added manually on Notion's side.
+    """
+    global _tags_schema_cache
+    if _tags_schema_cache is None:
+        _tags_schema_cache = _fetch_tags_schema()
+
+    needed_opts = {t for t in (tags or []) if isinstance(t, str) and t}
+    missing_opts = needed_opts - _tags_schema_cache["options"]
+
+    if _tags_schema_cache["exists"] and not missing_opts:
+        return  # Nothing to do
+
+    db_id = notion.get_database_id()
+    if not db_id:
+        return
+
+    if not _tags_schema_cache["exists"]:
+        try:
+            notion.mcp_call(
+                "notion-update-data-source",
+                {"data_source_id": db_id, "statements": 'ADD COLUMN "Tags" MULTI_SELECT()'},
+            )
+            _tags_schema_cache["exists"] = True
+        except Exception as e:
+            err = str(e).lower()
+            if "already" in err or "exists" in err or "duplicate" in err:
+                _tags_schema_cache["exists"] = True
+            else:
+                logging.warning(f"Could not create Tags column: {e}")
+                return
+
+    if missing_opts:
+        all_opts = _tags_schema_cache["options"] | needed_opts
+        # ALTER SET replaces the full option list — keep every existing one so
+        # we don't wipe options the user added manually on Notion's side.
+        options_str = ", ".join(f"'{n.replace(chr(39), chr(39) * 2)}':default" for n in sorted(all_opts))
+        try:
+            notion.mcp_call(
+                "notion-update-data-source",
+                {
+                    "data_source_id": db_id,
+                    "statements": f'ALTER COLUMN "Tags" SET MULTI_SELECT({options_str})',
+                },
+            )
+            _tags_schema_cache["options"] = all_opts
+        except Exception as e:
+            logging.warning(f"Could not register Tags options: {e}")
+            # Invalidate the cache so the next push retries a fresh fetch.
+            _tags_schema_cache = None
 
 
+# Back-compat alias — older call sites in this module / recordings.py use this name.
 def _ensure_tags_property_once(tags):
-    global _tags_property_ensured
-    if tags and not _tags_property_ensured:
-        if _ensure_tags_property():
-            _tags_property_ensured = True
+    _ensure_tags_schema(tags)
 
 
 def _resolve_title_for_update(session_id, app_title, page_url):
