@@ -264,20 +264,33 @@ def tag_recording():
     # Sync tags to Notion if page already exists (tags-only update, no title change)
     notion_synced = False
     try:
-        from app.routes.notion import _get_notion_page_url, _build_notion_properties
+        from app.routes.notion import (
+            _build_notion_properties,
+            _ensure_tags_property_once,
+            _extract_page_id,
+            _get_notion_page_url,
+        )
         from app.state import notion
         existing_url = _get_notion_page_url(session_id)
         if existing_url and notion.is_connected():
-            # Only update tags, not title — avoids overwriting Notion-side title changes
-            properties = _build_notion_properties(None, tags)
-            if properties:  # Only call if there's something to update
+            page_id = _extract_page_id(existing_url)
+            if page_id:
+                _ensure_tags_property_once(tags)
+                # Send empty string when tags cleared so Notion wipes the value.
+                properties = {"Tags": ",".join(tags) if tags else ""}
                 notion.mcp_call(
                     "notion-update-page",
-                    {"url": existing_url, "properties": properties},
+                    {
+                        "page_id": page_id,
+                        "command": "update_properties",
+                        "properties": properties,
+                        "content_updates": [],
+                    },
                 )
                 notion_synced = True
-    except Exception:
-        pass
+    except Exception as e:
+        import logging as _logging
+        _logging.warning(f"Notion tag sync failed: {e}")
 
     return jsonify({"saved": True, "notion_synced": notion_synced})
 

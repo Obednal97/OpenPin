@@ -318,24 +318,40 @@ def _build_notion_properties(title, tags=None):
     """Build Notion page properties dict with title and optional tags.
 
     Title can be None to skip title update (preserves Notion-side custom title).
-    Tags are passed as a multi-select property — comma-separated strings.
+    Tags are passed as a multi-select property — comma-separated string
+    (Notion MCP's SQLite-value representation of an array).
     """
     props = {}
     if title is not None:
         props["title"] = title
     if tags:
-        props["Tags"] = ", ".join(tags)
+        # Notion MCP auto-creates new multi-select options on write as long
+        # as the column itself exists. See _ensure_tags_property.
+        props["Tags"] = ",".join(tags)
     return props
+
+
+def _extract_page_id(url_or_id):
+    """Extract a dashed UUID page_id from a Notion URL or bare id."""
+    if not url_or_id:
+        return None
+    stripped = url_or_id.replace("-", "")
+    m = re.search(r"([a-f0-9]{32})", stripped)
+    if not m:
+        return None
+    h = m.group(1)
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
 
 def _ensure_tags_property():
     """Ensure the Notion database has a Tags multi-select property.
 
-    Called once on first push with tags. Creates the property if missing.
+    Creates the property if missing. Safe to call repeatedly — the ALTER
+    errors on duplicate and we swallow that case.
     """
     db_id = notion.get_database_id()
     if not db_id:
-        return
+        return False
     try:
         notion.mcp_call(
             "notion-update-data-source",
@@ -344,29 +360,25 @@ def _ensure_tags_property():
                 "statements": 'ADD COLUMN "Tags" MULTI_SELECT()',
             },
         )
+        return True
     except Exception as e:
-        # Property may already exist — that's fine
         err = str(e).lower()
-        if "already" not in err and "exists" not in err and "duplicate" not in err:
-            logging.warning(f"Could not create Tags property: {e}")
+        if "already" in err or "exists" in err or "duplicate" in err:
+            return True
+        logging.warning(f"Could not create Tags property: {e}")
+        return False
 
 
-# Track whether we've verified the Tags property exists this session
-_tags_property_checked = False
+# Ensure the Tags column exists proactively on the first push that has tags.
+# Notion silently drops unknown properties, so a reactive retry would never fire.
+_tags_property_ensured = False
 
 
-def _push_with_tags_fallback(call_fn, tags):
-    """Execute a Notion MCP call, creating Tags property if needed on first failure."""
-    global _tags_property_checked
-    try:
-        return call_fn()
-    except Exception as e:
-        if tags and not _tags_property_checked and "tags" in str(e).lower():
-            # Tags property likely doesn't exist — create it and retry
-            _tags_property_checked = True
-            _ensure_tags_property()
-            return call_fn()
-        raise
+def _ensure_tags_property_once(tags):
+    global _tags_property_ensured
+    if tags and not _tags_property_ensured:
+        if _ensure_tags_property():
+            _tags_property_ensured = True
 
 
 def _resolve_title_for_update(session_id, app_title, page_url):
@@ -405,7 +417,6 @@ def push_to_notion(session_id, t_data=None, config=None):
 
     Returns dict with keys: pushed, updated, url, error (if any).
     """
-    global _tags_property_checked
     if not notion.is_connected():
         return {"error": "Not connected to Notion"}
     if not notion.get_database_id():
@@ -425,40 +436,72 @@ def push_to_notion(session_id, t_data=None, config=None):
     tags = config.get("recording_tags", {}).get(session_id, [])
     full_content = _build_notion_content(t_data)
 
+    # Make sure the Tags MULTI_SELECT column exists before we try to write to
+    # it. Notion MCP silently drops unknown properties, so we can't rely on
+    # an error from the page write to tell us the column is missing.
+    _ensure_tags_property_once(tags)
+
     existing_url = _get_notion_page_url(session_id)
 
     if existing_url:
         # Updating existing page — protect Notion-side title changes
+        page_id = _extract_page_id(existing_url)
+        if not page_id:
+            return {"error": "Could not parse page ID from saved Notion URL"}
+
         resolved_title = _resolve_title_for_update(session_id, app_title, existing_url)
-        properties = _build_notion_properties(resolved_title, tags) if resolved_title else _build_notion_properties(None, tags)
-        result = _push_with_tags_fallback(
-            lambda: notion.mcp_call(
-                "notion-update-page",
-                {"url": existing_url, "properties": properties, "content": full_content},
-            ),
-            tags,
+        properties = (
+            _build_notion_properties(resolved_title, tags)
+            if resolved_title is not None
+            else _build_notion_properties(None, tags)
         )
-        if resolved_title:
+
+        # Two separate MCP calls: properties update, then content replace.
+        # notion-update-page requires an explicit command per call.
+        if properties:
+            notion.mcp_call(
+                "notion-update-page",
+                {
+                    "page_id": page_id,
+                    "command": "update_properties",
+                    "properties": properties,
+                    "content_updates": [],
+                },
+            )
+
+        result = notion.mcp_call(
+            "notion-update-page",
+            {
+                "page_id": page_id,
+                "command": "replace_content",
+                "properties": {},
+                "content_updates": [],
+                "new_str": full_content,
+                "allow_deleting_content": True,
+            },
+        )
+
+        if resolved_title is not None:
             _save_notion_pushed_title(session_id, resolved_title)
         return {"pushed": True, "updated": True, "url": existing_url, "result": result}
     else:
         # Creating new page — always use app title
         properties = _build_notion_properties(app_title, tags)
-        result = _push_with_tags_fallback(
-            lambda: notion.mcp_call(
-                "notion-create-pages",
-                {
-                    "parent": {"database_id": notion.get_database_id()},
-                    "pages": [
-                        {
-                            "properties": properties,
-                            "content": full_content,
-                            "icon": "\U0001f399\ufe0f",
-                        }
-                    ],
+        result = notion.mcp_call(
+            "notion-create-pages",
+            {
+                "parent": {
+                    "type": "database_id",
+                    "database_id": notion.get_database_id(),
                 },
-            ),
-            tags,
+                "pages": [
+                    {
+                        "properties": properties,
+                        "content": full_content,
+                        "icon": "\U0001f399\ufe0f",
+                    }
+                ],
+            },
         )
         page_url = _extract_page_url(result)
         if page_url:

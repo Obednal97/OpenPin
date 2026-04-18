@@ -335,9 +335,23 @@ def transcribe_file():
         vocab = config.get("custom_vocabulary", [])
         vocab_prompt = ", ".join(vocab) if vocab else None
 
+        # Re-check the source file exists — user may have deleted it while cloud
+        # providers were running, or a sync may have removed it. Whisper will
+        # call ffmpeg which fails with an ugly 500 if the file is gone.
+        if not Path(path).exists():
+            return jsonify({"error": "Source audio file not found — it may have been deleted"}), 400
+
         from src.transcribe import transcribe as do_transcribe
 
-        t = do_transcribe(str(path), model=model, language=language, diarize=diarize, initial_prompt=vocab_prompt)
+        try:
+            t = do_transcribe(str(path), model=model, language=language, diarize=diarize, initial_prompt=vocab_prompt)
+        except RuntimeError as e:
+            # whisper.load_audio wraps ffmpeg failures as RuntimeError — convert
+            # file-missing failures into a clean 400 instead of a reported 500.
+            msg = str(e)
+            if "No such file" in msg or "Failed to load audio" in msg:
+                return jsonify({"error": "Source audio file not found or unreadable"}), 400
+            raise
 
         if t.text:
             t.save(str(transcript_path))

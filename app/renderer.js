@@ -558,11 +558,13 @@ async function executeWifiSync() {
       return;
     }
 
-    // Check if WiFi restore needs manual intervention
+    // Check if WiFi restore needs manual intervention.
+    // Not an auto-bug: this is a known macOS limitation — networksetup returns
+    // -3900 after Bluetooth sharing toggles the interface, and manual reconnect
+    // is required. The user is informed via the in-app UI + system notification.
     if (result.wifi_restore && result.wifi_restore.need_manual) {
       const ssidName = result.wifi_restore.ssid || 'your WiFi';
       _renderWifiProgress('wifi', 'Reconnect to WiFi', `Please reconnect to "${ssidName}" — WiFi settings should be open.`, 95, 'error');
-      window.plaud.reportError(`WiFi restore failed — manual reconnect needed for ${ssidName}`, '', 'wifi-restore-failed');
       window.plaud.showNotification(
         'WiFi transfer complete',
         `Please reconnect to "${ssidName}" in the WiFi settings panel.`,
@@ -671,6 +673,10 @@ window.plaud.onNotificationAction((action) => {
 // BLE connections die during macOS sleep — detect wake and force reconnect cycle
 window.plaud.onSystemWake(async () => {
   console.log('[Wake] System resumed — refreshing device status');
+  // Unstick any polling guards that may have been locked true by a fetch
+  // that was in flight when the system slept and never resolved.
+  if (typeof app.resetPollingState === 'function') app.resetPollingState();
+  if (typeof app.restartPollingTimers === 'function') app.restartPollingTimers();
   // Give BLE stack a moment to settle after wake
   await new Promise((r) => setTimeout(r, 2000));
   await updateDeviceStatus();
@@ -908,8 +914,10 @@ function _startBgPoll() {
     _appFocused = !document.hidden;
     if (_appFocused !== wasFocused) {
       _restartTimers();
-      // When app becomes active again, immediately check status + sync
+      // When app becomes active again, immediately check status + sync.
+      // Reset the busy guard first in case a pre-background fetch got stranded.
       if (_appFocused) {
+        _bgBusy = false;
         updateDeviceStatus();
         bgDevicePoll();
       }
@@ -918,6 +926,7 @@ function _startBgPoll() {
   window.addEventListener('focus', () => {
     if (!_appFocused) {
       _appFocused = true;
+      _bgBusy = false;
       _restartTimers();
       updateDeviceStatus();
       bgDevicePoll();
@@ -930,6 +939,12 @@ function _startBgPoll() {
 
   // Background device polling
   let _bgBusy = false;
+  // Expose a way to unstick the guard — e.g. after system wake if a fetch
+  // got stranded pre-sleep and never resolved.
+  app.resetPollingState = () => {
+    _bgBusy = false;
+    app.syncing = false;
+  };
   async function bgDevicePoll() {
     if (_bgBusy || app.syncing) return;
     _bgBusy = true;
@@ -949,10 +964,7 @@ function _startBgPoll() {
       }
 
       // Skip reconnect/sync if a sync is already running server-side
-      if (status.syncing) {
-        _bgBusy = false;
-        return;
-      }
+      if (status.syncing) return;
 
       if (!status.connected) {
         const scan = await window.plaud.scanKnown();
@@ -965,15 +977,11 @@ function _startBgPoll() {
             await updateDeviceStatus();
           }
         }
-        _bgBusy = false;
         return;
       }
 
       // Auto-sync if enabled
-      if (app.settings.auto_sync === false) {
-        _bgBusy = false;
-        return;
-      }
+      if (app.settings.auto_sync === false) return;
 
       const check = await window.plaud.checkNew();
       if (check.new_files > 0) {
@@ -981,7 +989,6 @@ function _startBgPoll() {
         if (check.total_size > WIFI_SIZE_THRESHOLD) {
           if (app.settings.auto_prefer_wifi) {
             executeWifiSync();
-            _bgBusy = false;
             return;
           }
           const isBackground = !document.hasFocus();
@@ -1050,7 +1057,9 @@ function _startBgPoll() {
         }
       }
     } catch {}
-    _bgBusy = false;
+    finally {
+      _bgBusy = false;
+    }
   }
 
   // Start with initial timers

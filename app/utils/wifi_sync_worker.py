@@ -171,6 +171,26 @@ def get_preferred_networks(exclude):
         return []
 
 
+async def _on_target_network(original_ssid, hotspot_ip, timeout_s=12):
+    """Poll for up to timeout_s seconds waiting to be back on original_ssid
+    with a non-hotspot IP. Returns (ip, ssid) on success, or (None, None).
+
+    Uses SSID-match rather than IP-equality because DHCP usually assigns a
+    fresh IP on reconnect, so comparing IPs produces false negatives.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while asyncio.get_event_loop().time() < deadline:
+        ip = get_en0_ip()
+        current_ssid = _get_current_ssid()
+        if ip and ip != hotspot_ip:
+            # If we know the target SSID, require it to match. Otherwise any
+            # non-hotspot IP is good enough.
+            if not original_ssid or current_ssid == original_ssid:
+                return ip, current_ssid
+        await asyncio.sleep(1.5)
+    return None, None
+
+
 async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     """Restore internet after Plaud hotspot.
 
@@ -189,18 +209,20 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     except Exception:
         iface = None
 
-    # Step 1: Try networksetup first (uses saved keychain password, no power-cycle needed)
+    # Step 1: Try networksetup first (uses saved keychain password, no power-cycle needed).
+    # macOS can take 8–12s to settle after setairportnetwork, so poll rather than
+    # sleeping a fixed 5s — the previous fixed sleep was short-circuiting into
+    # an unnecessary power-cycle even when the reconnect had actually succeeded.
     if original_ssid:
         status(f"Reconnecting to {original_ssid}...", 92)
         subprocess.run(
             ["networksetup", "-setairportnetwork", "en0", original_ssid],
             capture_output=True, timeout=15,
         )
-        await asyncio.sleep(5)
-        ip = get_en0_ip()
-        if ip and ip != hotspot_ip:
-            status(f"Restored to {original_ssid} ({ip})", 98)
-            return {"restored": True, "ssid": original_ssid, "ip": ip}
+        ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=12)
+        if ip:
+            status(f"Restored to {current_ssid or original_ssid} ({ip})", 98)
+            return {"restored": True, "ssid": current_ssid or original_ssid, "ip": ip}
 
     # Step 2-3: Power-cycle WiFi radio + try multiple rejoin methods
     for cycle in range(2):
@@ -219,11 +241,10 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
                 ["networksetup", "-setairportnetwork", "en0", original_ssid],
                 capture_output=True, timeout=15,
             )
-            await asyncio.sleep(3)
-            ip = get_en0_ip()
-            if ip and ip != hotspot_ip:
-                status(f"Restored to {original_ssid} ({ip})", 98)
-                return {"restored": True, "ssid": original_ssid, "ip": ip}
+            ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=10)
+            if ip:
+                status(f"Restored to {current_ssid or original_ssid} ({ip})", 98)
+                return {"restored": True, "ssid": current_ssid or original_ssid, "ip": ip}
 
         # Try CoreWLAN scan + join as fallback
         if original_ssid and iface:
@@ -243,21 +264,30 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
                     if best:
                         success, error = iface.associateToNetwork_password_error_(best, None, None)
                         if success:
-                            await asyncio.sleep(3)
-                            ip = get_en0_ip()
-                            if ip and ip != hotspot_ip:
-                                status(f"Restored to {original_ssid} ({ip})", 98)
-                                return {"restored": True, "ssid": original_ssid, "ip": ip}
+                            ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=8)
+                            if ip:
+                                status(f"Restored to {current_ssid or original_ssid} ({ip})", 98)
+                                return {"restored": True, "ssid": current_ssid or original_ssid, "ip": ip}
             except Exception:
                 pass
 
-        # Check if macOS auto-joined on its own
+        # Check if macOS auto-joined on its own — accept ANY non-hotspot network
+        # since the user is back online. DHCP often hands out a different IP
+        # than before, so ip == original_ip was producing false negatives.
         ip = get_en0_ip()
         if ip and ip != hotspot_ip:
-            current = str(iface.ssid()) if iface and iface.ssid() else ""
-            if not original_ip or ip == original_ip:
-                status(f"Restored to {current or 'network'} ({ip})", 98)
-                return {"restored": True, "ssid": current, "ip": ip}
+            current = _get_current_ssid()
+            status(f"Restored to {current or 'network'} ({ip})", 98)
+            return {"restored": True, "ssid": current, "ip": ip}
+
+    # Final check before giving up — we may have reconnected during the last
+    # iteration's settle but missed the window. Don't open WiFi settings if
+    # we're already back online.
+    ip = get_en0_ip()
+    if ip and ip != hotspot_ip:
+        current = _get_current_ssid()
+        status(f"Restored to {current or 'network'} ({ip})", 98)
+        return {"restored": True, "ssid": current, "ip": ip}
 
     # All automatic methods failed — open WiFi settings for user
     status("Opening WiFi settings...", 96)
