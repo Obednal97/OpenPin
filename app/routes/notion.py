@@ -318,16 +318,17 @@ def _build_notion_properties(title, tags=None):
     """Build Notion page properties dict with title and optional tags.
 
     Title can be None to skip title update (preserves Notion-side custom title).
-    Tags are passed as a multi-select property — comma-separated string
-    (Notion MCP's SQLite-value representation of an array).
+    Notion MCP expects multi-select values as a JSON-array string (it's stored
+    as TEXT in the SQLite-style schema — see `notion-fetch` on a data source,
+    which annotates multi-select columns as `JSON array with zero or more of`).
     """
     props = {}
     if title is not None:
         props["title"] = title
-    if tags:
-        # Notion MCP auto-creates new multi-select options on write as long
-        # as the column itself exists. See _ensure_tags_property.
-        props["Tags"] = ",".join(tags)
+    if tags is not None:
+        # Always send — an empty array clears the property on Notion's side.
+        # Notion auto-creates new multi-select options when it sees unfamiliar values.
+        props["Tags"] = json.dumps(tags)
     return props
 
 
