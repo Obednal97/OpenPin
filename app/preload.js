@@ -15,8 +15,28 @@ const REPORT_ENDPOINTS = new Set([
   '/cloud/sync', '/cloud/exchange-token',
   '/notion/push', '/notion/connect',
 ]);
+// Endpoints that are legitimately long-running — never abort these on timeout
+const NO_TIMEOUT_ENDPOINTS = new Set([
+  '/device/sync', '/device/wifi-sync',
+  '/transcribe', '/summarize',
+  '/cloud/sync',
+  '/gdrive/sync', '/gdrive/upload',
+  '/recordings/redownload', '/recordings/crop', '/recordings/export',
+]);
+const DEFAULT_TIMEOUT_MS = 30000;
 // Suppress "Failed to fetch" reports during the first 15s (server may still be starting)
 const _appStartTime = Date.now();
+
+async function _fetchWithTimeout(url, opts, endpoint) {
+  if (NO_TIMEOUT_ENDPOINTS.has(endpoint)) return fetch(url, opts);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 async function apiCall(method, endpoint, body = null) {
   // Wait for the dynamic port to be resolved before first API call
@@ -30,7 +50,7 @@ async function apiCall(method, endpoint, body = null) {
   }
   let res;
   try {
-    res = await fetch(`${_apiUrl}${endpoint}`, opts);
+    res = await _fetchWithTimeout(`${_apiUrl}${endpoint}`, opts, endpoint);
   } catch (err) {
     // Network error (server down, etc.) — suppress during startup grace period
     if (REPORT_ENDPOINTS.has(endpoint) && Date.now() - _appStartTime > 15000) {
@@ -44,9 +64,18 @@ async function apiCall(method, endpoint, body = null) {
   }
   const data = await res.json();
   // Auto-report errors from critical endpoints (include Python traceback if available)
-  // Skip transient BLE errors that are expected during background reconnect
+  // Skip transient BLE/network errors that are expected during background reconnect
   const errMsg = (data.raw_error || data.error || '').toLowerCase();
-  const isTransient = errMsg.includes('not found') || errMsg.includes('not in range');
+  const TRANSIENT_MARKERS = [
+    'not found',
+    'not in range',
+    'timeout',
+    'timed out',
+    'cancellederror',
+    'disconnected',
+    'went out of range',
+  ];
+  const isTransient = TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok) && !isTransient) {
     const snTag = data.device_sn ? ` [SN: ${data.device_sn}]` : '';
     const reportMsg = data.raw_error || data.error || `HTTP ${res.status}`;

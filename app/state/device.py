@@ -1133,6 +1133,11 @@ async def _sync_files_inner(progress_callback=None):
         # Download via BLE
         file_data = _device_state["file_data"]
         file_done = _device_state["file_done"]
+        if file_data is None or file_done is None:
+            # Device disconnected (or never fully handshaked) — abort cleanly.
+            logging.warning("BLE sync: device state reset mid-sync — aborting")
+            _reset_state()
+            break
         file_data.clear()
         file_done.clear()
 

@@ -116,13 +116,36 @@ function openTranscript(sessionId, autoPlay = false) {
   }
   $('#transcript-meta').textContent = metaParts.join(' \u00B7 ');
 
-  // Audio
+  // Audio — reset player UI immediately so we don't show the previous
+  // recording's progress while the new m4a transcodes on the server.
+  dom.audioEl.pause();
+  dom.playerFill.style.width = '0%';
+  dom.playerCurrent.textContent = formatTime(0);
+  dom.playerDuration.textContent = formatTime(rec.duration || 0);
+  dom.playIcon.classList.remove('hidden');
+  dom.pauseIcon.classList.add('hidden');
+
   const filename = `${sessionId}.ogg`;
   dom.audioEl.src = window.plaud.audioUrl(filename);
   dom.audioEl.load();
   if (autoPlay) {
     dom.audioEl.play().catch(() => {});
   }
+
+  // Pre-warm the m4a cache for neighbouring recordings so flipping through
+  // the list doesn't re-block on ffmpeg. Cached hits are a no-op server-side.
+  try {
+    const idx = app.recordings.findIndex((r) => r.session_id === sessionId);
+    if (idx >= 0) {
+      [app.recordings[idx - 1], app.recordings[idx + 1]]
+        .filter(Boolean)
+        .forEach((n) => {
+          fetch(window.plaud.audioUrl(`${n.session_id}.ogg`))
+            .then((r) => r.blob())
+            .catch(() => {});
+        });
+    }
+  } catch {}
 
   // Actions bar
   const actionsBar = $('#transcript-actions');
@@ -863,13 +886,17 @@ function initAudioPlayer() {
       const segments = $$('.segment');
       if (segments.length === 0) return;
 
-      // If current segment is still active, skip the search
-      if (_lastActiveSegment) {
+      // If current segment is still active, skip the search.
+      // isConnected guards against a stale reference after the transcript
+      // was re-rendered (e.g. the user switched to a different recording).
+      if (_lastActiveSegment && _lastActiveSegment.isConnected) {
         const start = parseFloat(_lastActiveSegment.dataset.start);
         const nextEl = _lastActiveSegment.nextElementSibling;
         const nextStart = nextEl ? parseFloat(nextEl.dataset.start) : Infinity;
         if (t >= start && t < nextStart) return; // Still in the same segment
         _lastActiveSegment.classList.remove('active');
+      } else {
+        _lastActiveSegment = null;
       }
 
       // Binary search for the active segment
