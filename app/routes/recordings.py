@@ -276,8 +276,10 @@ def tag_recording():
             page_id = _extract_page_id(existing_url)
             if page_id:
                 _ensure_tags_property_once(tags)
-                # Send empty string when tags cleared so Notion wipes the value.
-                properties = {"Tags": ",".join(tags) if tags else ""}
+                # Notion MCP stores multi-select as a JSON-array string (see the
+                # SQLite annotation on a multi-select column from notion-fetch).
+                import json as _json
+                properties = {"Tags": _json.dumps(tags)}
                 notion.mcp_call(
                     "notion-update-page",
                     {
