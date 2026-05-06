@@ -382,7 +382,8 @@ async def ble_connect_and_setup():
     dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
     key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
     cipher = ChaCha20Poly1305(key)
-    assert cipher.decrypt(nonce, ct, aad) == b"PLAUD.AI"
+    if cipher.decrypt(nonce, ct, aad) != b"PLAUD.AI":
+        raise ValueError("BLE handshake AAD validation failed")
     try:
         await cl.stop_notify(N)
     except Exception:
