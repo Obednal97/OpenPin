@@ -12,6 +12,7 @@
   const POLL_INTERVAL_MS = 250;
   const POLL_TIMEOUT_MS = 30000;
   const BG_POLL_INTERVAL_MS = 5000;
+  let _bgPollerHandle = null;
   let _bgPollerStarted = false;
 
   async function pingHealthOnce() {
@@ -81,10 +82,18 @@
     // Push initial 'up' state
     pushHealth('up');
 
-    setInterval(async () => {
+    _bgPollerHandle = setInterval(async () => {
       const ok = await pingHealthOnce();
       pushHealth(ok ? 'up' : 'down');
     }, BG_POLL_INTERVAL_MS);
+  }
+
+  function stopBackgroundPoller() {
+    if (_bgPollerHandle !== null) {
+      clearInterval(_bgPollerHandle);
+      _bgPollerHandle = null;
+    }
+    _bgPollerStarted = false;
   }
 
   async function mountGate() {
