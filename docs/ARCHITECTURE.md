@@ -2,29 +2,30 @@
 
 ## Overview
 
-Electron 41 desktop app with a Python Flask backend. The Electron main process spawns Python as a child process on `localhost:5123`. The renderer communicates with the backend via HTTP.
+Tauri 2 desktop app with a Python Flask backend. The Tauri Rust shell spawns Python as a child process on `localhost:5123`. The renderer is a vanilla-JS frontend served from a WebKit window; it communicates with the backend via HTTP and with the Rust shell via Tauri commands.
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Electron (main.js)                          │
-│  - Spawns Python subprocess                  │
+│  Tauri Rust shell (src-tauri/src/lib.rs)     │
+│  - Spawns Python subprocess (python.rs)      │
 │  - Theme sync (light/dark/auto)              │
 │  - OAuth URL scheme (plaud-v2://)            │
 │  - Tray icon, login items, dock visibility   │
 │  - Auto-updates via GitHub Releases API      │
-│  - Clean BLE disconnect on quit/reload       │
+│  - Bug reporter + diagnostics log            │
 │  - Code signed + notarized (Developer ID)    │
 ├──────────────────────────────────────────────┤
 │  Renderer (index.html + JS modules)          │
-│  - ui/utils.js    → shared state, DOM, toast │
-│  - ui/recordings.js → list, search, delete   │
-│  - ui/transcript.js → view, player, crop,    │
-│                        editable segments      │
-│  - ui/settings.js   → all settings tabs      │
+│  - ui/utils.js       → shared state, DOM     │
+│  - ui/recordings.js  → list, search, delete  │
+│  - ui/transcript.js  → view, player, crop,   │
+│                         editable segments     │
+│  - ui/settings.js    → all settings tabs     │
+│  - ui/health-gate.js → backend-ready splash  │
 │  - renderer.js       → orchestrator + init   │
 ├──────────────────────────────────────────────┤
-│  preload.js (contextBridge)                  │
-│  - ~67 API methods exposed as window.plaud   │
+│  tauri-bridge.js                             │
+│  - window.plaud surface (Tauri invoke + HTTP)│
 └───────────────┬──────────────────────────────┘
                 │ HTTP (localhost:5123)
 ┌───────────────▼──────────────────────────────┐
@@ -48,11 +49,11 @@ Electron 41 desktop app with a Python Flask backend. The Electron main process s
 
 ## Packaging
 
-- **ASAR**: Enabled. JS/CSS/HTML/node_modules packed into `app.asar`. Python files selectively unpacked via `asarUnpack` so they remain on the real filesystem for the Python subprocess.
-- **extraResources**: `src/` (transcription scripts), `keys/` (E2EE RSA keys), `bin/` (bundled FFmpeg).
-- **FFmpeg**: Static macOS binary bundled in `bin/`, downloaded by `scripts/download-ffmpeg.sh` before build. Added to PATH so both our code and Whisper find it.
-- **Code signing**: Developer ID Application certificate, hardened runtime, entitlements for BLE/network/JIT.
-- **Notarization**: Apple notarization via electron-builder. Users can double-click to install without Gatekeeper warnings.
+- **Tauri bundle**: `cargo tauri build` produces a signed/notarized `.dmg`. Frontend assets are staged via `scripts/prepare-frontend.sh` (called by Tauri's `beforeBuildCommand`) into `dist-tauri/`, which is the `frontendDist` Tauri serves from the bundled webview.
+- **Bundled resources** (`tauri.conf.json` `bundle.resources`): `src/` (transcription scripts), `keys/` (E2EE RSA keys), and the Python backend (`app/api_server.py`, `app/routes/`, `app/state/`, `app/providers/`, `app/utils/`).
+- **FFmpeg**: Downloaded at first use by `app/utils/system.py` into `~/Library/Application Support/com.plaud.v2/bin/ffmpeg`. Not bundled with the app — keeps the DMG small and avoids licensing complexity.
+- **Code signing**: Developer ID Application certificate, hardened runtime, entitlements at `src-tauri/Entitlements.plist` (Bluetooth, network client, user-selected file access).
+- **Notarization**: Apple notarization via Tauri's bundler. Users can double-click to install without Gatekeeper warnings.
 
 ## Python Backend
 
@@ -173,16 +174,23 @@ Token-based design system with light/dark mode, split into 7 files:
 
 ## Auto-Updates
 
-Custom updater using GitHub Releases API with a read-only PAT.
+Custom updater in the Rust shell (`src-tauri/src/commands/mod.rs`) using GitHub Releases API with a read-only PAT (`update_token()` at `commands/mod.rs:201`).
 
-- Checks for updates 5s after launch, then every 4 hours
-- Downloads ZIP silently, shows banner when ready
-- Install: detached bash script extracts with `ditto`, safe-swaps the `.app` bundle, relaunches
-- Manual check available in Settings > General > About
+- Checks for updates 5 s after launch, then every 4 hours (loop in `lib.rs`).
+- Downloads the DMG silently, shows banner when ready.
+- Install: detached script mounts the DMG, copies the new `.app` over the old one, relaunches.
+- Manual check available in **Settings > General > About**.
 
 ## Auto Bug Reporter
 
-Unhandled errors are automatically reported as GitHub Issues (tagged `auto-bug`). Deduplicates by error fingerprint — same error creates a comment on the existing issue instead of a new one. Catches both main process (`uncaughtException`) and renderer (`window.onerror`) errors.
+Unhandled errors are automatically reported as GitHub Issues (tagged `auto-bug`). Deduplicates by error fingerprint — same error creates a comment on the existing issue instead of a new one. Catches Rust panics (`panic::set_hook`), Python uncaught exceptions (relayed via the `report_error` Tauri command from the renderer), and renderer errors (`window.onerror` / unhandled rejections).
+
+Two filters keep noise low:
+
+- `AbortError` (timeouts, navigation cancellations) → suppressed from GitHub, written to a local diagnostics log at `~/Library/Application Support/com.plaud.v2/diagnostics.log`.
+- Backend-down state (the health-gate poller flips this) → suppressed from GitHub while the Python server is unreachable.
+
+The diagnostics log rotates at 1 MB to `.log.1` (≈ 2 MB ceiling). Open it from the splash's "Backend not responding" screen via the **Open diagnostics log** button.
 
 ## Testing
 

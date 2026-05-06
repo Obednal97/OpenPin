@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Plaud V2 — Flask API server for the Electron app.
+"""Plaud V2 — Flask API server.
 
 Wraps the existing BLE/crypto/transcription code as HTTP endpoints.
-Spawned by Electron main.js as a child process on localhost:5123.
+Spawned by the Tauri Rust shell as a child process on localhost:5123.
 """
 
 import logging

@@ -764,7 +764,7 @@ window.plaud.onStartupStatus((msg) => {
 });
 let _startupErrorShown = false;
 
-// Init Electron-only features immediately (don't wait for Python API)
+// Init host-app features immediately (don't wait for Python API)
 initSettingsEvents();
 
 async function init() {

@@ -111,26 +111,29 @@ Sync recordings with your existing Plaud account:
 ```
 app/
   api_server.py          # Flask API (app factory)
-  main.js                # Electron main process + auto-updater
-  renderer.js            # Frontend orchestrator
   index.html             # UI markup
+  renderer.js            # Frontend orchestrator
+  tauri-bridge.js        # window.plaud bridge (Tauri invoke)
   styles.css             # @import hub for CSS modules
-  ui/                    # Frontend modules (utils, recordings, transcript, settings)
+  ui/                    # Frontend modules (utils, recordings, transcript, settings, health-gate)
+  css/                   # Design system (tokens, components, layouts, recordings, transcript, settings, utilities)
   routes/                # Flask blueprints (core, device, cloud, notion, recordings, transcribe, settings)
   state/                 # State managers (device, cloud, notion)
   providers/             # AI providers (summarize, transcribe, validate)
   utils/                 # Shared utilities (config, constants, audio, webhooks, system, wifi_sync)
-  css/                   # Design system (tokens, components, layouts, recordings, transcript, settings, utilities)
-bin/
-  ffmpeg                 # Bundled static FFmpeg binary (downloaded by scripts/download-ffmpeg.sh)
+src-tauri/
+  src/                   # Rust shell (window, IPC commands, Python supervisor, updater, bug reporter)
+  tauri.conf.json        # Bundle + window config
+  Entitlements.plist     # macOS code-signing entitlements
 src/
   transcribe.py          # Whisper transcription + diarization cascade
   crypto.py              # RSA key management
   scanner.py             # BLE manufacturer data parser
-tests/                   # 112 tests (pytest)
+tests/                   # pytest suite
 docs/
   ARCHITECTURE.md        # Detailed architecture docs
   RELEASING.md           # Release workflow + auto-update system
+  TAURI_MIGRATION.md     # Migration record (Electron → Tauri)
   reverse-engineering/   # BLE protocol specs, capture analysis, API findings
 ```
 
@@ -155,24 +158,20 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture docum
 ## Development
 
 ```bash
-# Run in dev mode
-cd app && pnpm run dev
+# Run in dev mode (launches Tauri shell + Python backend)
+cargo tauri dev
 
 # Run Python tests
-cd .. && python3 -m pytest tests/ -v
+python3 -m pytest tests/ -v
 
-# Lint
-cd app && pnpm run lint          # eslint + stylelint
-cd .. && ruff check app/ src/ tests/   # Python
+# Lint Python
+ruff check app/ src/ tests/
 
-# Format
-cd app && pnpm run format        # prettier + ruff
+# Format Python
+ruff format app/ src/ tests/
 
-# Build DMG
-cd app && pnpm run build
-
-# Publish a new release (see docs/RELEASING.md)
-cd app && pnpm run publish
+# Build a signed/notarized DMG (see docs/RELEASING.md for the full release flow)
+cargo tauri build
 ```
 
 ## Reverse Engineering
