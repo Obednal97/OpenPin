@@ -612,6 +612,29 @@ def list_transcripts():
     return jsonify(transcripts)
 
 
+def _validate_segments(segments):
+    """Return (ok: bool, error_msg: str) after checking segment list structure.
+
+    Each segment must be a dict with numeric start/end and a string text.
+    speaker is optional but, when present, must be a string or null.
+    """
+    if not isinstance(segments, list):
+        return False, "segments must be a list"
+    for i, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            return False, f"segment[{i}] must be an object"
+        if not isinstance(seg.get("start"), (int, float)):
+            return False, f"segment[{i}].start must be a number"
+        if not isinstance(seg.get("end"), (int, float)):
+            return False, f"segment[{i}].end must be a number"
+        if not isinstance(seg.get("text"), str):
+            return False, f"segment[{i}].text must be a string"
+        # speaker is optional — only validate if present
+        if "speaker" in seg and not isinstance(seg["speaker"], (str, type(None))):
+            return False, f"segment[{i}].speaker must be a string or null"
+    return True, ""
+
+
 @bp.route("/transcripts/update", methods=["POST"])
 def update_transcript():
     """Update transcript segments and/or summary."""
@@ -628,6 +651,9 @@ def update_transcript():
     transcript = json.loads(json_path.read_text())
 
     if "segments" in data:
+        ok, err = _validate_segments(data["segments"])
+        if not ok:
+            return jsonify({"error": err}), 400
         transcript["segments"] = data["segments"]
         transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
 
