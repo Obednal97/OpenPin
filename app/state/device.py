@@ -684,27 +684,21 @@ async def list_device_files():
     if r:
         print(f"[BLE] list_files first response: {len(r)} bytes: {r.hex()[:200]}", file=sys.stderr, flush=True)
 
-    # Collect the first response + any queued additional responses
-    packets = list(_device_state.get("file_list_packets", []))
-    if r is not None:
-        packets.insert(0, r)
-
-    for packet in packets:
-        if len(packet) < 11:
-            continue
-        total = struct.unpack_from("<H", packet, 7)[0]
-        pkt_start = struct.unpack_from("<H", packet, 9)[0]
-        if expected_total is None:
-            expected_total = total
-        print(f"[BLE] packet: total={total} start_idx={pkt_start} bytes={len(packet)}", file=sys.stderr, flush=True)
-
+    def _parse_packet_records(pkt):
+        """Extract file records from a single BLE notification packet."""
+        records = []
+        if len(pkt) < 11:
+            return records
+        total = struct.unpack_from("<H", pkt, 7)[0]
+        pkt_start = struct.unpack_from("<H", pkt, 9)[0]
+        print(f"[BLE] packet: total={total} start_idx={pkt_start} bytes={len(pkt)}", file=sys.stderr, flush=True)
         offset = 11
-        while offset + 10 <= len(packet):
-            sid = struct.unpack_from("<I", packet, offset)[0]
-            fsize = struct.unpack_from("<I", packet, offset + 4)[0]
+        while offset + 10 <= len(pkt):
+            sid = struct.unpack_from("<I", pkt, offset)[0]
+            fsize = struct.unpack_from("<I", pkt, offset + 4)[0]
             if 0 < fsize < 500_000_000 and sid > 0:
                 duration_est = (fsize - 512) / 80 * 0.02 if fsize > 512 else 0
-                files.append(
+                records.append(
                     {
                         "session_id": sid,
                         "size": fsize,
@@ -712,6 +706,29 @@ async def list_device_files():
                     }
                 )
             offset += 10
+        return records
+
+    def _total_from_packet(pkt):
+        """Read the expected total file count from a packet header."""
+        if len(pkt) < 9:
+            return None
+        return struct.unpack_from("<H", pkt, 7)[0]
+
+    # Process the first (direct-response) packet, if any.
+    if r is not None:
+        if expected_total is None:
+            expected_total = _total_from_packet(r)
+        files.extend(_parse_packet_records(r))
+
+    # Also consume any BLE notification packets already queued before the loop.
+    # `prev_consumed` tracks how many items in `_device_state["file_list_packets"]`
+    # we have already processed — it is independent of `r`.
+    _initial_queued = list(_device_state.get("file_list_packets", []))
+    prev_consumed = len(_initial_queued)
+    for pkt in _initial_queued:
+        if expected_total is None:
+            expected_total = _total_from_packet(pkt)
+        files.extend(_parse_packet_records(pkt))
 
     # Wait for additional packets if we expected more files
     if expected_total is not None and len(files) < expected_total:
@@ -720,29 +737,25 @@ async def list_device_files():
         for _ in range(30):
             await asyncio.sleep(0.1)
             new_packets = list(_device_state.get("file_list_packets", []))
-            if len(new_packets) > len(packets) - (1 if r is not None else 0):
-                # Parse new packets
-                for pi in range(len(packets) - (1 if r is not None else 0), len(new_packets)):
-                    pkt = new_packets[pi]
-                    if len(pkt) < 11:
-                        continue
-                    offset = 11
-                    while offset + 10 <= len(pkt):
-                        sid = struct.unpack_from("<I", pkt, offset)[0]
-                        fsize = struct.unpack_from("<I", pkt, offset + 4)[0]
-                        if 0 < fsize < 500_000_000 and sid > 0:
-                            duration_est = (fsize - 512) / 80 * 0.02 if fsize > 512 else 0
-                            files.append(
-                                {
-                                    "session_id": sid,
-                                    "size": fsize,
-                                    "duration_est": round(duration_est, 1),
-                                }
-                            )
-                        offset += 10
-                packets = [r] + new_packets if r is not None else new_packets
-            if len(files) >= expected_total:
+            if len(new_packets) > prev_consumed:
+                # Process only the newly arrived packets (slice from prev_consumed onward)
+                for pkt in new_packets[prev_consumed:]:
+                    if expected_total is None:
+                        expected_total = _total_from_packet(pkt)
+                    files.extend(_parse_packet_records(pkt))
+                prev_consumed = len(new_packets)
+            if expected_total is not None and len(files) >= expected_total:
                 break
+
+    # Dedup by session_id — BLE retransmits can cause the same record to appear
+    # in multiple packets. Preserve insertion order; first occurrence wins.
+    seen_sids: set = set()
+    deduped: list = []
+    for rec in files:
+        if rec["session_id"] not in seen_sids:
+            seen_sids.add(rec["session_id"])
+            deduped.append(rec)
+    files = deduped
 
     print(f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})", file=sys.stderr, flush=True)
     return files
