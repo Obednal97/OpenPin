@@ -780,7 +780,7 @@ class TestAudioServing:
         audio_file.write_bytes(ogg_data)
 
         with patch("app.routes.core.get_all_recordings_dirs", return_value=[recordings_dir]):
-            # Explicit OGG accept (Electron) or wildcard
+            # Wildcard accept header — browser default
             r = flask_client.get("/audio/test_audio.ogg", headers={"Accept": "*/*"})
             assert r.status_code == 200
             assert r.content_type in ("audio/ogg", "audio/mp4")

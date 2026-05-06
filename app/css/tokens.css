@@ -133,11 +133,6 @@
 /* --- Reset --- */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-/* Apple squircle corners — applies to ALL elements with border-radius */
-* {
-  -electron-corner-smoothing: system-ui;
-}
-
 html {
   border-radius: 16px;
   overflow: hidden;

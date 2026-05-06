@@ -300,26 +300,16 @@ pub fn check_for_updates(app: tauri::AppHandle) {
                 log::info!("[Updater] Update available: v{latest}");
                 emit("available", serde_json::json!({ "version": latest }));
 
-                // Find the update asset — prefer DMG (Tauri builds), fall back to ZIP (Electron)
+                // Find the DMG release asset
                 let update_asset = release["assets"]
                     .as_array()
                     .and_then(|a| {
-                        // Try DMG first (Tauri releases)
                         a.iter()
                             .find(|a| {
                                 a["name"]
                                     .as_str()
                                     .map(|n| n.ends_with(".dmg") && !n.contains("blockmap"))
                                     .unwrap_or(false)
-                            })
-                            // Fall back to ZIP (Electron releases or bridge ZIPs)
-                            .or_else(|| {
-                                a.iter().find(|a| {
-                                    a["name"]
-                                        .as_str()
-                                        .map(|n| n.ends_with("-mac.zip"))
-                                        .unwrap_or(false)
-                                })
                             })
                     });
 
@@ -598,7 +588,7 @@ fn github_post(path: &str, body: &serde_json::Value) -> Result<(u16, serde_json:
 // ---- System Info for Bug Reports ----
 
 /// Anonymous device ID — SHA-256 of hardware UUID, first 8 chars
-/// Uses SHA-256 (matching Electron) so the same machine produces the same ID across builds
+/// Stable across builds: same machine always produces the same ID
 fn device_id() -> String {
     static DEVICE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DEVICE_ID
@@ -610,7 +600,7 @@ fn device_id() -> String {
                 let text = String::from_utf8_lossy(&o.stdout);
                 if let Some(cap) = text.split("IOPlatformUUID").nth(1) {
                     if let Some(uuid) = cap.split('"').nth(1) {
-                        // SHA-256 hash (same as Electron's crypto.createHash('sha256'))
+                        // SHA-256 hash via shasum(1)
                         use std::io::Write;
                         let hash_output = std::process::Command::new("shasum")
                             .args(["-a", "256"])
@@ -864,7 +854,7 @@ pub fn open_diagnostics_log() -> Result<(), String> {
 }
 
 fn error_fingerprint(message: &str) -> String {
-    // Strip variable parts for deduplication — matches Electron's algorithm:
+    // Strip variable parts for deduplication:
     // BLE UUIDs and long hex strings → HEX, digits → N
     let mut result = String::new();
     let mut hex_run = String::new();
@@ -940,7 +930,7 @@ pub fn report_error(message: String, stack: Option<String>, context: Option<Stri
 
             if let Some(issue) = open_issue {
                 if let Some(number) = issue["number"].as_u64() {
-                    // Include full system info in comments (matching Electron)
+                    // Include full system info in GitHub issue comments
                     let dev_tag = if is_dev { " (DEV)" } else { "" };
                     let comment = serde_json::json!({
                         "body": format!(

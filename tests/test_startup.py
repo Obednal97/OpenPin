@@ -23,7 +23,7 @@ class TestDynamicPort:
 
     def test_csp_allows_any_localhost_port(self):
         """CSP must allow any localhost port, not just 5123.
-        CSP may be in index.html (Electron) or tauri.conf.json (Tauri)."""
+        CSP is in tauri.conf.json."""
         root = Path(__file__).parent.parent
         html = (root / "app" / "index.html").read_text()
         tauri_conf = (root / "src-tauri" / "tauri.conf.json").read_text() if (root / "src-tauri" / "tauri.conf.json").exists() else ""
