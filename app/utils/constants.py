@@ -107,7 +107,7 @@ GDRIVE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GDRIVE_API_BASE = "https://www.googleapis.com"
 GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 GDRIVE_CLIENT_ID = "364974909213-m56e0v5la7ivomclvlf22r3selcsn1b2.apps.googleusercontent.com"
-GDRIVE_CLIENT_SECRET = "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"  # Desktop app — not confidential per Google docs
+GDRIVE_CLIENT_SECRET = "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"  # Desktop app OAuth — see SECURITY.md
 
 # Default tags
 DEFAULT_TAGS = ["Group Meeting", "1:1", "Memo", "Journal", "Interview", "Lecture"]
