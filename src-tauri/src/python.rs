@@ -50,13 +50,16 @@ pub fn get_server() -> &'static Mutex<PythonServer> {
     })
 }
 
-fn find_free_port(start: u16) -> u16 {
+fn find_free_port(start: u16) -> Result<u16, String> {
     for port in start..start + 100 {
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+            return Ok(port);
         }
     }
-    start
+    Err(format!(
+        "NO_FREE_PORT: all ports in {start}–{end} are in use",
+        end = start + 99
+    ))
 }
 
 const PYTHON_CANDIDATES: &[&str] = &[
@@ -473,7 +476,16 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     }
 
     // Find free port
-    let port = find_free_port(5123);
+    let port = find_free_port(5123).map_err(|e| {
+        set_startup_error(
+            "NO_FREE_PORT",
+            "No available port",
+            "All ports in the range 5123–5222 are already in use.",
+            "Close other applications that may be using these ports, then restart.",
+            &e,
+        );
+        e
+    })?;
     let url = format!("http://127.0.0.1:{port}");
 
     // Locate api_server.py
