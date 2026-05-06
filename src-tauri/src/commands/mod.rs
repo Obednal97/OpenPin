@@ -711,6 +711,49 @@ fn system_info_block(version: &str) -> String {
     )
 }
 
+// ---- Diagnostics Log ----
+
+const DIAGNOSTICS_MAX_BYTES: u64 = 1024 * 1024;
+
+fn diagnostics_log_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("Library/Application Support/com.plaud.v2/diagnostics.log")
+}
+
+fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {
+    let path = diagnostics_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Rotate if oversize
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() >= DIAGNOSTICS_MAX_BYTES {
+            let mut rotated = path.clone();
+            rotated.set_extension("log.1");
+            let _ = std::fs::rename(&path, &rotated);
+        }
+    }
+    let stack_trunc: String = stack.chars().take(4096).collect();
+    let line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "version": app_version(),
+        "context": context,
+        "message": message,
+        "fingerprint": fingerprint,
+        "stackTruncated": stack_trunc,
+    }).to_string();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}", line);
+    }
+}
+
+fn is_abort_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("aborted") || lower.contains("aborterror") || lower.contains("signal is aborted")
+}
+
 // ---- Error/Bug Reporting ----
 
 /// Deduplicate errors within a session
@@ -719,6 +762,25 @@ static REPORTED_ERRORS: std::sync::OnceLock<std::sync::Mutex<std::collections::H
 
 fn reported_errors() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     REPORTED_ERRORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+// ---- Backend Health State ----
+
+static BACKEND_HEALTH: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+
+fn backend_health() -> &'static std::sync::Mutex<String> {
+    BACKEND_HEALTH.get_or_init(|| std::sync::Mutex::new("unknown".to_string()))
+}
+
+#[tauri::command]
+pub fn set_backend_health(state: String) -> Result<String, String> {
+    if state == "up" || state == "down" || state == "unknown" {
+        let mut current = backend_health().lock().unwrap();
+        *current = state.clone();
+        Ok(state)
+    } else {
+        Err(format!("Invalid state: {}", state))
+    }
 }
 
 fn error_fingerprint(message: &str) -> String {
@@ -758,6 +820,22 @@ pub fn report_error(message: String, stack: Option<String>, context: Option<Stri
     log::error!("[BugReporter] {ctx}: {message}");
 
     let fingerprint = error_fingerprint(&message);
+    let stack_str = stack.unwrap_or_default();
+
+    // Always capture locally before deciding whether to escalate
+    append_diagnostic(&ctx, &message, &stack_str, &fingerprint);
+
+    // FILTER: legitimate aborts — log only
+    if is_abort_error(&message) {
+        return;
+    }
+
+    // FILTER: backend is known to be down — log only
+    if backend_health().lock().unwrap().as_str() == "down" {
+        return;
+    }
+
+    // Existing dedupe (per session)
     {
         let mut set = reported_errors().lock().unwrap();
         if set.contains(&fingerprint) {
@@ -766,7 +844,6 @@ pub fn report_error(message: String, stack: Option<String>, context: Option<Stri
         set.insert(fingerprint.clone());
     }
 
-    let stack_str = stack.unwrap_or_default();
     let version = app_version();
     let is_dev = is_dev_mode();
 
