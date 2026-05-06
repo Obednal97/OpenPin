@@ -11,6 +11,8 @@
 (function () {
   const POLL_INTERVAL_MS = 250;
   const POLL_TIMEOUT_MS = 30000;
+  const BG_POLL_INTERVAL_MS = 5000;
+  let _bgPollerStarted = false;
 
   async function pingHealthOnce() {
     try {
@@ -64,6 +66,25 @@
     });
   }
 
+  function pushHealth(state) {
+    if (window.plaud && window.plaud.setBackendHealth) {
+      window.plaud.setBackendHealth(state).catch(() => {});
+    }
+  }
+
+  function startBackgroundPoller() {
+    if (_bgPollerStarted) return;
+    _bgPollerStarted = true;
+
+    // Push initial 'up' state
+    pushHealth('up');
+
+    setInterval(async () => {
+      const ok = await pingHealthOnce();
+      pushHealth(ok ? 'up' : 'down');
+    }, BG_POLL_INTERVAL_MS);
+  }
+
   async function mountGate() {
     const splash = buildSplash();
     const start = Date.now();
@@ -71,11 +92,13 @@
     while (Date.now() - start < POLL_TIMEOUT_MS) {
       if (await pingHealthOnce()) {
         splash.remove();
+        startBackgroundPoller();
         return;
       }
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
 
+    pushHealth('down');
     showFailureScreen(splash);
   }
 
