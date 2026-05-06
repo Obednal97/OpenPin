@@ -143,43 +143,57 @@ pub struct DockInfo {
 }
 
 #[tauri::command]
-pub fn get_dock_visible() -> DockInfo {
+pub async fn get_dock_visible(app: tauri::AppHandle) -> DockInfo {
     #[cfg(target_os = "macos")]
     {
         use objc2::MainThreadMarker;
         use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-        unsafe {
-            let mtm = MainThreadMarker::new_unchecked();
-            let app = NSApplication::sharedApplication(mtm);
-            let visible = app.activationPolicy() == NSApplicationActivationPolicy::Regular;
-            return DockInfo { visible };
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        app.run_on_main_thread(move || {
+            let mtm = MainThreadMarker::new()
+                .expect("run_on_main_thread guarantees execution on the main thread");
+            let ns_app = NSApplication::sharedApplication(mtm);
+            let visible =
+                ns_app.activationPolicy() == NSApplicationActivationPolicy::Regular;
+            let _ = tx.send(visible);
+        })
+        .expect("run_on_main_thread should not fail");
+        let visible = rx.await.expect("oneshot sender closed before sending");
+        return DockInfo { visible };
     }
     #[cfg(not(target_os = "macos"))]
-    DockInfo { visible: true }
+    {
+        let _ = app; // suppress unused-variable warning on non-macOS
+        DockInfo { visible: true }
+    }
 }
 
 #[tauri::command]
-pub fn set_dock_visible(visible: bool) -> DockInfo {
+pub async fn set_dock_visible(app: tauri::AppHandle, visible: bool) -> DockInfo {
     #[cfg(target_os = "macos")]
     {
         use objc2::MainThreadMarker;
         use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-        unsafe {
-            let mtm = MainThreadMarker::new_unchecked();
-            let app = NSApplication::sharedApplication(mtm);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        app.run_on_main_thread(move || {
+            let mtm = MainThreadMarker::new()
+                .expect("run_on_main_thread guarantees execution on the main thread");
+            let ns_app = NSApplication::sharedApplication(mtm);
             let policy = if visible {
                 NSApplicationActivationPolicy::Regular
             } else {
                 NSApplicationActivationPolicy::Accessory
             };
-            app.setActivationPolicy(policy);
+            ns_app.setActivationPolicy(policy);
             if !visible {
-                if let Some(w) = app.mainWindow() {
+                if let Some(w) = ns_app.mainWindow() {
                     w.makeKeyAndOrderFront(None);
                 }
             }
-        }
+            let _ = tx.send(());
+        })
+        .expect("run_on_main_thread should not fail");
+        rx.await.expect("oneshot sender closed before sending");
     }
     // Persist preference
     let mut prefs = crate::load_prefs();
