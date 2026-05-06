@@ -1272,6 +1272,15 @@ ipcMain.handle('set-backend-health', (event, state) => {
   return { ok: true, state: _backendHealth };
 });
 
-ipcMain.handle('get-diagnostics-log-path', () => {
-  return _diagnosticsLogPath();
+ipcMain.handle('open-diagnostics-log', async () => {
+  const file = _diagnosticsLogPath();
+  // Ensure the file exists so the OS handler doesn't error on first run.
+  try {
+    fs.closeSync(fs.openSync(file, 'a'));
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  // shell.openPath handles spaces / encoding correctly — no manual URL construction.
+  const result = await shell.openPath(file);
+  return { ok: result === '', error: result || null };
 });

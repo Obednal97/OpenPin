@@ -311,7 +311,7 @@ pub fn run() {
             commands::report_error,
             commands::report_bug,
             commands::set_backend_health,
-            commands::get_diagnostics_log_path,
+            commands::open_diagnostics_log,
             commands::get_login_item,
             commands::set_login_item,
             commands::get_dock_visible,

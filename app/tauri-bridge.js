@@ -292,5 +292,5 @@ window.plaud = {
   reportError: (message, stack, context) => invoke('report_error', { message, stack, context }),
   reportBug: (expected, actual, steps) => invoke('report_bug', { expected, actual, steps }),
   setBackendHealth: (state) => invoke('set_backend_health', { state }),
-  getDiagnosticsLogPath: () => invoke('get_diagnostics_log_path'),
+  openDiagnosticsLog: () => invoke('open_diagnostics_log'),
 };
