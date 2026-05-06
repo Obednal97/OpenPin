@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import threading
 import time as _time
 import traceback
 
@@ -362,6 +363,11 @@ def _extract_page_id(url_or_id):
 # Session-cached view of the Tags column schema. Populated on first push that
 # carries tags (so we don't hit Notion on startup or on tagless pushes).
 _tags_schema_cache = None  # None = uninitialised; else {"exists": bool, "options": set[str]}
+# Guards all check-then-set operations on _tags_schema_cache.  push_to_notion
+# is called from both the Flask request thread and the notion_queue worker, so
+# concurrent pushes can race the "is None → fetch → mutate" sequence without
+# this lock.
+_tags_schema_lock = threading.Lock()
 
 
 def _fetch_tags_schema():
@@ -423,52 +429,53 @@ def _ensure_tags_schema(tags):
     any options the user added manually on Notion's side.
     """
     global _tags_schema_cache
-    if _tags_schema_cache is None:
-        _tags_schema_cache = _fetch_tags_schema()
+    with _tags_schema_lock:
+        if _tags_schema_cache is None:
+            _tags_schema_cache = _fetch_tags_schema()
 
-    needed_opts = {t for t in (tags or []) if isinstance(t, str) and t}
-    missing_opts = needed_opts - _tags_schema_cache["options"]
+        needed_opts = {t for t in (tags or []) if isinstance(t, str) and t}
+        missing_opts = needed_opts - _tags_schema_cache["options"]
 
-    if _tags_schema_cache["exists"] and not missing_opts:
-        return  # Nothing to do
+        if _tags_schema_cache["exists"] and not missing_opts:
+            return  # Nothing to do
 
-    db_id = notion.get_database_id()
-    if not db_id:
-        return
+        db_id = notion.get_database_id()
+        if not db_id:
+            return
 
-    if not _tags_schema_cache["exists"]:
-        try:
-            notion.mcp_call(
-                "notion-update-data-source",
-                {"data_source_id": db_id, "statements": 'ADD COLUMN "Tags" MULTI_SELECT()'},
-            )
-            _tags_schema_cache["exists"] = True
-        except Exception as e:
-            err = str(e).lower()
-            if "already" in err or "exists" in err or "duplicate" in err:
+        if not _tags_schema_cache["exists"]:
+            try:
+                notion.mcp_call(
+                    "notion-update-data-source",
+                    {"data_source_id": db_id, "statements": 'ADD COLUMN "Tags" MULTI_SELECT()'},
+                )
                 _tags_schema_cache["exists"] = True
-            else:
-                logging.warning(f"Could not create Tags column: {e}")
-                return
+            except Exception as e:
+                err = str(e).lower()
+                if "already" in err or "exists" in err or "duplicate" in err:
+                    _tags_schema_cache["exists"] = True
+                else:
+                    logging.warning(f"Could not create Tags column: {e}")
+                    return
 
-    if missing_opts:
-        all_opts = _tags_schema_cache["options"] | needed_opts
-        # ALTER SET replaces the full option list — keep every existing one so
-        # we don't wipe options the user added manually on Notion's side.
-        options_str = ", ".join(f"'{n.replace(chr(39), chr(39) * 2)}':default" for n in sorted(all_opts))
-        try:
-            notion.mcp_call(
-                "notion-update-data-source",
-                {
-                    "data_source_id": db_id,
-                    "statements": f'ALTER COLUMN "Tags" SET MULTI_SELECT({options_str})',
-                },
-            )
-            _tags_schema_cache["options"] = all_opts
-        except Exception as e:
-            logging.warning(f"Could not register Tags options: {e}")
-            # Invalidate the cache so the next push retries a fresh fetch.
-            _tags_schema_cache = None
+        if missing_opts:
+            all_opts = _tags_schema_cache["options"] | needed_opts
+            # ALTER SET replaces the full option list — keep every existing one so
+            # we don't wipe options the user added manually on Notion's side.
+            options_str = ", ".join(f"'{n.replace(chr(39), chr(39) * 2)}':default" for n in sorted(all_opts))
+            try:
+                notion.mcp_call(
+                    "notion-update-data-source",
+                    {
+                        "data_source_id": db_id,
+                        "statements": f'ALTER COLUMN "Tags" SET MULTI_SELECT({options_str})',
+                    },
+                )
+                _tags_schema_cache["options"] = all_opts
+            except Exception as e:
+                logging.warning(f"Could not register Tags options: {e}")
+                # Invalidate the cache so the next push retries a fresh fetch.
+                _tags_schema_cache = None
 
 
 # Back-compat alias — older call sites in this module / recordings.py use this name.
