@@ -1042,7 +1042,7 @@ def do_wifi_sync_blocking():
             stdout=sp.PIPE,
             stderr=sp.PIPE,
             cwd=str(APP_KEY_PATH.parent.parent),  # project root
-            env={**__import__("os").environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
+            env={**os.environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
         )
         _wlog(f"Worker PID: {proc.pid}")
 
