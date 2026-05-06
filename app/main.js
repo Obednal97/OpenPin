@@ -13,6 +13,7 @@ let API_URL = `http://127.0.0.1:${API_PORT}`;
 let themePreference = 'auto'; // 'auto' | 'light' | 'dark'
 let _startupError = null; // Sent to renderer via IPC
 let _startupStatus = 'Starting up...'; // Current status message for the UI
+let _backendHealth = 'unknown'; // 'up' | 'down' | 'unknown' — pushed from renderer via set-backend-health IPC
 
 // ---- Custom Auto-Updater (no code signing required) ----
 const UPDATE_REPO = 'Obednal97/Plaud-V2';
@@ -364,6 +365,11 @@ async function reportError(error, context = 'main') {
 
     // FILTER: legitimate aborts (timeouts, navigation, manual cancellation) — log only
     if (_isAbortError(errorMsg)) {
+      return;
+    }
+
+    // FILTER: backend is known to be down — these are environmental, log only
+    if (_backendHealth === 'down') {
       return;
     }
 
@@ -1257,4 +1263,11 @@ ipcMain.handle('show-notification', (event, { title, body, actionLabel }) => {
   }
   notif.show();
   return { shown: true };
+});
+
+ipcMain.handle('set-backend-health', (event, state) => {
+  if (state === 'up' || state === 'down' || state === 'unknown') {
+    _backendHealth = state;
+  }
+  return { ok: true, state: _backendHealth };
 });
