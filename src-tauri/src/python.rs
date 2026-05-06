@@ -70,24 +70,12 @@ fn bundled_python_dir() -> PathBuf {
         .join("Library/Application Support/com.plaud.v2/python")
 }
 
-/// Electron's bundled Python location (for users upgrading from Electron)
-fn electron_python_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_default()
-        .join("Library/Application Support/Plaud V2/python")
-}
-
 /// Find a working Python 3 binary, returns (path, version_string)
 fn find_python(full_path: &str) -> Option<(String, String)> {
-    // Check both Tauri and Electron bundled Python locations (upgrade compatibility)
     let tauri_bundled = bundled_python_dir().join("bin/python3");
-    let electron_bundled = electron_python_dir().join("bin/python3");
     let mut candidates: Vec<String> = vec![];
     if tauri_bundled.exists() {
         candidates.push(tauri_bundled.to_string_lossy().to_string());
-    }
-    if electron_bundled.exists() {
-        candidates.push(electron_bundled.to_string_lossy().to_string());
     }
     candidates.extend(PYTHON_CANDIDATES.iter().map(|s| s.to_string()));
 
