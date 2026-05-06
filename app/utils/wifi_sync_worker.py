@@ -636,10 +636,12 @@ async def main():
     hotspot_ip = None
     server = None
     restore_result = None
-    # Remove preferred networks for the ENTIRE transfer duration —
-    # if restored too early, macOS auto-rejoins a known network mid-transfer
-    saved_networks = remove_preferred_networks()
     try:
+        # Remove preferred networks for the ENTIRE transfer duration —
+        # if restored too early, macOS auto-rejoins a known network mid-transfer.
+        # NOTE: must be the first statement inside this try so the finally
+        # always runs restore_preferred_networks() if the remove ran.
+        saved_networks = remove_preferred_networks()
         status("Starting WebSocket server...", 5)
         server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
 
