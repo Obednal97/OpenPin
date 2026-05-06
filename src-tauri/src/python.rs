@@ -368,33 +368,69 @@ fn build_path(app: &AppHandle) -> String {
     all_paths.join(":")
 }
 
-/// Kill any orphaned Python server from a previous crash (SIGKILL leaves zombies)
+fn pid_file_path() -> std::path::PathBuf {
+    crate::home_dir().join("Library/Application Support/com.plaud.v2/server.pid")
+}
+
+fn write_pid_file(pid: u32) {
+    let path = pid_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, pid.to_string());
+}
+
+fn delete_pid_file() {
+    let _ = std::fs::remove_file(pid_file_path());
+}
+
+/// Kill any orphaned Python server from a previous run using the PID file.
+///
+/// Only kills the exact PID that was written at spawn time, and only after
+/// confirming the process is still alive and is a Python process — avoiding
+/// false-positive kills of unrelated tools (Jupyter, ML servers, etc.).
 fn kill_orphan_python_servers() {
-    // Look for Python processes listening on our port range
-    if let Ok(output) = Command::new("lsof")
-        .args(["-ti", "tcp:5123-5223", "-sTCP:LISTEN"])
+    let path = pid_file_path();
+    let pid_str = match std::fs::read_to_string(&path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return,
+    };
+    let pid: u32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            delete_pid_file();
+            return;
+        }
+    };
+
+    // Check the process is still alive (signal 0 = existence check, no signal sent)
+    #[cfg(unix)]
+    let is_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    #[cfg(not(unix))]
+    let is_alive = false;
+
+    if !is_alive {
+        delete_pid_file();
+        return;
+    }
+
+    // Confirm it is a Python process before killing
+    let is_python = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
-    {
-        let pids = String::from_utf8_lossy(&output.stdout);
-        for pid_str in pids.trim().lines() {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                // Check if it's a Python process (not something else on that port)
-                if let Ok(ps) = Command::new("ps")
-                    .args(["-p", &pid.to_string(), "-o", "comm="])
-                    .output()
-                {
-                    let comm = String::from_utf8_lossy(&ps.stdout);
-                    if comm.to_lowercase().contains("python") {
-                        log::warn!("[Cleanup] Killing orphan Python server (pid: {pid})");
-                        #[cfg(unix)]
-                        unsafe {
-                            libc::kill(pid, libc::SIGTERM);
-                        }
-                    }
-                }
-            }
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.to_lowercase().contains("python"))
+        .unwrap_or(false);
+
+    if is_python {
+        log::info!("[Python] Killing orphan from previous run: PID {pid}");
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
     }
+    delete_pid_file();
 }
 
 /// Start the Python Flask API server
@@ -510,6 +546,9 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
             );
             format!("Failed to spawn Python: {e}")
         })?;
+
+    // Record PID so the next launch can clean up if we crash before stop_python_server runs
+    write_pid_file(child.id());
 
     // Capture stdout in a background thread
     if let Some(stdout) = child.stdout.take() {
@@ -787,6 +826,7 @@ pub fn stop_python_server() {
                         log::info!("Python server exited gracefully");
                         server.process = None;
                         SERVER_READY.store(false, Ordering::Release);
+                        delete_pid_file();
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -799,6 +839,7 @@ pub fn stop_python_server() {
             }
             server.process = None;
             SERVER_READY.store(false, Ordering::Release);
+            delete_pid_file();
         }
     }
 }
