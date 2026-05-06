@@ -8,25 +8,44 @@ import subprocess
 import sys
 
 
-def ensure_installed(package, pip_name=None):
-    """Auto-install a Python package if missing."""
+def ensure_installed(package, pip_name=None, required: bool = False):
+    """Auto-install a Python package if missing.
+
+    Args:
+        package:  The importable module name (e.g. ``"flask"``).
+        pip_name: The PyPI distribution name when it differs from the module
+                  name (e.g. ``"Pillow"`` for ``"PIL"``).  Defaults to
+                  *package*.
+        required: When *True* and installation fails, raise a
+                  :exc:`RuntimeError` with an actionable message rather than
+                  silently returning ``None``.
+    """
     try:
         __import__(package)
+        return
     except ImportError:
-        name = pip_name or package
-        print(f"Installing {name}...")
-        # Try with --break-system-packages (pip 23.1+), fall back without (older pip)
-        for extra_args in [["--break-system-packages"], []]:
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", *extra_args, "--user", "-q", name],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                return
-            except Exception:
-                pass
-        print(f"  Could not install {name} (optional)")
+        pass
+
+    name = pip_name or package
+    print(f"Installing {name}...")
+    # Try with --break-system-packages (pip 23.1+), fall back without (older pip)
+    for extra_args in [["--break-system-packages"], []]:
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", *extra_args, "--user", "-q", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception:
+            pass
+
+    if required:
+        raise RuntimeError(
+            f"Could not install required package '{name}'. "
+            f"Run `{sys.executable} -m pip install {name}` manually and retry."
+        )
+    print(f"  Could not install {name} (optional)")
 
 
 # ---- FFmpeg auto-download ----

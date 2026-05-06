@@ -18,8 +18,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Auto-install core dependencies if missing (diarize is optional, lazy-imported at transcription time)
 from app.utils.system import ensure_installed
 
-ensure_installed("flask")
-ensure_installed("requests")
+ensure_installed("flask", required=True)
+ensure_installed("requests", required=True)
 
 from flask import Flask, jsonify, request
 
