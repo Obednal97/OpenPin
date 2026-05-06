@@ -262,9 +262,7 @@ fn pending_update() -> &'static std::sync::Mutex<Option<PendingUpdate>> {
 }
 
 fn updates_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home)
-        .join("Library/Application Support/com.plaud.v2/updates")
+    crate::home_dir().join("Library/Application Support/com.plaud.v2/updates")
 }
 
 #[tauri::command]
@@ -764,9 +762,7 @@ const DIAGNOSTICS_MAX_BYTES: u64 = 1024 * 1024;
 static DIAG_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn diagnostics_log_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("Library/Application Support/com.plaud.v2/diagnostics.log")
+    crate::home_dir().join("Library/Application Support/com.plaud.v2/diagnostics.log")
 }
 
 fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {
