@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify, request
 from app.utils.config import load_config, save_config
 from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
 from app.utils.system import ensure_ffmpeg
+from app.utils.transcript_locks import get_transcript_lock
 
 bp = Blueprint("recordings", __name__)
 
@@ -255,9 +256,10 @@ def tag_recording():
     if transcript_path.exists():
         try:
             import json as _json
-            t_data = _json.loads(transcript_path.read_text())
-            t_data["tags"] = tags
-            transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
+            with get_transcript_lock(session_id):
+                t_data = _json.loads(transcript_path.read_text())
+                t_data["tags"] = tags
+                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
         except Exception:
             pass
 
@@ -301,12 +303,13 @@ def rename_recording():
     if transcript_path.exists():
         try:
             import json as _json
-            t_data = _json.loads(transcript_path.read_text())
-            if title:
-                t_data["custom_name"] = title
-            else:
-                t_data.pop("custom_name", None)
-            transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
+            with get_transcript_lock(session_id):
+                t_data = _json.loads(transcript_path.read_text())
+                if title:
+                    t_data["custom_name"] = title
+                else:
+                    t_data.pop("custom_name", None)
+                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
         except Exception:
             pass
 
@@ -657,19 +660,24 @@ def update_transcript():
     if not json_path.exists():
         return jsonify({"error": "Transcript not found"}), 404
 
-    transcript = json.loads(json_path.read_text())
-
+    # Validate segments before acquiring the lock so we fail fast on bad input
+    # without holding the lock during validation work.
     if "segments" in data:
         ok, err = _validate_segments(data["segments"])
         if not ok:
             return jsonify({"error": err}), 400
-        transcript["segments"] = data["segments"]
-        transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
 
-    if "summary" in data:
-        transcript["summary"] = data["summary"]
+    with get_transcript_lock(session_id):
+        transcript = json.loads(json_path.read_text())
 
-    json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
+        if "segments" in data:
+            transcript["segments"] = data["segments"]
+            transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
+
+        if "summary" in data:
+            transcript["summary"] = data["summary"]
+
+        json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
     txt_path.write_text(transcript.get("text", ""))
 
     return jsonify({"saved": True})
