@@ -270,8 +270,11 @@ window.plaud = {
   // OAuth callback listener
   onOAuthCallback: (callback) => addListener('oauth-callback', callback),
 
-  // Open external URL — IPC to Rust
-  openExternal: (url) => invoke('open_external', { url }),
+  // Open external URL — IPC to Rust (allowlisted to https/http/mailto)
+  openExternal: (url) =>
+    invoke('open_external', { url }).catch((err) => {
+      console.error('[openExternal] Blocked:', err);
+    }),
 
   // System events
   onSystemWake: (callback) => addListener('system-wake', callback),

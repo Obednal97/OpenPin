@@ -205,8 +205,16 @@ pub async fn set_dock_visible(app: tauri::AppHandle, visible: bool) -> DockInfo 
 // ---- Open External ----
 
 #[tauri::command]
-pub fn open_external(url: String) {
-    let _ = open::that(&url);
+pub fn open_external(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let allowed = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:");
+    if !allowed {
+        return Err(format!("Refused to open URL with disallowed scheme: {url}"));
+    }
+    open::that(&url).map_err(|e| format!("Failed to open URL: {e}"))?;
+    Ok(())
 }
 
 // ---- App Version ----
