@@ -226,6 +226,40 @@ function installUpdate() {
   app.quit();
 }
 
+// ---- Diagnostics Log ----
+// Local sink for events that are suppressed from GitHub.
+// Path: <userData>/diagnostics.log, rotated at 1 MB to .log.1, max ~2 MB total.
+const _DIAGNOSTICS_MAX_BYTES = 1024 * 1024;
+function _diagnosticsLogPath() {
+  return path.join(app.getPath('userData'), 'diagnostics.log');
+}
+function _appendDiagnostic({ context, message, stack, fingerprint }) {
+  try {
+    const file = _diagnosticsLogPath();
+    // Rotate if size exceeds cap
+    try {
+      const st = fs.statSync(file);
+      if (st.size >= _DIAGNOSTICS_MAX_BYTES) {
+        fs.renameSync(file, file + '.1');
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      version: app.getVersion(),
+      context: context || 'unknown',
+      message: String(message || ''),
+      fingerprint: fingerprint || '',
+      stackTruncated: String(stack || '').slice(0, 4096),
+    }) + '\n';
+    fs.appendFileSync(file, line);
+  } catch (err) {
+    // Never let diagnostics failures crash anything
+    console.error('[Diagnostics] append failed:', err.message);
+  }
+}
+
 // ---- Auto Bug Reporter ----
 const _reportedErrors = new Set(); // Deduplicate within a session
 const os = require('os');
