@@ -531,7 +531,18 @@ async function executeWifiSync() {
   // Poll for progress updates while sync runs
   let pollActive = true;
   const pollProgress = async () => {
+    const pollStartedAt = Date.now();
+    const POLL_MAX_MS = 5 * 60 * 1000; // 5 minutes
     while (pollActive) {
+      if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+        pollActive = false;
+        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync did not complete within 5 minutes', 0, 'error');
+        const panel = $('#wifi-confirm-overlay .modal-panel');
+        panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
+          '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
+        panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
+        break;
+      }
       try {
         const s = await window.plaud.wifiSyncStatus();
         // Re-check pollActive after the async status call: the main sync may have
