@@ -24,8 +24,9 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 // Shared app state — all modules read/write through this object
+// currentView: 'recordings' | 'transcript'
 const app = {
-  currentView: 'list',
+  currentView: 'recordings',
   recordings: [],
   transcripts: {},
   settings: {},
