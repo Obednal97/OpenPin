@@ -26,7 +26,7 @@ from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
 from app.utils.config import load_config
 from app.utils.constants import APP_KEY_PATH, RECORDINGS_DIR, get_all_recordings_dirs, get_recordings_dir
 
-WS_PORT = 8081
+WS_PORT_CANDIDATES = [8081, 8082, 8083]
 WIFI_SIZE_THRESHOLD = 500_000  # Use WiFi if total new files > 500KB
 
 
@@ -399,7 +399,19 @@ async def wifi_sync_files(session_keys, serial_number, send_ble_cmd, status_call
     server = None
     try:
         _status("Starting WebSocket server...", 5)
-        server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
+        server = None
+        last_bind_err = None
+        for _port in WS_PORT_CANDIDATES:
+            try:
+                server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", _port)
+                break
+            except OSError as _e:
+                last_bind_err = _e
+                _status(f"Port {_port} in use, trying next...", 5)
+        if server is None:
+            raise OSError(
+                f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use"
+            ) from last_bind_err
 
         _status("Opening device hotspot...", 10)
         await send_ble_cmd("WiFi_Open", bytes([1, 10, 0]))
