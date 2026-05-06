@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ _cloud_state = {
     "user": None,
     "desktop_uuid": None,
 }
+_cloud_state_lock = threading.Lock()
 
 
 def get_state():
@@ -119,14 +121,16 @@ def load_cloud_token():
             token = data.get("token", "")
             api_domain = data.get("api_domain", PLAUD_API_DOMAINS["eu"])
             if token:
-                _cloud_state["token"] = token
-                _cloud_state["api_domain"] = api_domain
-                _cloud_state["logged_in"] = True
+                with _cloud_state_lock:
+                    _cloud_state["token"] = token
+                    _cloud_state["api_domain"] = api_domain
+                    _cloud_state["logged_in"] = True
                 # Validate in background — update user info if available
                 try:
                     user_data = _try_token(token, api_domain)
                     if user_data:
-                        _cloud_state["user"] = user_data
+                        with _cloud_state_lock:
+                            _cloud_state["user"] = user_data
                 except Exception:
                     pass
                 return True
@@ -138,10 +142,11 @@ def load_cloud_token():
         # For auto-detected tokens, validate before trusting
         user_data = _try_token(token, api_domain)
         if user_data:
-            _cloud_state["token"] = token
-            _cloud_state["api_domain"] = api_domain
-            _cloud_state["logged_in"] = True
-            _cloud_state["user"] = user_data
+            with _cloud_state_lock:
+                _cloud_state["token"] = token
+                _cloud_state["api_domain"] = api_domain
+                _cloud_state["logged_in"] = True
+                _cloud_state["user"] = user_data
             save_cloud_token(token, api_domain)
             return True
 
@@ -149,13 +154,18 @@ def load_cloud_token():
 
 
 def save_cloud_token(token, api_domain=None):
-    """Save Plaud cloud token."""
-    if api_domain:
-        _cloud_state["api_domain"] = api_domain
+    """Save Plaud cloud token atomically via a temp-file rename."""
+    with _cloud_state_lock:
+        if api_domain:
+            _cloud_state["api_domain"] = api_domain
     data = {"token": token}
     if api_domain:
         data["api_domain"] = api_domain
-    PLAUD_CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    # Write atomically: write to a sibling temp file then rename so a crash
+    # mid-write cannot leave a partial config file.
+    tmp_path = PLAUD_CONFIG_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2))
+    tmp_path.replace(PLAUD_CONFIG_PATH)
 
 
 def cloud_api(endpoint, method="GET", params=None, json_body=None):
@@ -190,15 +200,14 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
                 correct_domain = (body.get("data") or {}).get("domains", {}).get("api")
                 if correct_domain and correct_domain != domain:
                     logging.info(f"Region mismatch: switching API domain from {domain} to {correct_domain}")
-                    _cloud_state["api_domain"] = correct_domain
-                    # Update saved config so it persists
-                    if PLAUD_CONFIG_PATH.exists():
-                        try:
-                            cfg = json.loads(PLAUD_CONFIG_PATH.read_text())
-                            cfg["api_domain"] = correct_domain
-                            PLAUD_CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
-                        except Exception:
-                            pass
+                    with _cloud_state_lock:
+                        _cloud_state["api_domain"] = correct_domain
+                        current_token = _cloud_state["token"]
+                    # Persist via the atomic helper (temp-rename, no lock re-entry).
+                    try:
+                        save_cloud_token(current_token, correct_domain)
+                    except Exception:
+                        pass
                     continue  # retry with correct domain
 
         r.raise_for_status()
@@ -210,9 +219,10 @@ def get_login_url(region="eu"):
     import uuid as uuid_mod
 
     desktop_uuid = str(uuid_mod.uuid4())
-    _cloud_state["desktop_uuid"] = desktop_uuid
     api_domain = PLAUD_API_DOMAINS.get(region, PLAUD_API_DOMAINS["eu"])
-    _cloud_state["api_domain"] = api_domain
+    with _cloud_state_lock:
+        _cloud_state["desktop_uuid"] = desktop_uuid
+        _cloud_state["api_domain"] = api_domain
     login_url = f"{PLAUD_WEB_HOST}/launch-desktop?from=desktop&desktop_uuid={desktop_uuid}"
     return login_url, desktop_uuid
 
@@ -240,12 +250,15 @@ def exchange_token(auth_code, desktop_uuid=None):
     if not token:
         return {"error": "No token in response", "raw": token_data}
 
-    _cloud_state["token"] = token
-    save_cloud_token(token, _cloud_state["api_domain"])
+    with _cloud_state_lock:
+        _cloud_state["token"] = token
+        saved_domain = _cloud_state["api_domain"]
+    save_cloud_token(token, saved_domain)
 
     user = cloud_api("/user/me")
-    _cloud_state["logged_in"] = True
-    _cloud_state["user"] = user
+    with _cloud_state_lock:
+        _cloud_state["logged_in"] = True
+        _cloud_state["user"] = user
     return {"logged_in": True, "user": user}
 
 
@@ -255,26 +268,30 @@ def login_with_token(token, region="eu"):
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     api_domain = PLAUD_API_DOMAINS.get(region, PLAUD_API_DOMAINS["eu"])
-    _cloud_state["api_domain"] = api_domain
-    _cloud_state["token"] = token
+    with _cloud_state_lock:
+        _cloud_state["api_domain"] = api_domain
+        _cloud_state["token"] = token
 
     try:
         user = cloud_api("/user/me")
-        _cloud_state["logged_in"] = True
-        _cloud_state["user"] = user
+        with _cloud_state_lock:
+            _cloud_state["logged_in"] = True
+            _cloud_state["user"] = user
         save_cloud_token(token, api_domain)
         return {"logged_in": True, "user": user}
     except Exception:
-        _cloud_state["logged_in"] = False
-        _cloud_state["token"] = None
+        with _cloud_state_lock:
+            _cloud_state["logged_in"] = False
+            _cloud_state["token"] = None
         raise
 
 
 def logout():
     """Log out from Plaud cloud."""
-    _cloud_state["logged_in"] = False
-    _cloud_state["token"] = None
-    _cloud_state["user"] = None
+    with _cloud_state_lock:
+        _cloud_state["logged_in"] = False
+        _cloud_state["token"] = None
+        _cloud_state["user"] = None
     if PLAUD_CONFIG_PATH.exists():
         PLAUD_CONFIG_PATH.unlink()
     return {"logged_out": True}
