@@ -1099,6 +1099,9 @@ pub fn show_notification(
 #[tauri::command]
 pub async fn select_directory(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
-    let folder = app.dialog().file().blocking_pick_folder();
-    folder.map(|p| p.to_string())
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path.map(|p| p.to_string()));
+    });
+    rx.await.unwrap_or(None)
 }
