@@ -233,6 +233,13 @@ def _start_callback_server():
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class CallbackHandler(BaseHTTPRequestHandler):
+        def _signal(self, result):
+            """Put result onto the queue without blocking if it's already full."""
+            try:
+                type(self)._result_queue.put_nowait(result)
+            except queue.Full:
+                pass  # First result already wins; ignore duplicates
+
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path == "/gdrive/callback":
@@ -243,12 +250,12 @@ def _start_callback_server():
 
                 if error:
                     self._respond(f"<h2>Connection failed</h2><p>{error}</p><p>You can close this tab.</p>")
-                    CallbackHandler._result_queue.put({"error": error})
+                    self._signal({"error": error})
                     return
 
                 if state != _gdrive_state.get("state"):
                     self._respond("<h2>Invalid state</h2><p>CSRF check failed. Try again.</p>")
-                    CallbackHandler._result_queue.put({"error": "csrf_mismatch"})
+                    self._signal({"error": "csrf_mismatch"})
                     return
 
                 try:
@@ -293,11 +300,11 @@ def _start_callback_server():
                         "<p>You can close this tab and return to Plaud V2.</p>"
                         "<script>setTimeout(()=>window.close(),2000)</script>"
                     )
-                    CallbackHandler._result_queue.put({"ok": True})
+                    self._signal({"ok": True})
                 except Exception as e:
                     logging.error(f"Google Drive token exchange failed: {e}")
                     self._respond(f"<h2>Token exchange failed</h2><p>{e}</p>")
-                    CallbackHandler._result_queue.put({"error": str(e)})
+                    self._signal({"error": str(e)})
             else:
                 self.send_response(404)
                 self.end_headers()
