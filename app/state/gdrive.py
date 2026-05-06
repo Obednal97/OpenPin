@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -242,10 +243,12 @@ def _start_callback_server():
 
                 if error:
                     self._respond(f"<h2>Connection failed</h2><p>{error}</p><p>You can close this tab.</p>")
+                    CallbackHandler._result_queue.put({"error": error})
                     return
 
                 if state != _gdrive_state.get("state"):
                     self._respond("<h2>Invalid state</h2><p>CSRF check failed. Try again.</p>")
+                    CallbackHandler._result_queue.put({"error": "csrf_mismatch"})
                     return
 
                 try:
@@ -290,9 +293,11 @@ def _start_callback_server():
                         "<p>You can close this tab and return to Plaud V2.</p>"
                         "<script>setTimeout(()=>window.close(),2000)</script>"
                     )
+                    CallbackHandler._result_queue.put({"ok": True})
                 except Exception as e:
                     logging.error(f"Google Drive token exchange failed: {e}")
                     self._respond(f"<h2>Token exchange failed</h2><p>{e}</p>")
+                    CallbackHandler._result_queue.put({"error": str(e)})
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -311,10 +316,15 @@ def _start_callback_server():
         def log_message(self, format, *args):
             pass
 
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+    CallbackHandler._result_queue = result_queue  # type: ignore[attr-defined]
+
     def run_server():
         server = HTTPServer(("127.0.0.1", GDRIVE_CALLBACK_PORT), CallbackHandler)
-        server.timeout = 120
-        server.handle_request()
+        server.timeout = 1
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and result_queue.empty():
+            server.handle_request()
         server.server_close()
 
     t = threading.Thread(target=run_server, daemon=True)
