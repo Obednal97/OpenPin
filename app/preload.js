@@ -17,6 +17,7 @@ const REPORT_ENDPOINTS = new Set([
 ]);
 // Endpoints that are legitimately long-running — never abort these on timeout
 const NO_TIMEOUT_ENDPOINTS = new Set([
+  '/device/connect', // BLE pairing — service discovery can take 30-45s on slow links
   '/device/sync', '/device/wifi-sync',
   '/transcribe', '/summarize',
   '/cloud/sync',
