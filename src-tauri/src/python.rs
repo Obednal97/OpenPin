@@ -752,6 +752,7 @@ pub fn stop_python_server() {
                     if child.try_wait().ok().flatten().is_some() {
                         log::info!("Python server exited gracefully");
                         server.process = None;
+                        SERVER_READY.store(false, Ordering::Release);
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -763,6 +764,7 @@ pub fn stop_python_server() {
                 let _ = child.wait();
             }
             server.process = None;
+            SERVER_READY.store(false, Ordering::Release);
         }
     }
 }
