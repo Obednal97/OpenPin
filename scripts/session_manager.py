@@ -4,15 +4,27 @@
 NEVER overwrites session data. Each connection is logged with a timestamp.
 All keys, tokens, and device responses are preserved in sessions/ directory.
 """
-import asyncio, struct, base64, json, time, os
+import asyncio, struct, base64, json, time, os, sys
 from datetime import datetime
 from pathlib import Path
 from bleak import BleakScanner, BleakClient
 from src.crypto import get_public_key_full_pem, rsa_decrypt, load_rsa_private_key
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-SN_SIG = "TOb4HuuFPMhEB8bMCR3SFlqTRO9ihuhsHp0Jp3bwBGDYpew7FI9rFykg2JUKGLfe50BJS4z6Esm2Mt7Bqv6e5nz0j6jRCKWVWTuNiFY6a2iGY2lAvghwP8+JrqHb2RlTgoCj+vYXxAlMpZ5eMFCmTudiCmJt4aPzrJFURyM8OJfVJ8IHZi2/WbkR/i0vLrVuuLO3aShZrFjR7Enw0MQYUl4RMnHxk4qEwr7MV7qSTjyA7qeYcZY09gfS9+GmbVhwU4ZS4doiD+8gk6AmOn4zn20C3sCS1EOo3KGJgTNzSdZA59d/YQLql3bTjL3VsJYVvQlP5Zzfa5nHLcd3fN588w=="
-BIND_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NjllNzgwNDE4ZDg0OWRhOGFmMDU2MzIzOTljMjVhZSIsImF1ZCI6IiIsImV4cCI6MjAzMzczMzY5NSwiaWF0IjoxNzc0NTMzNjk1LCJjbGllbnRfaWQiOiJkZXZpY2UiLCJzbiI6Ijg4MjBCNTAyNTY5NDczMTcifQ.UJH_zwN0Imyc4W8dropHXy1_j7kN09aJf-2ZUtyLEJs"
+# Device credentials — read from production app config
+CONFIG_PATH = Path.home() / "Library/Application Support/Plaud V2/.plaud_v2_config.json"
+try:
+    with open(CONFIG_PATH) as _f:
+        _cfg = json.load(_f)
+except FileNotFoundError:
+    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+
+SN = "8820B50256947317"
+BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(SN)
+SN_SIG = _cfg.get("device_sn_signatures", {}).get(SN)
+if not BIND_TOKEN or not SN_SIG:
+    sys.exit(f"No credentials for SN {SN} in config — re-pair device via the Plaud V2 app first.")
+
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
