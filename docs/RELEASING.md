@@ -47,13 +47,17 @@ Because the app is signed with a Developer ID certificate, macOS preserves Bluet
 ### Steps
 
 ```bash
-# 1. Bump the version in src-tauri/tauri.conf.json (the "version" field).
+# 1. Bump the version in ALL THREE manifests (must stay in sync):
+#    - src-tauri/tauri.conf.json  → "version": "{version}"
+#    - src-tauri/Cargo.toml       → version = "{version}"  (also run `cd src-tauri && cargo build` to update Cargo.lock)
+#    - pyproject.toml             → version = "{version}"
 #    Follow semver: major.minor.patch.
 
 # 2. Commit the version bump
-git add src-tauri/tauri.conf.json
+git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock pyproject.toml
 git commit -m "Bump v{version}"
-git push
+git tag v{version}
+git push && git push --tags
 
 # 3. Build, sign, notarize
 cargo tauri build

@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
 from flask import Blueprint, Response, abort, jsonify, request, send_file
@@ -11,6 +12,11 @@ from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
 from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("core", __name__)
+
+try:
+    _APP_VERSION = _pkg_version("plaud-v2")
+except PackageNotFoundError:
+    _APP_VERSION = "unknown"
 
 # Cache transcoded M4A files so we only convert once per recording
 _M4A_CACHE_DIR = None
@@ -29,7 +35,7 @@ def _m4a_cache_dir():
 
 @bp.route("/health")
 def health():
-    return jsonify({"status": "ok", "version": "1.0.0"})
+    return jsonify({"status": "ok", "version": _APP_VERSION})
 
 
 @bp.route("/audio/<path:filepath>")
