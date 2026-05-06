@@ -59,10 +59,8 @@
     });
     document.getElementById('hg-openlog').addEventListener('click', async () => {
       try {
-        if (!window.plaud || !window.plaud.getDiagnosticsLogPath) return;
-        const path = await window.plaud.getDiagnosticsLogPath();
-        if (path && window.plaud.openExternal) {
-          window.plaud.openExternal('file://' + path);
+        if (window.plaud && window.plaud.openDiagnosticsLog) {
+          await window.plaud.openDiagnosticsLog();
         }
       } catch (err) {
         console.warn('[health-gate] open diagnostics log failed:', err);

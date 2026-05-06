@@ -793,8 +793,23 @@ pub fn set_backend_health(state: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn get_diagnostics_log_path() -> String {
-    diagnostics_log_path().to_string_lossy().into_owned()
+pub fn open_diagnostics_log() -> Result<(), String> {
+    let path = diagnostics_log_path();
+    // Ensure parent dir + file exist so the OS handler doesn't error on first run.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    // macOS: use the system `open` command. Plaud V2 is macOS-only, so this is fine.
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn error_fingerprint(message: &str) -> String {
