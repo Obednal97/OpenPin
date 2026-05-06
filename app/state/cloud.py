@@ -108,12 +108,34 @@ def _extract_plaud_desktop_token():
     return None, None
 
 
+def _validate_token_async(token, api_domain, *, save_on_success=False):
+    """Background validation; updates user info or clears logged_in if rejected."""
+    try:
+        user_data = _try_token(token, api_domain)
+        if user_data:
+            with _cloud_state_lock:
+                _cloud_state["user"] = user_data
+            if save_on_success:
+                save_cloud_token(token, api_domain)
+        else:
+            with _cloud_state_lock:
+                # Only clear logged_in if this token is still the active one
+                if _cloud_state.get("token") == token:
+                    _cloud_state["logged_in"] = False
+            logging.warning("[Cloud] Saved token rejected by server; logged_in cleared.")
+    except Exception as e:
+        logging.warning("[Cloud] Token validation failed (network?): %s", e)
+
+
 def load_cloud_token():
     """Load Plaud cloud token. Priority: 1) our saved config, 2) Plaud desktop app.
 
     Trusts saved tokens without online validation — they'll be checked
     lazily when an API call actually needs them. This allows offline
     startup and avoids losing login state due to network issues.
+
+    Validation is deferred to a daemon thread so module import never blocks
+    on a network call.
     """
     if PLAUD_CONFIG_PATH.exists():
         try:
@@ -125,30 +147,32 @@ def load_cloud_token():
                     _cloud_state["token"] = token
                     _cloud_state["api_domain"] = api_domain
                     _cloud_state["logged_in"] = True
-                # Validate in background — update user info if available
-                try:
-                    user_data = _try_token(token, api_domain)
-                    if user_data:
-                        with _cloud_state_lock:
-                            _cloud_state["user"] = user_data
-                except Exception:
-                    pass
+                # Validate in background — update user info if token is still valid
+                threading.Thread(
+                    target=_validate_token_async,
+                    args=(token, api_domain),
+                    kwargs={"save_on_success": False},
+                    daemon=True,
+                ).start()
                 return True
         except Exception:
             pass
 
     token, api_domain = _extract_plaud_desktop_token()
     if token:
-        # For auto-detected tokens, validate before trusting
-        user_data = _try_token(token, api_domain)
-        if user_data:
-            with _cloud_state_lock:
-                _cloud_state["token"] = token
-                _cloud_state["api_domain"] = api_domain
-                _cloud_state["logged_in"] = True
-                _cloud_state["user"] = user_data
-            save_cloud_token(token, api_domain)
-            return True
+        # Trust auto-detected tokens immediately; validate in background and
+        # persist them if the server confirms they are valid.
+        with _cloud_state_lock:
+            _cloud_state["token"] = token
+            _cloud_state["api_domain"] = api_domain
+            _cloud_state["logged_in"] = True
+        threading.Thread(
+            target=_validate_token_async,
+            args=(token, api_domain),
+            kwargs={"save_on_success": True},
+            daemon=True,
+        ).start()
+        return True
 
     return False
 
