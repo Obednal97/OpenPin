@@ -342,7 +342,8 @@ def list_folders(query=""):
     """Search for folders in the user's Drive."""
     q = "mimeType='application/vnd.google-apps.folder' and trashed=false"
     if query:
-        q += f" and name contains '{query}'"
+        escaped_query = query.replace("\\", "\\\\").replace("'", "\\'")
+        q += f" and name contains '{escaped_query}'"
     r = _api_call(
         "GET",
         "/drive/v3/files",
