@@ -613,7 +613,14 @@ fn device_id() -> String {
                             .stdout(std::process::Stdio::piped())
                             .spawn()
                             .and_then(|mut child| {
-                                child.stdin.take().unwrap().write_all(uuid.as_bytes())?;
+                                let mut stdin = child.stdin.take().ok_or_else(|| {
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        "shasum stdin unavailable",
+                                    )
+                                })?;
+                                stdin.write_all(uuid.as_bytes())?;
+                                drop(stdin);
                                 child.wait_with_output()
                             });
                         if let Ok(out) = hash_output {
