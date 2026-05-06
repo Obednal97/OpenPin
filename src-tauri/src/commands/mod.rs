@@ -792,6 +792,11 @@ pub fn set_backend_health(state: String) -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+pub fn get_diagnostics_log_path() -> String {
+    diagnostics_log_path().to_string_lossy().into_owned()
+}
+
 fn error_fingerprint(message: &str) -> String {
     // Strip variable parts for deduplication — matches Electron's algorithm:
     // BLE UUIDs and long hex strings → HEX, digits → N

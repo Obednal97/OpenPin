@@ -57,11 +57,15 @@
       splash.remove();
       mountGate();
     });
-    document.getElementById('hg-openlog').addEventListener('click', () => {
-      // Best-effort: open the userData parent dir; user can find diagnostics.log from there.
-      // A proper getDiagnosticsLogPath IPC/command is a follow-up.
-      if (window.plaud && window.plaud.openExternal) {
-        window.plaud.openExternal('file:///');
+    document.getElementById('hg-openlog').addEventListener('click', async () => {
+      try {
+        if (!window.plaud || !window.plaud.getDiagnosticsLogPath) return;
+        const path = await window.plaud.getDiagnosticsLogPath();
+        if (path && window.plaud.openExternal) {
+          window.plaud.openExternal('file://' + path);
+        }
+      } catch (err) {
+        console.warn('[health-gate] open diagnostics log failed:', err);
       }
     });
   }
