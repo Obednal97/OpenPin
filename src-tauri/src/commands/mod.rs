@@ -70,29 +70,35 @@ fn resolve_theme(pref: &str) -> String {
     }
 }
 
-/// Update the macOS dock icon to match the resolved theme
-#[cfg(target_os = "macos")]
-fn update_dock_icon(resolved: &str) {
-    crate::set_dock_icon_for_theme(resolved == "dark");
-}
-
-#[cfg(not(target_os = "macos"))]
-fn update_dock_icon(_resolved: &str) {}
-
 #[tauri::command]
-pub fn cycle_theme() -> ThemeInfo {
-    let mut pref = theme_pref().lock().unwrap();
-    *pref = match pref.as_str() {
-        "auto" => "light".to_string(),
-        "light" => "dark".to_string(),
-        "dark" => "auto".to_string(),
-        _ => "auto".to_string(),
+pub async fn cycle_theme(app: tauri::AppHandle) -> ThemeInfo {
+    let (resolved, preference) = {
+        let mut pref = theme_pref().lock().unwrap();
+        *pref = match pref.as_str() {
+            "auto" => "light".to_string(),
+            "light" => "dark".to_string(),
+            "dark" => "auto".to_string(),
+            _ => "auto".to_string(),
+        };
+        let resolved = resolve_theme(&pref);
+        (resolved, pref.clone())
     };
-    let resolved = resolve_theme(&pref);
-    update_dock_icon(&resolved);
+
+    // Dispatch dock-icon update to the main thread — AppKit requires it.
+    #[cfg(target_os = "macos")]
+    {
+        let is_dark = resolved == "dark";
+        app.run_on_main_thread(move || {
+            crate::set_dock_icon_for_theme(is_dark);
+        })
+        .expect("run_on_main_thread should not fail");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+
     ThemeInfo {
         resolved,
-        preference: pref.clone(),
+        preference,
     }
 }
 
@@ -100,7 +106,6 @@ pub fn cycle_theme() -> ThemeInfo {
 pub fn get_theme() -> ThemeInfo {
     let pref = theme_pref().lock().unwrap();
     let resolved = resolve_theme(&pref);
-    update_dock_icon(&resolved);
     ThemeInfo {
         resolved,
         preference: pref.clone(),

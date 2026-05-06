@@ -7,7 +7,12 @@ use tauri::{
     Emitter, Listener, Manager,
 };
 
-/// Set the macOS dock icon based on system theme
+/// Set the macOS dock icon based on system theme.
+///
+/// # Panics
+/// Panics if called from a thread other than the main thread.  Callers that
+/// are not guaranteed to be on the main thread (e.g. Tauri IPC handlers) must
+/// dispatch via `app.run_on_main_thread()` before calling this function.
 #[cfg(target_os = "macos")]
 pub fn set_dock_icon_for_theme(is_dark: bool) {
     use objc2::{AnyThread, MainThreadMarker};
@@ -20,13 +25,12 @@ pub fn set_dock_icon_for_theme(is_dark: bool) {
         include_bytes!("../icons/dock-light.png")
     };
 
-    unsafe {
-        let data = NSData::with_bytes(icon_bytes);
-        let image = NSImage::initWithData(NSImage::alloc(), &data).unwrap();
-        let mtm = MainThreadMarker::new_unchecked();
-        let app = NSApplication::sharedApplication(mtm);
-        app.setApplicationIconImage(Some(&image));
-    }
+    let data = NSData::with_bytes(icon_bytes);
+    let image = NSImage::initWithData(NSImage::alloc(), &data).unwrap();
+    let mtm = MainThreadMarker::new()
+        .expect("set_dock_icon_for_theme must be called on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    unsafe { app.setApplicationIconImage(Some(&image)) };
 }
 
 #[cfg(target_os = "macos")]
@@ -130,7 +134,8 @@ pub fn run() {
                 // Watch for system theme changes via file modification
                 // macOS writes theme pref to ~/Library/Preferences/.GlobalPreferences.plist
                 // Watching this file is cheaper than spawning `defaults read` every 5s
-                std::thread::spawn(|| {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
                     let pref_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
                         .join("Library/Preferences/.GlobalPreferences.plist");
                     let mut was_dark = is_system_dark_mode();
@@ -148,7 +153,10 @@ pub fn run() {
                             let is_dark = is_system_dark_mode();
                             if is_dark != was_dark {
                                 was_dark = is_dark;
-                                set_dock_icon_for_theme(is_dark);
+                                // Dispatch to main thread — AppKit requires it.
+                                let _ = app_handle.run_on_main_thread(move || {
+                                    set_dock_icon_for_theme(is_dark);
+                                });
                             }
                         }
                     }
