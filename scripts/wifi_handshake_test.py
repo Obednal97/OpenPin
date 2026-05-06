@@ -27,15 +27,24 @@ from CoreWLAN import CWWiFiClient
 
 import websockets.asyncio.server
 
-# ── Constants ──
-SN_SIG = "<REDACTED_SN_SIGNATURE>"
-BIND_TOKEN = "<REDACTED_JWT>"
+# ── Device credentials — read from production app config ──
+CONFIG_PATH = Path.home() / "Library/Application Support/Plaud V2/.plaud_v2_config.json"
+try:
+    with open(CONFIG_PATH) as _f:
+        _cfg = json.load(_f)
+except FileNotFoundError:
+    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+
+DEVICE_SN = "8820A0000000XXXX"
+BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(DEVICE_SN)
+SN_SIG = _cfg.get("device_sn_signatures", {}).get(DEVICE_SN)
+if not BIND_TOKEN or not SN_SIG:
+    sys.exit(f"No credentials for SN {DEVICE_SN} in config — re-pair device via the Plaud V2 app first.")
+
 APP_KEY = "0b1ef6247326fc79b200163e0a0431dc"
 
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
-
-DEVICE_SN = "8820A0000000XXXX"
 WIFI_SSID = f"Plaud{DEVICE_SN[-4:]}"
 WIFI_PASS = DEVICE_SN[-8:]
 WS_PORT = 8081

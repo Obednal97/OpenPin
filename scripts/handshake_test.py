@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """One-shot handshake test. Press device button, then run immediately."""
-import asyncio, struct, base64, json
+import asyncio, struct, base64, json, sys
+from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from src.crypto import rsa_decrypt, load_rsa_private_key, get_public_key_pem_body
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
 
-SN_SIG = "<REDACTED_SN_SIGNATURE>"
+# Device credentials — read from production app config
+CONFIG_PATH = Path.home() / "Library/Application Support/Plaud V2/.plaud_v2_config.json"
+try:
+    with open(CONFIG_PATH) as _f:
+        _cfg = json.load(_f)
+except FileNotFoundError:
+    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+
+SN = "8820A0000000XXXX"
+SN_SIG = _cfg.get("device_sn_signatures", {}).get(SN)
+if not SN_SIG:
+    sys.exit(f"No SN_SIG for SN {SN} in config — re-pair device via the Plaud V2 app first.")
+
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 

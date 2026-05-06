@@ -22,8 +22,20 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
-SN_SIG = "<REDACTED_SN_SIGNATURE>"
-BIND_TOKEN = "<REDACTED_JWT>"
+# Device credentials — read from production app config
+_CONFIG_PATH = Path.home() / "Library/Application Support/Plaud V2/.plaud_v2_config.json"
+try:
+    with open(_CONFIG_PATH) as _f:
+        _cfg = json.load(_f)
+except FileNotFoundError:
+    sys.exit(f"Config not found at {_CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+
+_SN = "8820A0000000XXXX"
+BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(_SN)
+SN_SIG = _cfg.get("device_sn_signatures", {}).get(_SN)
+if not BIND_TOKEN or not SN_SIG:
+    sys.exit(f"No credentials for SN {_SN} in config — re-pair device via the Plaud V2 app first.")
+
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 

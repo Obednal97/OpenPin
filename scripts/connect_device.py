@@ -6,7 +6,7 @@ Then disconnect and reconnect with this script.
 
 Or: this script does the full flow (pair + commands) in one shot.
 """
-import asyncio, struct, base64, json, time, os
+import asyncio, struct, base64, json, time, os, sys
 from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from src.crypto import (
@@ -14,8 +14,20 @@ from src.crypto import (
 )
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-SN_SIG = "<REDACTED_SN_SIGNATURE>"
-BIND_TOKEN = "<REDACTED_JWT>"
+# Device credentials — read from production app config
+CONFIG_PATH = Path.home() / "Library/Application Support/Plaud V2/.plaud_v2_config.json"
+try:
+    with open(CONFIG_PATH) as _f:
+        _cfg = json.load(_f)
+except FileNotFoundError:
+    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+
+SN = "8820A0000000XXXX"
+BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(SN)
+SN_SIG = _cfg.get("device_sn_signatures", {}).get(SN)
+if not BIND_TOKEN or not SN_SIG:
+    sys.exit(f"No credentials for SN {SN} in config — re-pair device via the Plaud V2 app first.")
+
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
