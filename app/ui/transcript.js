@@ -5,6 +5,10 @@
 // Track document-level listener to prevent accumulation across openTranscript() calls
 let _exportDropdownCleanup = null;
 
+// OAuth poll handles — stored at module scope so repeated clicks don't accumulate intervals
+let _notionPollHandle = null;
+let _notionPollTimeoutHandle = null;
+
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
   if (!rec) return;
@@ -466,10 +470,15 @@ function openTranscript(sessionId, autoPlay = false) {
           if (result.url) {
             window.plaud.openExternal(result.url);
             toast('Sign in with Notion in your browser. Come back here after.', 'info');
-            const poll = setInterval(async () => {
+            if (_notionPollHandle) clearInterval(_notionPollHandle);
+            if (_notionPollTimeoutHandle) clearTimeout(_notionPollTimeoutHandle);
+            _notionPollHandle = setInterval(async () => {
               const s = await window.plaud.notionStatus();
               if (s.connected) {
-                clearInterval(poll);
+                clearInterval(_notionPollHandle);
+                _notionPollHandle = null;
+                clearTimeout(_notionPollTimeoutHandle);
+                _notionPollTimeoutHandle = null;
                 app.notionState = s;
                 toast('Notion connected!', 'success');
                 if (!s.database_id) {
@@ -479,7 +488,13 @@ function openTranscript(sessionId, autoPlay = false) {
                 }
               }
             }, 2000);
-            setTimeout(() => clearInterval(poll), 120000);
+            _notionPollTimeoutHandle = setTimeout(() => {
+              if (_notionPollHandle) {
+                clearInterval(_notionPollHandle);
+                _notionPollHandle = null;
+              }
+              _notionPollTimeoutHandle = null;
+            }, 120000);
           }
         } catch (err) {
           toast(`Error: ${err.message}`, 'error');
@@ -883,6 +898,14 @@ async function transcribeRecording(oggPath, sessionId) {
 }
 
 function closeTranscript() {
+  if (_notionPollHandle) {
+    clearInterval(_notionPollHandle);
+    _notionPollHandle = null;
+  }
+  if (_notionPollTimeoutHandle) {
+    clearTimeout(_notionPollTimeoutHandle);
+    _notionPollTimeoutHandle = null;
+  }
   const titleEl = $('#transcript-title');
   if (titleEl && document.activeElement === titleEl) {
     titleEl.blur();

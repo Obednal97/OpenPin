@@ -2,6 +2,12 @@
    Plaud V2 — Settings Module
    ============================================================ */
 
+// OAuth poll handles — stored at module scope so repeated clicks don't accumulate intervals
+let _notionPollHandle = null;
+let _notionPollTimeoutHandle = null;
+let _gdrivePollHandle = null;
+let _gdrivePollTimeoutHandle = null;
+
 async function loadSettings() {
   try {
     app.settings = await window.plaud.getSettings();
@@ -461,10 +467,15 @@ function initGdriveEvents() {
           window.plaud.openExternal(result.url);
           toast('Sign in with Google in your browser...', 'info');
 
-          const poll = setInterval(async () => {
+          if (_gdrivePollHandle) clearInterval(_gdrivePollHandle);
+          if (_gdrivePollTimeoutHandle) clearTimeout(_gdrivePollTimeoutHandle);
+          _gdrivePollHandle = setInterval(async () => {
             const status = await window.plaud.gdriveStatus();
             if (status.connected) {
-              clearInterval(poll);
+              clearInterval(_gdrivePollHandle);
+              _gdrivePollHandle = null;
+              clearTimeout(_gdrivePollTimeoutHandle);
+              _gdrivePollTimeoutHandle = null;
               app.gdriveState = status;
               renderGoogleDrive();
               toast('Google Drive connected!', 'success');
@@ -472,7 +483,14 @@ function initGdriveEvents() {
             }
           }, 2000);
 
-          setTimeout(() => { clearInterval(poll); setLoading(connectBtn, false); }, 120000);
+          _gdrivePollTimeoutHandle = setTimeout(() => {
+            if (_gdrivePollHandle) {
+              clearInterval(_gdrivePollHandle);
+              _gdrivePollHandle = null;
+            }
+            _gdrivePollTimeoutHandle = null;
+            setLoading(connectBtn, false);
+          }, 120000);
         }
       } catch (err) {
         toast(`Error: ${err.message}`, 'error');
@@ -1181,18 +1199,27 @@ function initSettingsEvents() {
       } else if (result.url) {
         window.plaud.openExternal(result.url);
         toast('Sign in with Notion in your browser...', 'info');
-        const pollInterval = setInterval(async () => {
+        if (_notionPollHandle) clearInterval(_notionPollHandle);
+        if (_notionPollTimeoutHandle) clearTimeout(_notionPollTimeoutHandle);
+        _notionPollHandle = setInterval(async () => {
           const status = await window.plaud.notionStatus();
           if (status.connected) {
-            clearInterval(pollInterval);
+            clearInterval(_notionPollHandle);
+            _notionPollHandle = null;
+            clearTimeout(_notionPollTimeoutHandle);
+            _notionPollTimeoutHandle = null;
             app.notionState = status;
             renderNotion();
             toast('Notion connected!', 'success');
             setLoading(btn, false);
           }
         }, 2000);
-        setTimeout(() => {
-          clearInterval(pollInterval);
+        _notionPollTimeoutHandle = setTimeout(() => {
+          if (_notionPollHandle) {
+            clearInterval(_notionPollHandle);
+            _notionPollHandle = null;
+          }
+          _notionPollTimeoutHandle = null;
           setLoading(btn, false);
         }, 120000);
       }
