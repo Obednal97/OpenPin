@@ -42,6 +42,8 @@ def scan_all():
 
 @bp.route("/connect", methods=["POST"])
 def connect():
+    serial_number = None
+    address = None
     try:
         data = request.get_json(silent=True) or {}
         address = data.get("address")
