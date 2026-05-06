@@ -1530,7 +1530,7 @@ function initSettingsEvents() {
             const address = row.dataset.address;
             const name = row.dataset.name;
             const sn = row.dataset.sn;
-            results.innerHTML = `<div class="dm-scanning">Connecting to ${name}</div>`;
+            results.innerHTML = `<div class="dm-scanning">Connecting to ${escapeHtml(name)}</div>`;
             try {
               // Auto-bind device to cloud (gets per-device BIND_TOKEN + SN_SIG)
               if (sn) {
@@ -1558,7 +1558,7 @@ function initSettingsEvents() {
         });
       }
     } catch (err) {
-      results.innerHTML = `<p class="settings-desc" style="color:var(--primary);">Scan error: ${err.message}</p>`;
+      results.innerHTML = `<p class="settings-desc" style="color:var(--primary);">Scan error: ${escapeHtml(err.message)}</p>`;
     } finally {
       setLoading(btn, false);
     }
@@ -1649,7 +1649,7 @@ function renderStorageSettings() {
   if (histContainer && histList) {
     if (historical.length > 0) {
       histContainer.classList.remove('hidden');
-      histList.innerHTML = historical.map(d => `<li>${d}</li>`).join('');
+      histList.innerHTML = historical.map(d => `<li>${escapeHtml(d)}</li>`).join('');
     } else {
       histContainer.classList.add('hidden');
     }
