@@ -107,6 +107,10 @@ app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 
+# Recover metadata from transcript files — deferred here so the scan does not
+# run at module-import time (blueprint load), only once at server startup.
+recordings.init_recordings()
+
 # Start background workers
 from app.utils import notion_queue as _notion_queue
 _notion_queue.start_worker()
