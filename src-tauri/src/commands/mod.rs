@@ -662,65 +662,60 @@ fn macos_name() -> String {
     major
 }
 
-/// Get Python env diagnostics (pip version, key packages) — cached after first call
+/// Get Python env diagnostics (pip version, key packages) — recomputed fresh each call
 fn python_env_info() -> String {
-    static PY_ENV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PY_ENV
-        .get_or_init(|| {
-            let server = python::get_server().lock().unwrap();
-            let py_path = server.python_path.clone();
-            drop(server);
-            if py_path.is_empty() {
-                return "Python not found".to_string();
-            }
+    let server = python::get_server().lock().unwrap();
+    let py_path = server.python_path.clone();
+    drop(server);
+    if py_path.is_empty() {
+        return "Python not found".to_string();
+    }
 
-            let mut info = Vec::new();
+    let mut info = Vec::new();
 
-            // pip version
-            if let Ok(o) = std::process::Command::new(&py_path)
-                .args(["-m", "pip", "--version"])
-                .output()
-            {
-                info.push(format!(
-                    "pip: {}",
-                    String::from_utf8_lossy(&o.stdout).trim()
-                ));
-            }
+    // pip version
+    if let Ok(o) = std::process::Command::new(&py_path)
+        .args(["-m", "pip", "--version"])
+        .output()
+    {
+        info.push(format!(
+            "pip: {}",
+            String::from_utf8_lossy(&o.stdout).trim()
+        ));
+    }
 
-            // Key packages
-            if let Ok(o) = std::process::Command::new(&py_path)
-                .args(["-m", "pip", "list", "--format=columns"])
-                .output()
-            {
-                let output = String::from_utf8_lossy(&o.stdout);
-                let key_pkgs: Vec<&str> = output
-                    .lines()
-                    .filter(|l| {
-                        let lower = l.to_lowercase();
-                        ["flask", "requests", "bleak", "cryptography", "whisper", "transformers", "diarize"]
-                            .iter()
-                            .any(|k| lower.starts_with(k))
-                    })
-                    .collect();
-                if !key_pkgs.is_empty() {
-                    info.push(format!("packages:\n```\n{}\n```", key_pkgs.join("\n")));
-                }
-            }
+    // Key packages
+    if let Ok(o) = std::process::Command::new(&py_path)
+        .args(["-m", "pip", "list", "--format=columns"])
+        .output()
+    {
+        let output = String::from_utf8_lossy(&o.stdout);
+        let key_pkgs: Vec<&str> = output
+            .lines()
+            .filter(|l| {
+                let lower = l.to_lowercase();
+                ["flask", "requests", "bleak", "cryptography", "whisper", "transformers", "diarize"]
+                    .iter()
+                    .any(|k| lower.starts_with(k))
+            })
+            .collect();
+        if !key_pkgs.is_empty() {
+            info.push(format!("packages:\n```\n{}\n```", key_pkgs.join("\n")));
+        }
+    }
 
-            // site-packages
-            if let Ok(o) = std::process::Command::new(&py_path)
-                .args(["-c", "import site; print('; '.join(site.getsitepackages()))"])
-                .output()
-            {
-                info.push(format!(
-                    "site-packages: `{}`",
-                    String::from_utf8_lossy(&o.stdout).trim()
-                ));
-            }
+    // site-packages
+    if let Ok(o) = std::process::Command::new(&py_path)
+        .args(["-c", "import site; print('; '.join(site.getsitepackages()))"])
+        .output()
+    {
+        info.push(format!(
+            "site-packages: `{}`",
+            String::from_utf8_lossy(&o.stdout).trim()
+        ));
+    }
 
-            info.join("\n")
-        })
-        .clone()
+    info.join("\n")
 }
 
 fn system_info_block(version: &str) -> String {
