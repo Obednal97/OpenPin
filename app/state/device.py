@@ -714,18 +714,18 @@ async def list_device_files():
             return None
         return struct.unpack_from("<H", pkt, 7)[0]
 
-    # Process the first (direct-response) packet, if any.
-    if r is not None:
-        if expected_total is None:
-            expected_total = _total_from_packet(r)
-        files.extend(_parse_packet_records(r))
-
-    # Also consume any BLE notification packets already queued before the loop.
-    # `prev_consumed` tracks how many items in `_device_state["file_list_packets"]`
-    # we have already processed — it is independent of `r`.
-    _initial_queued = list(_device_state.get("file_list_packets", []))
-    prev_consumed = len(_initial_queued)
-    for pkt in _initial_queued:
+    # The BLE notification handler fires during the `send_cmd` await and appends
+    # the first response packet to `file_list_packets` — the same object that
+    # `send_cmd` returns as `r`.  Processing `r` directly AND then iterating
+    # `file_list_packets` would double-process that first packet, temporarily
+    # inflating `len(files)` and risking premature termination of the poll loop.
+    #
+    # Fix (F-py-019): take a snapshot of `file_list_packets` after send_cmd
+    # returns; process every packet from the snapshot (which includes r exactly
+    # once).  Do NOT process `r` separately.
+    initial_packets = list(_device_state.get("file_list_packets", []))
+    prev_consumed = len(initial_packets)
+    for pkt in initial_packets:
         if expected_total is None:
             expected_total = _total_from_packet(pkt)
         files.extend(_parse_packet_records(pkt))
