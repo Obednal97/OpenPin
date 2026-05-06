@@ -357,7 +357,8 @@ def transcribe_file():
             raise
 
         if t.text:
-            t.save(str(transcript_path))
+            with get_transcript_lock(session_id):
+                t.save(str(transcript_path))
             txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
             txt_path.write_text(t.formatted, encoding="utf-8")
 
@@ -415,7 +416,8 @@ def summarize_transcript():
         return jsonify({"error": "Transcript not found"}), 404
 
     try:
-        t_data = json.loads(transcript_path.read_text())
+        with get_transcript_lock(session_id):
+            t_data = json.loads(transcript_path.read_text())
         full_text = t_data.get("text", "")
         if not full_text or len(full_text.strip()) < 20:
             return jsonify({"error": "Transcript too short to summarize"}), 400
