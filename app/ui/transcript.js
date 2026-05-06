@@ -29,7 +29,11 @@ function openTranscript(sessionId, autoPlay = false) {
   titleEl.onblur = async () => {
     const newTitle = titleEl.textContent.trim();
     if (newTitle !== (rec.title || '')) {
-      await window.plaud.renameRecording(sessionId, newTitle);
+      try {
+        await window.plaud.renameRecording(sessionId, newTitle);
+      } catch (err) {
+        if (err.name !== 'AbortError') console.warn('[transcript] rename failed:', err);
+      }
       rec.title = newTitle;
       if (!newTitle) {
         titleEl.setAttribute('data-placeholder', formatDate(rec.date));
@@ -210,7 +214,13 @@ function openTranscript(sessionId, autoPlay = false) {
 
   // Re-transcribe
   $('#retranscribe-btn').addEventListener('click', async () => {
-    if (t) await window.plaud.deleteTranscript(sessionId);
+    if (t) {
+      try {
+        await window.plaud.deleteTranscript(sessionId);
+      } catch (err) {
+        if (err.name !== 'AbortError') console.warn('[transcript] deleteTranscript failed:', err);
+      }
+    }
     await transcribeRecording(rec.ogg_path, sessionId);
   });
 
@@ -672,7 +682,11 @@ function renderTranscriptSegments(container, t, sessionId) {
       const newText = e.target.textContent.trim();
       if (newText !== t.text) {
         t.text = newText;
-        await window.plaud.updateTranscript(sessionId, { segments: [{ text: newText, start: 0 }] });
+        try {
+          await window.plaud.updateTranscript(sessionId, { segments: [{ text: newText, start: 0 }] });
+        } catch (err) {
+          if (err.name !== 'AbortError') console.warn('[transcript] updateTranscript failed:', err);
+        }
       }
     });
   } else {
@@ -702,7 +716,12 @@ function saveSegmentEdit(sessionId, t) {
 async function saveSegments(sessionId, t) {
   t.text = t.segments.map((s) => s.text).join(' ');
   t.text_preview = t.text.length > 150 ? t.text.slice(0, 150) + '...' : t.text;
-  await window.plaud.updateTranscript(sessionId, { segments: t.segments });
+  try {
+    await window.plaud.updateTranscript(sessionId, { segments: t.segments });
+  } catch (err) {
+    if (err.name !== 'AbortError') console.warn('[transcript] saveSegments failed:', err);
+    return;
+  }
   // Update in-memory cache
   if (app.transcripts[sessionId]) {
     app.transcripts[sessionId].segments = t.segments;
@@ -748,9 +767,13 @@ function renderEditableSummary(container, t, sessionId) {
       const newSummary = textarea.value.trim();
       if (newSummary !== t.summary) {
         t.summary = newSummary;
-        await window.plaud.updateTranscript(sessionId, { summary: newSummary });
-        if (app.transcripts[sessionId]) {
-          app.transcripts[sessionId].summary = newSummary;
+        try {
+          await window.plaud.updateTranscript(sessionId, { summary: newSummary });
+          if (app.transcripts[sessionId]) {
+            app.transcripts[sessionId].summary = newSummary;
+          }
+        } catch (err) {
+          if (err.name !== 'AbortError') console.warn('[transcript] save summary failed:', err);
         }
       }
       editing = false;
