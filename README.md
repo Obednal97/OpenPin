@@ -133,7 +133,7 @@ tests/                   # pytest suite
 docs/
   ARCHITECTURE.md        # Detailed architecture docs
   RELEASING.md           # Release workflow + auto-update system
-  TAURI_MIGRATION.md     # Migration record (Electron → Tauri)
+  TAURI_MIGRATION.md     # Migration record and Tauri architecture notes
   reverse-engineering/   # BLE protocol specs, capture analysis, API findings
 ```
 

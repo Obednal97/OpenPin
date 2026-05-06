@@ -1,11 +1,11 @@
 /**
- * Tauri bridge — drop-in replacement for Electron's preload.js
+ * Tauri IPC bridge
  *
- * Exposes the same window.plaud.* API so the rest of the frontend
- * (renderer.js, ui/*.js) works without modification.
+ * Exposes the window.plaud.* API so the rest of the frontend
+ * (renderer.js, ui/*.js) can call backend commands and receive events.
  *
- * HTTP API calls use fetch() to the Python backend (same as before).
- * IPC calls use Tauri's invoke() instead of Electron's ipcRenderer.
+ * HTTP API calls use fetch() to the Python backend.
+ * IPC calls use Tauri's invoke() for Rust commands and listen() for events.
  */
 
 /* global __TAURI__ */
@@ -123,7 +123,7 @@ async function apiCall(method, endpoint, body = null) {
   return data;
 }
 
-// --- Event listeners (Tauri events replace Electron IPC push events) ---
+// --- Event listeners (server-push events via Tauri's listen()) ---
 
 const _eventCallbacks = {
   'startup-error': [],
@@ -245,7 +245,7 @@ window.plaud = {
   gdriveSyncStatus: () => apiCall('GET', '/gdrive/sync-status'),
   gdriveUploadProgress: () => apiCall('GET', '/gdrive/upload-progress'),
 
-  // Theme — IPC to Rust, then apply to DOM (in Electron, main.js did this via executeJavaScript)
+  // Theme — invoke Rust command, then apply the resolved theme to the DOM
   cycleTheme: async () => {
     const result = await invoke('cycle_theme');
     document.documentElement.setAttribute('data-theme', result.resolved);

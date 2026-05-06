@@ -123,7 +123,7 @@ Code-signing identity, notarization team ID, and entitlements are configured in:
 | `network.client` | HTTP API calls, cloud sync |
 | `files.user-selected.read-write` | Audio export to Downloads |
 
-(Tauri does not need the JIT/unsigned-memory entitlements that Electron required.)
+(Tauri does not need JIT or unsigned-memory entitlements.)
 
 ### Apple credentials (in `.env`)
 

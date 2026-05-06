@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <!-- CSP managed by Tauri (tauri.conf.json) in Tauri builds, or by Electron preload -->
+  <!-- CSP managed by Tauri (tauri.conf.json) -->
   <title>Plaud V2</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -861,7 +861,7 @@
   <div id="toast-container" class="toast-container"></div>
 
   <script>
-    // Tauri: make header draggable (replaces Electron's -webkit-app-region: drag)
+    // Tauri: make header draggable via data-tauri-drag-region attribute
     if (window.__TAURI__) {
       document.addEventListener('mousedown', (e) => {
         const header = document.getElementById('header');
