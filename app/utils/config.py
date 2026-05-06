@@ -8,7 +8,7 @@ import threading
 from app.utils.constants import CONFIG_PATH
 
 # Thread lock to prevent concurrent read-modify-write races
-_config_lock = threading.Lock()
+_config_lock = threading.RLock()
 
 
 def load_config():
