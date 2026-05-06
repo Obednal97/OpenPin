@@ -5,6 +5,7 @@
 .notion_mcp.json
 .hf_token
 session_keys.json
+scripts/rsa_session.json
 keys/
 
 # Runtime data
