@@ -97,9 +97,14 @@ def recover_metadata_from_transcripts():
         print(f"[Recovery] Recovered {recovered} metadata entries from transcript/marker files")
 
 
-# Run recovery on import (server startup)
-recover_metadata_from_transcripts()
+def init_recordings():
+    """Explicit startup hook — call once from api_server after blueprint registration.
 
+    Runs recover_metadata_from_transcripts() without triggering the scan at
+    module import time, avoiding synchronous filesystem I/O during blueprint
+    loading on machines with many transcripts.
+    """
+    recover_metadata_from_transcripts()
 
 
 @bp.route("/recordings")
