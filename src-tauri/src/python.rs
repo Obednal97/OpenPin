@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -491,11 +491,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     // Locate api_server.py
     emit_startup_status(app, "Starting server...");
     let server_script = find_server_script(app);
-    let cwd = server_script
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(server_script.parent().unwrap())
-        .to_path_buf();
+    let cwd = script_cwd(&server_script);
 
     log::info!("Python script: {}", server_script.display());
     log::info!("CWD: {}", cwd.display());
@@ -653,6 +649,21 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// Return the working directory to use when spawning the Python server.
+///
+/// Tries two levels up from the script path (the repo/bundle root), falling
+/// back to one level up, and ultimately to `"."` if the script has no parent
+/// at all.  This avoids the nested `.unwrap()` that would panic when the path
+/// has no parent component.
+fn script_cwd(script: &Path) -> PathBuf {
+    script
+        .parent()
+        .and_then(|p| p.parent())
+        .or_else(|| script.parent())
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
+}
+
 fn find_server_script(app: &AppHandle) -> PathBuf {
     // Check bundled Resources FIRST — the CARGO_MANIFEST_DIR dev path is baked at
     // compile time and will still exist on the dev machine even in production builds.
@@ -686,11 +697,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
 
     let full_path = build_path(app);
     let server_script = find_server_script(app);
-    let cwd = server_script
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(server_script.parent().unwrap())
-        .to_path_buf();
+    let cwd = script_cwd(&server_script);
 
     let mut child = Command::new(&python_path)
         .arg(&server_script)
