@@ -235,7 +235,7 @@ window.plaud = {
 
   // Google Drive
   gdriveStatus: () => apiCall('GET', '/gdrive/status'),
-  gdriveConnect: (client_id, client_secret) => apiCall('POST', '/gdrive/connect', { client_id, client_secret }),
+  gdriveConnect: () => apiCall('POST', '/gdrive/connect', {}),
   gdriveDisconnect: () => apiCall('POST', '/gdrive/disconnect'),
   gdriveFolders: (q) => apiCall('GET', `/gdrive/folders${q ? '?q=' + encodeURIComponent(q) : ''}`),
   gdriveCreateFolder: (name) => apiCall('POST', '/gdrive/create-folder', { name }),
