@@ -2,8 +2,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+
+/// Flipped to `true` only after `wait_for_server` confirms `/health` responds.
+/// Reset to `false` whenever the server crashes and a restart begins.
+/// `get_api_info` reads this to return "starting" vs "ready".
+pub static SERVER_READY: AtomicBool = AtomicBool::new(false);
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -540,6 +546,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     let url_clone = url.clone();
     std::thread::spawn(move || {
         if wait_for_server(&url_clone, 60) {
+            SERVER_READY.store(true, Ordering::Release);
             log::info!("Python server is ready at {url_clone}");
         } else {
             log::error!("Python server failed to start within 30 seconds");
@@ -573,6 +580,9 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
 
                         if code != 0 {
                             log::error!("[Python] Server crashed with exit code {code}");
+                            // Mark not-ready immediately so get_api_info returns "starting"
+                            // during the restart window rather than stale "ready".
+                            SERVER_READY.store(false, Ordering::Release);
                             restart_count += 1;
 
                             if restart_count <= MAX_RESTARTS {
@@ -711,6 +721,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
         return Err("Server did not become ready after restart".to_string());
     }
 
+    SERVER_READY.store(true, Ordering::Release);
     log::info!("[Python] Server restarted successfully on port {port}");
     Ok(())
 }

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
 use crate::python;
 
@@ -15,15 +16,24 @@ pub struct ApiInfo {
 #[tauri::command]
 pub fn get_api_info() -> ApiInfo {
     let server = python::get_server().lock().unwrap();
+    let has_process = server.process.is_some();
+    let has_error = server.startup_error.is_some();
+    let status = if has_error {
+        "error"
+    } else if has_process {
+        if python::SERVER_READY.load(Ordering::Acquire) {
+            "ready"
+        } else {
+            "starting"
+        }
+    } else {
+        "stopped"
+    };
     ApiInfo {
         port: server.port,
         url: server.url.clone(),
         error: server.startup_error.clone(),
-        status: if server.startup_error.is_some() {
-            "error".to_string()
-        } else {
-            "ready".to_string()
-        },
+        status: status.to_string(),
     }
 }
 
