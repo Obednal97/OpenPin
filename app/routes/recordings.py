@@ -612,6 +612,15 @@ def list_transcripts():
     return jsonify(transcripts)
 
 
+def _is_number(v):
+    """Return True iff v is a numeric type but not a bool.
+
+    bool is a subclass of int in Python, so isinstance(True, (int, float))
+    returns True.  We explicitly reject bools to avoid corrupt segment timing.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _validate_segments(segments):
     """Return (ok: bool, error_msg: str) after checking segment list structure.
 
@@ -623,9 +632,9 @@ def _validate_segments(segments):
     for i, seg in enumerate(segments):
         if not isinstance(seg, dict):
             return False, f"segment[{i}] must be an object"
-        if not isinstance(seg.get("start"), (int, float)):
+        if not _is_number(seg.get("start")):
             return False, f"segment[{i}].start must be a number"
-        if not isinstance(seg.get("end"), (int, float)):
+        if not _is_number(seg.get("end")):
             return False, f"segment[{i}].end must be a number"
         if not isinstance(seg.get("text"), str):
             return False, f"segment[{i}].text must be a string"
