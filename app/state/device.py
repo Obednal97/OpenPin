@@ -410,7 +410,7 @@ async def connect_device(address=None):
         dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
         key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
         if ChaCha20Poly1305(key).decrypt(nonce, ct, aad) != b"PLAUD.AI":
-            raise ValueError("BLE handshake AAD validation failed")
+            raise ValueError("BLE handshake identity check failed: decrypted token mismatch")
         try:
             await cl.stop_notify(N)
         except Exception:

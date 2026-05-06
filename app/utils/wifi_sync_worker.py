@@ -383,7 +383,7 @@ async def ble_connect_and_setup():
     key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
     cipher = ChaCha20Poly1305(key)
     if cipher.decrypt(nonce, ct, aad) != b"PLAUD.AI":
-        raise ValueError("BLE handshake AAD validation failed")
+        raise ValueError("BLE handshake identity check failed: decrypted token mismatch")
     try:
         await cl.stop_notify(N)
     except Exception:
@@ -446,7 +446,11 @@ async def main():
         return
 
     # Do our own BLE connection (device invalidates sessions when BLE drops)
-    ble = await ble_connect_and_setup()
+    try:
+        ble = await ble_connect_and_setup()
+    except ValueError as e:
+        print(json.dumps({"error": f"BLE handshake failed: {e}"}))
+        return
     if not ble:
         print(json.dumps({"error": "BLE connection failed"}))
         return
