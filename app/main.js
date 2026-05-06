@@ -349,15 +349,29 @@ function getPythonEnv() {
   return _pythonEnvCache;
 }
 
+function _isAbortError(message) {
+  return /aborted|AbortError|signal is aborted/i.test(String(message || ''));
+}
+
 async function reportError(error, context = 'main') {
   try {
     const fingerprint = errorFingerprint(error);
+    const errorMsg = String(error.message || error);
+    const stack = error.stack || '';
+
+    // Always capture in local diagnostics, then decide whether to escalate to GitHub
+    _appendDiagnostic({ context, message: errorMsg, stack, fingerprint });
+
+    // FILTER: legitimate aborts (timeouts, navigation, manual cancellation) — log only
+    if (_isAbortError(errorMsg)) {
+      return;
+    }
+
+    // Existing dedupe (per session)
     if (_reportedErrors.has(fingerprint)) return;
     _reportedErrors.add(fingerprint);
 
     const version = app.getVersion();
-    const errorMsg = String(error.message || error);
-    const stack = error.stack || '';
 
     // Gather system info
     const uptimeMin = Math.round((Date.now() - _appStartTime) / 60000);
