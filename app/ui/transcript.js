@@ -898,6 +898,10 @@ async function transcribeRecording(oggPath, sessionId) {
 }
 
 function closeTranscript() {
+  if (_exportDropdownCleanup) {
+    document.removeEventListener('click', _exportDropdownCleanup);
+    _exportDropdownCleanup = null;
+  }
   if (_notionPollHandle) {
     clearInterval(_notionPollHandle);
     _notionPollHandle = null;
