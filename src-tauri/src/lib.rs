@@ -51,24 +51,10 @@ fn prefs_path() -> std::path::PathBuf {
 }
 
 fn load_prefs() -> serde_json::Value {
-    let prefs = std::fs::read_to_string(prefs_path())
+    std::fs::read_to_string(prefs_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}));
-
-    // One-time migration: if tauri-prefs is empty, import from Electron prefs
-    if prefs.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-        let electron_prefs_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join("Library/Application Support/Plaud V2/electron-prefs.json");
-        if let Ok(data) = std::fs::read_to_string(&electron_prefs_path) {
-            if let Ok(electron_prefs) = serde_json::from_str::<serde_json::Value>(&data) {
-                log::info!("[Migration] Importing preferences from Electron build");
-                save_prefs(&electron_prefs);
-                return electron_prefs;
-            }
-        }
-    }
-    prefs
+        .unwrap_or(serde_json::json!({}))
 }
 
 fn save_prefs(prefs: &serde_json::Value) {
@@ -119,14 +105,6 @@ pub fn run() {
 
             // Cache app version for bug reports (report_error doesn't have AppHandle)
             commands::set_app_version(app.package_info().version.to_string());
-
-            // One-time cleanup: remove Electron update cache if upgrading
-            let electron_updates = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join("Library/Application Support/Plaud V2/updates");
-            if electron_updates.exists() {
-                log::info!("[Migration] Cleaning up Electron update cache");
-                let _ = std::fs::remove_dir_all(&electron_updates);
-            }
 
             // macOS: traffic lights + themed dock icon
             #[cfg(target_os = "macos")]
