@@ -33,6 +33,7 @@ function openTranscript(sessionId, autoPlay = false) {
         await window.plaud.renameRecording(sessionId, newTitle);
       } catch (err) {
         if (err.name !== 'AbortError') console.warn('[transcript] rename failed:', err);
+        return;
       }
       rec.title = newTitle;
       if (!newTitle) {
