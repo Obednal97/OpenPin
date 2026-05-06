@@ -534,7 +534,12 @@ async function executeWifiSync() {
     while (pollActive) {
       try {
         const s = await window.plaud.wifiSyncStatus();
-        if (s && s.message) {
+        // Re-check pollActive after the async status call: the main sync may have
+        // already finished (setting pollActive=false) and rendered a terminal
+        // success/error state with an appended Close/Done button. Calling
+        // _renderWifiProgress now would replace the entire innerHTML and destroy
+        // that button.
+        if (pollActive && s && s.message) {
           const stage = _wifiSyncStageFromMessage(s.message, s.percent || 5);
           _renderWifiProgress(stage.icon, stage.title, stage.detail, s.percent || 5);
         }
