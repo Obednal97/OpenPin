@@ -460,24 +460,31 @@ pub fn install_update(app: tauri::AppHandle) -> UpdateResult {
     let is_dmg = zip_path.ends_with(".dmg");
     log::info!("[Updater] Installing from {zip_path} (dmg={is_dmg}) to {app_path}");
 
-    // Spawn detached bash script that handles both DMG and ZIP formats
-    let script = format!(
-        r#"
+    // Spawn detached bash script that handles both DMG and ZIP formats.
+    // zip_path and app_path are passed as positional arguments ($1, $2) to
+    // avoid shell injection: format!()-interpolating untrusted values (e.g.
+    // the GitHub release asset name) into the script body would allow a
+    // maliciously crafted asset name containing $(), backticks, or quotes to
+    // break out of the variable assignments and execute arbitrary commands.
+    let script_template = r#"
+zip_path="$1"
+app_path="$2"
+IS_DMG="$3"
+
 sleep 1
 rm -rf /tmp/plaud-v2-update
 
-IS_DMG="{is_dmg}"
 if [ "$IS_DMG" = "true" ]; then
   # DMG: mount, copy .app, unmount
   # Use sed to extract full /Volumes/... path (handles spaces in volume names)
-  MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/' | tail -1)
+  MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "$zip_path" 2>/dev/null | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/' | tail -1)
   if [ -z "$MOUNT_POINT" ]; then
-    MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "{zip_path}" 2>/dev/null | tail -1 | sed 's/.*\(\/Volumes\/.*\)/\1/')
+    MOUNT_POINT=$(hdiutil attach -nobrowse -noverify -noautoopen "$zip_path" 2>/dev/null | tail -1 | sed 's/.*\(\/Volumes\/.*\)/\1/')
   fi
   NEW_APP=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" 2>/dev/null | head -1)
 else
   # ZIP: extract with ditto
-  ditto -xk "{zip_path}" "/tmp/plaud-v2-update"
+  ditto -xk "$zip_path" "/tmp/plaud-v2-update"
   NEW_APP=$(find /tmp/plaud-v2-update -maxdepth 1 -name "*.app" | head -1)
 fi
 
@@ -488,41 +495,47 @@ if [ -n "$NEW_APP" ] && [ -d "$NEW_APP/Contents/MacOS" ]; then
     echo "Update signature invalid: $SIGCHECK" >&2
     [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
     rm -rf /tmp/plaud-v2-update
-    open "{app_path}"
+    open "$app_path"
     exit 1
   fi
   # Safe swap: rename old, move new, only then delete old
-  mv "{app_path}" "{app_path}.old" 2>/dev/null
-  cp -R "$NEW_APP" "{app_path}"
-  if [ -d "{app_path}/Contents/MacOS" ]; then
-    rm -rf "{app_path}.old"
-    xattr -dr com.apple.quarantine "{app_path}"
+  mv "$app_path" "${app_path}.old" 2>/dev/null
+  cp -R "$NEW_APP" "$app_path"
+  if [ -d "${app_path}/Contents/MacOS" ]; then
+    rm -rf "${app_path}.old"
+    xattr -dr com.apple.quarantine "$app_path"
     [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
     rm -rf /tmp/plaud-v2-update
-    open "{app_path}"
+    open "$app_path"
   else
     # Swap failed — restore old app
-    rm -rf "{app_path}"
-    mv "{app_path}.old" "{app_path}" 2>/dev/null
+    rm -rf "$app_path"
+    mv "${app_path}.old" "$app_path" 2>/dev/null
     [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
-    open "{app_path}"
+    open "$app_path"
   fi
 else
   # Extraction/mount failed — just relaunch existing app
   [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
   rm -rf /tmp/plaud-v2-update
-  open "{app_path}"
+  open "$app_path"
 fi
-"#
-    );
+"#;
 
     // Spawn detached so it survives app.exit(0). Rust's default spawn keeps
     // the child in the parent's session; when the Tauri process terminates,
     // macOS can reap the still-attached bash before it finishes the swap +
     // `open`. pre_exec runs between fork and exec — calling setsid() there
     // makes the child a new session leader so it outlives the parent.
+    //
+    // bash -c '<script>' '<$0>' '<$1>' '<$2>' '<$3>'
+    // The first arg after the script is $0 (script name placeholder); actual
+    // positional params start at $1. Values are never part of the script body.
     let mut cmd = std::process::Command::new("bash");
-    cmd.args(["-c", &script])
+    cmd.args(["-c", script_template, "install-update"])
+        .arg(&zip_path)
+        .arg(&app_path)
+        .arg(is_dmg.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
