@@ -1271,3 +1271,7 @@ ipcMain.handle('set-backend-health', (event, state) => {
   }
   return { ok: true, state: _backendHealth };
 });
+
+ipcMain.handle('get-diagnostics-log-path', () => {
+  return _diagnosticsLogPath();
+});
