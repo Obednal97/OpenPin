@@ -275,6 +275,9 @@ All `BUG` and `LATENT` P0/P1 findings. Goal: stop wrong behavior under realistic
 ---
 
 ### F-bd-001 — Live `.env` file with real GitHub PAT and Apple App-Specific Password on disk
+
+> **⚠️ DEFERRED BY USER (2026-05-06):** Skipped from this execution run. The `.env` is gitignored and not committed; user accepts the on-disk credentials risk for now. Re-evaluate before sharing the repo broadly or moving to a shared dev machine. Related cleanup items (`.env.example` in F-bd-011, comment update in F-x-005) remain in scope.
+
 - **File:** `.env`
 - **Category / Severity:** SECURITY / P0
 - **Description:** `.env` (gitignored, never committed per audit) contains a live GitHub personal access token, a live Apple app-specific password, and an App Store Connect API key. Live credentials on disk; if the machine is shared or backed up to an unencrypted location, they're leaked. Comment also references the deleted Electron `npm run publish` flow.
