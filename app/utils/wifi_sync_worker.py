@@ -636,6 +636,7 @@ async def main():
     hotspot_ip = None
     server = None
     restore_result = None
+    saved_networks = []
     try:
         # Remove preferred networks for the ENTIRE transfer duration —
         # if restored too early, macOS auto-rejoins a known network mid-transfer.
