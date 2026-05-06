@@ -50,7 +50,7 @@ _device_state = {
 }
 
 _ble_lock = threading.Lock()
-_syncing = threading.Event()  # Set while a file sync is in progress — blocks status polls
+_syncing = threading.Lock()  # Held while a file sync is in progress — blocks concurrent syncs
 _sync_abort = False  # Set True to abort current BLE sync (e.g. switching to WiFi)
 _wifi_sync_status = {"message": "", "percent": 0}  # Progress for WiFi sync polling
 _loop = None
@@ -889,13 +889,12 @@ async def stop_recording():
 async def sync_files(progress_callback=None):
     """Download all files from device, decrypt, save as .ogg."""
     global _syncing
-    if _syncing.is_set():
+    if not _syncing.acquire(blocking=False):
         return {"error": "Sync already in progress"}
-    _syncing.set()
     try:
         return await _sync_files_inner(progress_callback)
     finally:
-        _syncing.clear()
+        _syncing.release()
 
 
 def do_wifi_sync_blocking():
@@ -912,15 +911,12 @@ def do_wifi_sync_blocking():
         _wifi_sync_status.update({"message": "No BLE session", "percent": 0})
         return {"error": "No BLE session — connect device first"}
 
-    # Force-abort any running BLE sync and take over the lock
-    if _syncing.is_set():
-        _sync_abort = True
-        # Wait up to 10s for BLE sync to notice the abort and release
-        _syncing.wait(timeout=10)
-        # If still set, force it clear — WiFi worker runs in a separate process anyway
-        _syncing.clear()
-        _sync_abort = False
-    _syncing.set()
+    # Signal any running BLE sync to abort, then wait up to 10s for it to release.
+    _sync_abort = True
+    acquired = _syncing.acquire(timeout=10)
+    _sync_abort = False
+    if not acquired:
+        return {"error": "BLE sync still running after 10s; WiFi sync aborted"}
 
     sn = _device_state["serial_number"]
     key, nonce, aad = _device_state["session_keys"]
@@ -1082,7 +1078,7 @@ def do_wifi_sync_blocking():
         _on_status(f"WiFi transfer failed: {e}", 0)
         return {"error": str(e)}
     finally:
-        _syncing.clear()
+        _syncing.release()
 
 
 async def _sync_files_inner(progress_callback=None):
@@ -1262,7 +1258,7 @@ def is_connected():
 
 
 def is_syncing():
-    return _syncing.is_set()
+    return _syncing.locked()
 
 
 def abort_sync():
