@@ -19,7 +19,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-WS_PORT = 8081
+WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
 
@@ -656,7 +656,19 @@ async def main():
         # always runs restore_preferred_networks() if the remove ran.
         saved_networks = remove_preferred_networks()
         status("Starting WebSocket server...", 5)
-        server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", WS_PORT)
+        server = None
+        last_bind_err = None
+        for _port in WS_PORT_CANDIDATES:
+            try:
+                server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", _port)
+                break
+            except OSError as _e:
+                last_bind_err = _e
+                status(f"Port {_port} in use, trying next...", 5)
+        if server is None:
+            raise OSError(
+                f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use"
+            ) from last_bind_err
 
         status("Opening device hotspot...", 10)
         await ble_cmd("WiFi_Open", bytes([1, 10, 0]))
