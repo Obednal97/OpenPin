@@ -69,14 +69,8 @@ const PYTHON_CANDIDATES: &[&str] = &[
     "python3",
 ];
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
-}
-
 fn bundled_python_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_default()
-        .join("Library/Application Support/com.plaud.v2/python")
+    crate::home_dir().join("Library/Application Support/com.plaud.v2/python")
 }
 
 /// Find a working Python 3 binary, returns (path, version_string)
@@ -352,8 +346,7 @@ fn build_path(app: &AppHandle) -> String {
     let bundled_bin = resource_path.join("bin");
 
     // App support bin/ — where FFmpeg gets downloaded on first use
-    let app_support_bin = home_dir()
-        .unwrap_or_default()
+    let app_support_bin = crate::home_dir()
         .join("Library/Application Support/com.plaud.v2/bin");
 
     let extra_paths = vec![

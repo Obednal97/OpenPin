@@ -46,10 +46,15 @@ pub fn is_system_dark_mode() -> bool {
     }
 }
 
+/// Returns the current user's home directory, falling back to `/tmp` when the
+/// home directory cannot be determined (e.g. sandboxed environments).
+pub fn home_dir() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+}
+
 /// Simple prefs file for Tauri-level settings (dock visibility, etc.)
 fn prefs_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home)
+    home_dir()
         .join("Library/Application Support/com.plaud.v2")
         .join("tauri-prefs.json")
 }
@@ -136,7 +141,7 @@ pub fn run() {
                 // Watching this file is cheaper than spawning `defaults read` every 5s
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    let pref_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    let pref_path = crate::home_dir()
                         .join("Library/Preferences/.GlobalPreferences.plist");
                     let mut was_dark = is_system_dark_mode();
                     let mut last_mtime = std::fs::metadata(&pref_path)
