@@ -9,6 +9,7 @@ Usage: python3 wifi_sync_worker.py '{"key":"...","nonce":"...","aad":"...","sn":
 
 import asyncio
 import json
+import logging
 import struct
 import subprocess
 import sys
@@ -420,7 +421,18 @@ async def ble_connect_and_setup():
         return cmd_resp[0]
 
     # BLE setup commands
-    token32 = BIND_TOKEN[:32].encode("ascii")
+    if not BIND_TOKEN:
+        raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
+    if len(BIND_TOKEN) > 32:
+        logging.warning(
+            "BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
+            "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
+            len(BIND_TOKEN),
+        )
+    try:
+        token32 = BIND_TOKEN[:32].encode("ascii").ljust(32, b"\x00")
+    except UnicodeEncodeError as e:
+        raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
     await cmd("HS1", bytes([1, 1, 0, 2, 0, 0]) + token32)
     await cmd("HS2", bytes([1, 1, 0, 2, 0, 1]) + token32)
     await cmd("Sync", bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))

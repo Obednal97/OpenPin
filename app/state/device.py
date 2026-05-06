@@ -512,8 +512,17 @@ async def connect_device(address=None):
         except Exception as e:
             logging.warning(f"[BLE] Cloud bind failed: {e}")
     if not device_token:
-        logging.warning(f"[BLE] No BIND_TOKEN available for {sn} — handshake may fail")
-    token32 = (device_token or "")[:32].encode("ascii").ljust(32, b"\x00")
+        raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
+    if len(device_token) > 32:
+        logging.warning(
+            "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
+            "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
+            len(device_token),
+        )
+    try:
+        token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
+    except UnicodeEncodeError as e:
+        raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
     r1 = await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
     r2 = await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
     logging.info(f"[BLE] Handshake responses: HS1={r1 is not None}, HS2={r2 is not None}")
