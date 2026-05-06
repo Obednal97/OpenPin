@@ -1070,7 +1070,7 @@ pub fn show_notification(
     let mut builder = app.notification().builder().title(&title).body(&body);
 
     if let Some(ref label) = action_label {
-        builder = builder.action_type_id("default").action_type_id(label);
+        builder = builder.action_type_id(label);
     }
 
     let result = builder.show();
@@ -1078,14 +1078,14 @@ pub fn show_notification(
     // Show window when any notification is interacted with
     // (Tauri notification plugin doesn't have per-notification callbacks,
     // so we handle this globally via the plugin's event system)
-    if action_label.is_some() {
+    if let Some(label) = action_label {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             // Small delay to let the notification appear
             std::thread::sleep(std::time::Duration::from_millis(100));
-            // Emit notification-action event for the frontend
-            // The frontend listens for this to trigger WiFi sync etc.
-            let _ = app_clone.emit("notification-action", "wifi-sync");
+            // Emit notification-action event for the frontend, using the
+            // action label as payload so the frontend can dispatch accordingly.
+            let _ = app_clone.emit("notification-action", label);
         });
     }
 

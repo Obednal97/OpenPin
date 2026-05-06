@@ -450,7 +450,7 @@ function offerWifiSync(totalSize, fileCount, isBackground) {
     window.plaud.showNotification(
       'Large recordings detected',
       `${sizeStr} to sync. Tap to use WiFi transfer (temporarily disconnects internet).`,
-      'Use WiFi',
+      'wifi-sync',
     );
     return;
   }
