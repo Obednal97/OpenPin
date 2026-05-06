@@ -752,6 +752,12 @@ fn system_info_block(version: &str) -> String {
 
 const DIAGNOSTICS_MAX_BYTES: u64 = 1024 * 1024;
 
+/// Serialises all concurrent writes to the diagnostics log file.
+/// O_APPEND atomicity on macOS is guaranteed only for writes ≤ ~512 bytes;
+/// larger JSON lines from concurrent report_error calls can interleave without
+/// this lock.
+static DIAG_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn diagnostics_log_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
@@ -763,6 +769,23 @@ fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &st
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
+    // Format the full log line into a String BEFORE acquiring the lock so that
+    // the critical section contains only the write syscall.
+    let stack_trunc: String = stack.chars().take(4096).collect();
+    let mut line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "version": app_version(),
+        "context": context,
+        "message": message,
+        "fingerprint": fingerprint,
+        "stackTruncated": stack_trunc,
+    }).to_string();
+    line.push('\n');
+
+    // Acquire lock, then rotate (if needed) and write as a single operation so
+    // that rotation and the subsequent write are also serialised.
+    let _guard = DIAG_LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Rotate if oversize
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() >= DIAGNOSTICS_MAX_BYTES {
@@ -771,19 +794,11 @@ fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &st
             let _ = std::fs::rename(&path, &rotated);
         }
     }
-    let stack_trunc: String = stack.chars().take(4096).collect();
-    let line = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "version": app_version(),
-        "context": context,
-        "message": message,
-        "fingerprint": fingerprint,
-        "stackTruncated": stack_trunc,
-    }).to_string();
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", line);
+        let _ = f.write_all(line.as_bytes());
     }
+    // _guard drops here, releasing the lock
 }
 
 fn is_abort_error(message: &str) -> bool {
