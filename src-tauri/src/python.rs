@@ -577,72 +577,94 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         let mut restart_count = 0;
         const MAX_RESTARTS: u32 = 3;
         loop {
-            std::thread::sleep(Duration::from_secs(5));
-            let mut server = get_server().lock().unwrap();
-            if let Some(ref mut child) = server.process {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        let code = status.code().unwrap_or(-1);
-                        server.process = None;
-                        drop(server);
-
-                        if code != 0 {
-                            log::error!("[Python] Server crashed with exit code {code}");
-                            // Mark not-ready immediately so get_api_info returns "starting"
-                            // during the restart window rather than stale "ready".
-                            SERVER_READY.store(false, Ordering::Release);
-                            restart_count += 1;
-
-                            if restart_count <= MAX_RESTARTS {
-                                log::info!("[Python] Auto-restarting (attempt {restart_count}/{MAX_RESTARTS})...");
-                                // Re-spawn the Python server
-                                if let Err(e) = restart_python_server(&app_handle) {
-                                    log::error!("[Python] Restart failed: {e}");
-                                    set_startup_error(
-                                        "SERVER_CRASH",
-                                        "Server crashed",
-                                        "The Python backend crashed and could not be restarted.",
-                                        "Try restarting the app.",
-                                        &format!("Exit code {code}, restart failed: {e}"),
-                                    );
-                                    if let Some(w) = app_handle.get_webview_window("main") {
-                                        let err = get_server().lock().unwrap().startup_error.clone();
-                                        if let Some(e) = err {
-                                            let _ = w.emit("startup-error", e);
-                                        }
-                                    }
-                                    break;
-                                }
-                                // Continue monitoring the new process
-                                continue;
+            // Acquire lock, inspect process state, then release before sleeping.
+            // Keeping the lock held across a sleep would block stop_python_server
+            // (called on quit) for up to 5 s.
+            enum LoopAction {
+                StillRunning,
+                CleanExit,
+                Crashed(i32),
+                NoProcess,
+                WaitError,
+            }
+            let action = {
+                let mut server = get_server().lock().unwrap();
+                if let Some(ref mut child) = server.process {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let code = status.code().unwrap_or(-1);
+                            server.process = None;
+                            if code != 0 {
+                                LoopAction::Crashed(code)
                             } else {
-                                log::error!("[Python] Max restarts ({MAX_RESTARTS}) exceeded");
-                                set_startup_error(
-                                    "SERVER_CRASH",
-                                    "Server keeps crashing",
-                                    "The Python backend crashed repeatedly.",
-                                    "Try restarting the app. If this keeps happening, check Python installation.",
-                                    &format!("Exit code {code}, {restart_count} restarts attempted"),
-                                );
-                                if let Some(w) = app_handle.get_webview_window("main") {
-                                    let err = get_server().lock().unwrap().startup_error.clone();
-                                    if let Some(e) = err {
-                                        let _ = w.emit("startup-error", e);
-                                    }
-                                }
-                                break;
+                                LoopAction::CleanExit
                             }
-                        } else {
-                            // Clean exit (code 0) — don't restart
+                        }
+                        Ok(None) => LoopAction::StillRunning,
+                        Err(_) => LoopAction::WaitError,
+                    }
+                } else {
+                    LoopAction::NoProcess
+                }
+                // lock dropped here — stop_python_server can now proceed immediately
+            };
+
+            match action {
+                LoopAction::StillRunning => {}
+                LoopAction::CleanExit | LoopAction::NoProcess | LoopAction::WaitError => break,
+                LoopAction::Crashed(code) => {
+                    log::error!("[Python] Server crashed with exit code {code}");
+                    // Mark not-ready immediately so get_api_info returns "starting"
+                    // during the restart window rather than stale "ready".
+                    SERVER_READY.store(false, Ordering::Release);
+                    restart_count += 1;
+
+                    if restart_count <= MAX_RESTARTS {
+                        log::info!("[Python] Auto-restarting (attempt {restart_count}/{MAX_RESTARTS})...");
+                        // Re-spawn the Python server
+                        if let Err(e) = restart_python_server(&app_handle) {
+                            log::error!("[Python] Restart failed: {e}");
+                            set_startup_error(
+                                "SERVER_CRASH",
+                                "Server crashed",
+                                "The Python backend crashed and could not be restarted.",
+                                "Try restarting the app.",
+                                &format!("Exit code {code}, restart failed: {e}"),
+                            );
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let err = get_server().lock().unwrap().startup_error.clone();
+                                if let Some(e) = err {
+                                    let _ = w.emit("startup-error", e);
+                                }
+                            }
                             break;
                         }
+                        // Continue monitoring the new process (skip the 5 s sleep
+                        // so we start watching the fresh child immediately).
+                        continue;
+                    } else {
+                        log::error!("[Python] Max restarts ({MAX_RESTARTS}) exceeded");
+                        set_startup_error(
+                            "SERVER_CRASH",
+                            "Server keeps crashing",
+                            "The Python backend crashed repeatedly.",
+                            "Try restarting the app. If this keeps happening, check Python installation.",
+                            &format!("Exit code {code}, {restart_count} restarts attempted"),
+                        );
+                        if let Some(w) = app_handle.get_webview_window("main") {
+                            let err = get_server().lock().unwrap().startup_error.clone();
+                            if let Some(e) = err {
+                                let _ = w.emit("startup-error", e);
+                            }
+                        }
+                        break;
                     }
-                    Ok(None) => {} // Still running
-                    Err(_) => break,
                 }
-            } else {
-                break;
             }
+
+            // Sleep WITHOUT holding the server lock so that stop_python_server
+            // (triggered on app quit) can acquire it immediately.
+            std::thread::sleep(Duration::from_secs(5));
         }
     });
 
