@@ -14,6 +14,7 @@ from app.providers.transcribe import transcribe_deepgram, transcribe_groq, trans
 from app.providers.validate import validate_key as do_validate_key
 from app.utils.config import load_config, save_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
 
 
@@ -223,7 +224,8 @@ def transcribe_file():
             }
             if speakers:
                 t_data["speakers"] = speakers
-            transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
+            with get_transcript_lock(session_id):
+                transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
             txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
             txt_path.write_text(text, encoding="utf-8")
 
@@ -268,11 +270,12 @@ def transcribe_file():
                         ]
                         speakers = list({s.speaker for s in t_obj.segments if s.speaker})
                         tp = Path(_bg_tp)
-                        td = json.loads(tp.read_text())
-                        td["segments"] = updated_segments
-                        td["provider"] = f"{_cloud_provider}+pyannote"
-                        td["speakers"] = speakers
-                        tp.write_text(json.dumps(td, indent=2, ensure_ascii=False))
+                        with get_transcript_lock(_bg_sid):
+                            td = json.loads(tp.read_text())
+                            td["segments"] = updated_segments
+                            td["provider"] = f"{_cloud_provider}+pyannote"
+                            td["speakers"] = speakers
+                            tp.write_text(json.dumps(td, indent=2, ensure_ascii=False))
                         print(f"  [bg-diarize] Complete for {_bg_sid}: {len(speakers)} speaker(s)")
                         # Fire webhook after diarization with full segmented transcript
                         fire_webhooks(
@@ -484,9 +487,13 @@ def summarize_transcript():
             if len(title) < 5:
                 title = summary_text[:60].strip()
 
-        t_data["summary"] = summary_text
-        t_data["auto_title"] = title
-        transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
+        with get_transcript_lock(session_id):
+            # Re-read under the lock so any concurrent writes (e.g. diarization
+            # completing while the LLM call was in flight) are not overwritten.
+            t_data = json.loads(transcript_path.read_text())
+            t_data["summary"] = summary_text
+            t_data["auto_title"] = title
+            transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
 
         names = config.get("recording_names", {})
         if not names.get(session_id):
