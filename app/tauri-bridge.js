@@ -52,7 +52,6 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
 ]);
 const DEFAULT_TIMEOUT_MS = 30000;
-const _appStartTime = Date.now();
 
 async function _fetchWithTimeout(url, opts, endpoint) {
   if (NO_TIMEOUT_ENDPOINTS.has(endpoint)) return fetch(url, opts);
@@ -89,7 +88,7 @@ async function apiCall(method, endpoint, body = null) {
         throw err; // Same URL, genuinely unreachable
       }
     } catch {
-      if (REPORT_ENDPOINTS.has(endpoint) && Date.now() - _appStartTime > 15000) {
+      if (REPORT_ENDPOINTS.has(endpoint)) {
         invoke('report_error', {
           message: `API fetch failed: ${endpoint} — ${err.message}`,
           stack: '',

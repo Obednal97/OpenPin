@@ -25,8 +25,6 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
 ]);
 const DEFAULT_TIMEOUT_MS = 30000;
-// Suppress "Failed to fetch" reports during the first 15s (server may still be starting)
-const _appStartTime = Date.now();
 
 async function _fetchWithTimeout(url, opts, endpoint) {
   if (NO_TIMEOUT_ENDPOINTS.has(endpoint)) return fetch(url, opts);
@@ -53,8 +51,8 @@ async function apiCall(method, endpoint, body = null) {
   try {
     res = await _fetchWithTimeout(`${_apiUrl}${endpoint}`, opts, endpoint);
   } catch (err) {
-    // Network error (server down, etc.) — suppress during startup grace period
-    if (REPORT_ENDPOINTS.has(endpoint) && Date.now() - _appStartTime > 15000) {
+    // Network error — reporter filters by backend-health state and AbortError
+    if (REPORT_ENDPOINTS.has(endpoint)) {
       ipcRenderer.invoke('report-error', {
         message: `API fetch failed: ${endpoint} — ${err.message}`,
         stack: '',
