@@ -634,7 +634,7 @@ function showTranscriptTab(tabName, sessionId, rec, t) {
   if (tabName === 'summary' && t && t.summary) {
     segContainer.classList.add('hidden');
     sumContainer.classList.remove('hidden');
-    renderEditableSummary(sumContainer, t, sessionId);
+    renderEditableSummary(sumContainer, t, sessionId, rec);
     tabsEl.classList.remove('hidden');
   } else {
     sumContainer.classList.add('hidden');
@@ -747,7 +747,7 @@ async function saveSegments(sessionId, t) {
   }
 }
 
-function renderEditableSummary(container, t, sessionId) {
+function renderEditableSummary(container, t, sessionId, rec) {
   let editing = false;
   const render = () => {
     container.innerHTML = renderMarkdown(t.summary);
@@ -783,10 +783,17 @@ function renderEditableSummary(container, t, sessionId) {
     saveBtn.addEventListener('click', async () => {
       const newSummary = textarea.value.trim();
       if (newSummary !== t.summary) {
-        t.summary = newSummary;
-        try {
-          await window.plaud.updateTranscript(sessionId, { summary: newSummary });
+        if (newSummary) {
+          t.summary = newSummary;
+        } else {
+          delete t.summary;
           if (app.transcripts[sessionId]) {
+            delete app.transcripts[sessionId].summary;
+          }
+        }
+        try {
+          await window.plaud.updateTranscript(sessionId, { summary: newSummary || null });
+          if (newSummary && app.transcripts[sessionId]) {
             app.transcripts[sessionId].summary = newSummary;
           }
         } catch (err) {
@@ -794,7 +801,11 @@ function renderEditableSummary(container, t, sessionId) {
         }
       }
       editing = false;
-      render();
+      if (!t.summary) {
+        showTranscriptTab('transcript', sessionId, rec, t);
+      } else {
+        render();
+      }
     });
 
     cancelBtn.addEventListener('click', () => {
