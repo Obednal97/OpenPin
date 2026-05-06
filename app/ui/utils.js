@@ -43,6 +43,7 @@ const app = {
   transcribeSpeed: null,
   activeTab: 'transcript',
   pendingDesktopUuid: null,
+  currentSessionId: null,
 };
 
 // DOM refs — cached once
