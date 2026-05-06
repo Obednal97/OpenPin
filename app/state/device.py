@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import struct
 import sys
 import threading
@@ -427,20 +428,29 @@ async def connect_device(address=None):
             return {"connected": False, "error": "Device took too long to respond. Try moving it closer and reconnecting."}
         return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
 
-    # Save session
+    # Save session (atomic write — prevents corruption on mid-write crash)
     SESSIONS_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json.dump(
-        {
-            "key": key.hex(),
-            "nonce": nonce.hex(),
-            "aad": aad.hex(),
-            "status": "ACTIVE",
-            "timestamp": datetime.now().isoformat(),
-        },
-        open(str(SESSIONS_DIR / f"session_{ts}.json"), "w"),
-        indent=2,
-    )
+    session_path = str(SESSIONS_DIR / f"session_{ts}.json")
+    tmp_path = session_path + ".tmp"
+    session_data = {
+        "key": key.hex(),
+        "nonce": nonce.hex(),
+        "aad": aad.hex(),
+        "status": "ACTIVE",
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(session_data, f, indent=2)
+        os.replace(tmp_path, session_path)
+    except Exception as e:
+        logging.warning("Failed to save session: %s", e)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     _device_state["session_keys"] = (key, nonce, aad)
     cipher = ChaCha20Poly1305(key)
