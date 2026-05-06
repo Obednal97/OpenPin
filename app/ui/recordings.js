@@ -246,6 +246,7 @@ function updateSelectBar() {
             return rec && (rec.tags || []).includes(tag);
           });
 
+          const failures = [];
           for (const sid of ids) {
             const rec = app.recordings.find((r) => r.session_id === sid);
             if (!rec) continue;
@@ -258,14 +259,30 @@ function updateSelectBar() {
                 rec.tags = tags;
               }
             }
-            await window.plaud.tagRecording(sid, rec.tags);
+            try {
+              await window.plaud.tagRecording(sid, rec.tags);
+            } catch (err) {
+              failures.push({ sid, err });
+            }
           }
-          toast(
-            allHaveTag
-              ? `Removed "${tag}" from ${ids.length} recording(s)`
-              : `Tagged ${ids.length} recording(s) as "${tag}"`,
-            'success',
-          );
+          if (failures.length === 0) {
+            toast(
+              allHaveTag
+                ? `Removed "${tag}" from ${ids.length} recording(s)`
+                : `Tagged ${ids.length} recording(s) as "${tag}"`,
+              'success',
+            );
+          } else if (failures.length === ids.length) {
+            toast(
+              `Failed to tag any recordings (${failures[0].err.message || 'unknown'})`,
+              'error',
+            );
+          } else {
+            toast(
+              `Tagged ${ids.length - failures.length}/${ids.length}; ${failures.length} failed`,
+              'warning',
+            );
+          }
           renderRecordingsList();
           return;
         }
