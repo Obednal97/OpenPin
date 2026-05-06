@@ -9,6 +9,7 @@ function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
   if (!rec) return;
 
+  app.currentSessionId = sessionId;
   const t = app.transcripts[sessionId];
   app.currentView = 'transcript';
 
@@ -887,6 +888,7 @@ function closeTranscript() {
     titleEl.blur();
   }
   app.currentView = 'list';
+  app.currentSessionId = null;
   dom.transcriptView.classList.add('hidden');
   dom.recordingsList.classList.remove('hidden');
   dom.audioEl.pause();
