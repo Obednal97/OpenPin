@@ -196,4 +196,5 @@ contextBridge.exposeInMainWorld('plaud', {
   // Bug reporter
   reportError: (message, stack, context) => ipcRenderer.invoke('report-error', { message, stack, context }),
   reportBug: (expected, actual, steps) => ipcRenderer.invoke('report-bug', { expected, actual, steps }),
+  setBackendHealth: (state) => ipcRenderer.invoke('set-backend-health', state),
 });

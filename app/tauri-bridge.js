@@ -292,4 +292,5 @@ window.plaud = {
   // Bug reporter — IPC to Rust
   reportError: (message, stack, context) => invoke('report_error', { message, stack, context }),
   reportBug: (expected, actual, steps) => invoke('report_bug', { expected, actual, steps }),
+  setBackendHealth: (state) => invoke('set_backend_health', { state }),
 };
