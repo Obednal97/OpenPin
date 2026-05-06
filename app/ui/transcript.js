@@ -887,7 +887,7 @@ function closeTranscript() {
   if (titleEl && document.activeElement === titleEl) {
     titleEl.blur();
   }
-  app.currentView = 'list';
+  app.currentView = 'recordings';
   app.currentSessionId = null;
   dom.transcriptView.classList.add('hidden');
   dom.recordingsList.classList.remove('hidden');
