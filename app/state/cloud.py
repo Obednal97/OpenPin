@@ -6,7 +6,6 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 import requests as http_requests
@@ -23,6 +22,7 @@ from app.utils.constants import (
     get_all_recordings_dirs,
     get_recordings_dir,
 )
+from app.utils.recording_utils import extract_recording_date
 
 # Module-level state
 _cloud_state = {
@@ -297,33 +297,6 @@ def logout():
     return {"logged_out": True}
 
 
-def _extract_recording_date(stem):
-    """Extract the actual recording timestamp from the session ID or filename."""
-    import re
-
-    try:
-        ts = int(stem)
-        if 1700000000 < ts < 2000000000:
-            return datetime.fromtimestamp(ts)
-    except ValueError:
-        pass
-
-    m = re.match(r"cloud_(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})_", stem)
-    if m:
-        try:
-            return datetime.strptime(f"{m.group(1)} {m.group(2)}:{m.group(3)}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            pass
-
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", stem)
-    if m:
-        try:
-            return datetime.strptime(m.group(1), "%Y-%m-%d")
-        except ValueError:
-            pass
-
-    return None
-
 
 def download_cloud_recordings():
     """Download all cloud recordings, convert raw Opus to OGG."""
@@ -579,7 +552,7 @@ def upload_local_recordings_to_cloud():
         if session_id.startswith("cloud_"):
             continue
 
-        rec_date = _extract_recording_date(session_id)
+        rec_date = extract_recording_date(session_id)
         if rec_date:
             display_name = rec_date.strftime("%Y-%m-%d %H:%M:%S")
         else:
@@ -605,7 +578,7 @@ def upload_local_recordings_to_cloud():
             raw_audio = max(size - 2000, 0)
             duration = raw_audio / 80 * 0.02
 
-        rec_date = _extract_recording_date(session_id)
+        rec_date = extract_recording_date(session_id)
         rec_ts_ms = int(rec_date.timestamp() * 1000) if rec_date else None
 
         try:

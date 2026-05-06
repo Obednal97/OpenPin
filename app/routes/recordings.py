@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 
 from app.utils.config import load_config, save_config
 from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
+from app.utils.recording_utils import extract_recording_date
 from app.utils.system import ensure_ffmpeg
 from app.utils.transcript_locks import get_transcript_lock
 
@@ -100,33 +101,6 @@ def recover_metadata_from_transcripts():
 recover_metadata_from_transcripts()
 
 
-def _extract_recording_date(stem):
-    """Extract the actual recording timestamp from the session ID or filename."""
-    import re
-
-    try:
-        ts = int(stem)
-        if 1700000000 < ts < 2000000000:
-            return datetime.fromtimestamp(ts)
-    except ValueError:
-        pass
-
-    m = re.match(r"cloud_(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})_", stem)
-    if m:
-        try:
-            return datetime.strptime(f"{m.group(1)} {m.group(2)}:{m.group(3)}", "%Y-%m-%d %H:%M")
-        except ValueError:
-            pass
-
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", stem)
-    if m:
-        try:
-            return datetime.strptime(m.group(1), "%Y-%m-%d")
-        except ValueError:
-            pass
-
-    return None
-
 
 @bp.route("/recordings")
 def list_recordings():
@@ -149,7 +123,7 @@ def list_recordings():
             raw_audio_size = max(size - 2000, 0)
             duration = raw_audio_size / 80 * 0.02
 
-            rec_date = _extract_recording_date(f.stem)
+            rec_date = extract_recording_date(f.stem)
             if rec_date is None:
                 rec_date = datetime.fromtimestamp(f.stat().st_mtime)
 
@@ -186,7 +160,7 @@ def list_recordings():
                 continue
             complete_ids.add(stem)
             size = f.stat().st_size
-            rec_date = _extract_recording_date(stem)
+            rec_date = extract_recording_date(stem)
             if rec_date is None:
                 rec_date = datetime.fromtimestamp(f.stat().st_mtime)
             recordings.append(
@@ -213,7 +187,7 @@ def list_recordings():
             if sid in complete_ids:
                 continue
             transcript_path = TRANSCRIPTS_DIR / f"{sid}.json"
-            rec_date = _extract_recording_date(sid)
+            rec_date = extract_recording_date(sid)
             recordings.append(
                 {
                     "session_id": sid,
