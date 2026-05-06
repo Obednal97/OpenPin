@@ -1110,8 +1110,7 @@ async function openCropEditor(sessionId) {
     if (pct >= cropState.startPct && pct <= cropState.endPct) {
       playhead.style.display = 'block';
       const regionPct = (pct - cropState.startPct) / (cropState.endPct - cropState.startPct);
-      const containerRect = container.getBoundingClientRect();
-      playhead.style.left = `${pct * 100}%`;
+      playhead.style.left = `${regionPct * 100}%`;
     } else {
       playhead.style.display = 'none';
     }
