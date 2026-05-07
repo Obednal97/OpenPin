@@ -955,17 +955,28 @@ function _startBgPoll() {
 
   // Background device polling
   let _bgBusy = false;
+  // Monotonically-increasing generation counter. Each bgDevicePoll() invocation
+  // captures its own generation at entry. resetPollingState() bumps the counter,
+  // so any in-flight poll whose generation is now stale detects the mismatch
+  // after each await and exits — preventing two concurrent polls from racing.
+  let _bgGen = 0;
   // Expose a way to unstick the guard — e.g. after system wake if a fetch
   // got stranded pre-sleep and never resolved.
   app.resetPollingState = () => {
     _bgBusy = false;
+    _bgGen++;          // invalidate any in-flight poll; new invocation gets fresh gen
     app.syncing = false;
   };
   async function bgDevicePoll() {
     if (_bgBusy || app.syncing) return;
     _bgBusy = true;
+    const myGen = _bgGen; // capture generation; stale if resetPollingState fires mid-flight
     try {
       const status = await window.plaud.status();
+      // If resetPollingState() fired during the await above, _bgGen will have
+      // advanced and a fresh poll may already be running. Exit so we don't
+      // race with — or clobber the guard of — that newer invocation.
+      if (_bgGen !== myGen) return;
       const wasConnected = _deviceConnected;
       _deviceConnected = status.connected;
 
@@ -984,6 +995,7 @@ function _startBgPoll() {
 
       if (!status.connected) {
         const scan = await window.plaud.scanKnown();
+        if (_bgGen !== myGen) return; // stale — resetPollingState fired during scan
         if (scan.found) {
           const conn = await window.plaud.connect(scan.address, scan.serial_number);
           if (conn.connected) {
@@ -1000,6 +1012,7 @@ function _startBgPoll() {
       if (app.settings.auto_sync === false) return;
 
       const check = await window.plaud.checkNew();
+      if (_bgGen !== myGen) return; // stale — resetPollingState fired during checkNew
       if (check.new_files > 0) {
         // WiFi for large files — auto-execute or offer depending on setting
         if (check.total_size > WIFI_SIZE_THRESHOLD) {
@@ -1074,7 +1087,10 @@ function _startBgPoll() {
       }
     } catch {}
     finally {
-      _bgBusy = false;
+      // Only clear the guard if we're still the current generation. If
+      // resetPollingState() bumped _bgGen while we were mid-flight, a newer
+      // invocation already owns _bgBusy and must clear it itself.
+      if (_bgGen === myGen) _bgBusy = false;
     }
   }
 
