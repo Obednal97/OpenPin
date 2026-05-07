@@ -277,6 +277,8 @@ fn ensure_python_deps(python_path: &str, full_path: &str) -> Result<(), String> 
     }
 }
 
+const SERVER_READY_MAX_ATTEMPTS: u32 = 60;
+
 fn wait_for_server(url: &str, max_attempts: u32) -> bool {
     let addr = url
         .trim_start_matches("http://")
@@ -585,7 +587,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     // Wait for server + monitor for crashes in background
     let url_clone = url.clone();
     std::thread::spawn(move || {
-        if wait_for_server(&url_clone, 60) {
+        if wait_for_server(&url_clone, SERVER_READY_MAX_ATTEMPTS) {
             SERVER_READY.store(true, Ordering::Release);
             log::info!("Python server is ready at {url_clone}");
         } else {
@@ -790,7 +792,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
 
     // Wait for health check
     let url = format!("http://127.0.0.1:{port}");
-    if !wait_for_server(&url, 30) {
+    if !wait_for_server(&url, SERVER_READY_MAX_ATTEMPTS) {
         return Err("Server did not become ready after restart".to_string());
     }
 
