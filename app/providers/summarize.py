@@ -7,6 +7,13 @@ import sys
 
 import requests as http_requests
 
+from app.providers._models import (
+    CLAUDE_SUMMARIZE,
+    OPENAI_SUMMARIZE,
+    OPENROUTER_CLAUDE_SUMMARIZE,
+    OPENROUTER_OPENAI_SUMMARIZE,
+)
+
 
 def sanitize_for_json(text):
     """Sanitize text to be safely embedded in JSON prompts."""
@@ -44,7 +51,7 @@ def _extract_summary_json(content):
 
 
 def summarize_anthropic(full_text, api_key, tag_context=""):
-    """Summarize using Claude Sonnet 4.6."""
+    """Summarize using Claude (see CLAUDE_SUMMARIZE in _models.py)."""
     safe_text = sanitize_for_json(full_text[:15000])
     r = http_requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -54,7 +61,7 @@ def summarize_anthropic(full_text, api_key, tag_context=""):
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": CLAUDE_SUMMARIZE,
             "max_tokens": 2048,
             "messages": [
                 {
@@ -87,7 +94,7 @@ def summarize_anthropic(full_text, api_key, tag_context=""):
 
 
 def summarize_openai(full_text, api_key, tag_context=""):
-    """Summarize using GPT-5.4 mini."""
+    """Summarize using OpenAI (see OPENAI_SUMMARIZE in _models.py)."""
     safe_text = sanitize_for_json(full_text[:15000])
     r = http_requests.post(
         "https://api.openai.com/v1/chat/completions",
@@ -96,7 +103,7 @@ def summarize_openai(full_text, api_key, tag_context=""):
             "Content-Type": "application/json",
         },
         json={
-            "model": "gpt-5.4-mini",
+            "model": OPENAI_SUMMARIZE,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -195,17 +202,17 @@ def summarize(full_text, config, tag_context=""):
     # Build all available providers
     all_providers = []
     if config.get("anthropic_api_key"):
-        all_providers.append(("Anthropic (Claude Sonnet 4.6)", "anthropic",
+        all_providers.append((f"Anthropic ({CLAUDE_SUMMARIZE})", "anthropic",
             lambda: summarize_anthropic(full_text, config["anthropic_api_key"], tag_context)))
     elif or_key and preferred in ("anthropic", "openrouter"):
-        all_providers.append(("OpenRouter (Claude Sonnet 4.6)", "openrouter-claude",
-            lambda: summarize_openrouter(full_text, or_key, "anthropic/claude-sonnet-4.6", tag_context)))
+        all_providers.append((f"OpenRouter ({OPENROUTER_CLAUDE_SUMMARIZE})", "openrouter-claude",
+            lambda: summarize_openrouter(full_text, or_key, OPENROUTER_CLAUDE_SUMMARIZE, tag_context)))
     if config.get("openai_api_key"):
-        all_providers.append(("OpenAI (GPT-5.4 mini)", "openai",
+        all_providers.append((f"OpenAI ({OPENAI_SUMMARIZE})", "openai",
             lambda: summarize_openai(full_text, config["openai_api_key"], tag_context)))
     elif or_key:
-        all_providers.append(("OpenRouter (GPT-5.4 mini)", "openrouter-gpt",
-            lambda: summarize_openrouter(full_text, or_key, "openai/gpt-5.4-mini", tag_context)))
+        all_providers.append((f"OpenRouter ({OPENROUTER_OPENAI_SUMMARIZE})", "openrouter-gpt",
+            lambda: summarize_openrouter(full_text, or_key, OPENROUTER_OPENAI_SUMMARIZE, tag_context)))
     all_providers.append(("Local (DistilBART)", "local", lambda: (summarize_local(full_text), "")))
 
     # Sort so preferred provider is first

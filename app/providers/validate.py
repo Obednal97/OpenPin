@@ -2,6 +2,8 @@
 
 import requests as http_requests
 
+from app.providers._models import CLAUDE_VALIDATE
+
 
 def validate_key(provider, key):
     """Validate an API key by making a lightweight test request.
@@ -26,7 +28,7 @@ def validate_key(provider, key):
             r = http_requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": CLAUDE_VALIDATE, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
                 timeout=10,
             )
             if r.status_code == 200:
