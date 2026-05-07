@@ -644,11 +644,11 @@ fn app_version() -> String {
     APP_VERSION.get().cloned().unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Whether we're running in dev mode (not packaged)
+/// Whether we're running in dev mode (not packaged).
+/// Uses the compile-time `debug_assertions` flag — true for `cargo build`
+/// / `cargo tauri dev`, false for `cargo build --release`.
 fn is_dev_mode() -> bool {
-    // In dev, the binary is in src-tauri/target/debug/
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.to_string_lossy().contains("target/debug")
+    cfg!(debug_assertions)
 }
 
 fn macos_name() -> String {
