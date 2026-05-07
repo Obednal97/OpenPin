@@ -113,10 +113,7 @@
     showFailureScreen(splash);
   }
 
-  // Defer until window.plaud is available (preload/tauri-bridge sets it)
-  if (window.plaud) {
-    mountGate();
-  } else {
-    document.addEventListener('DOMContentLoaded', () => mountGate(), { once: true });
-  }
+  // tauri-bridge.js sets window.plaud synchronously during script eval,
+  // before this IIFE runs. No DOMContentLoaded fallback is needed.
+  mountGate();
 })();
