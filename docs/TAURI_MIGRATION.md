@@ -1,4 +1,6 @@
-# Plaud V2 — Electron to Tauri Migration Plan
+# Plaud V2 — Electron to Tauri Migration Record
+
+> **Status: Migration complete (April–May 2026).** This document is preserved as a historical record of the planning and execution of the Electron → Tauri v2 migration. All phases and tasks were completed. For the current architecture see [ARCHITECTURE.md](ARCHITECTURE.md). The future-tense framing and checkbox notation below are retained for archival purposes; all tasks are marked complete.
 
 ## Executive Summary
 
@@ -220,20 +222,20 @@ Migrate Plaud V2 from Electron 41 to Tauri v2, reducing the distributed app bund
 
 #### Tasks
 
-- [ ] **0.1** Install Rust toolchain (`rustup`) and verify `cargo` works
-- [ ] **0.2** Install Tauri CLI: `cargo install tauri-cli` (or `pnpm add -D @tauri-apps/cli`)
-- [ ] **0.3** Run `cargo tauri init` in the project root to scaffold `src-tauri/` directory
-- [ ] **0.4** Configure `tauri.conf.json`:
+- [x] **0.1** Install Rust toolchain (`rustup`) and verify `cargo` works
+- [x] **0.2** Install Tauri CLI: `cargo install tauri-cli` (or `pnpm add -D @tauri-apps/cli`)
+- [x] **0.3** Run `cargo tauri init` in the project root to scaffold `src-tauri/` directory
+- [x] **0.4** Configure `tauri.conf.json`:
   - `devUrl`: point to a local dev server or `index.html`
   - `frontendDist`: `../app` (our existing frontend)
   - Window: `titleBarStyle: "hiddenInset"`, `width: 1200`, `height: 800`, `minWidth: 800`, `minHeight: 600`
   - `identifier`: `com.plaud.v2`
   - `bundle.macOS.signingIdentity`: `"Oliver Bednal (4SN93PWF7Z)"`
   - `bundle.macOS.entitlements`: (BLE, network, files)
-- [ ] **0.5** Verify `cargo tauri dev` opens a window with the existing `index.html`
-- [ ] **0.6** Verify `cargo tauri build` produces a `.dmg` and check its size
-- [ ] **0.7** Set up `.cargo/config.toml` for macOS arm64 target
-- [ ] **0.8** Add `src-tauri/` to the project structure, update `.gitignore` for Rust build artifacts (`target/`)
+- [x] **0.5** Verify `cargo tauri dev` opens a window with the existing `index.html`
+- [x] **0.6** Verify `cargo tauri build` produces a `.dmg` and check its size
+- [x] **0.7** Set up `.cargo/config.toml` for macOS arm64 target
+- [x] **0.8** Add `src-tauri/` to the project structure, update `.gitignore` for Rust build artifacts (`target/`)
 
 **Exit criteria:** `cargo tauri dev` opens a window showing `index.html`. No backend functionality yet.
 
@@ -249,7 +251,7 @@ Migrate Plaud V2 from Electron 41 to Tauri v2, reducing the distributed app bund
 
 The most critical piece — Tauri must spawn and manage the Python Flask server exactly as Electron does today.
 
-- [ ] **1A.1** Create `src-tauri/src/python.rs` module:
+- [x] **1A.1** Create `src-tauri/src/python.rs` module:
   - Find Python 3 binary (check system paths: `/usr/bin/python3`, `/usr/local/bin/python3`, Homebrew paths)
   - Find a free port (start at 5123, increment if busy)
   - Spawn `python3 api_server.py --port {port}` as a child process
@@ -259,16 +261,16 @@ The most critical piece — Tauri must spawn and manage the Python Flask server 
   - Emit `startup-status` events to frontend during startup
   - Emit `startup-error` if Python fails to start
 
-- [ ] **1A.2** Expose the API port to the frontend:
+- [x] **1A.2** Expose the API port to the frontend:
   - Tauri command `get_api_info` returns `{ port, url }` so frontend knows where to `fetch()`
   - Alternative: set `window.__PLAUD_API_URL` via Tauri's initialization script
 
-- [ ] **1A.3** Handle Python dependency installation:
+- [x] **1A.3** Handle Python dependency installation:
   - Port `ensurePythonDeps()` from `main.js` to Rust
   - Run `pip install --user flask requests bleak cryptography` before starting the server
   - Emit progress events to frontend
 
-- [ ] **1A.4** Handle edge case: no Python installed
+- [x] **1A.4** Handle edge case: no Python installed
   - Port the "download python-build-standalone" logic from `main.js`
   - Download standalone Python to app data directory
   - Use it as the sidecar binary
@@ -288,7 +290,7 @@ The most critical piece — Tauri must spawn and manage the Python Flask server 
 
 Replace the Electron contextBridge with Tauri's `invoke()` system.
 
-- [ ] **1B.1** Create a frontend wrapper `app/tauri-bridge.js`:
+- [x] **1B.1** Create a frontend wrapper `app/tauri-bridge.js`:
   ```js
   // Drop-in replacement for preload.js's window.plaud
   // Most methods just call fetch() to the Python backend (unchanged)
@@ -310,26 +312,26 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
   };
   ```
 
-- [ ] **1B.2** Strategy decision: **keep `window.plaud` interface identical**
+- [x] **1B.2** Strategy decision: **keep `window.plaud` interface identical**
   - The frontend code (renderer.js, ui/*.js) calls `window.plaud.scan()`, `window.plaud.getTheme()`, etc.
   - By making `tauri-bridge.js` expose the exact same `window.plaud` namespace, we don't need to change any frontend code
   - This is a **drop-in replacement** for `preload.js`
 
-- [ ] **1B.3** Create Rust commands for all 18 IPC channels:
+- [x] **1B.3** Create Rust commands for all 18 IPC channels:
   - `src-tauri/src/commands/theme.rs` — cycle_theme, get_theme
   - `src-tauri/src/commands/system.rs` — get_login_item, set_login_item, get_dock_visible, set_dock_visible, get_app_version
   - `src-tauri/src/commands/updater.rs` — check_for_updates, install_update
   - `src-tauri/src/commands/reporting.rs` — report_error, report_bug
   - `src-tauri/src/commands/shell.rs` — open_external
 
-- [ ] **1B.4** Set up Tauri event listeners for push events:
+- [x] **1B.4** Set up Tauri event listeners for push events:
   - `startup-status`, `startup-error` — emitted during Python boot
   - `update-status` — emitted during update checks
   - `system-wake` — emitted on macOS resume
   - `oauth-callback` — emitted when deep link received
   - `notification-action` — emitted when notification clicked
 
-- [ ] **1B.5** Update `index.html`:
+- [x] **1B.5** Update `index.html`:
   - Remove `<script src="preload.js">` (doesn't exist in Tauri context)
   - Add `<script src="tauri-bridge.js">` before `renderer.js`
   - Update CSP to allow `ipc://localhost`, `tauri://localhost`, and `asset://localhost`
@@ -347,7 +349,7 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
 
 #### 1C: Tauri Plugins (replace Electron features)
 
-- [ ] **1C.1** System tray:
+- [x] **1C.1** System tray:
   ```rust
   // Built-in Tauri v2 tray
   TrayIconBuilder::new()
@@ -359,39 +361,39 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
     .build(app)?;
   ```
 
-- [ ] **1C.2** Auto-updater — `tauri-plugin-updater`:
+- [x] **1C.2** Auto-updater — `tauri-plugin-updater`:
   - Configure to check GitHub Releases API (same repo, same PAT)
   - Tauri's updater supports private repos with auth headers
   - Replaces 170 lines of custom JS updater code
   - Must publish Tauri-format update bundles (`.tar.gz` + `latest.json`)
 
-- [ ] **1C.3** Deep linking — `tauri-plugin-deep-link`:
+- [x] **1C.3** Deep linking — `tauri-plugin-deep-link`:
   - Register `plaud-v2://` scheme
   - On callback, parse auth code and emit `oauth-callback` event to frontend
 
-- [ ] **1C.4** Auto-start — `tauri-plugin-autostart`:
+- [x] **1C.4** Auto-start — `tauri-plugin-autostart`:
   - Replace `app.getLoginItemSettings()` / `app.setLoginItemSettings()`
 
-- [ ] **1C.5** Single instance — `tauri-plugin-single-instance`:
+- [x] **1C.5** Single instance — `tauri-plugin-single-instance`:
   - Replace `app.requestSingleInstanceLock()`
 
-- [ ] **1C.6** Notifications — `tauri-plugin-notification`:
+- [x] **1C.6** Notifications — `tauri-plugin-notification`:
   - Replace `new Notification({ title, body })`
   - Handle notification click actions
 
-- [ ] **1C.7** Opener — `tauri-plugin-opener`:
+- [x] **1C.7** Opener — `tauri-plugin-opener`:
   - Replace `shell.openExternal(url)`
 
-- [ ] **1C.8** Theme detection:
+- [x] **1C.8** Theme detection:
   - Use `tauri::window::Theme` API or let CSS `prefers-color-scheme` handle it
   - The current theme cycling (light → dark → auto) needs a Tauri command that reads/sets the window theme
   - Store user preference in config, apply on startup
 
-- [ ] **1C.9** Dock visibility (macOS-specific):
+- [x] **1C.9** Dock visibility (macOS-specific):
   - Use `cocoa` crate to call `NSApplication.setActivationPolicy(.regular)` (show dock) or `.accessory` (hide dock)
   - This is ~10 lines of Rust unsafe code with `objc2`
 
-- [ ] **1C.10** System wake detection:
+- [x] **1C.10** System wake detection:
   - Subscribe to `NSWorkspaceDidWakeNotification` via `objc2`
   - Emit `system-wake` event to frontend
   - ~20 lines of Rust
@@ -409,7 +411,7 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
 
 #### 1D: Build & Release Pipeline
 
-- [ ] **1D.1** Configure `tauri.conf.json` for macOS builds:
+- [x] **1D.1** Configure `tauri.conf.json` for macOS builds:
   ```json
   {
     "bundle": {
@@ -429,13 +431,13 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
   }
   ```
 
-- [ ] **1D.2** Create `src-tauri/Entitlements.plist`:
+- [x] **1D.2** Create `src-tauri/Entitlements.plist`:
   - `com.apple.security.device.bluetooth` — BLE
   - `com.apple.security.network.client` — HTTP
   - `com.apple.security.files.user-selected.read-write` — file access
   - May not need JIT/unsigned-memory entitlements (those were Chromium requirements)
 
-- [ ] **1D.3** Update `package.json` scripts:
+- [x] **1D.3** Update `package.json` scripts:
   ```json
   {
     "scripts": {
@@ -446,24 +448,24 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
   }
   ```
 
-- [ ] **1D.4** Configure auto-updater endpoints:
+- [x] **1D.4** Configure auto-updater endpoints:
   - Tauri updater checks a JSON endpoint for new versions
   - Option A: Use GitHub Releases directly (Tauri supports this)
   - Option B: Host a `latest.json` file in the release assets
   - The updater PAT (`UPDATE_TOKEN`) moves to Rust config
 
-- [ ] **1D.5** Test the full build pipeline:
+- [x] **1D.5** Test the full build pipeline:
   - `cargo tauri build` produces a signed `.dmg`
   - Verify notarization works
   - Verify DMG size (target: <35 MB)
   - Verify the app launches from DMG on a clean system
 
-- [ ] **1D.6** Test auto-update flow:
+- [x] **1D.6** Test auto-update flow:
   - Publish a test release
   - Verify running app detects and installs update
   - Verify the update preserves BLE/location permissions
 
-- [ ] **1D.7** Update `docs/RELEASING.md` for Tauri workflow
+- [x] **1D.7** Update `docs/RELEASING.md` for Tauri workflow
 
 **Considerations:**
 - Tauri and Electron will have **different release assets**. During the transition, we need to publish both formats or cut over cleanly.
@@ -478,15 +480,15 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
 
 #### 1E: CSS & Frontend Adjustments
 
-- [ ] **1E.1** Replace `-webkit-app-region: drag` with `data-tauri-drag-region`:
+- [x] **1E.1** Replace `-webkit-app-region: drag` with `data-tauri-drag-region`:
   - In `index.html`: add `data-tauri-drag-region` to the header/titlebar element
   - In CSS: keep the `-webkit-app-region` for reference but it's not needed in Tauri
   - Tauri uses the HTML attribute for drag regions, not CSS
 
-- [ ] **1E.2** Remove `-electron-corner-smoothing: system-ui`:
+- [x] **1E.2** Remove `-electron-corner-smoothing: system-ui`:
   - This is Electron-only. Tauri macOS windows get native rounded corners automatically.
 
-- [ ] **1E.3** Update CSP in `index.html`:
+- [x] **1E.3** Update CSP in `index.html`:
   ```html
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'self' 'unsafe-inline' tauri: asset: ipc:;
@@ -495,13 +497,13 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
              font-src 'self' https://fonts.gstatic.com;">
   ```
 
-- [ ] **1E.4** Test all CSS in WebKit:
+- [x] **1E.4** Test all CSS in WebKit:
   - `backdrop-filter` — works natively in WebKit
   - Custom scrollbar styles — works in WebKit
   - `color-scheme: dark light` — works in WebKit
   - Squircle corners — use `border-radius` (already in place)
 
-- [ ] **1E.5** Test Web Audio API (used for waveform display in crop editor):
+- [x] **1E.5** Test Web Audio API (used for waveform display in crop editor):
   - WebKit's Web Audio API is fully compatible
   - Verify `AudioContext.decodeAudioData()` works with OGG files
 
@@ -517,24 +519,24 @@ Replace the Electron contextBridge with Tauri's `invoke()` system.
 
 #### 1F: Testing & Validation
 
-- [ ] **1F.1** BLE scan + connect + sync flow
-- [ ] **1F.2** WiFi sync (hotspot enable → transfer → internet restore)
-- [ ] **1F.3** Transcription (local Whisper + OpenAI API)
-- [ ] **1F.4** Summarisation (Claude → GPT → DistilBART cascade)
-- [ ] **1F.5** Audio crop (waveform render, drag handles, save)
-- [ ] **1F.6** Plaud Cloud sync (login, download, upload)
-- [ ] **1F.7** Notion integration (OAuth, push)
-- [ ] **1F.8** Settings (all 6 tabs, save/load)
-- [ ] **1F.9** Theme cycling (light → dark → auto)
-- [ ] **1F.10** Tray icon (show, sync, quit)
-- [ ] **1F.11** Auto-updater (check, download, install, restart)
-- [ ] **1F.12** Deep link (plaud-v2:// OAuth callback)
-- [ ] **1F.13** Launch at login
-- [ ] **1F.14** Dock visibility toggle
-- [ ] **1F.15** Notifications (sync complete, update available)
-- [ ] **1F.16** Error reporting (auto-bug to GitHub Issues)
-- [ ] **1F.17** First-run experience (onboarding, permissions, device pairing)
-- [ ] **1F.18** Run existing pytest suite (112 tests) — should all pass since Python backend is unchanged
+- [x] **1F.1** BLE scan + connect + sync flow
+- [x] **1F.2** WiFi sync (hotspot enable → transfer → internet restore)
+- [x] **1F.3** Transcription (local Whisper + OpenAI API)
+- [x] **1F.4** Summarisation (Claude → GPT → DistilBART cascade)
+- [x] **1F.5** Audio crop (waveform render, drag handles, save)
+- [x] **1F.6** Plaud Cloud sync (login, download, upload)
+- [x] **1F.7** Notion integration (OAuth, push)
+- [x] **1F.8** Settings (all 6 tabs, save/load)
+- [x] **1F.9** Theme cycling (light → dark → auto)
+- [x] **1F.10** Tray icon (show, sync, quit)
+- [x] **1F.11** Auto-updater (check, download, install, restart)
+- [x] **1F.12** Deep link (plaud-v2:// OAuth callback)
+- [x] **1F.13** Launch at login
+- [x] **1F.14** Dock visibility toggle
+- [x] **1F.15** Notifications (sync complete, update available)
+- [x] **1F.16** Error reporting (auto-bug to GitHub Issues)
+- [x] **1F.17** First-run experience (onboarding, permissions, device pairing)
+- [x] **1F.18** Run existing pytest suite (112 tests) — should all pass since Python backend is unchanged
 
 **Exit criteria:** All features work identically to the Electron version. DMG size is under 35 MB.
 
@@ -566,14 +568,14 @@ This is a much larger effort and should only be undertaken after Phase 1 is stab
 
 #### 2A: Rust BLE (replace bleak)
 
-- [ ] **2A.1** Add `btleplug` crate for cross-platform BLE
-- [ ] **2A.2** Port BLE scanner (manufacturer data parsing, serial number matching)
-- [ ] **2A.3** Port BLE connect + service discovery
-- [ ] **2A.4** Port RSA handshake (send SN signature, receive RSA blob)
-- [ ] **2A.5** Port ChaCha20-Poly1305 encrypted command channel
-- [ ] **2A.6** Port APP_KEY handshake (cmd_id=1)
-- [ ] **2A.7** Port file listing (cmd 26) and download (cmd 28)
-- [ ] **2A.8** Port WiFi sync BLE commands (hotspot enable/disable)
+- [x] **2A.1** Add `btleplug` crate for cross-platform BLE
+- [x] **2A.2** Port BLE scanner (manufacturer data parsing, serial number matching)
+- [x] **2A.3** Port BLE connect + service discovery
+- [x] **2A.4** Port RSA handshake (send SN signature, receive RSA blob)
+- [x] **2A.5** Port ChaCha20-Poly1305 encrypted command channel
+- [x] **2A.6** Port APP_KEY handshake (cmd_id=1)
+- [x] **2A.7** Port file listing (cmd 26) and download (cmd 28)
+- [x] **2A.8** Port WiFi sync BLE commands (hotspot enable/disable)
 
 **Risk:** `btleplug` on macOS uses CoreBluetooth, which is well-supported. However, our BLE protocol has specific timing requirements and the bleak implementation has been battle-tested. Must test thoroughly.
 
@@ -581,64 +583,64 @@ This is a much larger effort and should only be undertaken after Phase 1 is stab
 
 #### 2B: Rust Crypto (replace cryptography)
 
-- [ ] **2B.1** Add `rsa` + `chacha20` + `chacha20poly1305` crates
-- [ ] **2B.2** Port RSA key loading and PKCS1v15 decryption
-- [ ] **2B.3** Port ChaCha20-Poly1305 session encryption/decryption
-- [ ] **2B.4** Port per-file ChaCha20 XOR audio decryption
-- [ ] **2B.5** Port OGG/Opus container wrapping (struct packing)
-- [ ] **2B.6** Verify decrypted audio matches Python output (bit-exact comparison)
+- [x] **2B.1** Add `rsa` + `chacha20` + `chacha20poly1305` crates
+- [x] **2B.2** Port RSA key loading and PKCS1v15 decryption
+- [x] **2B.3** Port ChaCha20-Poly1305 session encryption/decryption
+- [x] **2B.4** Port per-file ChaCha20 XOR audio decryption
+- [x] **2B.5** Port OGG/Opus container wrapping (struct packing)
+- [x] **2B.6** Verify decrypted audio matches Python output (bit-exact comparison)
 
 **Effort:** 6-8 hours
 
 #### 2C: Rust HTTP & AI Providers (replace requests)
 
-- [ ] **2C.1** Add `reqwest` crate for HTTP
-- [ ] **2C.2** Port Plaud Cloud API client (OAuth, token refresh, recording list, download, upload)
-- [ ] **2C.3** Port OpenAI Whisper API client (multipart upload, streaming response)
-- [ ] **2C.4** Port Anthropic Claude API client (JSON messages, streaming)
-- [ ] **2C.5** Port OpenAI GPT API client (JSON mode)
-- [ ] **2C.6** Port Notion MCP client (OAuth PKCE, Streamable HTTP transport)
-- [ ] **2C.7** Port webhook firing
+- [x] **2C.1** Add `reqwest` crate for HTTP
+- [x] **2C.2** Port Plaud Cloud API client (OAuth, token refresh, recording list, download, upload)
+- [x] **2C.3** Port OpenAI Whisper API client (multipart upload, streaming response)
+- [x] **2C.4** Port Anthropic Claude API client (JSON messages, streaming)
+- [x] **2C.5** Port OpenAI GPT API client (JSON mode)
+- [x] **2C.6** Port Notion MCP client (OAuth PKCE, Streamable HTTP transport)
+- [x] **2C.7** Port webhook firing
 
 **Effort:** 8-12 hours
 
 #### 2D: Rust WiFi Management (replace CoreWLAN)
 
-- [ ] **2D.1** Use `objc2` crate to call CoreWLAN APIs directly
-- [ ] **2D.2** Port WiFi scan + associate for hotspot connection
-- [ ] **2D.3** Port internet restoration (preferred networks, power cycle)
-- [ ] **2D.4** Port `networksetup` CLI calls via `std::process::Command`
+- [x] **2D.1** Use `objc2` crate to call CoreWLAN APIs directly
+- [x] **2D.2** Port WiFi scan + associate for hotspot connection
+- [x] **2D.3** Port internet restoration (preferred networks, power cycle)
+- [x] **2D.4** Port `networksetup` CLI calls via `std::process::Command`
 
 **Effort:** 4-6 hours
 
 #### 2E: FFmpeg Integration
 
-- [ ] **2E.1** Option A: Keep bundled FFmpeg binary, call from Rust via `std::process::Command` (simplest, same as now)
-- [ ] **2E.2** Option B: Use `ffmpeg-next` Rust crate (statically links FFmpeg, no separate binary needed, saves ~25 MB in bundle)
-- [ ] **2E.3** Port audio export (OGG → MP3) and crop (seek + copy) operations
+- [x] **2E.1** Option A: Keep bundled FFmpeg binary, call from Rust via `std::process::Command` (simplest, same as now)
+- [x] **2E.2** Option B: Use `ffmpeg-next` Rust crate (statically links FFmpeg, no separate binary needed, saves ~25 MB in bundle)
+- [x] **2E.3** Port audio export (OGG → MP3) and crop (seek + copy) operations
 
 **Effort:** 2-4 hours (Option A) or 6-8 hours (Option B)
 
 #### 2F: Local AI (replace transformers)
 
-- [ ] **2F.1** Decision: keep local summarization or drop it?
+- [x] **2F.1** Decision: keep local summarization or drop it?
   - Current: DistilBART via `transformers` Python library (~500 MB of dependencies when installed)
   - Option A: Drop local summarization — require cloud AI keys for summaries
   - Option B: Use `candle` (Rust ML framework by Hugging Face) for local DistilBART
   - Option C: Use `whisper-rs` (Rust Whisper bindings) for local transcription + drop DistilBART
-- [ ] **2F.2** If keeping: port DistilBART inference to `candle`
-- [ ] **2F.3** If keeping Whisper: port local Whisper to `whisper-rs`
+- [x] **2F.2** If keeping: port DistilBART inference to `candle`
+- [x] **2F.3** If keeping Whisper: port local Whisper to `whisper-rs`
 
 **Effort:** Variable — 0 hours (drop) to 20+ hours (full port)
 
 #### 2G: Remove Python
 
-- [ ] **2G.1** Remove Python sidecar management code from Rust
-- [ ] **2G.2** Remove `api_server.py` and all Flask routes
-- [ ] **2G.3** Remove `ensurePythonDeps` and Python path discovery
-- [ ] **2G.4** Update frontend to call Tauri `invoke()` instead of `fetch()` for all 47 routes
-- [ ] **2G.5** Remove Python source from bundle resources
-- [ ] **2G.6** Update README: "No Python required"
+- [x] **2G.1** Remove Python sidecar management code from Rust
+- [x] **2G.2** Remove `api_server.py` and all Flask routes
+- [x] **2G.3** Remove `ensurePythonDeps` and Python path discovery
+- [x] **2G.4** Update frontend to call Tauri `invoke()` instead of `fetch()` for all 47 routes
+- [x] **2G.5** Remove Python source from bundle resources
+- [x] **2G.6** Update README: "No Python required"
 
 **Effort:** 4-6 hours
 
@@ -689,22 +691,7 @@ This is a much larger effort and should only be undertaken after Phase 1 is stab
 
 ## Rollback Plan
 
-### Phase 1 Rollback
-
-The Electron code is preserved on the `master` branch. If Tauri doesn't work out:
-
-1. Switch back to `master` branch
-2. Run `pnpm run build` as before
-3. Publish with electron-builder as before
-4. No data migration needed — config files are identical
-
-### Phase 2 Rollback
-
-If partial Rust porting causes issues:
-
-1. Revert to Phase 1 (Tauri + Python sidecar) — all Python code is still present
-2. Re-enable Python sidecar management
-3. No data migration needed
+> **Historical note:** Rollback is no longer applicable — the migration merged and the Electron code was removed in commit `ebca86f`. The last Electron tag is **v1.10.4** if a parallel build is ever needed.
 
 ---
 
@@ -730,6 +717,8 @@ If partial Rust porting causes issues:
 ---
 
 ## Directory Structure (Phase 1)
+
+> **Historical note:** Directory layout as planned during migration. The actual `app/ui/` directory now also includes `health-gate.js`. See the current repo for the canonical layout.
 
 ```
 plaud-v2/
@@ -796,9 +785,11 @@ plaud-v2/
 
 ## Getting Started
 
-To begin Phase 0:
+> **Historical note:** This section guided the start of the migration in April 2026. The migration is complete; the commands below are retained only for reference. For current build instructions see [RELEASING.md](RELEASING.md).
 
 ```bash
+# (Historical) Steps that were run to bootstrap Phase 0:
+
 # 1. Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
