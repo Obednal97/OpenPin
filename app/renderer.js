@@ -733,6 +733,8 @@ window.plaud.onSystemWake(async () => {
 
 // ---- Init ----
 
+let _startupErrorShown = false;
+
 function showStartupError(error) {
   const h2 = dom.emptyState.querySelector('h2');
   const p = dom.emptyState.querySelector('p');
@@ -778,7 +780,6 @@ window.plaud.onStartupStatus((msg) => {
     p.textContent = msg;
   }
 });
-let _startupErrorShown = false;
 
 // Init host-app features immediately (don't wait for Python API)
 initSettingsEvents();
