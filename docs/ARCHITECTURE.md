@@ -126,7 +126,7 @@ Token-based design system with light/dark mode, split into 7 files:
 | `.plaud_v2_config.json` | App settings, API keys, recording metadata, paired devices, webhooks |
 | `.plaud_config.json` | Plaud Cloud bearer token |
 | `.notion_mcp.json` | Notion OAuth tokens and database selection |
-| `.hf_token` | HuggingFace token (bundled for diarization) |
+| `.hf_token` | HuggingFace token for diarization — stored in `~/Library/Application Support/Plaud V2/`, supplied per-user via Settings (NOT bundled in the DMG) |
 
 ## Key Flows
 
