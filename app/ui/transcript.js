@@ -6,8 +6,8 @@
 let _exportDropdownCleanup = null;
 
 // OAuth poll handles — stored at module scope so repeated clicks don't accumulate intervals
-let _notionPollHandle = null;
-let _notionPollTimeoutHandle = null;
+let _notionPollHandleTx = null;
+let _notionPollTimeoutHandleTx = null;
 
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
@@ -470,15 +470,15 @@ function openTranscript(sessionId, autoPlay = false) {
           if (result.url) {
             window.plaud.openExternal(result.url);
             toast('Sign in with Notion in your browser. Come back here after.', 'info');
-            if (_notionPollHandle) clearInterval(_notionPollHandle);
-            if (_notionPollTimeoutHandle) clearTimeout(_notionPollTimeoutHandle);
-            _notionPollHandle = setInterval(async () => {
+            if (_notionPollHandleTx) clearInterval(_notionPollHandleTx);
+            if (_notionPollTimeoutHandleTx) clearTimeout(_notionPollTimeoutHandleTx);
+            _notionPollHandleTx = setInterval(async () => {
               const s = await window.plaud.notionStatus();
               if (s.connected) {
-                clearInterval(_notionPollHandle);
-                _notionPollHandle = null;
-                clearTimeout(_notionPollTimeoutHandle);
-                _notionPollTimeoutHandle = null;
+                clearInterval(_notionPollHandleTx);
+                _notionPollHandleTx = null;
+                clearTimeout(_notionPollTimeoutHandleTx);
+                _notionPollTimeoutHandleTx = null;
                 app.notionState = s;
                 toast('Notion connected!', 'success');
                 if (!s.database_id) {
@@ -488,12 +488,12 @@ function openTranscript(sessionId, autoPlay = false) {
                 }
               }
             }, 2000);
-            _notionPollTimeoutHandle = setTimeout(() => {
-              if (_notionPollHandle) {
-                clearInterval(_notionPollHandle);
-                _notionPollHandle = null;
+            _notionPollTimeoutHandleTx = setTimeout(() => {
+              if (_notionPollHandleTx) {
+                clearInterval(_notionPollHandleTx);
+                _notionPollHandleTx = null;
               }
-              _notionPollTimeoutHandle = null;
+              _notionPollTimeoutHandleTx = null;
             }, 120000);
           }
         } catch (err) {
@@ -913,13 +913,13 @@ function closeTranscript() {
     document.removeEventListener('click', _exportDropdownCleanup);
     _exportDropdownCleanup = null;
   }
-  if (_notionPollHandle) {
-    clearInterval(_notionPollHandle);
-    _notionPollHandle = null;
+  if (_notionPollHandleTx) {
+    clearInterval(_notionPollHandleTx);
+    _notionPollHandleTx = null;
   }
-  if (_notionPollTimeoutHandle) {
-    clearTimeout(_notionPollTimeoutHandle);
-    _notionPollTimeoutHandle = null;
+  if (_notionPollTimeoutHandleTx) {
+    clearTimeout(_notionPollTimeoutHandleTx);
+    _notionPollTimeoutHandleTx = null;
   }
   const titleEl = $('#transcript-title');
   if (titleEl && document.activeElement === titleEl) {
