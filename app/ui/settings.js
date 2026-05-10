@@ -712,7 +712,11 @@ async function fetchDeviceInfo() {
   _deviceInfoFetching = false;
 }
 
-function formatBytes(bytes) {
+// Storage-scale byte formatter (KB → MB → GB). Renamed from formatBytes to
+// avoid colliding with renderer.js's file-size formatBytes — both declared as
+// plain `function` in scripts that share global scope, and the later-loaded
+// one silently wins. See feedback_frontend_global_scope.md.
+function formatStorageBytes(bytes) {
   if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
   if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(0)} MB`;
   return `${(bytes / 1024).toFixed(0)} KB`;
@@ -723,8 +727,8 @@ function renderDeviceInfoPanel(panel, info) {
 
   // Storage
   if (info.storage_total_bytes) {
-    const used = formatBytes(info.storage_used_bytes || 0);
-    const total = formatBytes(info.storage_total_bytes);
+    const used = formatStorageBytes(info.storage_used_bytes || 0);
+    const total = formatStorageBytes(info.storage_total_bytes);
     const pct = info.storage_used_pct || 0;
     const remaining = info.storage_remaining_hours || 0;
     items.push(`<div class="dm-info-item full-width">
