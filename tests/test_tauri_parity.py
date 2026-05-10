@@ -865,16 +865,16 @@ class TestConfigPersistenceRoundTrip:
 class TestSidecarManagement:
     """Verify Python detection and dependency management code paths."""
 
-    def test_main_js_has_python_finder(self):
-        """main.js must have logic to find a Python interpreter."""
-        src = (PROJECT_ROOT / "app" / "main.js").read_text()
+    def test_rust_has_python_finder(self):
+        """src-tauri/src/python.rs must have logic to find a Python interpreter."""
+        src = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
         assert "python" in src.lower()
         # Must check version
         assert "--version" in src or "sys.version" in src
 
-    def test_main_js_installs_deps(self):
-        """main.js must pip-install dependencies."""
-        src = (PROJECT_ROOT / "app" / "main.js").read_text()
+    def test_rust_installs_deps(self):
+        """src-tauri/src/python.rs must pip-install dependencies."""
+        src = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
         assert "pip" in src
         assert "install" in src
 
