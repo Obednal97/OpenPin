@@ -120,10 +120,18 @@ class TestAutoReporting:
         timing-based suppression, the Tauri build filters aborts by message
         pattern (see is_abort_error) and skips reports when backend_health
         is 'down'.
+
+        Asserts both the definition AND a call site exist, so the test
+        catches a regression that removes the gating call but leaves the
+        helper function in place.
         """
         src = RUST_COMMANDS.read_text()
-        assert "is_abort_error" in src
-        assert "backend_health" in src
+        # Definition + at least one caller (currently in report_error)
+        assert src.count("is_abort_error(") >= 2, (
+            "is_abort_error must be both defined and called by report_error"
+        )
+        # backend_health() accessor must be checked inside report_error
+        assert "backend_health().lock()" in src
 
     def test_traceback_included_in_reports(self):
         """tauri-bridge.js must include Python traceback in error reports."""
