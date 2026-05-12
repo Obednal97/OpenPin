@@ -4,20 +4,21 @@ This document records security-sensitive design decisions for Plaud V2.
 
 ## Embedded Google OAuth client secret
 
-The Google Drive OAuth client ID + secret are loaded at runtime from
-`keys/gdrive_oauth.json` (gitignored) and bundled into the DMG via the
-`tauri.conf.json` `keys/*` resource. They are NOT in tracked source —
-this keeps the secret out of GitHub's secret-scanner crawls of public
-repos, which would otherwise trigger Google to auto-revoke the credential.
-
+`app/utils/constants.py` contains the `GDRIVE_CLIENT_ID` and
+`GDRIVE_CLIENT_SECRET` for a Google Drive desktop OAuth application.
 Per Google's published OAuth guidelines, desktop client secrets are
 not strictly confidential — they cannot be hidden from end users running
 the binary, and the secret on its own does not grant access to user data.
+The credential is scope-limited to `https://www.googleapis.com/auth/drive`
+and is bound to the registered desktop redirect URI (`http://127.0.0.1:<port>`).
 
-**Accepted risk:** Anyone with the DMG can extract the credentials and
-initiate OAuth flows that present themselves as Plaud V2. The user-consent
-screen still displays "Plaud V2" as the requesting app, so this enables
-phishing only against users who already trust the Plaud V2 name.
+**Accepted risk:** Anyone with the binary (or the source) can extract the
+credentials and initiate OAuth flows that present themselves as Plaud V2.
+The user-consent screen still displays "Plaud V2" as the requesting app,
+so this enables phishing only against users who already trust the
+Plaud V2 name. Google may auto-revoke if their secret scanner flags it
+on a public repo — if that happens, regenerate the OAuth client in
+Google Cloud Console and update the constants.
 
 **Mitigation:** Per-user OAuth credentials (each install registers its
 own OAuth client with Google) would eliminate this surface but are
