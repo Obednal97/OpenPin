@@ -1,7 +1,7 @@
 #!/bin/bash
 # Prepare frontend assets for Tauri build — copies only what's needed,
 # excluding node_modules, Python backend, and dev files.
-set -e
+set -euo pipefail
 
 DIST="$(dirname "$0")/../dist-tauri"
 APP="$(dirname "$0")/../app"

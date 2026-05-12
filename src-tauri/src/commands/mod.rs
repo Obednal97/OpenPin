@@ -72,7 +72,10 @@ fn resolve_theme(pref: &str) -> String {
 
 #[tauri::command]
 pub async fn cycle_theme(app: tauri::AppHandle) -> ThemeInfo {
-    let (resolved, preference) = {
+    // Update the preference under the lock, then drop it before resolving — a
+    // slow `defaults read` subprocess inside resolve_theme would otherwise hold
+    // THEME_PREF and block every concurrent get_theme/cycle_theme IPC call.
+    let preference = {
         let mut pref = theme_pref().lock().unwrap();
         *pref = match pref.as_str() {
             "auto" => "light".to_string(),
@@ -80,9 +83,9 @@ pub async fn cycle_theme(app: tauri::AppHandle) -> ThemeInfo {
             "dark" => "auto".to_string(),
             _ => "auto".to_string(),
         };
-        let resolved = resolve_theme(&pref);
-        (resolved, pref.clone())
+        pref.clone()
     };
+    let resolved = resolve_theme(&preference);
 
     // Dispatch dock-icon update to the main thread — AppKit requires it.
     #[cfg(target_os = "macos")]
@@ -104,11 +107,13 @@ pub async fn cycle_theme(app: tauri::AppHandle) -> ThemeInfo {
 
 #[tauri::command]
 pub fn get_theme() -> ThemeInfo {
-    let pref = theme_pref().lock().unwrap();
-    let resolved = resolve_theme(&pref);
+    // Snapshot the preference under the lock, drop, then resolve outside —
+    // see cycle_theme for the rationale.
+    let preference = theme_pref().lock().unwrap().clone();
+    let resolved = resolve_theme(&preference);
     ThemeInfo {
         resolved,
-        preference: pref.clone(),
+        preference,
     }
 }
 
@@ -485,6 +490,20 @@ if [ -n "$NEW_APP" ] && [ -d "$NEW_APP/Contents/MacOS" ]; then
   SIGCHECK=$(codesign --verify --deep --strict "$NEW_APP" 2>&1)
   if [ $? -ne 0 ]; then
     echo "Update signature invalid: $SIGCHECK" >&2
+    [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
+    rm -rf /tmp/plaud-v2-update
+    open "$app_path"
+    exit 1
+  fi
+  # Verify the signature is OUR identity, not just any valid Apple cert.
+  # Without this an attacker who can replace the GitHub release asset (or
+  # MITM between GitHub and the updater) could ship a .app signed with a
+  # different Developer ID and codesign --verify alone would accept it.
+  EXPECTED_TEAM="4SN93PWF7Z"
+  IDCHECK=$(codesign -dv --verbose=4 "$NEW_APP" 2>&1)
+  if ! echo "$IDCHECK" | grep -q "TeamIdentifier=$EXPECTED_TEAM"; then
+    echo "Update signing identity mismatch — expected TeamIdentifier=$EXPECTED_TEAM" >&2
+    echo "$IDCHECK" >&2
     [ "$IS_DMG" = "true" ] && hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null
     rm -rf /tmp/plaud-v2-update
     open "$app_path"
@@ -989,54 +1008,67 @@ pub struct BugReportResult {
 }
 
 #[tauri::command]
-pub fn report_bug(
+pub async fn report_bug(
     app: tauri::AppHandle,
     expected: Option<String>,
     actual: Option<String>,
     steps: Option<String>,
 ) -> BugReportResult {
+    // Off-load the work: system_info_block spawns several subprocesses (pip,
+    // sw_vers, ioreg|shasum, sysctl) before the GitHub POST. Running it on the
+    // command's worker thread blocks the renderer's submit button for several
+    // seconds — spawn_blocking keeps the IPC pool responsive.
     let version = app.package_info().version.to_string();
-    let title_text = actual.as_deref().or(expected.as_deref()).unwrap_or("Bug report");
-    let title = format!("[User Report] {}", &title_text[..80.min(title_text.len())]);
-    let sys_info = system_info_block(&version);
-    let body = format!(
-        "## User Bug Report\n\n### Expected behaviour\n{}\n\n### Actual behaviour\n{}\n\n{}\n### System\n{sys_info}\n\n---\n*Submitted via in-app bug reporter.*",
-        expected.as_deref().unwrap_or("_Not provided_"),
-        actual.as_deref().unwrap_or("_Not provided_"),
-        steps.map(|s| format!("### Steps to reproduce\n{s}\n\n")).unwrap_or_default(),
-    );
+    tokio::task::spawn_blocking(move || {
+        let title_text = actual.as_deref().or(expected.as_deref()).unwrap_or("Bug report");
+        let title = format!("[User Report] {}", &title_text[..80.min(title_text.len())]);
+        let sys_info = system_info_block(&version);
+        let body = format!(
+            "## User Bug Report\n\n### Expected behaviour\n{}\n\n### Actual behaviour\n{}\n\n{}\n### System\n{sys_info}\n\n---\n*Submitted via in-app bug reporter.*",
+            expected.as_deref().unwrap_or("_Not provided_"),
+            actual.as_deref().unwrap_or("_Not provided_"),
+            steps.map(|s| format!("### Steps to reproduce\n{s}\n\n")).unwrap_or_default(),
+        );
 
-    let issue = serde_json::json!({
-        "title": title,
-        "body": body,
-        "labels": ["user-report"]
-    });
+        let issue = serde_json::json!({
+            "title": title,
+            "body": body,
+            "labels": ["user-report"]
+        });
 
-    match github_post(&format!("/repos/{UPDATE_REPO}/issues"), &issue) {
-        Ok((201, data)) => {
-            let number = data["number"].as_u64().map(|n| n as u32);
-            let url = data["html_url"].as_str().map(String::from);
-            log::info!("[BugReporter] User report created: #{}", number.unwrap_or(0));
-            BugReportResult {
-                success: true,
-                number,
-                url,
-                error: None,
+        match github_post(&format!("/repos/{UPDATE_REPO}/issues"), &issue) {
+            Ok((201, data)) => {
+                let number = data["number"].as_u64().map(|n| n as u32);
+                let url = data["html_url"].as_str().map(String::from);
+                log::info!("[BugReporter] User report created: #{}", number.unwrap_or(0));
+                BugReportResult {
+                    success: true,
+                    number,
+                    url,
+                    error: None,
+                }
             }
+            Ok((status, _)) => BugReportResult {
+                success: false,
+                number: None,
+                url: None,
+                error: Some(format!("GitHub returned {status}")),
+            },
+            Err(e) => BugReportResult {
+                success: false,
+                number: None,
+                url: None,
+                error: Some(e),
+            },
         }
-        Ok((status, _)) => BugReportResult {
-            success: false,
-            number: None,
-            url: None,
-            error: Some(format!("GitHub returned {status}")),
-        },
-        Err(e) => BugReportResult {
-            success: false,
-            number: None,
-            url: None,
-            error: Some(e),
-        },
-    }
+    })
+    .await
+    .unwrap_or_else(|e| BugReportResult {
+        success: false,
+        number: None,
+        url: None,
+        error: Some(format!("Background task panicked: {e}")),
+    })
 }
 
 // ---- Notifications ----

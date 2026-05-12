@@ -4,22 +4,36 @@ This document records security-sensitive design decisions for Plaud V2.
 
 ## Embedded Google OAuth client secret
 
-`app/utils/constants.py` contains a `GDRIVE_CLIENT_SECRET` value
-constant. This is the OAuth 2.0 client secret for a desktop OAuth
-application. Per Google's published OAuth guidelines, desktop client
-secrets are not strictly confidential — they cannot be hidden from
-end users running the binary, and the secret on its own does not grant
-access to user data.
+The Google Drive OAuth client ID + secret are loaded at runtime from
+`keys/gdrive_oauth.json` (gitignored) and bundled into the DMG via the
+`tauri.conf.json` `keys/*` resource. They are NOT in tracked source —
+this keeps the secret out of GitHub's secret-scanner crawls of public
+repos, which would otherwise trigger Google to auto-revoke the credential.
 
-**Accepted risk:** A user reading this repository (or extracting the
-constant from a built binary) could initiate OAuth flows that present
-themselves as Plaud V2. The user-consent screen would still display
-"Plaud V2" as the requesting app, so this enables phishing only against
-users who already trust the Plaud V2 name.
+Per Google's published OAuth guidelines, desktop client secrets are
+not strictly confidential — they cannot be hidden from end users running
+the binary, and the secret on its own does not grant access to user data.
+
+**Accepted risk:** Anyone with the DMG can extract the credentials and
+initiate OAuth flows that present themselves as Plaud V2. The user-consent
+screen still displays "Plaud V2" as the requesting app, so this enables
+phishing only against users who already trust the Plaud V2 name.
 
 **Mitigation:** Per-user OAuth credentials (each install registers its
 own OAuth client with Google) would eliminate this surface but are
 impractical for the shareable-build use case.
+
+## Bundled RSA keys for Plaud device E2EE
+
+`keys/app_private.pem` and `keys/e2ee_private.pem` are reverse-engineered
+from the official Plaud Android APK. They are the same constants that
+ship in every official Plaud client — required for the BLE RSA key
+exchange + per-file ChaCha20 decryption of audio recorded by any
+Plaud NotePin S device. They are "private keys" in PEM format only;
+functionally they are public constants for the Plaud device ecosystem.
+
+The files are bundled into the DMG (via `tauri.conf.json` `keys/*`)
+but gitignored, mirroring the pattern used for the GDrive OAuth secret.
 
 ## Embedded HuggingFace token
 

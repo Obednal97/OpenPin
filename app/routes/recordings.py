@@ -571,7 +571,12 @@ def list_transcripts():
     transcripts = []
     for f in sorted(TRANSCRIPTS_DIR.glob("*.json"), reverse=True):
         try:
-            data = json.loads(f.read_text())
+            # Serialize against concurrent writes from diarization/summarization
+            # background tasks. Without this, json.loads can catch a partial
+            # write and the transcript silently disappears from the listing
+            # (the bare-except below swallows JSONDecodeError).
+            with get_transcript_lock(f.stem):
+                data = json.loads(f.read_text())
             speakers = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
             transcripts.append(
                 {

@@ -106,8 +106,22 @@ GDRIVE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 GDRIVE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GDRIVE_API_BASE = "https://www.googleapis.com"
 GDRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
-GDRIVE_CLIENT_ID = "364974909213-m56e0v5la7ivomclvlf22r3selcsn1b2.apps.googleusercontent.com"
-GDRIVE_CLIENT_SECRET = "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"  # Desktop app OAuth — see SECURITY.md
+# Loaded from keys/gdrive_oauth.json — gitignored so a public repo doesn't
+# trip Google's secret scanner. The file is bundled into the DMG via the
+# tauri.conf.json `keys/*` resource. See docs/RELEASING.md.
+def _load_gdrive_oauth():
+    path = PROJECT_ROOT / "keys" / "gdrive_oauth.json"
+    if not path.exists():
+        return ("", "")
+    try:
+        import json as _json
+        data = _json.loads(path.read_text())
+        return (data.get("client_id", ""), data.get("client_secret", ""))
+    except Exception:
+        return ("", "")
+
+
+GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET = _load_gdrive_oauth()
 
 # Default tags
 DEFAULT_TAGS = ["Group Meeting", "1:1", "Memo", "Journal", "Interview", "Lecture"]

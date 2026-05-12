@@ -523,10 +523,13 @@ function _closeWifiModal() {
 }
 
 async function executeWifiSync() {
+  // Re-entry guard: another sync (BLE or WiFi) is already running. Without
+  // this, double-click on Start can spawn two pollProgress loops that stomp
+  // on each other's DOM and both attempt the BLE reconnect on finish.
+  if (app.syncing) return;
+  app.syncing = true;
   // Keep the modal open — transform into progress view
   _renderWifiProgress('preparing', 'Preparing...', '', 2);
-
-  app.syncing = true;
 
   // Poll for progress updates while sync runs
   let pollActive = true;
@@ -1054,6 +1057,7 @@ function _startBgPoll() {
           }
           const isBackground = !document.hasFocus();
           offerWifiSync(check.total_size, check.new_files, isBackground);
+          return;
         }
 
         toast(`${check.new_files} new recording(s) found, syncing via Bluetooth...`, 'info');
