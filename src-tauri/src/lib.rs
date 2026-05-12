@@ -162,6 +162,9 @@ pub fn run() {
                                 let _ = app_handle.run_on_main_thread(move || {
                                     set_dock_icon_for_theme(is_dark);
                                 });
+                                // Renderer caches the resolved theme at startup; tell it to
+                                // re-resolve so `auto` follows the system flip.
+                                let _ = app_handle.emit("system-theme-changed", is_dark);
                             }
                         }
                     }

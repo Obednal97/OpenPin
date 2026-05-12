@@ -687,14 +687,45 @@ window.plaud.onNotificationAction((action) => {
 
 // ---- System Wake Recovery ----
 // BLE connections die during macOS sleep — detect wake and force reconnect cycle
+// On macOS the WKWebView's NSURLSession can also be stranded by sleep, making
+// every fetch() throw "Load failed" even though the Python sidecar is fine.
+// `probeWebviewFetch` detects that and the handler reloads to reset the stack.
+async function probeWebviewFetch() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const h = await window.plaud.health();
+      if (h && (h.status === 'ok' || h.ok === true)) return true;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return false;
+}
+
 window.plaud.onSystemWake(async () => {
   console.log('[Wake] System resumed — refreshing device status');
+  // System appearance may have flipped while sleeping — re-resolve before
+  // anything paints, so the user doesn't see a flash of the wrong theme.
+  try { await window.plaud.getTheme(); } catch {}
   // Unstick any polling guards that may have been locked true by a fetch
   // that was in flight when the system slept and never resolved.
   if (typeof app.resetPollingState === 'function') app.resetPollingState();
   if (typeof app.restartPollingTimers === 'function') app.restartPollingTimers();
   // Give BLE stack a moment to settle after wake
   await new Promise((r) => setTimeout(r, 2000));
+
+  // WKWebView post-sleep network breakage: sidecar is healthy but every fetch
+  // throws "Load failed". Only fix is to reload the renderer.
+  if (!app.syncing && !(await probeWebviewFetch())) {
+    try {
+      const info = await window.plaud.getApiInfo();
+      if (info && info.status === 'ready') {
+        console.log('[Wake] WebView fetch broken, sidecar healthy — reloading renderer');
+        window.location.reload();
+        return;
+      }
+    } catch {}
+  }
+
   await updateDeviceStatus();
 
   // If the device is now showing disconnected, try auto-reconnect

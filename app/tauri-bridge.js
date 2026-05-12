@@ -143,6 +143,14 @@ for (const eventName of Object.keys(_eventCallbacks)) {
   });
 }
 
+// macOS appearance flips while the app is running — Rust emits this from the
+// .GlobalPreferences.plist watcher. Re-resolve so `auto` follows the system.
+listen('system-theme-changed', () => {
+  if (window.plaud && window.plaud.getTheme) {
+    window.plaud.getTheme().catch(() => {});
+  }
+});
+
 function addListener(eventName, callback) {
   if (_eventCallbacks[eventName]) {
     _eventCallbacks[eventName].push(callback);
@@ -215,7 +223,9 @@ window.plaud = {
 
   // Health check
   health: () => apiCall('GET', '/health'),
-  getApiInfo: () => _apiInfoReady,
+  // Always returns current state — the cached _apiInfoReady is for startup
+  // URL resolution; callers checking server status need a fresh value.
+  getApiInfo: () => invoke('get_api_info'),
   onStartupError: (callback) => addListener('startup-error', callback),
   onStartupStatus: (callback) => addListener('startup-status', callback),
 
