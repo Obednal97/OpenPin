@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """WiFi sync worker — runs as standalone subprocess.
 
-Called by the app with session keys and serial number as JSON arg.
+Called by the app with session keys + per-device credentials as JSON on stdin.
 Outputs JSON result to stdout. Progress updates to stderr as JSON lines.
 
-Usage: python3 wifi_sync_worker.py '{"key":"...","nonce":"...","aad":"...","sn":"...","recordings_dir":"..."}'
+The args were previously passed via argv but BIND_TOKEN + SN_SIG embedded in
+argv are visible to every process on the machine through `ps aux`; stdin keeps
+them out of the process table.
 """
 
 import asyncio
@@ -443,7 +445,9 @@ async def ble_connect_and_setup():
 
 async def main():
     global BIND_TOKEN, SN_SIG
-    args = json.loads(sys.argv[1])
+    # Read args from stdin (parent writes JSON + closes pipe). Keeps the
+    # per-device BIND_TOKEN and SN_SIG out of argv → out of `ps aux` output.
+    args = json.loads(sys.stdin.read())
     sn = args["sn"]
     recordings_dir = Path(args["recordings_dir"])
     app_key_path = Path(args["app_key_path"])

@@ -107,17 +107,44 @@ app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 
-# Recover metadata from transcript files — deferred here so the scan does not
-# run at module-import time (blueprint load), only once at server startup.
-recordings.init_recordings()
-
-# Start background workers
-from app.utils import notion_queue as _notion_queue
-_notion_queue.start_worker()
-
-
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PLAUD_API_PORT", "5123"))
-    print(f"Plaud V2 API server starting on http://localhost:{port}")
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+
+    from werkzeug.serving import make_server
+
+    # Recover metadata from transcript files and start background workers
+    # *here* (not at module-import time). This guarantees init runs before
+    # serve_forever opens the listening socket, and skips re-running these
+    # side effects if api_server.py is ever imported from a test/REPL.
+    recordings.init_recordings()
+    from app.utils import notion_queue as _notion_queue
+    _notion_queue.start_worker()
+
+    start_port = int(os.environ.get("PLAUD_API_PORT", "5123"))
+    # Walk past occupied ports if our initial pick was claimed in the window
+    # between Rust's find_free_port probe and this bind. The Rust stdout drain
+    # watches for the PLAUD_PORT_BOUND marker to learn the actual port.
+    last_err: Exception | None = None
+    bound = False
+    for offset in range(8):
+        candidate = start_port + offset
+        try:
+            server = make_server("127.0.0.1", candidate, app, threaded=True)
+        except OSError as e:
+            last_err = e
+            continue
+        print(f"PLAUD_PORT_BOUND: {candidate}", flush=True)
+        print(f"Plaud V2 API server starting on http://127.0.0.1:{candidate}", flush=True)
+        bound = True
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+        break
+    if not bound:
+        print(
+            f"FATAL: could not bind any port in {start_port}..{start_port + 7}: {last_err}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)

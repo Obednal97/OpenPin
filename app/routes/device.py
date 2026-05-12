@@ -134,7 +134,12 @@ def status():
             return _is_rec, _battery, _charging, _rssi, _cmd_ok
 
         try:
-            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(_poll_device())
+            # lock_timeout: closes the is_syncing()→run_async race window. If
+            # sync acquired _ble_lock between our is_syncing() check and now,
+            # bail rather than stall the status poll for the full sync (≤30 min).
+            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(
+                _poll_device(), lock_timeout=0.5
+            )
             if live_battery is not None:
                 battery = live_battery
             # If all commands failed and no RSSI, device is gone — mark disconnected

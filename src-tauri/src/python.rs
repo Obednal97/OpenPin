@@ -170,6 +170,7 @@ fn try_download_standalone() -> bool {
 
     let tmp_dir = std::env::temp_dir();
     let tar_path = tmp_dir.join(&filename);
+    let sha_path = tmp_dir.join(format!("{filename}.sha256"));
 
     // Download with curl
     let dl = Command::new("curl")
@@ -182,6 +183,47 @@ fn try_download_standalone() -> bool {
         log::error!("[Python] Download failed");
         return false;
     }
+
+    // Download + verify SHA-256 sidecar file from the same release. Catches
+    // captive-portal MITM, mid-download corruption, and partial tampering
+    // where only the tarball is swapped. Does NOT defend against a fully
+    // compromised python-build-standalone release (both files would be).
+    let sha_dl = Command::new("curl")
+        .args(["-fSL", "--retry", "2", "-o"])
+        .arg(&sha_path)
+        .arg(format!("{url}.sha256"))
+        .output();
+    if sha_dl.is_err() || !sha_dl.unwrap().status.success() {
+        log::error!("[Python] SHA-256 sidecar download failed");
+        let _ = std::fs::remove_file(&tar_path);
+        return false;
+    }
+    let expected = std::fs::read_to_string(&sha_path)
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(|s| s.to_string()))
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&sha_path);
+    let actual = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(&tar_path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .next()
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+    if expected.is_empty() || expected != actual {
+        log::error!(
+            "[Python] Checksum mismatch — expected '{expected}', got '{actual}'. Discarding download."
+        );
+        let _ = std::fs::remove_file(&tar_path);
+        return false;
+    }
+    log::info!("[Python] Checksum verified ({})", &expected[..16.min(expected.len())]);
 
     // Extract
     let dest = bundled_python_dir();
@@ -279,18 +321,26 @@ fn ensure_python_deps(python_path: &str, full_path: &str) -> Result<(), String> 
 
 const SERVER_READY_MAX_ATTEMPTS: u32 = 60;
 
-fn wait_for_server(url: &str, max_attempts: u32) -> bool {
-    let addr = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
+fn wait_for_server(_initial_url: &str, max_attempts: u32) -> bool {
+    // Read the URL from the global state on each iteration so we follow the
+    // actual port Python bound (PLAUD_PORT_BOUND messages from stdout update
+    // get_server().url if Python had to walk past an occupied initial port).
     for _ in 0..max_attempts {
+        let addr_str = {
+            let server = get_server().lock().unwrap();
+            server
+                .url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string()
+        };
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-            &addr
+            &addr_str
                 .parse()
                 .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5123))),
             Duration::from_secs(1),
         ) {
-            let request = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n");
+            let request = format!("GET /health HTTP/1.0\r\nHost: {addr_str}\r\n\r\n");
             if stream.write_all(request.as_bytes()).is_ok() {
                 let mut response = String::new();
                 let _ = stream.read_to_string(&mut response);
@@ -302,6 +352,13 @@ fn wait_for_server(url: &str, max_attempts: u32) -> bool {
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+/// Parse a stdout line for the `PLAUD_PORT_BOUND: <port>` marker emitted by
+/// api_server.py just before serve_forever. Returns the port if matched.
+fn parse_port_bound(line: &str) -> Option<u16> {
+    line.strip_prefix("PLAUD_PORT_BOUND: ")
+        .and_then(|rest| rest.trim().parse::<u16>().ok())
 }
 
 /// Send BLE disconnect request to the Python backend (fire-and-forget)
@@ -552,14 +609,19 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     // Record PID so the next launch can clean up if we crash before stop_python_server runs
     write_pid_file(child.id());
 
-    // Capture stdout in a background thread
+    // Capture stdout in a background thread — also watches for the
+    // PLAUD_PORT_BOUND marker so we can follow Python if it had to walk past
+    // an occupied initial port (closes the find_free_port TOCTOU window).
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("[Python] {line}");
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(actual_port) = parse_port_bound(&line) {
+                    let mut server = get_server().lock().unwrap();
+                    server.port = actual_port;
+                    server.url = format!("http://127.0.0.1:{actual_port}");
                 }
+                eprintln!("[Python] {line}");
             }
         });
     }
@@ -568,10 +630,8 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("[Python] {line}");
-                }
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("[Python] {line}");
             }
         });
     }
@@ -619,7 +679,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                 CleanExit,
                 Crashed(i32),
                 NoProcess,
-                WaitError,
+                WaitError(String),
             }
             let action = {
                 let mut server = get_server().lock().unwrap();
@@ -635,7 +695,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                             }
                         }
                         Ok(None) => LoopAction::StillRunning,
-                        Err(_) => LoopAction::WaitError,
+                        Err(e) => LoopAction::WaitError(e.to_string()),
                     }
                 } else {
                     LoopAction::NoProcess
@@ -645,7 +705,28 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
 
             match action {
                 LoopAction::StillRunning => {}
-                LoopAction::CleanExit | LoopAction::NoProcess | LoopAction::WaitError => break,
+                LoopAction::CleanExit | LoopAction::NoProcess => break,
+                LoopAction::WaitError(err) => {
+                    // Silent break here would leave the user with a stale "ready"
+                    // status forever. Log it and surface to the renderer so the
+                    // user knows the watchdog has stopped monitoring.
+                    log::error!("[Python] Watchdog try_wait failed: {err} — stopping crash monitor");
+                    SERVER_READY.store(false, Ordering::Release);
+                    set_startup_error(
+                        "WATCHDOG_DIED",
+                        "Process monitor stopped",
+                        "Plaud V2's crash watchdog could not poll the backend process.",
+                        "Restart the app to recover.",
+                        &format!("try_wait error: {err}"),
+                    );
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let err = get_server().lock().unwrap().startup_error.clone();
+                        if let Some(e) = err {
+                            let _ = w.emit("startup-error", e);
+                        }
+                    }
+                    break;
+                }
                 LoopAction::Crashed(code) => {
                     log::error!("[Python] Server crashed with exit code {code}");
                     // Mark not-ready immediately so get_api_info returns "starting"
@@ -766,11 +847,16 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Spawn failed: {e}"))?;
 
-    // Capture output
+    // Capture output (stdout also watches for PLAUD_PORT_BOUND on restart)
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
+                if let Some(actual_port) = parse_port_bound(&line) {
+                    let mut server = get_server().lock().unwrap();
+                    server.port = actual_port;
+                    server.url = format!("http://127.0.0.1:{actual_port}");
+                }
                 eprintln!("[Python] {line}");
             }
         });

@@ -8,6 +8,10 @@ let _exportDropdownCleanup = null;
 // OAuth poll handles — stored at module scope so repeated clicks don't accumulate intervals
 let _notionPollHandleTx = null;
 let _notionPollTimeoutHandleTx = null;
+// Background diarization poll — orphan intervals could forcibly re-open the
+// transcript view, so we track the handles and cancel on close + on re-entry.
+let _diarPollHandleTx = null;
+let _diarPollTimeoutHandleTx = null;
 
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
@@ -883,19 +887,37 @@ async function transcribeRecording(oggPath, sessionId) {
 
       if (result.diarizing) {
         toast('Speaker detection running in background...', 'info');
-        const pollDiar = setInterval(async () => {
+        // Cancel any prior diarization poll before starting a new one — otherwise
+        // closing+re-transcribing leaves an orphan that can force-navigate the
+        // user back to this session whenever the speakers field appears.
+        if (_diarPollHandleTx) clearInterval(_diarPollHandleTx);
+        if (_diarPollTimeoutHandleTx) clearTimeout(_diarPollTimeoutHandleTx);
+        _diarPollHandleTx = setInterval(async () => {
           try {
             const transcriptData = await window.plaud.transcripts();
             const t = transcriptData.find((tr) => tr.session_id === sessionId);
             if (t && t.speakers && t.speakers.length > 0) {
-              clearInterval(pollDiar);
+              clearInterval(_diarPollHandleTx);
+              _diarPollHandleTx = null;
+              if (_diarPollTimeoutHandleTx) {
+                clearTimeout(_diarPollTimeoutHandleTx);
+                _diarPollTimeoutHandleTx = null;
+              }
               toast(`Speaker detection complete: ${t.speakers.length} speaker(s) found`, 'success');
               app.transcripts[sessionId] = t;
-              if (app.currentView === 'transcript') openTranscript(sessionId);
+              if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
+                openTranscript(sessionId);
+              }
             }
           } catch {}
         }, 5000);
-        setTimeout(() => clearInterval(pollDiar), 300000);
+        _diarPollTimeoutHandleTx = setTimeout(() => {
+          if (_diarPollHandleTx) {
+            clearInterval(_diarPollHandleTx);
+            _diarPollHandleTx = null;
+          }
+          _diarPollTimeoutHandleTx = null;
+        }, 300000);
       }
     }
   } catch (err) {
@@ -920,6 +942,14 @@ function closeTranscript() {
   if (_notionPollTimeoutHandleTx) {
     clearTimeout(_notionPollTimeoutHandleTx);
     _notionPollTimeoutHandleTx = null;
+  }
+  if (_diarPollHandleTx) {
+    clearInterval(_diarPollHandleTx);
+    _diarPollHandleTx = null;
+  }
+  if (_diarPollTimeoutHandleTx) {
+    clearTimeout(_diarPollTimeoutHandleTx);
+    _diarPollTimeoutHandleTx = null;
   }
   const titleEl = $('#transcript-title');
   if (titleEl && document.activeElement === titleEl) {
@@ -1248,8 +1278,9 @@ async function drawWaveform(canvas, audioSrc) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, rect.width, rect.height);
 
+  let audioContext = null;
   try {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const response = await fetch(audioSrc);
     const arrayBuffer = await response.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -1305,7 +1336,6 @@ async function drawWaveform(canvas, audioSrc) {
     }
 
     ctx.globalAlpha = 1;
-    audioContext.close();
   } catch {
     // Fallback: draw placeholder bars
     const barCount = Math.floor(rect.width / 3);
@@ -1318,5 +1348,11 @@ async function drawWaveform(canvas, audioSrc) {
       ctx.fillRect(i * 3, midY - h, 2, h * 2);
     }
     ctx.globalAlpha = 1;
+  } finally {
+    // WKWebView caps simultaneous AudioContexts at 6; closing in finally
+    // prevents the editor from breaking after repeated crop-open failures.
+    if (audioContext) {
+      try { audioContext.close(); } catch {}
+    }
   }
 }

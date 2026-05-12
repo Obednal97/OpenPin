@@ -95,8 +95,24 @@ bp = Blueprint("transcribe", __name__)
 def transcribe_file():
     data = request.get_json(silent=True) or {}
     path = data.get("path")
-    if not path or not Path(path).exists():
+    if not path:
+        return jsonify({"error": "No path"}), 400
+
+    # The local API has no auth (binds 127.0.0.1) so the caller can submit any
+    # path on disk. Without containment, /transcribe is a primitive to ship
+    # arbitrary readable files (e.g. ~/.ssh/id_rsa) to a cloud transcription
+    # provider. Resolve symlinks + reject anything outside the known dirs.
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except (FileNotFoundError, OSError):
         return jsonify({"error": "File not found"}), 400
+    from app.utils.constants import CLOUD_RECORDINGS_DIR, get_all_recordings_dirs
+
+    allowed_dirs = [d.resolve() for d in get_all_recordings_dirs()]
+    allowed_dirs.append(CLOUD_RECORDINGS_DIR.resolve())
+    if not any(resolved.is_relative_to(base) for base in allowed_dirs):
+        return jsonify({"error": "Path is outside the recordings directories"}), 400
+    path = str(resolved)
 
     config = load_config()
     model = data.get("model", config.get("whisper_model", "small"))

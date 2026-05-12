@@ -159,12 +159,28 @@ def _get_loop():
     return _loop
 
 
-def run_async(coro, timeout=120):
-    """Run an async coroutine from sync Flask context. Serialized via _ble_lock."""
-    with _ble_lock:
-        loop = _get_loop()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=timeout)
+def run_async(coro, timeout=120, lock_timeout=None):
+    """Run an async coroutine from sync Flask context. Serialized via _ble_lock.
+
+    `lock_timeout` lets callers fail fast instead of stalling behind a
+    long-running operation (e.g. a 30-min sync that holds _ble_lock for the
+    full duration). Used by the /status poll so the UI doesn't freeze on the
+    `is_syncing()` → `run_async()` window race.
+    """
+    if lock_timeout is not None:
+        if not _ble_lock.acquire(timeout=lock_timeout):
+            raise TimeoutError("BLE busy — lock held by long-running operation")
+        try:
+            loop = _get_loop()
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=timeout)
+        finally:
+            _ble_lock.release()
+    else:
+        with _ble_lock:
+            loop = _get_loop()
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=timeout)
 
 
 async def scan_devices(scan_duration=6):
@@ -564,10 +580,18 @@ async def send_cmd(pt, timeout=5):
         return None
     cipher = _device_state["cipher"]
     key, nonce, aad = _device_state["session_keys"]
+    # Snapshot the event + response holder locally: bleak fires _on_disconnect
+    # from its own thread, which calls _reset_state() and replaces these with
+    # None. Without local refs, the cmd_resp[0] read below would TypeError if
+    # the disconnect lands mid-await.
+    cmd_evt = _device_state["cmd_evt"]
+    cmd_resp = _device_state["cmd_resp"]
+    if cmd_evt is None or cmd_resp is None:
+        return None
     _device_state["seq"] += 1
     ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + pt, aad)
-    _device_state["cmd_evt"].clear()
-    _device_state["cmd_resp"][0] = None
+    cmd_evt.clear()
+    cmd_resp[0] = None
     try:
         await cl.write_gatt_char(W, ct, response=False)
     except Exception as e:
@@ -575,10 +599,10 @@ async def send_cmd(pt, timeout=5):
         _reset_state()
         return None
     try:
-        await asyncio.wait_for(_device_state["cmd_evt"].wait(), timeout=timeout)
+        await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
     except TimeoutError:
         pass
-    return _device_state["cmd_resp"][0]
+    return cmd_resp[0]
 
 
 async def disconnect_device():
@@ -1035,15 +1059,22 @@ def do_wifi_sync_blocking():
         _wlog(f"Spawning worker: {python_bin} {worker_path}")
         _wlog(f"CWD: {APP_KEY_PATH.parent.parent}")
 
-        # Run worker as subprocess — it has its own clean asyncio.run()
+        # Run worker as subprocess — it has its own clean asyncio.run().
+        # Credentials go in via stdin, not argv, so `ps aux` can't see them.
         import subprocess as sp
         proc = sp.Popen(
-            [python_bin, str(worker_path), worker_args],
+            [python_bin, str(worker_path)],
+            stdin=sp.PIPE,
             stdout=sp.PIPE,
             stderr=sp.PIPE,
             cwd=str(APP_KEY_PATH.parent.parent),  # project root
             env={**os.environ, "PYTHONPATH": str(APP_KEY_PATH.parent.parent)},
         )
+        try:
+            proc.stdin.write(worker_args.encode("utf-8"))
+            proc.stdin.close()
+        except (BrokenPipeError, OSError) as e:
+            _wlog(f"Failed to send args to worker: {e}")
         _wlog(f"Worker PID: {proc.pid}")
 
         # Read stdout and stderr in separate threads to avoid pipe deadlocks.

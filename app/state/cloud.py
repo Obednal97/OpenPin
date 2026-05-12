@@ -467,80 +467,83 @@ def upload_to_cloud(ogg_path, filename, duration, file_type="OPUS", scene=1, sta
     upload_path = tmp.name
     file_size = len(raw_opus)
 
-    if file_size < 100:
-        os.unlink(upload_path)
-        return {"error": "File too small to upload"}
-
-    headers = {
-        "Authorization": f"bearer {_cloud_state['token']}",
-        "Content-Type": "application/json",
-        "app-platform": "desktop",
-        "app-language": "en",
-    }
-    api = _cloud_state["api_domain"]
-
-    r = http_requests.post(
-        f"{api}/file/get_upload_presigned_url",
-        json={"filesize": file_size, "file_type": file_type},
-        headers=headers,
-        timeout=15,
-    )
-    r.raise_for_status()
-    raw = r.json()
-    upload_data = raw.get("data", raw)
-    upload_id = upload_data.get("upload_id", "")
-    object_name = upload_data.get("object_name", "")
-    part_urls = upload_data.get("part_urls", [])
-
-    if not upload_id or not part_urls:
-        return {"error": "Failed to get upload URLs from cloud"}
-
-    parts = []
-    chunk_size = 5 * 1024 * 1024
-    with open(upload_path, "rb") as f:
-        for part_num, part_url in enumerate(part_urls, start=1):
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            resp = http_requests.put(part_url, data=chunk, timeout=60)
-            resp.raise_for_status()
-            etag = resp.headers.get("ETag", "")
-            parts.append({"PartNumber": part_num, "ETag": etag})
-
-    r = http_requests.post(
-        f"{api}/file/merge_multipart",
-        json={"upload_id": upload_id, "object_name": object_name, "parts": parts},
-        headers=headers,
-        timeout=30,
-    )
-    r.raise_for_status()
-
-    duration_ms = int(duration * 1000) if duration < 100000 else int(duration)
-    if not start_time_ms:
-        start_time_ms = int(time.time() * 1000)
-
-    r = http_requests.post(
-        f"{api}/file/confirm_upload",
-        json={
-            "upload_id": upload_id,
-            "object_name": object_name,
-            "scene": scene,
-            "file_type": file_type,
-            "duration": duration_ms,
-            "filename": filename,
-            "start_time": start_time_ms,
-        },
-        headers=headers,
-        timeout=15,
-    )
-    r.raise_for_status()
-
+    # try/finally so the temp file is unlinked on every exit path. Previously
+    # the early-return at `if not upload_id` and any HTTPError leaked tens of
+    # MB per failure into the system temp dir.
     try:
-        os.unlink(upload_path)
-    except Exception:
-        pass
+        if file_size < 100:
+            return {"error": "File too small to upload"}
 
-    return r.json()
+        headers = {
+            "Authorization": f"bearer {_cloud_state['token']}",
+            "Content-Type": "application/json",
+            "app-platform": "desktop",
+            "app-language": "en",
+        }
+        api = _cloud_state["api_domain"]
+
+        r = http_requests.post(
+            f"{api}/file/get_upload_presigned_url",
+            json={"filesize": file_size, "file_type": file_type},
+            headers=headers,
+            timeout=15,
+        )
+        r.raise_for_status()
+        raw = r.json()
+        upload_data = raw.get("data", raw)
+        upload_id = upload_data.get("upload_id", "")
+        object_name = upload_data.get("object_name", "")
+        part_urls = upload_data.get("part_urls", [])
+
+        if not upload_id or not part_urls:
+            return {"error": "Failed to get upload URLs from cloud"}
+
+        parts = []
+        chunk_size = 5 * 1024 * 1024
+        with open(upload_path, "rb") as f:
+            for part_num, part_url in enumerate(part_urls, start=1):
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                resp = http_requests.put(part_url, data=chunk, timeout=60)
+                resp.raise_for_status()
+                etag = resp.headers.get("ETag", "")
+                parts.append({"PartNumber": part_num, "ETag": etag})
+
+        r = http_requests.post(
+            f"{api}/file/merge_multipart",
+            json={"upload_id": upload_id, "object_name": object_name, "parts": parts},
+            headers=headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+
+        duration_ms = int(duration * 1000) if duration < 100000 else int(duration)
+        if not start_time_ms:
+            start_time_ms = int(time.time() * 1000)
+
+        r = http_requests.post(
+            f"{api}/file/confirm_upload",
+            json={
+                "upload_id": upload_id,
+                "object_name": object_name,
+                "scene": scene,
+                "file_type": file_type,
+                "duration": duration_ms,
+                "filename": filename,
+                "start_time": start_time_ms,
+            },
+            headers=headers,
+            timeout=15,
+        )
+        r.raise_for_status()
+
+        return r.json()
+    finally:
+        try:
+            os.unlink(upload_path)
+        except OSError:
+            pass
 
 
 def upload_local_recordings_to_cloud():
