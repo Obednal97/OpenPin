@@ -120,11 +120,18 @@ def status():
             except Exception:
                 pass
             try:
+                # Battery from the standard 0x2A19 characteristic (fresh read).
+                _battery = await dev.read_battery()
+                if _battery is not None:
+                    _cmd_ok = True
+            except Exception:
+                pass
+            try:
+                # cmd 9 (BattStatusRsp) — use its charging flag (battery via 0x2A19 above).
                 r = await dev.send_cmd(bytes([1, 9, 0]), timeout=3)
-                if r and len(r) >= 5:
+                if r and len(r) >= 4:
                     _cmd_ok = True
                     _charging = bool(r[3])
-                    _battery = r[4]
             except Exception:
                 pass
             try:
@@ -319,3 +326,9 @@ def wifi_sync():
 def wifi_sync_status():
     """Poll WiFi sync progress."""
     return jsonify(dev.get_wifi_sync_status())
+
+
+@bp.route("/sync-status")
+def sync_status():
+    """Poll BLE sync progress so the UI updates per-file during a transfer."""
+    return jsonify(dev.get_ble_sync_status())

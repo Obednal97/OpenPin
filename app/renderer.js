@@ -221,8 +221,27 @@ async function performSync(triggerBtn) {
   setLoading(btn, false);
   setSyncButtonMode('switch-wifi');
 
+  // Poll BLE sync progress so the UI updates per-file instead of sitting frozen
+  // on one blocking call. setTimeout is OS-throttled while the window is in the
+  // background, but the transfer keeps running (App Nap is suppressed backend-side);
+  // the bar catches up on refocus. Download maps to 20–60%, leaving 60–100% for
+  // transcription so the bar stays monotonic.
+  let _syncPollActive = true;
+  (async () => {
+    while (_syncPollActive) {
+      try {
+        const s = await window.plaud.syncStatus();
+        if (_syncPollActive && s && s.active && s.message) {
+          showProgress(s.message, 20 + (s.percent || 0) * 0.4);
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  })();
+
   try {
     const result = await window.plaud.sync();
+    _syncPollActive = false;
     if (result.error) {
       toast(`Sync failed: ${result.error}`, 'error');
     } else {
@@ -285,6 +304,7 @@ async function performSync(triggerBtn) {
   } catch (err) {
     toast(`Sync error: ${err.message}`, 'error');
   } finally {
+    _syncPollActive = false;
     app.syncing = false;
     setLoading(btn, false);
     setLoading(dom.syncBtn, false);
@@ -295,6 +315,11 @@ async function performSync(triggerBtn) {
 }
 
 dom.syncBtn.addEventListener('click', () => performSync(dom.syncBtn));
+
+// Tray "Sync Device" menu item routes here so it behaves identically to the
+// in-app Sync button (progress UI, transcription, reload) instead of poking the
+// backend directly. Rust shows the window before emitting this event.
+window.plaud.onTraySync(() => performSync(dom.syncBtn));
 
 dom.disconnectBtn.addEventListener('click', async () => {
   try {

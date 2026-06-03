@@ -202,18 +202,15 @@ pub fn run() {
                         }
                     }
                     "sync" => {
-                        let server = python::get_server().lock().unwrap();
-                        let port = server.port;
-                        drop(server);
-                        std::thread::spawn(move || {
-                            if let Ok(mut s) = std::net::TcpStream::connect_timeout(
-                                &format!("127.0.0.1:{port}").parse().unwrap(),
-                                std::time::Duration::from_secs(2),
-                            ) {
-                                use std::io::Write;
-                                let _ = write!(s, "POST /device/sync HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n");
-                            }
-                        });
+                        // Route through the frontend so a tray sync behaves exactly
+                        // like clicking Sync in-app (progress UI, transcription,
+                        // recordings reload). Poking /device/sync over a raw socket
+                        // bypassed all of that and left the UI unaware.
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                            let _ = w.emit("tray-sync", ());
+                        }
                     }
                     "quit" => {
                         python::stop_python_server();
