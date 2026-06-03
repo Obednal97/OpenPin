@@ -54,6 +54,9 @@ _ble_lock = threading.Lock()
 _syncing = threading.Lock()  # Held while a file sync is in progress — blocks concurrent syncs
 _sync_abort = False  # Set True to abort current BLE sync (e.g. switching to WiFi)
 _wifi_sync_status = {"message": "", "percent": 0}  # Progress for WiFi sync polling
+# Progress for BLE sync polling — the frontend reads this via /device/sync-status
+# so the UI updates per-file instead of freezing on one blocking call.
+_ble_sync_status = {"message": "", "percent": 0, "active": False}
 _loop = None
 _loop_thread = None
 
@@ -68,6 +71,7 @@ def _reset_state():
     _device_state["device_name"] = None
     _device_state["rssi"] = None
     _device_state["seq"] = 0
+    _device_state["expected_cmd_id"] = None
     _device_state["cmd_evt"] = None
     _device_state["cmd_resp"] = None
     _device_state["file_data"] = None
@@ -109,8 +113,11 @@ async def _setup_notify(cl):
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))
-            cmd_resp[0] = dd
-            cmd_evt.set()
+            # Only wake send_cmd() if this is the response it's waiting for.
+            expected = _device_state.get("expected_cmd_id")
+            if expected is None or cid == expected:
+                cmd_resp[0] = dd
+                cmd_evt.set()
 
     await cl.start_notify(N, handler)
 
@@ -141,6 +148,71 @@ async def read_rssi():
         return _device_state.get("rssi")
     except Exception:
         return _device_state.get("rssi")
+
+
+async def read_battery():
+    """Read battery % fresh from the standard GATT Battery Level characteristic.
+
+    0x2A19 is the documented standard battery source (uint8 0-100%); a direct
+    read_gatt_char triggers a real GATT read each call (not cached), so polling
+    it keeps the value fresh. The device ALSO reports battery via cmd 9
+    (BattStatusRsp: charging@3, level@4) — that is the authoritative source the
+    official app uses — but we read 0x2A19 here as an independent path that does
+    not depend on the cmd-response matching in send_cmd().
+    """
+    cl = _device_state.get("client")
+    if not cl or not _device_state["connected"]:
+        return None
+    try:
+        bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
+        if bat:
+            val = bat[0]
+            _device_state["battery"] = val
+            return val
+    except Exception as e:
+        logging.debug(f"Battery read (0x2A19) failed: {e}")
+    return None
+
+
+class _keep_awake:
+    """Context manager that disables macOS App Nap for its duration.
+
+    When the app window loses focus, macOS throttles the process and coalesces
+    timers, which delays CoreBluetooth notification delivery. During a long BLE
+    file transfer that stall can exceed the watchdog window and abort the sync.
+    NSProcessInfo's begin/endActivity keeps the process responsive while syncing.
+    No-op on non-macOS or if pyobjc Foundation is unavailable.
+    """
+
+    # NSActivityUserInitiated — user-initiated work; disables App Nap and idle sleep.
+    _OPTIONS = 0x00FFFFFF
+
+    def __init__(self, reason="Plaud BLE sync"):
+        self._reason = reason
+        self._token = None
+
+    def __enter__(self):
+        try:
+            from Foundation import NSProcessInfo
+
+            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                self._OPTIONS, self._reason
+            )
+        except Exception as e:
+            logging.debug(f"App Nap suppression unavailable: {e}")
+            self._token = None
+        return self
+
+    def __exit__(self, *exc):
+        if self._token is not None:
+            try:
+                from Foundation import NSProcessInfo
+
+                NSProcessInfo.processInfo().endActivity_(self._token)
+            except Exception:
+                pass
+            self._token = None
+        return False
 
 
 def _get_loop():
@@ -501,8 +573,13 @@ async def connect_device(address=None):
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))
-            cmd_resp[0] = dd
-            cmd_evt.set()
+            # Only wake send_cmd() if this is the response it's waiting for.
+            # Unsolicited cmd_type==1 packets (record events, late replies) carry a
+            # different cmd_id and must not be returned as the current command's reply.
+            expected = _device_state.get("expected_cmd_id")
+            if expected is None or cid == expected:
+                cmd_resp[0] = dd
+                cmd_evt.set()
 
     await cl.start_notify(N, handler)
     _device_state["cmd_evt"] = cmd_evt
@@ -546,23 +623,24 @@ async def connect_device(address=None):
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
-    # Read battery — try cmd 9 first (live value), fallback to BLE characteristic
-    battery = None
+    # Battery from the standard 0x2A19 characteristic (uint8 0-100%, read fresh).
+    battery = await read_battery()
+    # cmd 9 is BattStatusRsp (charging@3, level@4) — the authoritative source the
+    # official app uses. Take charging from it, and log both sources once per
+    # connect to confirm they agree against the physical device.
     charging = False
     try:
         r = await send_cmd(bytes([1, 9, 0]), timeout=3)
-        if r and len(r) >= 5:
-            charging = bool(r[3])
-            battery = r[4]
+        if r:
+            logging.info(
+                f"[Battery] 0x2A19={battery} | cmd9 BattStatusRsp "
+                f"charging=r[3]={r[3] if len(r) > 3 else '?'} "
+                f"level=r[4]={r[4] if len(r) > 4 else '?'}"
+            )
+            if len(r) >= 5:
+                charging = bool(r[3])
     except Exception:
         pass
-    if battery is None:
-        # Fallback to BLE characteristic (may be cached from pairing, but better than nothing)
-        try:
-            bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
-            battery = bat[0]
-        except Exception:
-            pass
     _device_state["battery"] = battery
     _device_state["charging"] = charging
 
@@ -589,6 +667,14 @@ async def send_cmd(pt, timeout=5):
     if cmd_evt is None or cmd_resp is None:
         return None
     _device_state["seq"] += 1
+    # Record the cmd_id we're issuing so the notify handler only wakes us for the
+    # matching response. The device also emits unsolicited cmd_type==1 packets
+    # (button-press record events, late/duplicate replies); without this the first
+    # such packet would be returned here and its bytes misread (e.g. a sessionId
+    # byte parsed as battery %). The SDK matches responses to requests the same way.
+    _device_state["expected_cmd_id"] = (
+        struct.unpack_from("<H", pt, 1)[0] if len(pt) >= 3 else None
+    )
     ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + pt, aad)
     cmd_evt.clear()
     cmd_resp[0] = None
@@ -886,12 +972,13 @@ async def get_device_info():
     except Exception:
         pass
 
-    # cmd 9 — Battery/charging status
+    # Battery from standard 0x2A19; cmd 9 (BattStatusRsp) gives charging@3, level@4.
+    info["battery_level"] = await read_battery()
     try:
         r = await send_cmd(bytes([1, 9, 0]), timeout=3)
         if r and len(r) >= 5:
             info["charging"] = bool(r[3])
-            info["battery_level"] = r[4]
+            info["battery_cmd9"] = r[4]  # cmd 9 battery level (cross-check vs 0x2A19)
     except Exception:
         pass
 
@@ -947,9 +1034,14 @@ async def sync_files(progress_callback=None):
     global _syncing
     if not _syncing.acquire(blocking=False):
         return {"error": "Sync already in progress"}
+    _ble_sync_status.update({"message": "Preparing…", "percent": 5, "active": True})
     try:
-        return await _sync_files_inner(progress_callback)
+        # Suppress macOS App Nap so backgrounding the window can't throttle the
+        # CoreBluetooth stream and trip the stall watchdog mid-transfer.
+        with _keep_awake("Plaud BLE sync"):
+            return await _sync_files_inner(progress_callback)
     finally:
+        _ble_sync_status.update({"message": "", "percent": 0, "active": False})
         _syncing.release()
 
 
@@ -1159,6 +1251,7 @@ async def _sync_files_inner(progress_callback=None):
     dismissed = set(load_config().get("deleted_ids", []))
 
     new_files = []
+    total = len(files)
     for i, f in enumerate(files):
         # Check abort flag (user switching to WiFi sync)
         global _sync_abort
@@ -1186,6 +1279,13 @@ async def _sync_files_inner(progress_callback=None):
             continue
 
         # Download via BLE
+        _ble_sync_status.update(
+            {
+                "message": f"Downloading recording {i + 1} of {total}…",
+                "percent": round(i / total * 100),
+                "active": True,
+            }
+        )
         file_data = _device_state["file_data"]
         file_done = _device_state["file_done"]
         if file_data is None or file_done is None:
@@ -1208,24 +1308,36 @@ async def _sync_files_inner(progress_callback=None):
             _reset_state()
             break
 
-        start = time.time()
-        max_time = max(fsize / 1500, 60)  # ~1.5 KB/s worst case, 60s minimum
         last_progress_len = 0
         last_progress_time = time.time()
-        stall_timeout = 15  # Abort if no new data for 15 seconds (device out of range)
+        # Abort only when data genuinely stops arriving. 60s tolerates background
+        # throttling / transient BLE pauses that the old 15s window cut short
+        # mid-transfer on large files. A real disconnect is caught immediately
+        # below, so this no longer needs to be aggressive.
+        stall_timeout = 60
         while not file_done.is_set():
             try:
                 await asyncio.wait_for(file_done.wait(), timeout=2)
             except TimeoutError:
                 now = time.time()
-                if now - start > max_time:
-                    logging.warning(f"Sync timeout for session {sid} after {now - start:.0f}s")
+                # Connection genuinely dropped — stop immediately rather than
+                # waiting out the stall window.
+                if not _device_state["connected"] or _device_state["file_data"] is None:
+                    logging.warning(f"Sync: device disconnected mid-file for session {sid}")
                     break
                 # Check if data is still flowing
                 current_len = len(file_data)
                 if current_len > last_progress_len:
                     last_progress_len = current_len
                     last_progress_time = now
+                    if fsize > 0:
+                        frac = min(1.0, current_len / fsize)
+                        _ble_sync_status.update(
+                            {
+                                "message": f"Downloading recording {i + 1} of {total}…",
+                                "percent": round((i + frac) / total * 100),
+                            }
+                        )
                 elif now - last_progress_time > stall_timeout:
                     logging.warning(f"Sync stalled for session {sid} — no data for {stall_timeout}s, device likely out of range")
                     break
@@ -1331,6 +1443,10 @@ def abort_sync():
 
 def get_wifi_sync_status():
     return dict(_wifi_sync_status)
+
+
+def get_ble_sync_status():
+    return dict(_ble_sync_status)
 
 
 def set_connected(val):

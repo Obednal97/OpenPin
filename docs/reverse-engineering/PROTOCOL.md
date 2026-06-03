@@ -2,6 +2,11 @@
 
 > Reverse engineered from the Android APK (TinnoTech PenBLE SDK + Flutter bridge).
 > All integers are **little-endian** unless stated otherwise.
+>
+> ⚠️ **Superseded in places by [`COMMAND_REFERENCE.md`](./COMMAND_REFERENCE.md)** (built from the
+> decompiled SDK response classes + packet captures). Known corrections to this file:
+> **cmd 9 is Battery Status (`charging@3`, `level@4`), not "Device Settings"** — the generic
+> settings command is **cmd 8** (`CommonSettingsRsp`). Trust `COMMAND_REFERENCE.md` on conflicts.
 
 ## 1. BLE Service & Characteristic UUIDs
 
@@ -161,10 +166,11 @@ Bytes 5+:  log data
 
 | cmd_id | Name | Request | Response |
 |--------|------|---------|----------|
-| 9 | Device Settings | settingType, value | current settings |
-| 13 | Common Settings | settingType, actionType, value | (ack) |
-| 34 | LED State | (varies) | state |
-| 109 | Find My / Auto-delete | (varies) | state |
+| 8 | **Common Settings** (the real settings cmd) | settingType, value | type (u16@3), value (u32@5) |
+| 9 | **Battery Status** ⚠️ *not settings* | (none) | charging (@3), **level @4 = battery %** |
+| 13 | Close WiFi | (none) | status |
+| 33/34 | LED State | (varies) | onOff (@3, inverted) |
+| 109 | Find My | enable (@3) | enabled (@3) |
 
 ### WiFi Operations
 

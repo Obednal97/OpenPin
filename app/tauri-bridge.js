@@ -132,6 +132,7 @@ const _eventCallbacks = {
   'system-wake': [],
   'notification-action': [],
   'update-status': [],
+  'tray-sync': [],
 };
 
 // Set up Tauri event listeners
@@ -174,6 +175,7 @@ window.plaud = {
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
   sync: () => apiCall('POST', '/device/sync'),
+  syncStatus: () => apiCall('GET', '/device/sync-status'),
   abortSync: () => apiCall('POST', '/device/abort-sync'),
   wifiSync: () => apiCall('POST', '/device/wifi-sync'),
   wifiSyncStatus: () => apiCall('GET', '/device/wifi-sync-status'),
@@ -288,6 +290,8 @@ window.plaud = {
 
   // System events
   onSystemWake: (callback) => addListener('system-wake', callback),
+  // Tray "Sync Device" menu item — routed through the normal in-app sync flow
+  onTraySync: (callback) => addListener('tray-sync', callback),
   showNotification: (title, body, actionLabel) =>
     invoke('show_notification', { title, body, actionLabel }),
   onNotificationAction: (callback) => addListener('notification-action', callback),
