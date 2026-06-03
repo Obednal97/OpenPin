@@ -267,32 +267,34 @@ from `0x84`) XORed over each 80 B frame independently.
 
 ---
 
-## 7. Battery — the corrected story
+## 7. Battery — resolved (v2.2.1, confirmed on-device)
 
-**Earlier conclusion was wrong.** I previously read `PROTOCOL.md` ("cmd 9 = Device Settings") and
-concluded byte 4 was a settings value misread as battery. The decompiled SDK disproves that:
+**Use cmd 9. Do NOT use the 0x2A19 GATT characteristic.**
 
 - **cmd 9 IS battery.** `C9779g` → `mo35995a()==9`, `toString()=="BattStatusRsp{charging,level}"`,
-  parsing `charging@3` and **`level@4`**. The original `battery = r[4]` was reading the correct byte.
-- The **generic settings** command is **cmd 8** (`CommonSettingsRsp`), not cmd 9.
+  parsing `charging@3` and **`level@4`**. `PROTOCOL.md`'s "cmd 9 = Device Settings" was wrong; the
+  generic settings command is **cmd 8** (`CommonSettingsRsp`).
 
-So why did the device show a false ~90%? With the offset confirmed correct, the real suspects are:
-1. **Response/request mismatch (most likely).** Our `send_cmd` returns the *first* `cmd_type==1`
-   packet after clearing its event, with **no cmd_id check** ([§9](#9-known-divergences--bugs)). An
-   unsolicited cmd_type-1 notify (e.g. a physical button-press `RecordStart/Stop`, a delayed reply)
-   landing during a cmd-9 poll returns *that* packet, and its byte 4 (e.g. a `sessionId` byte) is
-   shown as battery. The official SDK avoids this by matching responses to requests by opcode.
-2. **Staleness** — device updates the value slowly.
+The false/stuck "90%" was two stacked bugs, both now fixed:
 
-**Implication for the fix already shipped:** I switched battery to the standard GATT `0x2A19`
-characteristic. That source is independent and *does* bypass the buggy cmd-response path, so it can
-incidentally fix a mismatch-induced wrong reading — but the **code comments I added are now
-factually wrong** (they assert cmd 9 byte 4 is "a settings value, not charge level"). Those comments
-should be corrected, and the proper root-cause fix is to add cmd_id matching in `send_cmd` (which
-would make cmd 9 reliable again and fix wrong values across *all* commands).
+1. **Response/request mismatch (v2.2.0 fix).** `send_cmd` used to return the *first* `cmd_type==1`
+   packet after clearing its event, with no cmd_id check. An unsolicited cmd_type-1 notify (e.g. a
+   physical button-press `RecordStart/Stop`, a delayed reply) landing during a cmd-9 poll was
+   returned instead, and its byte 4 (e.g. a `sessionId` byte) shown as battery. **Fixed:** `send_cmd`
+   sets `_device_state["expected_cmd_id"]` and the notify handlers only wake it on a matching cmd_id
+   — mirroring the SDK. This fixes wrong values across *all* commands, not just battery.
 
-Battery is available from three places: **cmd 9** (`charging`,`level`), **GATT 0x2A19** (standard
-`uint8` %), and the **WiFi HeartbeatPing** response (`batteryLevel`,`batteryVoltage`,`charging`).
+2. **0x2A19 hangs on this device (v2.2.0 regression → v2.2.1 fix).** A brief detour read battery
+   from the standard `0x2A19` GATT characteristic. On the NotePin S `read_gatt_char(0x2A19)` **hangs
+   indefinitely** (no timeout): it pinned battery to the connect-time value (stuck "90%") and stalled
+   the BLE lock, so polls fell back to the cached value. Diagnosed live by curling the running
+   backend (`/device/status` frozen at 90 while rssi updated; `/device/info` hung ~85s returning
+   `battery_level:null`). **Fixed:** battery + charging read from cmd 9 via `send_cmd` (3s timeout, so
+   it can neither hang nor stall). `read_battery()` returns `(level, charging)`; `0x2A19` removed from
+   every path. Confirmed reading correctly on-device after v2.2.1.
+
+Other battery sources (not used, for reference): the WiFi **HeartbeatPing** response carries
+`batteryLevel`, `batteryVoltage`, `charging` — a fallback if cmd 9 ever proves insufficient.
 
 ---
 
@@ -326,14 +328,14 @@ BLE cmd 10/13 open/close the hotspot before/after the WiFi session.
 
 ## 9. Known divergences & bugs (our impl vs SDK)
 
-| # | Finding | Where | Severity |
-|---|---------|-------|----------|
-| 1 | **No response/request opcode matching.** `send_cmd` returns the first `cmd_type==1` packet after `cmd_evt`; SDK matches `bArr[1]` to the requested opcode. Unsolicited/delayed packets corrupt the result (prime suspect for false battery). | `device.py:644-673` + notify handler | **High** |
-| 2 | **cmd 9 mislabeled in PROTOCOL.md** as "Device Settings"; it is Battery Status. My battery-fix comments inherit this error and should be corrected. | `PROTOCOL.md`, `device.py` battery comments | Medium (docs) |
-| 3 | **cmd 6 byte 19** is `duration`, not "unknown field 3". | `device.py:952` | Low |
-| 4 | **cmd 26 entry size** is version-dependent (8/9/10 B); we hardcode 10 B. Fine for current firmware, breaks on older. | file-list parse | Low |
-| 5 | **cmd 2 version** read as u24@60-62; SDK uses u16@60-61. | `device.py` SSN parse | Low |
-| 6 | **WiFi close** uses `[1,10,0,0]`; SDK has a dedicated **cmd 13 CloseWiFi**. Verify our close actually takes effect. | `wifi_sync_worker.py` | Low |
+| # | Finding | Where | Status |
+|---|---------|-------|--------|
+| 1 | **No response/request opcode matching** — `send_cmd` returned the first `cmd_type==1` packet; unsolicited/delayed packets corrupted results (caused false battery). | `device.py` `send_cmd` + notify handlers | ✅ Fixed v2.2.0 (cmd_id matching) |
+| 2 | **cmd 9 mislabeled** in PROTOCOL.md as "Device Settings"; it is Battery Status. | `PROTOCOL.md`, `device.py` | ✅ Fixed (PROTOCOL.md corrected; battery from cmd 9 in v2.2.1) |
+| 3 | **cmd 6 byte 19** is `duration`, not "unknown field 3". | `device.py` storage parse | Open (cosmetic — labeled `storage_field3_raw`) |
+| 4 | **cmd 26 entry size** is version-dependent (8/9/10 B); we hardcode 10 B. Fine for current firmware, breaks on older. | file-list parse | Open (low) |
+| 5 | **cmd 2 version** read as u24@60-62; SDK uses u16@60-61. | `device.py` SSN parse | Open (low) |
+| 6 | **WiFi close** uses `[1,10,0,0]`; SDK has a dedicated **cmd 13 CloseWiFi**. Verify our close actually takes effect. | `wifi_sync_worker.py` | Open (low, unverified) |
 
 ---
 
