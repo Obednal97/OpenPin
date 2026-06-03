@@ -120,18 +120,11 @@ def status():
             except Exception:
                 pass
             try:
-                # Battery from the standard 0x2A19 characteristic (fresh read).
-                _battery = await dev.read_battery()
+                # Battery + charging from cmd 9 (BattStatusRsp: charging@3, level@4).
+                _battery, _chg = await dev.read_battery()
                 if _battery is not None:
                     _cmd_ok = True
-            except Exception:
-                pass
-            try:
-                # cmd 9 (BattStatusRsp) — use its charging flag (battery via 0x2A19 above).
-                r = await dev.send_cmd(bytes([1, 9, 0]), timeout=3)
-                if r and len(r) >= 4:
-                    _cmd_ok = True
-                    _charging = bool(r[3])
+                    _charging = bool(_chg)
             except Exception:
                 pass
             try:

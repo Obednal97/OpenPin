@@ -151,27 +151,32 @@ async def read_rssi():
 
 
 async def read_battery():
-    """Read battery % fresh from the standard GATT Battery Level characteristic.
+    """Read battery % + charging from cmd 9 (BattStatusRsp: charging@3, level@4).
 
-    0x2A19 is the documented standard battery source (uint8 0-100%); a direct
-    read_gatt_char triggers a real GATT read each call (not cached), so polling
-    it keeps the value fresh. The device ALSO reports battery via cmd 9
-    (BattStatusRsp: charging@3, level@4) — that is the authoritative source the
-    official app uses — but we read 0x2A19 here as an independent path that does
-    not depend on the cmd-response matching in send_cmd().
+    cmd 9 is the source the official app uses, and the cmd_id matching in
+    send_cmd() ensures we get the cmd-9 reply rather than an unrelated
+    notification (the bug that previously produced false readings).
+
+    The standard 0x2A19 GATT characteristic is deliberately NOT used: on this
+    device its read_gatt_char hangs indefinitely, which pinned the value to the
+    connect-time reading and stalled the BLE channel. cmd 9 goes through
+    send_cmd (3s timeout), so it can neither hang nor stall the lock.
+
+    Returns (level, charging), or (None, None) on failure.
     """
-    cl = _device_state.get("client")
-    if not cl or not _device_state["connected"]:
-        return None
+    if not _device_state["connected"]:
+        return None, None
     try:
-        bat = await cl.read_gatt_char(BLE_BATTERY_UUID)
-        if bat:
-            val = bat[0]
-            _device_state["battery"] = val
-            return val
+        r = await send_cmd(bytes([1, 9, 0]), timeout=3)
+        if r and len(r) >= 5:
+            level = r[4]
+            charging = bool(r[3])
+            _device_state["battery"] = level
+            _device_state["charging"] = charging
+            return level, charging
     except Exception as e:
-        logging.debug(f"Battery read (0x2A19) failed: {e}")
-    return None
+        logging.debug(f"Battery read (cmd 9) failed: {e}")
+    return None, None
 
 
 class _keep_awake:
@@ -623,24 +628,10 @@ async def connect_device(address=None):
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
-    # Battery from the standard 0x2A19 characteristic (uint8 0-100%, read fresh).
-    battery = await read_battery()
-    # cmd 9 is BattStatusRsp (charging@3, level@4) — the authoritative source the
-    # official app uses. Take charging from it, and log both sources once per
-    # connect to confirm they agree against the physical device.
-    charging = False
-    try:
-        r = await send_cmd(bytes([1, 9, 0]), timeout=3)
-        if r:
-            logging.info(
-                f"[Battery] 0x2A19={battery} | cmd9 BattStatusRsp "
-                f"charging=r[3]={r[3] if len(r) > 3 else '?'} "
-                f"level=r[4]={r[4] if len(r) > 4 else '?'}"
-            )
-            if len(r) >= 5:
-                charging = bool(r[3])
-    except Exception:
-        pass
+    # Battery + charging from cmd 9 (BattStatusRsp: charging@3, level@4).
+    battery, charging = await read_battery()
+    charging = bool(charging)
+    logging.info(f"[Battery] cmd9 BattStatusRsp level={battery} charging={charging}")
     _device_state["battery"] = battery
     _device_state["charging"] = charging
 
@@ -972,15 +963,11 @@ async def get_device_info():
     except Exception:
         pass
 
-    # Battery from standard 0x2A19; cmd 9 (BattStatusRsp) gives charging@3, level@4.
-    info["battery_level"] = await read_battery()
-    try:
-        r = await send_cmd(bytes([1, 9, 0]), timeout=3)
-        if r and len(r) >= 5:
-            info["charging"] = bool(r[3])
-            info["battery_cmd9"] = r[4]  # cmd 9 battery level (cross-check vs 0x2A19)
-    except Exception:
-        pass
+    # Battery + charging from cmd 9 (BattStatusRsp: charging@3, level@4).
+    lvl, chg = await read_battery()
+    info["battery_level"] = lvl
+    if chg is not None:
+        info["charging"] = chg
 
     # cmd 36 — Accelerometer / orientation
     try:
