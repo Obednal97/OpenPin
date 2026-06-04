@@ -133,8 +133,12 @@ def status():
                 r = await dev.send_cmd(bytes([1, 3, 0]), timeout=3)
                 if r and len(r) >= 5:
                     _cmd_ok = True
-                    state_byte = r[3] if len(r) > 3 else 0
-                    _is_rec = state_byte in (1, 2, 3)
+                    # Recording = an active session exists (sessionId @ bytes 11-14),
+                    # NOT the `state` field — measured: idle state=1 / session=0,
+                    # recording state=0x1003 / session!=0. The old byte-3 check read
+                    # 1 when idle and always reported "recording".
+                    sid = (r[11] | (r[12] << 8) | (r[13] << 16) | (r[14] << 24)) if len(r) >= 15 else 0
+                    _is_rec = sid != 0
             except Exception:
                 pass
             try:
