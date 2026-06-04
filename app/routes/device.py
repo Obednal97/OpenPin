@@ -83,6 +83,24 @@ def disconnect():
         return jsonify(_error_json({}, e)), 500
 
 
+@bp.route("/verify", methods=["POST"])
+def verify():
+    """Probe the live BLE link (used after system wake). Unlike /status this does
+    NOT trust the cached connected flag — it sends a real command. If the link is
+    dead (or the lock is wedged by a hung op), state is reset so the caller can
+    reconnect."""
+    if not dev.is_connected():
+        return jsonify({"connected": False})
+    try:
+        ok = dev.run_async(dev.verify_connection(), timeout=10, lock_timeout=5)
+        return jsonify({"connected": bool(ok)})
+    except Exception:
+        # Couldn't acquire the lock in time (wedged) or the probe errored —
+        # treat the link as dead and clear the stale state.
+        dev.force_reset()
+        return jsonify({"connected": False})
+
+
 @bp.route("/depair", methods=["POST"])
 def depair():
     """Erase & disconnect — unpairs device so it can pair with another host."""

@@ -167,6 +167,7 @@ window.plaud = {
   scanAll: () => apiCall('POST', '/device/scan-all'),
   connect: (address, serial_number) => apiCall('POST', '/device/connect', { address, serial_number }),
   disconnect: () => apiCall('POST', '/device/disconnect'),
+  verifyConnection: () => apiCall('POST', '/device/verify'),
   depair: () => apiCall('POST', '/device/depair'),
   status: () => apiCall('GET', '/device/status'),
   rssi: () => apiCall('GET', '/device/rssi'),
