@@ -925,10 +925,14 @@ async def get_device_info():
         r = await send_cmd(bytes([1, 3, 0]), timeout=3)
         if r and len(r) >= 8:
             state_val = struct.unpack_from("<I", r, 3)[0] if len(r) >= 7 else 0
-            info["recording_state"] = state_val
-            # state_val: 0=idle, 1=recording, 2=paused, 3=resuming
-            info["is_recording"] = state_val in (1, 3)
-            info["is_paused"] = state_val == 2
+            info["recording_state"] = state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
+            # Recording is determined by the active session id, not `state`:
+            # measured idle -> session 0, scene 0; recording -> session != 0, scene 1.
+            # (The `state` field is a bitfield, not a 0-3 enum, so the old
+            # `state in (1,3)` check was wrong both ways.)
+            session_id = struct.unpack_from("<I", r, 11)[0] if len(r) >= 15 else 0
+            info["active_session_id"] = session_id
+            info["is_recording"] = session_id != 0
             if len(r) >= 8:
                 info["privacy_enabled"] = bool(r[7])
             if len(r) >= 9:
@@ -941,8 +945,6 @@ async def get_device_info():
                 info["scene"] = scene
                 scene_names = {0: "Idle", 1: "Recording", 2: "Meeting", 3: "Call", 4: "Lecture"}
                 info["scene_name"] = scene_names.get(scene, f"Mode {scene}")
-            if len(r) >= 15:
-                info["active_session_id"] = struct.unpack_from("<I", r, 11)[0]
             if len(r) >= 16:
                 info["find_my_state"] = r[15]
                 info["find_my_enabled"] = r[15] > 0

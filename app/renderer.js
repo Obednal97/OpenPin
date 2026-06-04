@@ -240,7 +240,21 @@ async function performSync(triggerBtn) {
   })();
 
   try {
-    const result = await window.plaud.sync();
+    let result = await window.plaud.sync();
+    // A transient post-sleep connection flap can fail the first attempt with
+    // "Not connected" even though the device is in range. Verify the link
+    // (which resets a stale-dead connection), reconnect if needed, and retry
+    // once before surfacing an error to the user.
+    if (result.error && /not connected/i.test(result.error)) {
+      try {
+        const live = await window.plaud.verifyConnection();
+        if (!live.connected) {
+          const scan = await window.plaud.scanKnown();
+          if (scan.found) await window.plaud.connect(scan.address, scan.serial_number);
+        }
+        result = await window.plaud.sync();
+      } catch {}
+    }
     _syncPollActive = false;
     if (result.error) {
       toast(`Sync failed: ${result.error}`, 'error');
