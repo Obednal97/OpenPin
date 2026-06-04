@@ -142,7 +142,11 @@ async def read_rssi():
         return None
     try:
         backend = getattr(cl, "_backend", cl)
-        rssi = await backend.get_rssi()
+        # Hard timeout: after a system sleep the link can be dead while bleak
+        # still holds the peripheral, and readRSSI then never returns — which
+        # would pin _ble_lock for the full run_async window and freeze every
+        # status poll. Bound it so a dead link can't wedge the lock.
+        rssi = await asyncio.wait_for(backend.get_rssi(), timeout=4)
         if rssi is not None:
             _device_state["rssi"] = int(rssi)
         return _device_state.get("rssi")
@@ -1417,6 +1421,36 @@ def set_serial_number(sn):
 
 def is_connected():
     return _device_state["connected"]
+
+
+async def verify_connection():
+    """Actively probe the live BLE link with a bounded command.
+
+    After a macOS sleep the link can drop without bleak firing its disconnect
+    callback, leaving `_device_state["connected"]` stuck True. Callers that
+    trust that flag (e.g. the wake handler) then skip reconnecting. This issues
+    a real cmd 3 with a short timeout: a valid reply means the link is alive; no
+    reply means the cached flag is stale, so we reset state to let the caller
+    reconnect. Returns True only if the device actually responded.
+    """
+    if not _device_state["connected"]:
+        return False
+    try:
+        r = await send_cmd(bytes([1, 3, 0]), timeout=4)
+        if r and len(r) >= 4:
+            return True
+    except Exception:
+        pass
+    logging.info("verify_connection: live probe failed — resetting stale connection")
+    _reset_state()
+    return False
+
+
+def force_reset():
+    """Force connection state back to disconnected (used when a probe can't even
+    acquire the BLE lock — i.e. a hung op has wedged it). Safe to call from the
+    Flask thread: it only rewrites the state dict."""
+    _reset_state()
 
 
 def is_syncing():

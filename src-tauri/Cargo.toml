@@ -1,6 +1,6 @@
 [package]
 name = "plaud-v2"
-version = "2.2.1"
+version = "2.2.2"
 description = "Plaud NotePin S — Local sync, decrypt & transcribe"
 authors = ["Oliver Bednal"]
 license = "MIT"

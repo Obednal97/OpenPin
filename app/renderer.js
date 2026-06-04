@@ -753,10 +753,20 @@ window.plaud.onSystemWake(async () => {
 
   await updateDeviceStatus();
 
-  // If the device is now showing disconnected, try auto-reconnect
-  const status = await window.plaud.status();
-  if (!status.connected) {
-    console.log('[Wake] Device disconnected after sleep — attempting reconnect');
+  // Don't trust the cached `connected` flag after sleep: the BLE link routinely
+  // drops during sleep WITHOUT bleak firing its disconnect callback, so /status
+  // keeps reporting connected:true and serving a frozen pre-sleep snapshot
+  // (e.g. battery/charging stuck). Actively probe the link — verifyConnection
+  // sends a real command and resets state if it's dead — then decide.
+  let live;
+  try {
+    live = await window.plaud.verifyConnection();
+  } catch {
+    live = { connected: false };
+  }
+  if (!live.connected) {
+    await updateDeviceStatus();
+    console.log('[Wake] Device link dead after sleep — attempting reconnect');
     try {
       const scan = await window.plaud.scanKnown();
       if (scan.found) {
