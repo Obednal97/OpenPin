@@ -50,10 +50,13 @@ def reply_matches(reply, expected):
 # -- cmd 1: handshake (BIND_TOKEN) ----------------------------------------------
 
 HANDSHAKE_REJECTED_ERROR = "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device"
-HANDSHAKE_NO_REPLY_ERROR = (
-    "The NotePin didn't answer the pairing handshake. Move it closer and reconnect; "
-    "if this keeps happening, re-pair the device in Settings › Device"
-)
+
+# How long to wait for each reply during bind_handshake(). At most
+# HANDSHAKE_MAX_REPLY_WAITS replies are awaited (cmd 1 twice, cmd 4, the cmd 3
+# probe), so a device that answers none of them adds at most 4 x 1.5 = 6 s to a
+# connect. BLE replies normally take well under a second.
+HANDSHAKE_REPLY_TIMEOUT_S = 1.5
+HANDSHAKE_MAX_REPLY_WAITS = 4
 
 
 def handshake_request(token32, flag):
@@ -99,8 +102,10 @@ def handshake_verdict(replies, device_answers):
     "later commands just get no reply", so:
 
       device answers                    -> ok (a non-zero status is only logged)
-      no answer + a non-zero status     -> rejected
-      no answer + no handshake reply    -> no_reply
+      no answer + a non-zero status     -> rejected (the only verdict that fails a connect)
+      no answer + no handshake reply    -> no_reply (logged; the connect continues,
+                                           as in v2.4.0: whether the NotePin S
+                                           answers cmd 1 at all is unverified)
       no answer + status 0              -> ok (weak link; same as before)
     """
     parsed = [r for r in replies if r is not None]
@@ -117,11 +122,14 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
     """Send cmd 1 twice (flag 0, then 1), then cmd 4, and judge the result.
 
     `send(pt)` is an async function that writes one encrypted command and
-    returns its matching reply, or None on timeout. Used by both device.py and
-    the WiFi worker so they behave the same.
+    returns its matching reply, or None on timeout (callers use
+    HANDSHAKE_REPLY_TIMEOUT_S, so at most HANDSHAKE_MAX_REPLY_WAITS timeouts
+    add up). Used by both device.py and the WiFi worker so they behave the same.
 
     Returns (verdict, info): info has the parsed replies ("hs"), the port
-    version if the device reported one, and the cmd 4 reply.
+    version if the device reported one, and the cmd 4 reply. Only
+    HANDSHAKE_REJECTED should fail the connect; HANDSHAKE_NO_REPLY is logged
+    here as a warning and the caller carries on.
     """
     log = log or logging.info
     r1 = await send(handshake_request(token32, 0))
@@ -146,6 +154,13 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
             f"[BLE] Handshake status {statuses} but the device answers commands — treating as accepted "
             "(status meaning unconfirmed)"
         )
+    elif verdict == HANDSHAKE_NO_REPLY:
+        logging.warning(
+            "[BLE] Handshake: no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect "
+            "(whether the device answers cmd 1 is unverified; later commands decide)"
+        )
+    elif verdict == HANDSHAKE_REJECTED:
+        logging.warning(f"[BLE] Handshake rejected: status {statuses}, no reply to cmd 4 or cmd 3")
     port_version = next((h["port_version"] for h in reversed(hs) if h and "port_version" in h), None)
     return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4}
 
@@ -239,9 +254,9 @@ class FileListAssembler:
 
     Entry width: 10 bytes (confirmed for the NotePin S). If a notification's
     entry area isn't a multiple of 10 but is a multiple of the width the port
-    version suggests, that width is used. Otherwise the notification is
-    dropped and logged: misreading entries would produce bogus session ids,
-    while a missing entry only means that file waits for the next sync.
+    version suggests, that width is used. Otherwise, like the SDK and v2.4.0,
+    the whole entries are parsed and the trailing bytes ignored (with a
+    warning); a notification without even one whole entry is dropped.
     """
 
     def __init__(self, port_version=None):
@@ -279,10 +294,19 @@ class FileListAssembler:
             self._problem(f"total changed from {self.total} to {total}", pkt)
             return False
         if body:
-            width = self.width or next((w for w in self.widths if len(body) % w == 0), None)
-            if width is None or len(body) % width:
-                self._problem(f"{len(body)} entry bytes is not a multiple of the entry width", pkt)
+            # An exact fit decides the width; otherwise the confirmed 10 bytes.
+            width = self.width or next((w for w in self.widths if len(body) % w == 0), self.widths[0])
+            whole = len(body) // width * width
+            if not whole:
+                self._problem(f"{len(body)} entry bytes is less than one {width}-byte entry", pkt)
                 return False
+            if whole < len(body):
+                # Like the SDK (and v2.4.0): parse the whole entries, ignore the rest.
+                logging.warning(
+                    f"[BLE] file list: {len(body)} entry bytes is not a multiple of {width}; "
+                    f"ignoring the last {len(body) - whole} ({bytes(pkt[:64]).hex()})"
+                )
+                body = body[:whole]
             if self.width is None:
                 if width != 10:
                     logging.warning(f"[BLE] file list: using {width}-byte entries (not the usual 10)")

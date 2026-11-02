@@ -77,12 +77,32 @@ def test_nonzero_status_but_working_device_still_connects(connect_env, monkeypat
     assert "treating as accepted" in caplog.text
 
 
-def test_no_handshake_reply_at_all_fails_connect(connect_env, monkeypatch):
-    device = FakeNotePin(hs_status=None, silent={3, 4, 6, 9})
-    result = connect(monkeypatch, device)
-    assert result["connected"] is False
-    assert result["error"] == ble_proto.HANDSHAKE_NO_REPLY_ERROR
-    assert dev._device_state["connected"] is False
+def test_no_handshake_reply_at_all_still_connects_with_a_warning(connect_env, monkeypatch, caplog):
+    """As in v2.4.0: whether the NotePin S answers cmd 1 is unverified, so silence doesn't fail."""
+    device = FakeNotePin(hs_status=None, silent={3, 4})
+    with caplog.at_level("WARNING"):
+        result = connect(monkeypatch, device)
+    assert result["connected"] is True and "error" not in result
+    assert dev._device_state["connected"] is True
+    assert dev._device_state["port_version"] is None
+    assert "no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect" in caplog.text
+    # cmd 1 twice, cmd 4, the cmd 3 probe, then the usual cmd 3 / 6 / 9.
+    assert device.sent_cmds() == [1, 1, 4, 3, 3, 6, 9]
+
+
+def test_handshake_waits_are_capped():
+    """A device that answers nothing adds at most 4 reply waits of 1.5 s (6 s) to a connect."""
+    assert dev._HANDSHAKE_REPLY_TIMEOUT_S == ble_proto.HANDSHAKE_REPLY_TIMEOUT_S
+    assert ble_proto.HANDSHAKE_REPLY_TIMEOUT_S * ble_proto.HANDSHAKE_MAX_REPLY_WAITS <= 6
+    waits = []
+
+    async def silent_send(pt):
+        waits.append(ble_proto.HANDSHAKE_REPLY_TIMEOUT_S)
+        return None
+
+    verdict, _info = asyncio.run(ble_proto.bind_handshake(silent_send, bytes(32), log=lambda m: None))
+    assert verdict == ble_proto.HANDSHAKE_NO_REPLY
+    assert len(waits) == ble_proto.HANDSHAKE_MAX_REPLY_WAITS and sum(waits) <= 6
 
 
 def test_status_zero_on_a_slow_link_still_connects(connect_env, monkeypatch):

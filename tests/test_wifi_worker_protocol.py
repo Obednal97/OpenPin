@@ -102,6 +102,21 @@ def test_worker_handshake_rejection_raises_clear_error(ble, monkeypatch):
     assert device.client.is_connected is False
 
 
+def test_worker_handshake_without_any_reply_continues(ble, monkeypatch, caplog):
+    """No reply to cmd 1 / 4 / 3: logged, and the BLE setup carries on (as in v2.4.0)."""
+    monkeypatch.setattr(worker, "HANDSHAKE_REPLY_TIMEOUT_S", 0.05)
+    device = ble(FakeNotePin(hs_status=None, silent={3, 4}))
+    with caplog.at_level("WARNING"):
+        cl, *_rest = asyncio.run(worker.ble_connect_and_setup())
+    assert cl.is_connected is True
+    assert device.sent_cmds() == [1, 1, 4, 3]
+    assert "continuing the connect" in caplog.text
+
+
+def test_worker_uses_the_shared_handshake_timeout():
+    assert worker.HANDSHAKE_REPLY_TIMEOUT_S == ble_proto.HANDSHAKE_REPLY_TIMEOUT_S == dev._HANDSHAKE_REPLY_TIMEOUT_S
+
+
 def test_worker_sn_signature_uses_the_shared_count(ble):
     device = ble(FakeNotePin())
     asyncio.run(worker.ble_connect_and_setup())
