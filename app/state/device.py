@@ -1513,6 +1513,55 @@ def _recover_wifi_after_worker(wlog):
     return result
 
 
+# Startup WiFi recovery (api_server._recover_wifi) runs on a background thread
+# once the server is listening: re-adding networks and power-cycling can take
+# a minute, longer than the shell's startup health check allows. A WiFi sync
+# started meanwhile waits for it (it holds the worker lock, so the worker would
+# otherwise refuse with "already running").
+_wifi_recovery_idle = threading.Event()
+_wifi_recovery_idle.set()
+WIFI_RECOVERY_WAIT_S = 180  # the worker's RESTORE_BUDGET_S
+
+
+def run_wifi_recovery_in_background(recover):
+    """Run recover() on a daemon thread; do_wifi_sync_blocking waits for it."""
+    _wifi_recovery_idle.clear()
+
+    def go():
+        try:
+            recover()
+        except Exception as e:
+            logging.error(f"[WiFi Recovery] failed: {e}")
+        finally:
+            _wifi_recovery_idle.set()
+
+    t = threading.Thread(target=go, name="wifi-recovery", daemon=True)
+    try:
+        t.start()
+    except Exception:
+        _wifi_recovery_idle.set()
+        raise
+    return t
+
+
+def get_wifi_restore_notice():
+    """{"message", "networks", "since"} when saved networks couldn't be restored
+    and the UI hasn't acknowledged it yet, else None."""
+    from app.utils.wifi_sync_worker import restore_notice
+
+    try:
+        return restore_notice(DATA_DIR)
+    except Exception:
+        return None
+
+
+def acknowledge_wifi_restore_notice():
+    """The UI showed the notice; don't report it again. True if there was one."""
+    from app.utils.wifi_sync_worker import acknowledge_restore_notice
+
+    return acknowledge_restore_notice(DATA_DIR)
+
+
 def do_wifi_sync_blocking():
     """Run WiFi sync as a subprocess (user-initiated, blocking).
 
@@ -1537,6 +1586,13 @@ def do_wifi_sync_blocking():
         # next check (every sync clears it at start, so it can't go stale).
         return {"error": "BLE sync still running after 10s; WiFi sync aborted"}
     _sync_abort = False
+
+    if not _wifi_recovery_idle.is_set():
+        _wifi_sync_status.update({"message": "Restoring WiFi settings from an earlier transfer...", "percent": 2})
+        if not _wifi_recovery_idle.wait(WIFI_RECOVERY_WAIT_S):
+            _syncing.release()
+            _wifi_sync_status.update({"message": "Still restoring WiFi settings; try again shortly", "percent": 0})
+            return {"error": "Still restoring WiFi settings from an earlier transfer; try again shortly"}
 
     from app.utils.wifi_sync_worker import compute_budget
 
@@ -2201,7 +2257,9 @@ def abort_sync():
 
 
 def get_wifi_sync_status():
-    return dict(_wifi_sync_status)
+    """WiFi sync progress, plus restore_notice: saved networks that couldn't be
+    restored (show once, then acknowledge_wifi_restore_notice), or None."""
+    return {**_wifi_sync_status, "restore_notice": get_wifi_restore_notice()}
 
 
 def get_ble_sync_status():
