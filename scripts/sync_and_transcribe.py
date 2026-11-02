@@ -12,7 +12,7 @@ Usage:
     python3 sync_and_transcribe.py --record 10         # record 10s first, then sync
     python3 sync_and_transcribe.py --language en        # force English
 """
-import asyncio, struct, base64, json, time, sys, argparse
+import asyncio, struct, base64, json, os, time, sys, argparse
 from pathlib import Path
 from datetime import datetime
 from bleak import BleakScanner, BleakClient
@@ -30,7 +30,8 @@ try:
 except FileNotFoundError:
     sys.exit(f"Config not found at {_CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
 
-_SN = "8820A0000000XXXX"
+# Serial number: $PLAUD_SN, else the first device paired in the app.
+_SN = os.environ.get("PLAUD_SN") or next(iter(_cfg.get("device_bind_tokens", {})), "")
 BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(_SN)
 SN_SIG = _cfg.get("device_sn_signatures", {}).get(_SN)
 if not BIND_TOKEN or not SN_SIG:
