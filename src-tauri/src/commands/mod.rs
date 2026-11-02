@@ -1660,6 +1660,46 @@ mod tests {
         assert!(!crash_reports_enabled_in(Some(r#"{"crash_reports_enabled": false}"#)));
     }
 
+    /// Hits the deployed Worker: `cargo test --lib -- --ignored live_worker`.
+    #[test]
+    #[ignore]
+    fn live_worker_latest_and_download_redirect() {
+        let r = fetch_latest_release().expect("latest");
+        assert!(!parse_version(&r.version).is_empty());
+        assert!(is_safe_asset_name(&r.asset.name));
+        assert!(r.asset.size > 1_000_000);
+        let resp = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(&r.download_url)
+            .send()
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 302);
+        let loc = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(loc.starts_with("https://") && loc.contains("githubusercontent.com"), "{loc}");
+
+        // Full download path: .part → size/sha check → rename. Use a wrong
+        // checksum first (must fail and leave nothing behind), then the right one.
+        let dir = std::env::temp_dir().join(format!("plaud-v2-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join(&r.asset.name);
+        let mut bad = r.clone();
+        bad.asset.sha256 = Some("0".repeat(64));
+        assert!(download_update(&bad, &dest, |_| {}).is_err());
+        assert!(!dest.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part left behind");
+        download_update(&r, &dest, |_| {}).expect("download");
+        assert_eq!(dest.metadata().unwrap().len(), r.asset.size);
+        let digest = file_sha256(&dest).unwrap();
+        let shasum = std::process::Command::new("/usr/bin/shasum").args(["-a", "256"]).arg(&dest).output().unwrap();
+        assert!(String::from_utf8_lossy(&shasum.stdout).starts_with(&digest), "pure-Rust SHA-256 disagrees with shasum");
+        let mut good = r.clone();
+        good.asset.sha256 = Some(digest);
+        assert!(cached_download_matches(&dest, &good.asset));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn worker_base_is_https() {
         assert!(WORKER_BASE.starts_with("https://plaud-v2-updates."));
