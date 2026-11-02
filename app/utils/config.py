@@ -111,14 +111,15 @@ def save_config(config):
 def update_config(fn):
     """Atomically read-modify-write the config.
 
-    Under ``_config_lock``: loads a fresh copy, calls ``fn(cfg)`` which may
-    mutate ``cfg`` in place (return ``None``) or return a new dict, saves the
-    result and returns it. ``fn`` must be quick and must not do network I/O.
+    Under ``_config_lock``: loads a fresh copy, calls ``fn(cfg)`` which must
+    mutate ``cfg`` in place, saves it and returns it. Whatever ``fn`` returns
+    is ignored on purpose: one-liners such as ``lambda c: c.pop("x", None)`` or
+    ``lambda c: c.setdefault("k", {})`` return a value, and treating that as
+    the new config would silently replace the whole file. ``fn`` must be quick
+    and must not do network I/O.
     """
     with _config_lock:
         cfg = load_config()
-        result = fn(cfg)
-        if result is None:
-            result = cfg
-        save_config(result)
-        return result
+        fn(cfg)
+        save_config(cfg)
+        return cfg

@@ -77,14 +77,18 @@ def test_config_files_are_0600(tmp_config):
         assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
-def test_update_config_mutate_in_place_and_return_new(tmp_config):
+def test_update_config_mutates_in_place_and_ignores_return_value(tmp_config):
     from app.utils.config import load_config, update_config
 
     update_config(lambda c: c.setdefault("tags", {}).update({"s1": ["A"]}))
     assert load_config()["tags"] == {"s1": ["A"]}
+    # A callback that happens to return something (here: the popped value or a
+    # sub-dict) must never replace the whole config.
+    update_config(lambda c: c.setdefault("tags", {}))
+    update_config(lambda c: c.pop("missing", {"oops": 1}))
     out = update_config(lambda c: {"replaced": True})
-    assert out == {"replaced": True}
-    assert load_config() == {"replaced": True}
+    assert out["tags"] == {"s1": ["A"]}
+    assert load_config() == {"tags": {"s1": ["A"]}}
 
 
 def test_update_config_does_not_lose_concurrent_writes(tmp_config):
