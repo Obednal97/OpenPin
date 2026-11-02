@@ -324,6 +324,54 @@ pub fn quit_app(app: &AppHandle, code: i32) {
     }
 }
 
+/// How long after a termination signal the event loop gets to exit by itself
+/// (once the backend is stopped) before the process exits directly.
+const SIGNAL_EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// Stop the backend on SIGTERM/SIGINT, then exit. Without this the default
+/// action ends the process at once and the Python backend is orphaned (the next
+/// launch's PID-file sweep only catches it later). signal-hook's iterator
+/// receives signals on its own thread, so nothing runs in signal context. A
+/// second signal exits immediately.
+pub fn handle_termination_signals(app: &AppHandle) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    let mut signals = match signal_hook::iterator::Signals::new([SIGTERM, SIGINT]) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[Shutdown] Couldn't install SIGTERM/SIGINT handlers: {e}");
+            return;
+        }
+    };
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            let mut first = true;
+            for sig in signals.forever() {
+                if !first {
+                    log::warn!("[Shutdown] Second signal {sig}; exiting now");
+                    std::process::exit(128 + sig);
+                }
+                first = false;
+                log::info!("[Shutdown] Signal {sig}: stopping the backend, then exiting");
+                let app = app.clone();
+                let _ = std::thread::Builder::new()
+                    .name("signal-shutdown".into())
+                    .spawn(move || {
+                        shutdown_backend();
+                        app.exit(0);
+                        std::thread::sleep(SIGNAL_EXIT_GRACE);
+                        log::warn!("[Shutdown] Event loop didn't exit; exiting directly");
+                        log::logger().flush();
+                        std::process::exit(128 + sig);
+                    });
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("[Shutdown] Couldn't start the signal thread: {e}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Panic hook
 // ---------------------------------------------------------------------------

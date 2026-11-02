@@ -1413,7 +1413,8 @@ fn spawn_and_register(
     Ok(generation)
 }
 
-/// Forward the backend's stdout/stderr to ours. stdout is also watched for the
+/// Forward the backend's stdout/stderr to the log (target `python`, so it lands
+/// in app.log next to the shell's own messages). stdout is also watched for the
 /// `PLAUD_PORT_BOUND` marker so we follow Python if it had to walk past an
 /// occupied port (closes the find_free_port TOCTOU window).
 fn attach_output_readers(child: &mut Child) {
@@ -1426,7 +1427,7 @@ fn attach_output_readers(child: &mut Child) {
                     server.port = actual_port;
                     server.url = format!("http://127.0.0.1:{actual_port}");
                 }
-                eprintln!("[Python] {line}");
+                log::info!(target: "python", "{line}");
             }
         });
     }
@@ -1434,7 +1435,7 @@ fn attach_output_readers(child: &mut Child) {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                eprintln!("[Python] {line}");
+                log::info!(target: "python", "{line}");
             }
         });
     }

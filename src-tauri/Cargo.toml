@@ -31,6 +31,7 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRu
 objc2-foundation = { version = "0.3", features = ["NSData", "NSNotification", "NSOperation", "NSString", "block2"] }
 chrono = "0.4"
 dirs = "5"
+signal-hook = "0.4"
 
 [profile.dev]
 codegen-units = 16
