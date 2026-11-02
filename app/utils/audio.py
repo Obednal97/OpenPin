@@ -115,20 +115,51 @@ def wrap_opus_ogg(raw_data, frame_size=80):
     return bytes(pages)
 
 
+class BleDecryptError(ValueError):
+    """Raised when a BLE/WiFi-downloaded recording can't be decrypted to valid Opus.
+
+    Callers must keep the encrypted original and must NOT treat the file as
+    synced (no .ogg, no auto-delete from the device).
+    """
+
+
+def _looks_like_opus(frames, check_far_frame=True):
+    """Heuristic validity check for decrypted 80-byte CELT frames.
+
+    The NotePin S writes constant-bitrate CELT (TOC 0xB8 on current firmware),
+    so correctly decrypted frames share one TOC byte in the CELT range.
+    """
+    if len(frames) < 160:
+        return False
+    toc = frames[0]
+    if toc != frames[80] or (toc >> 3) & 0x1F not in range(16, 32):
+        return False
+    if check_far_frame and len(frames) >= 800 and frames[640] != toc:
+        return False
+    return True
+
+
 def decrypt_ble_file(data, app_key):
-    """Decrypt a BLE-downloaded ASR file -> raw Opus frames."""
-    if data[:8] != b"PLAUD.AI" or len(data) < 0x300:
-        return None
+    """Decrypt a BLE/WiFi-downloaded ASR file -> raw Opus frames.
+
+    Raises BleDecryptError when the file isn't a PLAUD.AI container, the file
+    key can't be recovered, or neither keystream layout yields valid Opus
+    frames. It never returns undecrypted/garbage bytes.
+    """
+    if len(data) < 0x300:
+        raise BleDecryptError(f"File too small to decrypt ({len(data)} bytes)")
+    if data[:8] != b"PLAUD.AI":
+        raise BleDecryptError("Missing PLAUD.AI header")
     nonce = data[0x84:0x90]
     rsa_blob = data[0x100:0x200]
     try:
         file_key = app_key.decrypt(rsa_blob, padding.PKCS1v15())
-    except Exception:
-        return None
+    except Exception as e:
+        raise BleDecryptError(f"RSA file-key decryption failed: {e}") from e
     if len(file_key) > 32:
         file_key = file_key[:32]
     if len(file_key) != 32:
-        return None
+        raise BleDecryptError(f"Unexpected file key length {len(file_key)}")
     full_nonce = b"\x00\x00\x00\x00" + nonce
     audio = data[0x200:]
 
@@ -140,26 +171,18 @@ def decrypt_ble_file(data, app_key):
         frame = audio[i : i + 80]
         decrypted_repeat.extend(bytes(a ^ b for a, b in zip(frame, keystream_80[: len(frame)], strict=False)))
 
-    if len(decrypted_repeat) >= 160:
-        toc = decrypted_repeat[0]
-        # Check that first two frames have the same TOC — confirms correct decrypt
-        if toc == decrypted_repeat[80] and (toc >> 3) & 0x1F in range(16, 32):
-            # Also verify a few more frames to catch longer recordings
-            if len(decrypted_repeat) < 800 or decrypted_repeat[640] == toc:
-                return bytes(decrypted_repeat)
+    if _looks_like_opus(decrypted_repeat):
+        return bytes(decrypted_repeat)
 
     # Repeating keystream failed — try continuous keystream
     cipher2 = Cipher(algorithms.ChaCha20(file_key, full_nonce), mode=None)
     full_keystream = cipher2.decryptor().update(b"\x00" * len(audio))
     decrypted_continuous = bytes(a ^ b for a, b in zip(audio, full_keystream))
 
-    if len(decrypted_continuous) >= 160:
-        toc = decrypted_continuous[0]
-        if toc == decrypted_continuous[80] and (toc >> 3) & 0x1F in range(16, 32):
-            return bytes(decrypted_continuous)
+    if _looks_like_opus(decrypted_continuous, check_far_frame=False):
+        return decrypted_continuous
 
-    # Fall back to repeating keystream even if TOC check failed
-    return bytes(decrypted_repeat)
+    raise BleDecryptError("Decrypted audio failed Opus validity checks (unknown key or layout)")
 
 
 def unwrap_ogg_to_raw_opus(ogg_path):
