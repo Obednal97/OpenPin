@@ -6,6 +6,10 @@
 # CPython 3.12 that src-tauri/src/python.rs downloads, so the pins are resolved
 # for CPython 3.12 on Apple Silicon, wheels only (users have no compilers).
 # Hashes are included: pip then refuses any file that doesn't match.
+# python.rs accepts only this Python minor and arch (REQUIRED_PYTHON,
+# SUPPORTED_ARCH), Homebrew fallback included: change both together
+# (tests/test_tauri_parity.py checks they agree). PLAUD_SLOW_TESTS=1 pytest
+# tests/test_python_runtime.py -k ForReal installs core.txt into a clean venv.
 #
 # core.txt is installed at launch; changing it makes the next launch re-sync the
 # venv (python.rs stores the lockfile's SHA-256 in the venv). The extras are

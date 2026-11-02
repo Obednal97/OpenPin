@@ -1,5 +1,6 @@
 mod commands;
 mod lifecycle;
+mod logging;
 mod power;
 mod python;
 
@@ -80,6 +81,9 @@ fn save_prefs(prefs: &serde_json::Value) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ~/Library/Logs/Plaud V2/app.log (+ stderr in debug). First, so that
+    // everything after it, panics included, is logged.
+    logging::init();
     // Report Rust panics (see lifecycle::install_panic_hook for the ordering).
     lifecycle::install_panic_hook();
 
@@ -107,6 +111,10 @@ pub fn run() {
             // Keep the latest startup message for the page to poll: the first
             // ones are emitted before the page has loaded.
             lifecycle::track_startup_messages(app.handle());
+
+            // SIGTERM/SIGINT (logout, `kill`, Ctrl-C in dev) would otherwise
+            // end the process without stopping the Python backend.
+            lifecycle::handle_termination_signals(app.handle());
 
             // macOS: themed dock icon. (Traffic lights: titleBarStyle Overlay +
             // trafficLightPosition in tauri.conf.json.)

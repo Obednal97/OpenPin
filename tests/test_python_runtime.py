@@ -440,3 +440,101 @@ class TestNoSideEffectsOnImport:
         assert "init()" not in main_block[0].replace("def init", "")
         cloud_src = (ROOT / "app" / "state" / "cloud.py").read_text()
         assert not any(line.startswith("load_cloud_token()") for line in cloud_src.splitlines())
+
+
+# ---------------------------------------------------------------------------
+# Real install of core.txt (opt-in: PLAUD_SLOW_TESTS=1)
+# ---------------------------------------------------------------------------
+
+_PYTHON_RS = ROOT / "src-tauri" / "src" / "python.rs"
+
+# What the backend can't start without (python.rs CORE_IMPORT_CHECK, plus a
+# full anthropic import and a check that the interpreter is the arm64 3.12).
+_CORE_IMPORTS = """
+import platform, sys
+assert sys.version_info[:2] == (3, 12), sys.version
+assert platform.machine() == "arm64", platform.machine()
+import flask, requests, bleak, cryptography, websockets, anthropic
+import objc, CoreBluetooth, CoreWLAN, Foundation
+print("ok", sys.version.split()[0], anthropic.__version__)
+"""
+
+
+def _rust_const(name: str) -> str:
+    import re
+
+    m = re.search(rf'const {name}: &str =\s*"([^"]+)";', _PYTHON_RS.read_text())
+    assert m, f"{name} not found in python.rs"
+    return m.group(1)
+
+
+def _clean_env() -> dict:
+    """The environment python.rs gives pip (python_command): no user site, no
+    PYTHONPATH/PYTHONHOME, no inherited PIP_USER/PIP_REQUIRE_HASHES."""
+    drop = {"PYTHONHOME", "PYTHONPATH", "PIP_USER", "PIP_REQUIRE_HASHES"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(PYTHONNOUSERSITE="1", PIP_DISABLE_PIP_VERSION_CHECK="1")
+    return env
+
+
+def _managed_python(workdir: Path) -> Path:
+    """The pinned python-build-standalone CPython the app downloads (URL and
+    SHA-256 read from python.rs), fetched into `workdir`. PLAUD_PYTHON312 points
+    at an existing CPython 3.12 instead."""
+    import hashlib
+    import urllib.request
+
+    override = os.environ.get("PLAUD_PYTHON312")
+    if override:
+        return Path(override)
+    tag = _rust_const("STANDALONE_TAG")
+    version = _rust_const("STANDALONE_PY_VERSION")
+    sha256 = _rust_const("STANDALONE_SHA256_AARCH64")
+    name = f"cpython-{version}+{tag}-aarch64-apple-darwin-install_only_stripped.tar.gz"
+    url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{name}"
+    tarball = workdir / name
+    with urllib.request.urlopen(url, timeout=300) as resp, open(tarball, "wb") as out:
+        out.write(resp.read())
+    assert hashlib.sha256(tarball.read_bytes()).hexdigest() == sha256, "pinned runtime checksum mismatch"
+    dest = workdir / "python"
+    dest.mkdir()
+    subprocess.run(["tar", "-xzf", str(tarball), "--strip-components=1", "-C", str(dest)], check=True)
+    return dest / "bin" / "python3"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.environ.get("PLAUD_SLOW_TESTS") != "1", reason="set PLAUD_SLOW_TESTS=1 (network, ~1 min)")
+class TestCoreLockInstallsForReal:
+    """What a first launch does (python.rs ensure_venv): a clean venv on the
+    managed CPython 3.12, then pip install core.txt with hashes, wheels only.
+    Catches a missing hash, a pin with no cp312/arm64 wheel, or a package that
+    installs but doesn't import."""
+
+    def test_clean_venv_installs_core_lock_and_imports(self, tmp_path):
+        base = _managed_python(tmp_path)
+        r = subprocess.run([str(base), "--version"], capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and r.stdout.startswith("Python 3.12."), (r.stdout, r.stderr)
+
+        env = _clean_env()
+        venv = tmp_path / "venv"
+        subprocess.run([str(base), "-m", "venv", str(venv)], check=True, env=env, timeout=300)
+        vpy = str(venv / "bin" / "python3")
+        pip = subprocess.run(
+            [vpy, "-m", "pip", "install", "--no-input", "--require-hashes", "--only-binary", ":all:"]
+            + ["-r", str(REQ_DIR / "core.txt")],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=1800,
+        )
+        assert pip.returncode == 0, pip.stdout[-4000:] + pip.stderr[-4000:]
+
+        check = subprocess.run(
+            [vpy, "-c", _CORE_IMPORTS], capture_output=True, text=True, env=env, timeout=300, cwd=tmp_path
+        )
+        assert check.returncode == 0, check.stdout + check.stderr
+        assert check.stdout.startswith("ok 3.12."), check.stdout
+
+        # The lock is self-consistent: no missing or conflicting requirements.
+        consistent = subprocess.run([vpy, "-m", "pip", "check"], capture_output=True, text=True, env=env, timeout=300)
+        assert consistent.returncode == 0, consistent.stdout + consistent.stderr
