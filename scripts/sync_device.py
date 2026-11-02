@@ -19,7 +19,8 @@ try:
 except FileNotFoundError:
     sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
 
-SN = "8820B50256947317"
+# Serial number: $PLAUD_SN, else the first device paired in the app.
+SN = os.environ.get("PLAUD_SN") or next(iter(_cfg.get("device_bind_tokens", {})), "")
 BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(SN)
 SN_SIG = _cfg.get("device_sn_signatures", {}).get(SN)
 if not BIND_TOKEN or not SN_SIG:
@@ -40,7 +41,7 @@ class SessionLog:
         self.ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.data = {
             "timestamp": datetime.now().isoformat(),
-            "device_sn": "8820B50256947317",
+            "device_sn": SN,
             "events": [],
         }
         self.path = SESSIONS_DIR / f"session_{self.ts}.json"

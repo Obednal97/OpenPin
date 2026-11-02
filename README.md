@@ -3,181 +3,191 @@
 </p>
 
 <p align="center">
-An open-source desktop companion for the <b>Plaud NotePin S</b> voice recorder.<br>
-Syncs recordings via BLE or WiFi, decrypts audio locally, transcribes with Whisper, and summarises with AI — no cloud required.
+A macOS companion app for the <b>Plaud NotePin S</b> voice recorder.<br>
+Syncs recordings over Bluetooth or WiFi, decrypts them on your Mac, transcribes and summarises them.
 </p>
 
-Built as a replacement for the official Plaud app. All processing happens on your Mac unless you explicitly connect cloud AI providers.
+Plaud V2 replaces the official Plaud app. Recordings are downloaded straight from the device and
+decrypted locally. Nothing goes to Plaud's cloud. Transcription and summaries run on your Mac, or
+with cloud AI providers if you add their API keys.
 
 ## Features
 
-- **BLE sync** — Connect to your NotePin S, download recordings over Bluetooth
-- **WiFi sync** — High-speed file transfer via the device's WiFi hotspot
-- **Local decryption** — Audio is decrypted entirely on-device (RSA + ChaCha20)
-- **Transcription** — Local Whisper or OpenAI Whisper API, with custom vocabulary
-- **Speaker diarization** — 3-tier cascade: diarize (fast) -> pyannote-onnx -> pyannote standard
-- **AI summaries** — Anthropic Claude / OpenAI GPT / local DistilBART fallback chain
-- **Audio cropping** — Waveform editor with draggable handles, save as new or overwrite
-- **Editable transcripts** — Edit segment text inline, delete rows, edit summaries as markdown
-- **Plaud Cloud sync** — Two-way sync with your existing Plaud account
-- **Notion integration** — Push transcripts and summaries to a Notion database via MCP
-- **Webhooks** — Trigger external services on transcribe/summarise/sync events
-- **Auto-updates** — App checks for new versions and updates itself
-- **Apple-style UI** — Glass design, light/dark/auto theme, squircle corners
-- **Signed & notarized** — Proper Apple Developer ID signing, no Gatekeeper warnings
+- **Bluetooth sync**: finds your NotePin S, pairs once, downloads new recordings. Incomplete
+  downloads are kept and retried, never saved as broken audio.
+- **WiFi sync**: for large files the Mac joins the device's own hotspot for a much faster
+  transfer, then puts your normal WiFi back.
+- **Local decryption**: audio is decrypted on the Mac (RSA file key + ChaCha20) and saved as Ogg/Opus.
+- **Transcription**: Deepgram Nova-3, Groq Whisper, OpenAI, or local Whisper (`base` to `large`,
+  including `turbo`). Custom vocabulary and your profile improve accuracy.
+- **Speaker labels**: Deepgram labels speakers. Local diarization also exists, but for now it only
+  runs if a Hugging Face token is saved as `.hf_token` in the data folder (there's no setting for it yet).
+- **Summaries with titles**: Claude, OpenAI, OpenRouter, a local Ollama model, or DistilBART as a
+  last resort. If one provider fails the next one is tried.
+- **Editing**: crop audio with a waveform editor, edit transcript lines, edit summaries as Markdown,
+  tag, rename, move recordings to another folder.
+- **Notion**: pushes each recording's title, tags, summary and transcript to a Notion database.
+  Edits you make in Notion outside the app's own section are left alone.
+- **Google Drive**: uploads recordings to a folder you choose.
+- **Webhooks**: calls your URLs when a recording is synced, transcribed or summarised.
+- **Automation**: auto-sync, auto-transcribe, auto-summarise, open at login, menu-bar icon.
+- **Updates**: the app checks for new versions, downloads them in the background and installs on
+  restart. Every update is checked (signature, team ID, Gatekeeper, checksum) before it replaces the app.
+- **Plaud Cloud sync** (optional): download recordings from, or upload them to, a Plaud account.
 
----
+## Requirements
+
+- A Mac with **Apple Silicon** (M1 or later). Intel Macs aren't supported.
+- **macOS 12** or later.
+- A Plaud NotePin S.
+- A **Plaud account, once**, to pair the device. Pairing needs a device token and serial signature
+  that only Plaud's API issues. After that the app works without it.
+- An internet connection on first launch (see below).
+
+You **don't** need to install Python. The app downloads and manages its own.
 
 ## Install
 
-### 1. Make sure you have Python 3
-
-Open **Terminal** and run:
-
-```bash
-python3 --version
-```
-
-If you see `Python 3.x.x`, you're good. If not:
+The GitHub repository is **private**, so the
+[Releases page](https://github.com/Obednal97/Plaud-V2/releases/latest) only works for people with
+access to the repo. Everyone else can download the DMG through the update server:
 
 ```bash
-# Install via Homebrew (recommended)
-brew install python3
-
-# Or download from https://www.python.org/downloads/
+# Prints the download link of the latest release
+curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest | jq -r .download_url
 ```
 
-> macOS 13+ usually has Python 3 via Xcode Command Line Tools. If you've ever used `git` in Terminal, you likely already have it.
+The link has the form
+`https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/download/<tag>/<asset>`, for example
+`.../v1/download/v2.4.0/Plaud.V2_2.4.0_aarch64.dmg`. There is no `/latest` download shortcut.
 
-### 2. Download the app
+Then:
 
-Go to the [latest release](https://github.com/Obednal97/Plaud-V2/releases/latest) and download **`Plaud-V2-x.x.x.dmg`**.
+1. Open the DMG and drag **Plaud V2** to **Applications**. Run it from Applications: run from the
+   DMG or Downloads, it can't update itself.
+2. Open it. It is signed and notarised, so macOS opens it without warnings.
+3. Allow Bluetooth when asked.
 
-### 3. Install
+### First launch
 
-1. Open the DMG
-2. Drag **Plaud V2** to your **Applications** folder
-3. Double-click to open — the app is signed and notarized, so it just works
+The window opens straight away and shows progress while the app sets itself up:
 
-### 4. First launch
+1. Downloads a pinned CPython 3.12 build and checks its SHA-256. If that fails, it uses a Homebrew
+   or python.org Python 3.12 if you have one.
+2. Creates its own virtual environment and installs the core packages from a hash-pinned lockfile.
+3. Starts the local backend.
 
-The app will:
-- Start a Python backend server automatically
-- Auto-install Python dependencies (Flask, Whisper, etc.) — this takes ~30 seconds on first run
-- Download Whisper speech models on first transcription (~74 MB for the `small` model)
+This takes a minute or two the first time and a few seconds after that. If it fails, the splash
+screen shows what went wrong, a **Retry** button and a link to the diagnostics log.
 
-That's it. Connect your Plaud NotePin S and hit **Scan**.
+Some features download more on first use: FFmpeg (for audio editing and local transcription),
+local Whisper and its model, the diarization package, and the DistilBART summariser.
+
+### Pairing
+
+The setup screen asks you to sign in to your Plaud account, then scans for the device. Keep the
+NotePin nearby, charged and switched on, and disconnect it from the Plaud phone app first. Pick it
+from the list and the app pairs with it.
 
 ### Updates
 
-The app checks for updates automatically. When a new version is available, a banner appears at the top — click **Restart to Update** and you're done. You can also check manually in **Settings > General > About > Check for Updates**.
+The app checks for updates 5 seconds after launch and every 4 hours. When one is ready, a banner
+offers **Restart to Update**. You can also check in **Settings › General › About**.
 
----
+## Optional setup
 
-## Optional Setup
+### AI providers
 
-### Cloud AI (better transcription + summaries)
+Add API keys in **Settings › Processing**. Without keys everything runs locally (slower).
 
-Add API keys in **Settings > Processing > Cloud AI**:
+| Provider | Used for | Get a key |
+|---|---|---|
+| Deepgram | Transcription with speaker labels (default) | [console.deepgram.com](https://console.deepgram.com/) |
+| Groq | Transcription (Whisper large-v3) | [console.groq.com](https://console.groq.com/keys) |
+| OpenAI | Transcription and summaries | [platform.openai.com](https://platform.openai.com/api-keys) |
+| Anthropic | Summaries (Claude) | [console.anthropic.com](https://console.anthropic.com/) |
+| OpenRouter | Summaries, if you have no Anthropic or OpenAI key | [openrouter.ai](https://openrouter.ai/keys) |
 
-| Provider | What it does | Get a key |
-|----------|-------------|-----------|
-| **OpenAI** | Faster transcription (Whisper API) + GPT summaries | [platform.openai.com](https://platform.openai.com/api-keys) |
-| **Anthropic** | Higher-quality summaries (Claude) | [console.anthropic.com](https://console.anthropic.com/) |
+For local summaries with a better model than DistilBART, install [Ollama](https://ollama.com) and
+pull a model (for example `ollama pull qwen3`). The app uses it when it's running; it never pulls
+models itself.
 
-Without API keys, everything runs locally using Whisper `small` and DistilBART. Works fine, just slower.
+### Notion
 
-### Notion Integration
+**Settings › Integrations › Notion**: click **Connect Notion**, approve in the browser, then pick a
+database (or paste its URL). Turn on **Auto-push** to send every recording after it's summarised.
+The app adds a `Session ID` column (and a `Tags` column if you use tags) and writes its content
+between marked headings, so your own notes on the page are kept.
 
-Push transcripts and summaries to a Notion database:
+### Google Drive
 
-1. Go to **Settings > Notion**
-2. Click **Connect to Notion** and authorise
-3. Paste your database URL or search for it
-4. Enable **Auto-push** to send summaries automatically
+**Settings › Integrations › Google Drive**: connect, then choose or create a folder.
 
-### Plaud Cloud
+### Webhooks
 
-Sync recordings with your existing Plaud account:
+**Settings › Integrations › Webhooks**: add a URL and choose the events (recording synced,
+transcribed, summary generated). The app POSTs JSON: `{event, timestamp, data}`.
 
-1. Go to **Settings > Cloud Account**
-2. Log in with your Plaud credentials
-3. Choose sync direction (download / two-way)
+### Plaud Cloud (optional)
 
----
+**Settings › Plaud Cloud**: you're already signed in if you paired a device. Choose **No sync**,
+**Download only** or **Two-way**. You don't need Plaud Cloud for anything after pairing.
 
-## Architecture
+## Privacy
 
-```
-app/
-  api_server.py          # Flask API (app factory)
-  index.html             # UI markup
-  renderer.js            # Frontend orchestrator
-  tauri-bridge.js        # window.plaud bridge (Tauri invoke)
-  styles.css             # @import hub for CSS modules
-  ui/                    # Frontend modules (utils, recordings, transcript, settings, health-gate)
-  css/                   # Design system (tokens, components, layouts, recordings, transcript, settings, utilities)
-  routes/                # Flask blueprints (core, device, cloud, notion, recordings, transcribe, settings)
-  state/                 # State managers (device, cloud, notion)
-  providers/             # AI providers (summarize, transcribe, validate)
-  utils/                 # Shared utilities (config, constants, audio, webhooks, system, wifi_sync)
-src-tauri/
-  src/                   # Rust shell (window, IPC commands, Python supervisor, updater, bug reporter)
-  tauri.conf.json        # Bundle + window config
-  Entitlements.plist     # macOS code-signing entitlements
-src/
-  transcribe.py          # Whisper transcription + diarization cascade
-  crypto.py              # RSA key management
-  scanner.py             # BLE manufacturer data parser
-tests/                   # pytest suite
-docs/
-  ARCHITECTURE.md        # Detailed architecture docs
-  RELEASING.md           # Release workflow + auto-update system
-  TAURI_MIGRATION.md     # Migration record and Tauri architecture notes
-  reverse-engineering/   # BLE protocol specs, capture analysis, API findings
-```
+**Stays on your Mac:** recordings, transcripts, summaries, settings and API keys (the config file
+is readable only by you), in `~/Library/Application Support/Plaud V2/`. Deleted recordings go to
+the macOS Trash.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation.
+**Leaves your Mac only if you set it up:**
 
-## How It Works
+- Audio goes to the transcription provider you choose (Deepgram, Groq or OpenAI).
+- Transcript text goes to the summary provider you choose (Anthropic, OpenAI or OpenRouter).
+- Notion, Google Drive and webhooks get what's described above.
+- Plaud's API is used to pair a device, and for Plaud Cloud sync if you turn it on.
 
-1. **BLE connection** — Scans for nearby NotePin S devices, identifies by serial number (macOS randomises BLE addresses). Performs RSA handshake to establish encrypted ChaCha20-Poly1305 session, then sends APP_KEY handshake to complete pairing.
+**Always:**
 
-2. **File sync (BLE)** — Downloads encrypted `.asr` files over BLE (~33 KB/s). Each file contains an RSA-encrypted file key + ChaCha20-XOR'd Opus frames.
+- Update checks go to the update server (`plaud-v2-updates`, a Cloudflare Worker). It sees your
+  IP address and app version.
+- First-launch and on-demand downloads come from GitHub (Python), PyPI (packages), evermeet.cx
+  (FFmpeg) and Hugging Face / OpenAI (models).
 
-3. **File sync (WiFi)** — For faster transfers: disconnects BLE, enables the device's WiFi hotspot, connects the Mac, transfers files over TCP, then restores the original WiFi connection.
+**Crash reports** are on by default and can be turned off in **Settings › General › System ›
+Send anonymous crash reports**. Before a report is sent, the app removes your user name and home
+folder, device serial numbers, Bluetooth IDs, API keys and tokens, e-mail addresses, and Notion and
+Google Drive links. Recording audio, transcripts and summaries are never included. Reports become
+issues in the private GitHub repo. **Report a bug** (the bug icon in the toolbar) sends a report
+you write yourself, even with crash reports off.
 
-4. **Decryption** — RSA-decrypts the per-file key, generates ChaCha20 keystream, XORs each 80-byte Opus frame. Wraps raw frames in OGG container.
+## Troubleshooting
 
-5. **Transcription** — Routes to OpenAI Whisper API (if key provided) or local Whisper. FFmpeg is bundled for audio decoding. Background diarization runs in a separate thread.
+| Log | What's in it |
+|---|---|
+| `~/Library/Logs/Plaud V2/app.log` | The app and its Python backend (startup, BLE, sync, errors). Rotates at 1 MB to `app.log.1` |
+| `~/Library/Logs/Plaud V2/update.log` | Every step of the last update install, and why it stopped if it did |
+| `~/Library/Application Support/com.plaud.v2/diagnostics.log` | Errors the app caught, including ones it didn't report. Open it from the splash screen's **Open diagnostics log** |
+| `~/Library/Application Support/Plaud V2/wifi_sync.log` | WiFi syncs (appended, not rotated) |
 
-6. **Summarisation** — Cascade: Anthropic Claude > OpenAI GPT > local DistilBART. Injects user profile context and recording tags into prompts.
+Common problems:
 
-7. **Audio editing** — Crop recordings with a waveform editor. Backend uses FFmpeg stream-copy for lossless cropping. Edit transcript text inline or delete segments. Edit summaries as markdown.
+- **Stuck on the startup screen.** Click **Retry**. If it keeps failing, quit, delete
+  `~/Library/Application Support/com.plaud.v2/venv` and open the app again: it rebuilds it.
+- **Device not found.** Check the NotePin is on, nearby and not connected to the Plaud phone app,
+  and that Bluetooth is allowed in **System Settings › Privacy & Security › Bluetooth**.
+- **WiFi didn't come back after a WiFi sync.** The app restores your networks itself, also on the
+  next launch if it was interrupted. If a network can't be restored, the app tells you which one;
+  rejoin it from the WiFi menu.
+- **"Plaud V2 is running from a temporary location".** Move the app to Applications and open it from there.
+- **Update won't install.** Allow Plaud V2 in **System Settings › Privacy & Security › App
+  Management**, then check `update.log`.
 
 ## Development
 
-```bash
-# Run in dev mode (launches Tauri shell + Python backend)
-cargo tauri dev
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to run from source, test and lint, and
+[docs/README.md](docs/README.md) for the rest of the documentation (architecture, releasing,
+reverse-engineering notes).
 
-# Run Python tests
-python3 -m pytest tests/ -v
+## Licence
 
-# Lint Python
-ruff check app/ src/ tests/
-
-# Format Python
-ruff format app/ src/ tests/
-
-# Build a signed/notarized DMG (see docs/RELEASING.md for the full release flow)
-cargo tauri build
-```
-
-## Reverse Engineering
-
-The BLE protocol, audio format, and cloud API were reverse-engineered from the Android APK and iOS BLE packet captures. Full documentation in [docs/reverse-engineering/](docs/reverse-engineering/).
-
-## License
-
-MIT
+MIT. See [LICENSE](LICENSE).
