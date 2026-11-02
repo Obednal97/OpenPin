@@ -76,6 +76,11 @@ def needs_reconnect():
     return bool(_notion_state.get("access_token")) and not _notion_state["connected"]
 
 
+def login_is_dead():
+    """True once the authorization server rejected the refresh token."""
+    return bool(_notion_state.get("refresh_dead"))
+
+
 def verify_connection():
     """Check if the Notion token is still valid. Returns True if connected, False if not.
     Proactively refreshes if expiring soon; mcp_init refreshes once on a 401."""
@@ -350,7 +355,9 @@ def mcp_init(_retried=False):
                 timeout=15,
             )
             if n.status_code >= 400:
-                logging.warning(f"Notion MCP rejected notifications/initialized ({n.status_code}): {_http_error_text(n)}")
+                logging.warning(
+                    f"Notion MCP rejected notifications/initialized ({n.status_code}): {_http_error_text(n)}"
+                )
         except Exception as e:
             logging.warning(f"Could not send notifications/initialized to Notion MCP: {e}")
         return _notion_session_id
