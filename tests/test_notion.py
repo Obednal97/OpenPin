@@ -16,17 +16,38 @@ SID = "1715000000"
 PAGE_URL = "https://www.notion.so/myteam/Meeting-Recorded-2e80f387aa1b4c3d9e8f0123456789ab"
 
 
+def _schema(**over):
+    s = {
+        "db_id": "db-id",
+        "data_source_id": "ds-id",
+        "tags_exists": True,
+        "tags_conflict": False,
+        "tag_options": {"A": "blue"},
+        "session_prop": True,
+        "session_conflict": False,
+    }
+    s.update(over)
+    return s
+
+
 @pytest.fixture
 def env(flask_client, tmp_path):
+    """Push plumbing with schema handling and the Session ID lookup stubbed
+    (they have their own tests below); tests may re-patch either."""
+    from app.routes import notion as rn
+
+    real = types.SimpleNamespace(find=rn._find_page_by_session_id, ensure_schema=rn._ensure_schema)
     trn = tmp_path / "transcripts"
     trn.mkdir()
     with (
         patch("app.routes.notion.TRANSCRIPTS_DIR", trn),
         patch("app.state.notion.is_connected", return_value=True),
         patch("app.state.notion.get_database_id", return_value="db-id"),
-        patch("app.routes.notion._ensure_tags_property_once"),
+        patch("app.routes.notion._ensure_schema", return_value=_schema()),
+        patch("app.routes.notion._find_page_by_session_id", return_value=None),
+        patch("app.routes.notion._sleep"),
     ):
-        yield types.SimpleNamespace(client=flask_client, trn=trn, root=tmp_path)
+        yield types.SimpleNamespace(client=flask_client, trn=trn, root=tmp_path, real=real)
 
 
 def _cfg():
@@ -160,7 +181,7 @@ def test_push_does_not_clobber_config_written_during_network_call(env):
     save_config({"recording_names": {SID: "My Title"}, "deleted_ids": ["a"]})
     _write_transcript(env.trn, SID, {"text": "hello"})
 
-    def fake_mcp(method, params=None):
+    def fake_mcp(method, params=None, timeout=None):
         # While the request is "in flight", other code writes to the config.
         update_config(lambda c: c["deleted_ids"].append("written_meanwhile"))
         update_config(lambda c: c.__setitem__("deepgram_api_key", "new-key"))
@@ -542,3 +563,879 @@ def test_queue_paused_by_real_auth_error(env, mcp_http, queue_state):
     notion_queue.enqueue(SID)
     _run_queue_once(queue_state)
     assert queue_state.paused is True
+
+
+# ---------------------------------------------------------------------------
+# MCP lifecycle / Streamable HTTP rules and OAuth (RFC 8707)
+# ---------------------------------------------------------------------------
+
+
+class _Resp:
+    def __init__(self, status=200, body=None, headers=None, text=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self.text = text if text is not None else (json.dumps(body) if body is not None else "")
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"{self.status_code} Error", response=self)
+
+
+INIT_OK = {"jsonrpc": "2.0", "id": "1", "result": {"protocolVersion": "2025-11-25", "capabilities": {}}}
+
+
+@pytest.fixture
+def scripted_http():
+    """Real mcp_init/mcp_call over a scripted ``http_requests.post``.
+
+    Responses are picked by JSON-RPC method ("token" for token-endpoint
+    posts): a list per key, popped in order, the last one repeating.
+    """
+    from app.state import notion as ns
+
+    calls = []
+    script = {}
+
+    def fake_post(url, json=None, data=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json, "data": data, "headers": dict(headers or {}), "timeout": timeout})
+        key = json.get("method") if json is not None else "token"
+        responses = script.get(key) or [_Resp(202)]
+        return responses.pop(0) if len(responses) > 1 else responses[0]
+
+    with (
+        patch.dict(
+            ns._notion_state,
+            {
+                "access_token": "tok-1",
+                "refresh_token": "ref-1",
+                "token_endpoint": "https://auth.example/token",
+                "client_id": "cid",
+                "client_secret": "",
+                "resource": "https://mcp.notion.com/mcp",
+                "connected": True,
+                "refresh_dead": False,
+            },
+        ),
+        patch.object(ns, "_notion_session_id", None),
+        patch.object(ns, "_negotiated_protocol_version", None),
+        patch.object(ns, "_token_expires_at", 0),
+        patch.object(ns, "save"),
+        patch.object(ns.http_requests, "post", side_effect=fake_post),
+    ):
+        yield types.SimpleNamespace(calls=calls, script=script, ns=ns)
+
+
+def _by_method(calls, method):
+    return [c for c in calls if (c["json"] or {}).get("method") == method]
+
+
+def _token_posts(calls):
+    return [c for c in calls if c["json"] is None]
+
+
+def test_initialize_sends_initialized_notification_and_protocol_header(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    h.script["notifications/initialized"] = [_Resp(202)]
+    h.script["tools/call"] = [_Resp(200, TOOL_OK)]
+
+    assert h.ns.mcp_call("notion-fetch", {"id": "x"}) == TOOL_OK["result"]
+
+    methods = [(c["json"] or {}).get("method") for c in h.calls]
+    assert methods == ["initialize", "notifications/initialized", "tools/call"]
+    init = h.calls[0]
+    assert "Mcp-Session-Id" not in init["headers"]
+    assert init["json"]["params"]["protocolVersion"] == h.ns.MCP_PROTOCOL_VERSION
+    note = h.calls[1]
+    assert "id" not in note["json"]  # a notification, not a request
+    assert note["headers"]["Mcp-Session-Id"] == "S1"
+    assert note["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+    call = h.calls[2]
+    assert call["headers"]["Mcp-Session-Id"] == "S1"
+    assert call["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+
+
+def test_protocol_header_uses_version_server_negotiated(scripted_http):
+    h = scripted_http
+    init = {"jsonrpc": "2.0", "id": "1", "result": {"protocolVersion": "2025-06-18"}}
+    h.script["initialize"] = [_Resp(200, init, headers={"mcp-session-id": "S1"})]
+    h.script["tools/call"] = [_Resp(200, TOOL_OK)]
+    h.ns.mcp_call("notion-fetch", {})
+    assert _by_method(h.calls, "tools/call")[0]["headers"]["MCP-Protocol-Version"] == "2025-06-18"
+
+
+def test_expired_session_404_reinitialises_once(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [
+        _Resp(200, INIT_OK, headers={"mcp-session-id": "S1"}),
+        _Resp(200, INIT_OK, headers={"mcp-session-id": "S2"}),
+    ]
+    h.script["tools/call"] = [_Resp(404, text="Session not found"), _Resp(200, TOOL_OK)]
+    assert h.ns.mcp_call("notion-fetch", {}) == TOOL_OK["result"]
+    tool_calls = _by_method(h.calls, "tools/call")
+    assert [c["headers"]["Mcp-Session-Id"] for c in tool_calls] == ["S1", "S2"]
+    assert len(_by_method(h.calls, "initialize")) == 2
+
+
+def test_repeated_404_is_not_retried_forever(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    h.script["tools/call"] = [_Resp(404, text="Session not found")]
+    with pytest.raises(Exception, match="404"):
+        h.ns.mcp_call("notion-fetch", {})
+    assert len(_by_method(h.calls, "tools/call")) == 2
+
+
+def test_400_surfaces_server_error_without_resending(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    bad = {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid arguments: page_id is required"}}
+    h.script["tools/call"] = [_Resp(400, bad)]
+    with pytest.raises(ValueError, match="page_id is required"):
+        h.ns.mcp_call("notion-update-page", {})
+    assert len(_by_method(h.calls, "tools/call")) == 1
+    assert len(_by_method(h.calls, "initialize")) == 1
+
+
+def test_mcp_init_401_refreshes_then_retries(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(401, text="unauthorized"), _Resp(200, INIT_OK, headers={"mcp-session-id": "S9"})]
+    h.script["token"] = [_Resp(200, {"access_token": "tok-2", "refresh_token": "ref-2", "expires_in": 28800})]
+    assert h.ns.mcp_init() == "S9"
+    inits = _by_method(h.calls, "initialize")
+    assert [c["headers"]["Authorization"] for c in inits] == ["Bearer tok-1", "Bearer tok-2"]
+    token_calls = _token_posts(h.calls)
+    assert len(token_calls) == 1
+    assert token_calls[0]["data"]["grant_type"] == "refresh_token"
+    assert token_calls[0]["data"]["resource"] == "https://mcp.notion.com/mcp"
+    assert h.ns._notion_state["refresh_token"] == "ref-2"
+
+
+def test_dead_refresh_token_needs_reconnect_and_is_not_retried(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(401, text="unauthorized")]
+    h.script["token"] = [_Resp(400, {"error": "invalid_grant"})]
+    with pytest.raises(ValueError, match="reconnect"):
+        h.ns.mcp_init()
+    assert h.ns._notion_state["refresh_dead"] is True
+    assert h.ns.needs_reconnect() is True
+    assert h.ns.get_state()["needs_reconnect"] is True
+    n_token = len(_token_posts(h.calls))
+    assert h.ns.refresh_token() is False
+    assert len(_token_posts(h.calls)) == n_token  # no new token request
+
+
+def test_refresh_skipped_when_another_thread_already_refreshed(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["access_token"] = "tok-new"
+    assert h.ns.refresh_token(stale_access_token="tok-1") is True
+    assert h.calls == []
+
+
+def test_concurrent_401s_refresh_once(scripted_http):
+    h = scripted_http
+    h.script["token"] = [_Resp(200, {"access_token": "tok-2", "refresh_token": "ref-2"})]
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(h.ns.refresh_token(stale_access_token="tok-1")))
+        for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert results == [True] * 4
+    assert len(_token_posts(h.calls)) == 1
+
+
+def test_authorize_and_code_exchange_send_resource(scripted_http):
+    from urllib.parse import parse_qs, urlparse
+
+    h = scripted_http
+    meta = {
+        "authorization_endpoint": "https://auth.example/authorize",
+        "token_endpoint": "https://auth.example/token",
+        "resource": "https://mcp.notion.com/mcp",
+    }
+    with patch.object(h.ns, "_discover", return_value=meta), patch.object(h.ns, "_start_callback_server"):
+        url = h.ns.start_connect()
+    q = parse_qs(urlparse(url).query)
+    assert q["resource"] == ["https://mcp.notion.com/mcp"]
+    assert q["code_challenge_method"] == ["S256"]
+
+    h.script["token"] = [_Resp(200, {"access_token": "tok-3", "refresh_token": "ref-3"})]
+    with patch("app.utils.notion_queue.resume") as resume:
+        h.ns._exchange_code("the-code")
+    token_call = _token_posts(h.calls)[-1]
+    assert token_call["data"]["grant_type"] == "authorization_code"
+    assert token_call["data"]["resource"] == "https://mcp.notion.com/mcp"
+    assert h.ns._notion_state["access_token"] == "tok-3"
+    resume.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# A fake Notion MCP server at the mcp_call level
+# ---------------------------------------------------------------------------
+
+DS_UUID = "0a1b2c3d-4e5f-4a6b-8c7d-0123456789ab"
+OTHER_URL = "https://www.notion.so/myteam/Other-ffffffffffffffffffffffffffffffff"
+
+
+def _text_result(obj):
+    return {"content": [{"type": "text", "text": obj if isinstance(obj, str) else json.dumps(obj)}]}
+
+
+def _db_fetch(schema_props):
+    state = json.dumps({"schema": schema_props})
+    text = (
+        f'<database url="https://www.notion.so/{DB_HEX}"><data-source url="collection://{DS_UUID}">'
+        f"<data-source-state>{state}</data-source-state></data-source></database>"
+    )
+    return _text_result({"metadata": {"type": "database"}, "title": "Meetings", "url": "x", "text": text})
+
+
+def _page_fetch(title, content, props=None, truncated=False):
+    props = props if props is not None else {"title": title}
+    text = f'<page url="{PAGE_URL}"><properties>{json.dumps(props)}</properties><content>\n{content}\n</content></page>'
+    obj = {"metadata": {"type": "page"}, "title": title, "url": PAGE_URL, "text": text}
+    if truncated:
+        obj["truncated"] = True
+    return _text_result(obj)
+
+
+class FakeNotion:
+    """Stand-in for notion.mcp_call: records calls; per-tool canned results."""
+
+    def __init__(self):
+        self.calls = []
+        self.handlers = {}
+
+    def __call__(self, method, params=None, timeout=None):
+        self.calls.append((method, params or {}))
+        h = self.handlers.get(method)
+        if h is None:
+            return _text_result({"ok": True})
+        return h(params or {}) if callable(h) else h
+
+    def methods(self):
+        return [m for m, _ in self.calls]
+
+    def of(self, method):
+        return [p for m, p in self.calls if m == method]
+
+
+def _raise(msg):
+    def f(_params):
+        raise ValueError(msg)
+
+    return f
+
+
+@pytest.fixture
+def fake():
+    f = FakeNotion()
+    with patch("app.state.notion.mcp_call", side_effect=f):
+        yield f
+
+
+def _save_page(sid=SID, url=PAGE_URL, **extra):
+    from app.utils.config import save_config
+
+    save_config({"notion_page_urls": {sid: url}, **extra})
+
+
+# ---------------------------------------------------------------------------
+# 1. Tag/rename changes touch properties only; re-push replaces only our section
+# ---------------------------------------------------------------------------
+
+
+def test_tag_change_updates_properties_only(env, fake, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    notion_queue.enqueue(SID)  # what /recordings/tag does
+    _run_queue_once(queue_state)
+
+    assert fake.methods() == ["notion-update-page"]
+    p = fake.of("notion-update-page")[0]
+    assert p["command"] == "update_properties"
+    assert json.loads(p["properties"]["Tags"]) == ["A"]
+    assert p["properties"]["Session ID"] == SID
+    assert "new_str" not in p and "allow_deleting_content" not in p
+    assert queue_state.entries == {}
+
+
+def test_repush_replaces_only_app_section(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "new words", "summary": "Fresh summary"})
+    old_section = rn._build_app_section({"text": "old words"}, SID)
+    content = f"My own notes at the top\n\n{old_section}\n\nAction items I added later"
+    fake.handlers["notion-fetch"] = _page_fetch("T", content)
+
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["content"] == "replaced"
+
+    upd = fake.of("notion-update-page")
+    assert [p["command"] for p in upd] == ["update_properties", "update_content"]
+    op = upd[1]["content_updates"][0]
+    assert op["old_str"] == old_section
+    assert "My own notes" not in op["old_str"] and "Action items" not in op["old_str"]
+    assert "new words" in op["new_str"] and "Fresh summary" in op["new_str"]
+    assert rn.APP_SECTION_HEADING in op["new_str"] and rn.APP_SECTION_END in op["new_str"]
+    assert all("allow_deleting_content" not in p for p in upd)
+
+
+def test_repush_unchanged_section_makes_no_content_write(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    t = {"text": "same words"}
+    _write_transcript(env.trn, SID, t)
+    fake.handlers["notion-fetch"] = _page_fetch("T", "notes\n\n" + rn._build_app_section(t, SID))
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.get_json()["content"] == "unchanged"
+    assert [p["command"] for p in fake.of("notion-update-page")] == ["update_properties"]
+
+
+def test_repush_legacy_page_appends_dated_section(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "new words"})
+    content = "Old summary\n\n---\n\n## Full Transcript\n\n[00:00] hello\n\nMy notes"
+    fake.handlers["notion-fetch"] = _page_fetch("T", content)
+
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    body = r.get_json()
+    assert body["content"] == "appended" and "kept" in body["content_note"]
+    upd = fake.of("notion-update-page")
+    assert [p["command"] for p in upd] == ["update_properties", "update_content"]
+    op = upd[1]["content_updates"][0]
+    assert op["old_str"] == "My notes"
+    assert op["new_str"].startswith("My notes\n\n## " + rn.APP_SECTION_HEADING + " (")
+    assert "new words" in op["new_str"]
+
+
+def test_repush_falls_back_to_append_when_in_place_replace_fails(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "new words"})
+    fake.handlers["notion-fetch"] = _page_fetch("T", rn._build_app_section({"text": "old"}, SID) + "\n\nmine")
+    seen = []
+
+    def update(p):
+        seen.append(p)
+        if p["command"] == "update_content" and len([s for s in seen if s["command"] == "update_content"]) == 1:
+            raise ValueError("validation_error: old_str not found")
+        return _text_result({"ok": True})
+
+    fake.handlers["notion-update-page"] = update
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.get_json()["content"] == "appended"
+    assert seen[-1]["content_updates"][0]["old_str"] == "mine"
+
+
+def test_repush_truncated_page_without_section_only_updates_properties(env, fake):
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "x"})
+    fake.handlers["notion-fetch"] = _page_fetch("T", "huge page …", truncated=True)
+    body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["content"] == "skipped"
+    assert [p["command"] for p in fake.of("notion-update-page")] == ["update_properties"]
+
+
+def test_repush_empty_page_uses_replace_without_deleting(env, fake):
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "x"})
+    fake.handlers["notion-fetch"] = _page_fetch("T", "")
+    body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["content"] == "appended"
+    upd = fake.of("notion-update-page")
+    assert upd[1]["command"] == "replace_content"
+    assert "allow_deleting_content" not in upd[1]
+
+
+def test_create_writes_marked_section_and_session_id(env, fake):
+    from app.routes import notion as rn
+
+    _write_transcript(env.trn, SID, {"text": "hello", "auto_title": "Standup"})
+    fake.handlers["notion-create-pages"] = _text_result({"pages": [{"id": DB_UUID, "url": PAGE_URL}]})
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.get_json() == {"pushed": True, "updated": False, "url": PAGE_URL}
+    args = fake.of("notion-create-pages")[0]
+    page = args["pages"][0]
+    assert args["allow_async"] is True
+    assert page["properties"] == {"title": "Standup", "Tags": "[]", "Session ID": SID}
+    assert page["content"].startswith("## " + rn.APP_SECTION_HEADING)
+    assert f"Session ID: {SID}" in page["content"]
+    assert _cfg()["notion_page_urls"][SID] == PAGE_URL
+
+
+def test_extract_page_url_ignores_async_status_url():
+    from app.routes.notion import _extract_page_url
+
+    res = _text_result({"async_task": {"id": "t", "status_url": "https://api.notion.com/v1/tasks/t"}})
+    assert _extract_page_url(res) is None
+    assert _extract_page_url(_text_result({"result": {"pages": [{"url": PAGE_URL}]}})) == PAGE_URL
+
+
+# ---------------------------------------------------------------------------
+# 2. Schema: add-only, from a fresh fetch, never from a stale/empty cache
+# ---------------------------------------------------------------------------
+
+TAGS_AB = {"type": "multi_select", "options": [{"name": "A", "color": "blue"}, {"name": "B", "color": "red"}]}
+
+
+@pytest.fixture
+def schema_fake():
+    from app.routes import notion as rn
+
+    f = FakeNotion()
+    with (
+        patch("app.state.notion.get_database_id", return_value="db-id"),
+        patch("app.state.notion.mcp_call", side_effect=f),
+        patch.object(rn, "_schema_cache", None),
+    ):
+        yield f
+
+
+def _ddl(f):
+    return [p["statements"] for p in f.of("notion-update-data-source")]
+
+
+def test_schema_adds_missing_options_as_union_keeping_colours(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    s = rn._ensure_schema(["A", "C"])
+    assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('A':blue, 'B':red, 'C':default)"]
+    assert schema_fake.of("notion-update-data-source")[0]["data_source_id"] == DS_UUID
+    assert set(s["tag_options"]) == {"A", "B", "C"}
+
+
+def test_schema_never_sets_from_stale_cache(schema_fake):
+    from app.routes import notion as rn
+
+    # Cache from earlier in the session: only "Z" (since deleted in Notion),
+    # and it lacks C, so a change is needed — it must come from a fresh fetch.
+    rn._schema_cache = {**_schema(), "tag_options": {"Z": "default"}}
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    rn._ensure_schema(["C"])
+    assert schema_fake.methods() == ["notion-fetch", "notion-update-data-source"]
+    assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('A':blue, 'B':red, 'C':default)"]
+
+
+def test_schema_fetch_failure_changes_nothing(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _raise("connection reset")
+    with pytest.raises(ValueError, match="Could not read the Notion database schema"):
+        rn._ensure_schema(["A"])
+    assert _ddl(schema_fake) == []
+    assert rn._schema_cache is None
+
+
+def test_schema_unreadable_layout_changes_nothing(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _text_result("Meetings database, no state block")
+    assert rn._ensure_schema(["A"]) is None
+    assert _ddl(schema_fake) == []
+
+
+def test_schema_no_tags_column_for_untagged_recording(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Name": {"type": "title"}})
+    s = rn._ensure_schema([])
+    assert _ddl(schema_fake) == ['ADD COLUMN "Session ID" RICH_TEXT']
+    assert s["tags_exists"] is False and s["session_prop"] is True
+    assert rn._page_properties("T", [], SID, s) == {"title": "T", "Session ID": SID}
+
+
+def test_schema_adds_tags_column_with_options(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Session ID": {"type": "text"}})
+    rn._ensure_schema(["It's"])
+    assert _ddl(schema_fake) == ["ADD COLUMN \"Tags\" MULTI_SELECT('It''s':default)"]
+
+
+def test_schema_option_add_failure_blocks_the_write(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    schema_fake.handlers["notion-update-data-source"] = _raise("rate limited")
+    with pytest.raises(ValueError, match="Could not add tag options"):
+        rn._ensure_schema(["C"])
+
+
+def test_schema_cache_skips_fetch_when_satisfied_and_is_per_database(schema_fake):
+    from app.routes import notion as rn
+
+    rn._schema_cache = _schema()
+    assert rn._ensure_schema(["A"]) is rn._schema_cache
+    assert schema_fake.calls == []
+    rn._schema_cache = {**_schema(), "db_id": "old-db"}
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    rn._ensure_schema(["A"])
+    assert schema_fake.methods() == ["notion-fetch"]
+
+
+def test_schema_cache_reset_when_database_changes(env):
+    from app.routes import notion as rn
+
+    with patch.object(rn, "_schema_cache", _schema()), patch("app.state.notion.set_database"):
+        r = env.client.post("/notion/set-database", json={"database_id": "new-db", "database_name": "N"})
+        assert r.status_code == 200
+        assert rn._schema_cache is None
+
+
+# ---------------------------------------------------------------------------
+# 3. Duplicates: upsert by Session ID, per-session lock, async creates
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_finds_existing_page_by_session_id(env, fake):
+    from app.routes import notion as rn
+
+    t = {"text": "hello"}
+    _write_transcript(env.trn, SID, t)
+    rows = {"results": [{"url": OTHER_URL, "Session ID": "999"}, {"url": PAGE_URL, "properties": {"Session ID": SID}}]}
+    fake.handlers["notion-query-data-sources"] = _text_result(rows)
+    fake.handlers["notion-fetch"] = _page_fetch("T", rn._build_app_section(t, SID))
+    with patch("app.routes.notion._find_page_by_session_id", env.real.find):
+        body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["updated"] is True and body["url"] == PAGE_URL
+    assert "notion-create-pages" not in fake.methods()
+    q = fake.of("notion-query-data-sources")[0]["data"]
+    assert q["mode"] == "rows" and q["data_source_url"] == "collection://ds-id"
+    assert _cfg()["notion_page_urls"][SID] == PAGE_URL
+
+
+def test_upsert_falls_back_to_search_and_verifies_candidate(env, fake):
+    from app.routes import notion as rn
+
+    t = {"text": "hello"}
+    _write_transcript(env.trn, SID, t)
+    fake.handlers["notion-query-data-sources"] = _raise("plan_required")
+    fake.handlers["notion-search"] = _text_result({"results": [{"url": PAGE_URL, "title": "x"}]})
+    fake.handlers["notion-fetch"] = _page_fetch("T", rn._build_app_section(t, SID), props={"Session ID": SID})
+    with patch("app.routes.notion._find_page_by_session_id", env.real.find):
+        body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["url"] == PAGE_URL and body["updated"] is True
+    assert "notion-create-pages" not in fake.methods()
+
+
+def test_upsert_does_not_trust_unverified_candidates(env, fake):
+    _write_transcript(env.trn, SID, {"text": "hello"})
+    fake.handlers["notion-query-data-sources"] = _text_result({"results": [{"url": OTHER_URL, "Session ID": "42"}]})
+    fake.handlers["notion-search"] = _text_result({"results": [{"url": OTHER_URL}]})
+    fake.handlers["notion-fetch"] = _page_fetch("Other", "unrelated page")
+    fake.handlers["notion-create-pages"] = _text_result({"pages": [{"url": PAGE_URL}]})
+    with patch("app.routes.notion._find_page_by_session_id", env.real.find):
+        body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["url"] == PAGE_URL and body["updated"] is False
+    assert fake.methods().count("notion-create-pages") == 1
+
+
+def test_upsert_lookup_failure_does_not_create_blindly(env, fake):
+    _write_transcript(env.trn, SID, {"text": "hello"})
+    fake.handlers["notion-query-data-sources"] = _raise("boom")
+    fake.handlers["notion-search"] = _raise("boom")
+    with patch("app.routes.notion._find_page_by_session_id", env.real.find):
+        r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.status_code == 500
+    assert "notion-create-pages" not in fake.methods()
+
+
+def test_per_session_lock_prevents_double_create(env, fake):
+    from app.routes import notion as rn
+
+    t = {"text": "hello"}
+    _write_transcript(env.trn, SID, t)
+
+    def slow_create(_p):
+        time.sleep(0.3)
+        return _text_result({"pages": [{"id": DB_UUID, "url": PAGE_URL}]})
+
+    fake.handlers["notion-create-pages"] = slow_create
+    fake.handlers["notion-fetch"] = _page_fetch("T", rn._build_app_section(t, SID))
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(rn.push_to_notion(SID))) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(10)
+    assert fake.methods().count("notion-create-pages") == 1
+    assert sorted(bool(r.get("updated")) for r in results) == [False, True]
+
+
+def test_async_create_is_resumed_not_duplicated(env, fake):
+    from app.routes import notion as rn
+
+    t = {"text": "hello"}
+    _write_transcript(env.trn, SID, t)
+    fake.handlers["notion-create-pages"] = _text_result(
+        {"async_task": {"id": "task-1", "status": "queued", "poll_after_seconds": 2}}
+    )
+    # First push: Notion is still working when our wait runs out.
+    out = rn.push_to_notion(SID, poll_budget=0)
+    assert out == {"pending": True, "message": "Notion is still creating the page"}
+    assert _cfg()["notion_pending_creates"][SID]["task_id"] == "task-1"
+
+    # Next attempt polls the same task instead of creating again.
+    fake.handlers["notion-get-async-task"] = _text_result(
+        {"status": "succeeded", "result": {"pages": [{"id": DB_UUID, "url": PAGE_URL}]}}
+    )
+    fake.handlers["notion-fetch"] = _page_fetch("T", rn._build_app_section(t, SID))
+    out = rn.push_to_notion(SID, poll_budget=10)
+    assert out["url"] == PAGE_URL and out["updated"] is True
+    assert fake.methods().count("notion-create-pages") == 1
+    assert fake.of("notion-get-async-task")[0] == {"task_id": "task-1"}
+    assert SID not in _cfg().get("notion_pending_creates", {})
+    assert _cfg()["notion_page_urls"][SID] == PAGE_URL
+
+
+def test_push_route_hands_pending_create_to_queue(env, fake):
+    _write_transcript(env.trn, SID, {"text": "hello"})
+    fake.handlers["notion-create-pages"] = _text_result({"async_task": {"id": "t", "status": "queued"}})
+    fake.handlers["notion-get-async-task"] = _text_result({"status": "running"})
+    with patch("app.routes.notion._POLL_BUDGET_REQUEST", 0), patch("app.utils.notion_queue.enqueue") as enq:
+        body = env.client.post("/notion/push", json={"session_id": SID}).get_json()
+    assert body["queued"] is True and body["pushed"] is False
+    enq.assert_called_once_with(SID, "full")
+
+
+def test_create_uses_long_timeout(env):
+    from app.routes import notion as rn
+
+    _write_transcript(env.trn, SID, {"text": "hello"})
+    seen = {}
+
+    def mcp(method, params=None, timeout=30):
+        seen[method] = timeout
+        return _text_result({"pages": [{"url": PAGE_URL}]})
+
+    with patch("app.state.notion.mcp_call", side_effect=mcp):
+        rn.push_to_notion(SID)
+    assert seen["notion-create-pages"] >= 120
+
+
+# ---------------------------------------------------------------------------
+# 4. Auto-push goes through the queue
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_auto_push_enqueues_instead_of_pushing(env):
+    from app.utils.config import save_config
+
+    save_config({"notion_auto_push": True})
+    _write_transcript(env.trn, SID, {"text": "A long enough transcript to summarise here."})
+    with (
+        patch("app.routes.transcribe.TRANSCRIPTS_DIR", env.trn),
+        patch("app.routes.transcribe.summarize", return_value=("Sum.", "Title", "x", [])),
+        patch("app.utils.notion_queue.enqueue") as enq,
+        patch("app.routes.notion.push_to_notion") as push,
+    ):
+        r = env.client.post("/summarize", json={"session_id": SID})
+    body = r.get_json()
+    assert r.status_code == 200, body
+    assert body["notion_queued"] is True and body["notion_error"] == ""
+    enq.assert_called_once_with(SID, "full")
+    push.assert_not_called()
+
+
+def test_summarize_auto_push_reports_missing_database(env):
+    from app.utils.config import save_config
+
+    save_config({"notion_auto_push": True})
+    _write_transcript(env.trn, SID, {"text": "A long enough transcript to summarise here."})
+    with (
+        patch("app.routes.transcribe.TRANSCRIPTS_DIR", env.trn),
+        patch("app.routes.transcribe.summarize", return_value=("Sum.", "Title", "x", [])),
+        patch("app.state.notion.get_database_id", return_value=None),
+        patch("app.utils.notion_queue.enqueue") as enq,
+    ):
+        body = env.client.post("/summarize", json={"session_id": SID}).get_json()
+    assert body["notion_queued"] is False and "No database" in body["notion_error"]
+    enq.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 5. Queue durability, visible failures, auth-pause backoff
+# ---------------------------------------------------------------------------
+
+
+def test_queue_entry_survives_crash_mid_push(queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID, "full")
+    entry = queue_state.pop_due()
+    assert entry["session_id"] == SID
+    # Still queued in memory and on disk while the push runs...
+    assert SID in queue_state.entries
+    # ...so a crash now (no complete/record_failure) loses nothing.
+    reloaded = notion_queue._State(queue_state.path)
+    assert reloaded.entries[SID]["kind"] == "full"
+    assert reloaded.pop_due()["session_id"] == SID
+
+
+def test_queue_claimed_entry_not_handed_out_twice(queue_state):
+    queue_state.enqueue(SID)
+    assert queue_state.pop_due() is not None
+    assert queue_state.pop_due() is None
+
+
+def test_queue_newer_enqueue_during_push_survives_completion(queue_state):
+    queue_state.enqueue(SID)
+    entry = queue_state.pop_due()
+    queue_state.enqueue(SID)  # e.g. another tag edit while pushing
+    queue_state.complete(entry)
+    assert SID in queue_state.entries
+    assert queue_state.pop_due() is not None
+
+
+def test_queue_full_kind_not_downgraded(queue_state):
+    queue_state.enqueue(SID, "full")
+    queue_state.enqueue(SID, "properties")
+    assert queue_state.entries[SID]["kind"] == "full"
+
+
+def test_queue_permanent_failure_is_recorded_and_retryable(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(TOOL_ERROR))
+    notion_queue.enqueue(SID, "full")
+    _run_queue_once(queue_state)
+    assert queue_state.entries == {}
+
+    snap = env.client.get("/notion/queue-status").get_json()
+    assert snap["failed_count"] == 1
+    assert snap["failed"][0]["session_id"] == SID and "validation_error" in snap["failed"][0]["error"]
+    assert json.loads(queue_state.path.read_text())["failed"][0]["session_id"] == SID
+
+    snap = env.client.post("/notion/queue-resume").get_json()
+    assert snap["failed_count"] == 0 and snap["pending"] == 1
+    assert queue_state.entries[SID]["kind"] == "full"
+
+
+def test_queue_pending_async_create_is_retried(env, queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID, "full")
+    with patch("app.routes.notion.push_to_notion", return_value={"pending": True, "message": "still creating"}) as p:
+        _run_queue_once(queue_state)
+    p.assert_called_once_with(SID, mode="full")
+    assert queue_state.entries[SID]["attempts"] == 1
+    assert queue_state.failed == []
+
+
+def test_pause_probe_backs_off_and_stops_for_dead_login(queue_state):
+    from app.utils import notion_queue
+
+    queue_state.pause("Notion auth expired")
+    with (
+        patch.dict(notion_queue._probe, {"last": 0.0, "interval": 30.0}),
+        patch("app.state.notion.login_is_dead", return_value=False),
+        patch("app.state.notion.verify_connection", return_value=False) as verify,
+    ):
+        assert notion_queue._probe_while_paused(now=100.0) is True
+        assert notion_queue._probe["interval"] == 60.0
+        assert notion_queue._probe_while_paused(now=130.0) is False  # backing off
+        assert notion_queue._probe_while_paused(now=161.0) is True
+        assert notion_queue._probe["interval"] == 120.0
+        assert verify.call_count == 2
+
+    with (
+        patch.dict(notion_queue._probe, {"last": 0.0, "interval": 30.0}),
+        patch("app.state.notion.login_is_dead", return_value=True),
+        patch("app.state.notion.verify_connection") as verify,
+    ):
+        assert notion_queue._probe_while_paused(now=10_000.0) is False
+        verify.assert_not_called()
+    assert queue_state.paused is True
+
+    with (
+        patch.dict(notion_queue._probe, {"last": 0.0, "interval": 30.0}),
+        patch("app.state.notion.login_is_dead", return_value=False),
+        patch("app.state.notion.verify_connection", return_value=True),
+    ):
+        notion_queue._probe_while_paused(now=10_000.0)
+    assert queue_state.paused is False
+
+
+def test_queue_status_reports_needs_reconnect(env, queue_state):
+    with patch("app.state.notion.needs_reconnect", return_value=True):
+        snap = env.client.get("/notion/queue-status").get_json()
+    assert snap["needs_reconnect"] is True
+
+
+# ---------------------------------------------------------------------------
+# 7. Rename reaches Notion (properties only), with the real page title
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_page_title_parses_title_not_whole_text(fake):
+    from app.routes import notion as rn
+
+    fake.handlers["notion-fetch"] = _page_fetch("Real Title", "the title of this talk was…")
+    assert rn._fetch_notion_page_title(PAGE_URL) == "Real Title"
+    assert fake.of("notion-fetch")[0] == {"id": DB_UUID}
+
+
+def test_rename_enqueues_property_sync(env):
+    _save_page()
+    with (
+        patch("app.routes.recordings.TRANSCRIPTS_DIR", env.trn),
+        patch("app.utils.notion_queue.enqueue") as enq,
+    ):
+        r = env.client.post("/recordings/rename", json={"session_id": SID, "title": "New name"})
+    assert r.get_json() == {"saved": True, "notion_queued": True}
+    enq.assert_called_once_with(SID, "properties")
+
+
+def test_rename_without_notion_page_does_not_enqueue(env):
+    with (
+        patch("app.routes.recordings.TRANSCRIPTS_DIR", env.trn),
+        patch("app.utils.notion_queue.enqueue") as enq,
+    ):
+        r = env.client.post("/recordings/rename", json={"session_id": SID, "title": "New name"})
+    assert r.get_json() == {"saved": True, "notion_queued": False}
+    enq.assert_not_called()
+
+
+def test_rename_sync_sends_new_title_when_notion_title_unchanged(env, fake, queue_state):
+    from app.utils import notion_queue
+
+    _save_page(recording_names={SID: "New name"}, notion_pushed_titles={SID: "Old name"})
+    _write_transcript(env.trn, SID, {"text": "x"})
+    fake.handlers["notion-fetch"] = _page_fetch("Old name", "body")
+    notion_queue.enqueue(SID, "properties")
+    _run_queue_once(queue_state)
+    upd = fake.of("notion-update-page")
+    assert len(upd) == 1 and upd[0]["command"] == "update_properties"
+    assert upd[0]["properties"]["title"] == "New name"
+    assert _cfg()["notion_pushed_titles"][SID] == "New name"
+
+
+def test_rename_sync_keeps_title_user_changed_in_notion(env, fake, queue_state):
+    from app.utils import notion_queue
+
+    _save_page(recording_names={SID: "New name"}, notion_pushed_titles={SID: "Old name"})
+    _write_transcript(env.trn, SID, {"text": "x"})
+    fake.handlers["notion-fetch"] = _page_fetch("Renamed in Notion", "body")
+    notion_queue.enqueue(SID, "properties")
+    _run_queue_once(queue_state)
+    props = fake.of("notion-update-page")[0]["properties"]
+    assert "title" not in props
