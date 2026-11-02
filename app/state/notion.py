@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import html as _html
 import json
 import logging
 import os
@@ -323,7 +324,7 @@ def _start_callback_server():
                 error = params.get("error", [None])[0]
 
                 if error:
-                    self._respond(f"<h2>Connection failed</h2><p>{error}</p><p>You can close this tab.</p>")
+                    self._respond(f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>")
                     self._signal({"error": error})
                     return
 
@@ -361,7 +362,7 @@ def _start_callback_server():
                     )
                     self._signal({"ok": True})
                 except Exception as e:
-                    self._respond(f"<h2>Token exchange failed</h2><p>{e}</p>")
+                    self._respond(f"<h2>Token exchange failed</h2><p>{_html.escape(str(e))}</p>")
                     self._signal({"error": str(e)})
             else:
                 self.send_response(404)
