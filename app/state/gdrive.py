@@ -82,9 +82,16 @@ def load():
     if GDRIVE_CONFIG_PATH.exists():
         try:
             data = json.loads(GDRIVE_CONFIG_PATH.read_text())
-            for k in ("access_token", "refresh_token", "token_expires_at",
-                       "user_email", "folder_id", "folder_name",
-                       "client_id", "client_secret"):
+            for k in (
+                "access_token",
+                "refresh_token",
+                "token_expires_at",
+                "user_email",
+                "folder_id",
+                "folder_name",
+                "client_id",
+                "client_secret",
+            ):
                 if k in data:
                     _gdrive_state[k] = data[k]
             if _gdrive_state.get("access_token"):
@@ -96,9 +103,16 @@ def load():
 def save():
     """Persist Google Drive tokens and config."""
     save_data = {}
-    for k in ("access_token", "refresh_token", "token_expires_at",
-              "user_email", "folder_id", "folder_name",
-              "client_id", "client_secret"):
+    for k in (
+        "access_token",
+        "refresh_token",
+        "token_expires_at",
+        "user_email",
+        "folder_id",
+        "folder_name",
+        "client_id",
+        "client_secret",
+    ):
         if _gdrive_state.get(k) is not None:
             save_data[k] = _gdrive_state[k]
     GDRIVE_CONFIG_PATH.write_text(json.dumps(save_data, indent=2))
@@ -109,9 +123,7 @@ def save():
 
 def _generate_pkce():
     code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
+    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
     return code_verifier, code_challenge
 
 
@@ -208,6 +220,7 @@ def start_connect(client_id=None, client_secret=None):
     _gdrive_state["code_verifier"] = code_verifier
 
     import uuid as uuid_mod
+
     state = str(uuid_mod.uuid4())
     _gdrive_state["state"] = state
 
@@ -250,7 +263,9 @@ def _start_callback_server():
                 error = params.get("error", [None])[0]
 
                 if error:
-                    self._respond(f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>")
+                    self._respond(
+                        f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>"
+                    )
                     self._signal({"error": error})
                     return
 
@@ -287,7 +302,8 @@ def _start_callback_server():
                         headers = {"Authorization": f"Bearer {tokens['access_token']}"}
                         info = http_requests.get(
                             "https://www.googleapis.com/oauth2/v2/userinfo",
-                            headers=headers, timeout=10,
+                            headers=headers,
+                            timeout=10,
                         ).json()
                         _gdrive_state["user_email"] = info.get("email", "")
                     except Exception:
@@ -429,12 +445,16 @@ def _simple_upload(path, file_name, folder_id):
 
     boundary = "plaud_v2_boundary"
     body = (
-        f"--{boundary}\r\n"
-        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-        f"{metadata}\r\n"
-        f"--{boundary}\r\n"
-        f"Content-Type: audio/ogg\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--".encode()
+        (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{metadata}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: audio/ogg\r\n\r\n"
+        ).encode()
+        + file_data
+        + f"\r\n--{boundary}--".encode()
+    )
 
     r = http_requests.post(
         f"{GDRIVE_API_BASE}/upload/drive/v3/files?uploadType=multipart",
@@ -650,12 +670,14 @@ def get_cloud_only_recordings():
     cloud_only = []
     for sid, info in synced.items():
         if sid not in local_ids and sid not in dismissed:
-            cloud_only.append({
-                "session_id": sid,
-                "drive_file_id": info.get("drive_file_id", ""),
-                "synced_at": info.get("synced_at", ""),
-                "file_size": info.get("file_size", 0),
-            })
+            cloud_only.append(
+                {
+                    "session_id": sid,
+                    "drive_file_id": info.get("drive_file_id", ""),
+                    "synced_at": info.get("synced_at", ""),
+                    "file_size": info.get("file_size", 0),
+                }
+            )
 
     return cloud_only
 
