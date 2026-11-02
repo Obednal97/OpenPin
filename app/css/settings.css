@@ -547,6 +547,22 @@
 }
 .delete-dialog-actions .action-btn { width: 100%; justify-content: center; }
 
+/* Generic confirm dialog (showConfirmDialog in ui/utils.js) */
+.confirm-dialog-items {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-5);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.confirm-dialog-items li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.confirm-dialog-note {
+  margin-top: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--destructive);
+}
+.action-btn.subtle.confirm-dialog-destructive { color: var(--destructive); }
+.action-btn.subtle.confirm-dialog-destructive:hover { border-color: var(--destructive); color: var(--destructive); }
+
 /* Move dialog */
 .move-destinations { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-4); }
 .move-destinations .action-btn { gap: var(--sp-2); }
