@@ -135,8 +135,8 @@ def load_cloud_token():
     lazily when an API call actually needs them. This allows offline
     startup and avoids losing login state due to network issues.
 
-    Validation is deferred to a daemon thread so module import never blocks
-    on a network call.
+    Validation is deferred to a daemon thread so startup never blocks on a
+    network call. Runs from init() at server startup, not at import.
     """
     if PLAUD_CONFIG_PATH.exists():
         try:
@@ -809,5 +809,11 @@ def get_device_sn_signature(sn):
     return config.get("device_sn_signatures", {}).get(sn)
 
 
-# Load cloud token on import
-load_cloud_token()
+def init():
+    """Load the saved cloud token into _cloud_state.
+
+    Called once from api_server.py's startup (``__main__``), never at import:
+    importing this module (tests, REPL, tooling) must not read the Plaud
+    desktop app's storage or start a validation request to the Plaud API.
+    """
+    return load_cloud_token()

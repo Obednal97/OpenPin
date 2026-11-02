@@ -6,16 +6,30 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # User data directory — outside the app bundle so it persists across updates.
-# In packaged app: ~/Library/Application Support/Plaud V2/
-# In dev mode: project root (so recordings/transcripts stay where they are)
+# 1. PLAUD_DATA_DIR env var, if set (tests/conftest.py points it at a temp dir
+#    so the suite never touches real recordings, config or tokens; dev runs can
+#    use it too)
+# 2. Packaged app: ~/Library/Application Support/Plaud V2/
+# 3. Dev mode (running from a git checkout): the project root
+DATA_DIR_ENV = "PLAUD_DATA_DIR"
 _is_packaged = not (PROJECT_ROOT / ".git").exists()
-if _is_packaged:
+_env_data_dir = os.environ.get(DATA_DIR_ENV, "").strip()
+if _env_data_dir:
+    _data_dir = Path(_env_data_dir).expanduser().resolve()
+    _data_dir.mkdir(parents=True, exist_ok=True)
+elif _is_packaged:
     _data_dir = Path(os.path.expanduser("~/Library/Application Support/Plaud V2"))
     _data_dir.mkdir(parents=True, exist_ok=True)
 else:
     _data_dir = PROJECT_ROOT
 
 DATA_DIR = _data_dir
+
+# Python dependency lockfiles (see scripts/lock-python-deps.sh). The Rust shell
+# writes the copies embedded in the app binary to Application Support and passes
+# that folder in PLAUD_REQUIREMENTS_DIR; otherwise use the repo/bundle copy.
+REQUIREMENTS_DIR_ENV = "PLAUD_REQUIREMENTS_DIR"
+BUNDLED_REQUIREMENTS_DIR = PROJECT_ROOT / "app" / "requirements"
 
 # BLE UUIDs
 BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
@@ -70,6 +84,8 @@ def get_all_recordings_dirs():
             dirs.add(p)
 
     return list(dirs)
+
+
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
@@ -85,12 +101,22 @@ PLAUD_API_DOMAINS = {
 }
 PLAUD_WEB_HOST = "https://web.plaud.ai"
 
-# Whisper models
+# Local Whisper models (openai-whisper), smallest download first.
+# size / download_mb: checkpoint download size (Content-Length of the .pt files
+# listed in whisper/__init__.py). ram_gb: "Required VRAM" from the Whisper
+# README (https://github.com/openai/whisper#available-models-and-languages).
+# The JSON response sorts keys alphabetically, so the UI orders by download_mb.
 WHISPER_MODELS = {
-    "base": {"ram_gb": 1, "size": "74 MB", "speed": "Fast", "accuracy": "Good enough for clear speech"},
-    "small": {"ram_gb": 2, "size": "244 MB", "speed": "Moderate", "accuracy": "Good - recommended default"},
-    "medium": {"ram_gb": 5, "size": "769 MB", "speed": "Slower", "accuracy": "Very good - handles accents well"},
-    "large": {"ram_gb": 10, "size": "1.5 GB", "speed": "Slowest", "accuracy": "Best available"},
+    "base": {"ram_gb": 1, "size": "145 MB", "download_mb": 145, "params": "74M",
+             "speed": "Fast", "accuracy": "Good enough for clear speech"},
+    "small": {"ram_gb": 2, "size": "484 MB", "download_mb": 484, "params": "244M",
+              "speed": "Moderate", "accuracy": "Good - recommended default"},
+    "medium": {"ram_gb": 5, "size": "1.5 GB", "download_mb": 1528, "params": "769M",
+               "speed": "Slower", "accuracy": "Very good - handles accents well"},
+    "turbo": {"ram_gb": 6, "size": "1.6 GB", "download_mb": 1618, "params": "809M",
+              "speed": "Moderate", "accuracy": "Near-best (large-v3-turbo) - best speed/accuracy balance"},
+    "large": {"ram_gb": 10, "size": "3.1 GB", "download_mb": 3087, "params": "1550M",
+              "speed": "Slowest", "accuracy": "Best available (large-v3)"},
 }
 
 # Notion MCP

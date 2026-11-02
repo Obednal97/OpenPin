@@ -489,6 +489,13 @@ window.plaud.onUpdateStatus((data) => {
     };
   } else if (data.status === 'error') {
     console.error('[Updater]', data.message);
+    // If an update was in progress (banner showing), say what went wrong
+    // instead of leaving it on "Downloading…" / "Installing…".
+    if (!banner.classList.contains('hidden')) {
+      message.textContent = `Update failed: ${data.message || 'unknown error'}`;
+      actionBtn.style.display = 'none';
+      actionBtn.disabled = false;
+    }
   } else if (data.status === 'up-to-date') {
     console.log('[Updater] App is up to date');
   }
@@ -497,10 +504,21 @@ window.plaud.onUpdateStatus((data) => {
   for (const fn of app.updateListeners.splice(0)) fn(data);
 });
 
-$('#update-action').addEventListener('click', () => {
+$('#update-action').addEventListener('click', async () => {
   $('#update-message').textContent = 'Installing update, restarting...';
   $('#update-action').disabled = true;
-  window.plaud.installUpdate();
+  try {
+    const res = await window.plaud.installUpdate();
+    // On success the app quits; we only get here if the install was refused
+    // (e.g. running from a mounted DMG / App Translocation).
+    if (res && res.installing === false) {
+      $('#update-message').textContent = res.error || 'The update could not be installed.';
+      $('#update-action').disabled = false;
+    }
+  } catch (err) {
+    $('#update-message').textContent = `Update failed: ${err && err.message ? err.message : err}`;
+    $('#update-action').disabled = false;
+  }
 });
 
 $('#update-dismiss').addEventListener('click', () => {
@@ -676,11 +694,19 @@ async function executeWifiSync(claimedGen) {
   let pollActive = true;
   const pollProgress = async () => {
     const pollStartedAt = Date.now();
-    const POLL_MAX_MS = 5 * 60 * 1000; // 5 minutes
+    // The backend reports its own time budget (`deadline`, UNIX seconds) and
+    // stops + restores the worker itself; only give up well after that. Without
+    // a deadline, fall back to a generous fixed ceiling (the parent can take
+    // ~16 min before it returns, even for small transfers).
+    const POLL_FALLBACK_MAX_MS = 20 * 60 * 1000;
+    let wifiDeadlineS = 0;
     while (pollActive) {
-      if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const timedOut = wifiDeadlineS
+        ? Date.now() / 1000 > wifiDeadlineS + 240
+        : Date.now() - pollStartedAt > POLL_FALLBACK_MAX_MS;
+      if (timedOut) {
         pollActive = false;
-        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync did not complete within 5 minutes', 0, 'error');
+        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync took longer than expected. Your WiFi settings are restored automatically.', 0, 'error');
         const panel = $('#wifi-confirm-overlay .modal-panel');
         panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
           '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
@@ -689,6 +715,7 @@ async function executeWifiSync(claimedGen) {
       }
       try {
         const s = await window.plaud.wifiSyncStatus();
+        if (s && typeof s.deadline === 'number' && s.deadline > 0) wifiDeadlineS = s.deadline;
         // Re-check pollActive after the async status call: the main sync may have
         // already finished (setting pollActive=false) and rendered a terminal
         // success/error state with an appended Close/Done button. Calling
@@ -740,6 +767,8 @@ async function executeWifiSync(claimedGen) {
       );
     }
 
+    if (result.wifi_restore_notice) _maybeShowWifiRestoreNotice(result.wifi_restore_notice);
+
     const newFiles = (result.files || []).filter((f) => f.status === 'new');
     toastPartialSync(result);
 
@@ -755,7 +784,7 @@ async function executeWifiSync(claimedGen) {
                 f.ogg_path,
                 app.settings.model || 'small',
                 app.settings.diarize || false,
-                app.settings.language || 'en',
+                app.settings.language || 'auto',
               );
             } catch {}
           }
@@ -933,8 +962,10 @@ window.plaud.onSystemWake(async () => {
 });
 
 // ---- Init ----
-
-let _startupErrorShown = false;
+// Startup is one state machine in ui/health-gate.js: its splash shows the
+// Rust shell's startup progress until the backend is ready, or a failure
+// screen whose Retry re-runs init(). showStartupError only covers errors that
+// arrive after startup (e.g. the backend crashing for good later on).
 
 function showStartupError(error) {
   const h2 = dom.emptyState.querySelector('h2');
@@ -947,7 +978,6 @@ function showStartupError(error) {
   const hint = isStructured ? error.hint : '';
   const code = isStructured ? error.code : 'UNKNOWN';
 
-  _startupErrorShown = true;
   h2.textContent = title;
   p.innerHTML = '';
 
@@ -974,51 +1004,18 @@ window.plaud.onStartupError((error) => {
   showStartupError(error);
 });
 
-// Show startup progress messages (e.g. "Installing dependencies...")
-window.plaud.onStartupStatus((msg) => {
-  const p = dom.emptyState.querySelector('p');
-  if (p && !_startupErrorShown) {
-    p.textContent = msg;
-  }
-});
-
 // Init host-app features immediately (don't wait for Python API)
 initSettingsEvents();
 
+let _rendererInitPassedGate = false;
+
 async function init() {
-  // Check if main process already detected a startup error
-  const apiInfo = await window.plaud.getApiInfo();
-  if (apiInfo.error) {
-    showStartupError(apiInfo.error);
-    return;
-  }
-
-  // Show current startup status from main process
-  if (apiInfo.status) {
-    dom.emptyState.querySelector('p').textContent = apiInfo.status;
-  }
-
-  let apiReady = false;
-  for (let i = 0; i < 30; i++) {
-    try {
-      const h = await window.plaud.health();
-      if (h.status === 'ok') {
-        apiReady = true;
-        break;
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  if (!apiReady) {
-    showStartupError({
-      code: 'SERVER_TIMEOUT',
-      title: 'Server not responding',
-      friendly: 'The Python backend started but never became ready.',
-      hint: 'Try restarting the app. Another instance may be running.',
-    });
-    return;
-  }
+  // Wait for the health gate: it resolves true once the backend answers
+  // /health, or false after showing its failure screen (whose Retry calls
+  // init() again).
+  const ready = await window.plaudStartup.waitForBackend();
+  if (!ready || _rendererInitPassedGate) return;
+  _rendererInitPassedGate = true;
 
   // Server is ready — reset empty state text to default
   dom.emptyState.querySelector('h2').textContent = 'No recordings yet';
@@ -1059,7 +1056,24 @@ async function init() {
     } catch {}
   }
 
+  _maybeShowWifiRestoreNotice();
   _startBgPoll();
+}
+
+// Shown once if a crashed/aborted WiFi sync couldn't put back every saved
+// WiFi network (the backend gave up after repeated failed restores).
+async function _maybeShowWifiRestoreNotice(notice) {
+  try {
+    if (!notice) {
+      const s = await window.plaud.wifiSyncStatus();
+      notice = s && s.restore_notice;
+    }
+    if (!notice || !notice.message) return;
+    toastAction(notice.message, 'OK', () => {}, 30000);
+    await window.plaud.ackWifiRestoreNotice();
+  } catch (err) {
+    console.warn('[wifi] restore notice check failed:', err);
+  }
 }
 
 let _bgPollStarted = false;
@@ -1257,7 +1271,7 @@ function _startBgPoll() {
                         f.ogg_path,
                         app.settings.model || 'small',
                         app.settings.diarize || false,
-                        app.settings.language || 'en',
+                        app.settings.language || 'auto',
                       );
                     } catch {}
                   }
@@ -1317,4 +1331,5 @@ function _startBgPoll() {
   app.restartPollingTimers = _restartTimers;
 }
 
+window.plaudStartup.onRetry(init);
 init();

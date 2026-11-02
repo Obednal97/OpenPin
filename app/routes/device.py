@@ -419,6 +419,12 @@ def wifi_sync_status():
     return jsonify(dev.get_wifi_sync_status())
 
 
+@bp.route("/wifi-restore-notice/ack", methods=["POST"])
+def wifi_restore_notice_ack():
+    """The UI has shown the 'some saved networks couldn't be restored' notice."""
+    return jsonify({"acknowledged": bool(dev.acknowledge_wifi_restore_notice())})
+
+
 @bp.route("/sync-status")
 def sync_status():
     """Poll BLE sync progress so the UI updates per-file during a transfer."""

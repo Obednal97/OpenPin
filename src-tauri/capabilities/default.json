@@ -31,7 +31,6 @@
     "core:tray:default",
     "core:menu:default",
     "opener:default",
-    "deep-link:default",
     "autostart:default",
     "notification:default",
     "notification:allow-is-permission-granted",

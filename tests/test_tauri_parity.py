@@ -25,6 +25,25 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def _invoked_commands(js_src: str) -> set[str]:
+    """Command names passed as a string literal to invoke(...) / invokeRust(...)."""
+    return set(re.findall(r"""\binvoke(?:Rust)?\(\s*['"]([a-z_][a-z0-9_]*)['"]""", js_src))
+
+
+def _handler_block() -> str:
+    """The body of lib.rs's tauri::generate_handler![...]."""
+    lib = (PROJECT_ROOT / "src-tauri" / "src" / "lib.rs").read_text()
+    m = re.search(r"\.invoke_handler\(\s*tauri::generate_handler!\[(.*?)\]\s*\)", lib, re.S)
+    assert m, "lib.rs has no invoke_handler(tauri::generate_handler![...])"
+    return m.group(1)
+
+
+def _registered_commands() -> set[str]:
+    """Command names registered in lib.rs (last path segment of each entry)."""
+    entries = [e.strip() for e in _handler_block().split(",")]
+    return {e.split("::")[-1] for e in entries if e and not e.startswith("//")}
+
+
 # ---------------------------------------------------------------------------
 # Blueprint registration
 # ---------------------------------------------------------------------------
@@ -156,9 +175,37 @@ class TestTauriBridgeAPISurface:
     ]
 
     def test_bridge_invokes_all_ipc_commands(self):
-        """Every required Tauri invoke command appears in tauri-bridge.js."""
+        """Every required command is actually invoke()d by tauri-bridge.js (not
+        just mentioned) and registered in lib.rs's invoke_handler."""
+        invoked = _invoked_commands(self.bridge_src)
+        registered = _registered_commands()
         for cmd in self.REQUIRED_INVOKES:
-            assert cmd in self.bridge_src, f"tauri-bridge.js missing invoke: {cmd}"
+            assert cmd in invoked, f"tauri-bridge.js never calls invoke('{cmd}')"
+            assert cmd in registered, f"{cmd} not in lib.rs invoke_handler"
+
+    def test_every_invoked_command_is_registered(self):
+        """An invoke() of a command missing from generate_handler! fails at
+        runtime only; catch it here for the bridge and the startup gate."""
+        registered = _registered_commands()
+        for js in ("tauri-bridge.js", "ui/health-gate.js"):
+            src = (PROJECT_ROOT / "app" / js).read_text()
+            for cmd in _invoked_commands(src) - registered:
+                pytest.fail(f"{js} invokes '{cmd}', which lib.rs doesn't register")
+
+    def test_startup_gate_uses_the_startup_commands(self):
+        """The splash (health-gate.js) polls get_startup_status and calls
+        retry_startup; both are #[tauri::command]s in lifecycle.rs and
+        registered in lib.rs."""
+        gate = (PROJECT_ROOT / "app" / "ui" / "health-gate.js").read_text()
+        invoked = _invoked_commands(gate)
+        registered = _registered_commands()
+        lifecycle = (PROJECT_ROOT / "src-tauri" / "src" / "lifecycle.rs").read_text()
+        for cmd in ("get_startup_status", "retry_startup"):
+            assert cmd in invoked, f"health-gate.js never invokes {cmd}"
+            assert cmd in registered, f"{cmd} not registered in lib.rs invoke_handler"
+            assert re.search(rf"#\[tauri::command\]\s*pub fn {cmd}\(", lifecycle), f"{cmd} isn't a command"
+        assert "lifecycle::get_startup_status" in _handler_block()
+        assert "lifecycle::retry_startup" in _handler_block()
 
     # --- window.plaud.* methods ---
 
@@ -286,6 +333,7 @@ class TestEndpointJSONShapes:
             "auto_summarise",
             "notion_auto_push",
             "auto_prefer_wifi",
+            "crash_reports_enabled",
             "transcription_provider",
             "diarization_provider",
             "summarization_provider",
@@ -478,6 +526,15 @@ class TestSettingsRoundTrip:
         assert data["auto_summarise"] is True
         assert data["auto_prefer_wifi"] is True
         assert data["notion_auto_push"] is True
+
+    def test_crash_reports_enabled_defaults_on_and_roundtrips(self, flask_client, tmp_path):
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
+        flask_client.post("/settings", json={"crash_reports_enabled": False}, content_type="application/json")
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is False
+        # Rust reads the raw config file and only treats a JSON `false` as off.
+        assert json.loads((tmp_path / ".plaud_v2_config.json").read_text())["crash_reports_enabled"] is False
+        flask_client.post("/settings", json={"crash_reports_enabled": True}, content_type="application/json")
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
 
     def test_setup_dismissed_roundtrip(self, flask_client):
         flask_client.post("/settings", json={"setup_dismissed": True}, content_type="application/json")
@@ -895,6 +952,22 @@ class TestSidecarManagement:
         src = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
         assert "pip" in src
         assert "install" in src
+
+    def test_runtime_matches_the_lockfile_target(self):
+        """python.rs only builds the venv on the Python/arch core.txt is locked
+        for (scripts/lock-python-deps.sh), and the pinned standalone build is
+        that same minor."""
+        src = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
+        lock_sh = (PROJECT_ROOT / "scripts" / "lock-python-deps.sh").read_text()
+        py = re.search(r"--python-version (\d+)\.(\d+)", lock_sh)
+        plat = re.search(r"--python-platform (\w+)-apple-darwin", lock_sh)
+        assert py and plat
+        assert f"const REQUIRED_PYTHON: (u32, u32) = ({py.group(1)}, {py.group(2)});" in src
+        assert f'const SUPPORTED_ARCH: &str = "{plat.group(1)}";' in src
+        standalone = re.search(r'const STANDALONE_PY_VERSION: &str = "(\d+)\.(\d+)\.\d+";', src)
+        assert standalone and standalone.groups() == py.groups()
+        header = (PROJECT_ROOT / "app" / "requirements" / "core.txt").read_text().splitlines()[1]
+        assert f"CPython {py.group(1)}.{py.group(2)}, {plat.group(1)}-apple-darwin" in header
 
     def test_tauri_rust_has_sidecar_or_command(self):
         """Tauri config or Rust code must reference Python sidecar."""

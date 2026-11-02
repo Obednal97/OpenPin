@@ -421,7 +421,13 @@
               <span class="toggle-switch"></span>
               <span>Show icon in Dock</span>
             </label>
+            <label class="toggle-label auto-step">
+              <input type="checkbox" id="crash-reports-toggle" class="toggle-input" checked>
+              <span class="toggle-switch"></span>
+              <span>Send anonymous crash reports</span>
+            </label>
           </div>
+          <p class="settings-hint mt-2">Crash reports contain the error message, app and macOS version, and an anonymous device ID. Your name, device serial number, recordings and transcripts are never included.</p>
         </div>
         <div class="settings-section">
           <h3>Storage</h3>
@@ -584,9 +590,9 @@
             <label class="proc-label" for="transcription-provider">Provider</label>
             <select id="transcription-provider" class="proc-select">
               <option value="deepgram">Deepgram Nova-3</option>
-              <option value="groq">Groq Whisper</option>
-              <option value="openai">OpenAI Whisper</option>
-              <option value="local">Local Whisper</option>
+              <option value="groq">Groq Whisper Large v3</option>
+              <option value="openai">OpenAI GPT-Transcribe</option>
+              <option value="local">Local Whisper (on this Mac)</option>
             </select>
             <span class="proc-recommended" id="transcription-rec">Recommended</span>
           </div>
@@ -640,10 +646,10 @@
           <div class="proc-provider-row">
             <label class="proc-label" for="summarization-provider">Provider</label>
             <select id="summarization-provider" class="proc-select">
-              <option value="anthropic">Anthropic Claude</option>
-              <option value="openai">OpenAI GPT</option>
+              <option value="anthropic">Anthropic Claude Sonnet</option>
+              <option value="openai">OpenAI GPT-6 Luna</option>
               <option value="openrouter">OpenRouter</option>
-              <option value="local">Local DistilBART</option>
+              <option value="local">Local (Ollama if running, else DistilBART)</option>
             </select>
             <span class="proc-recommended" id="summarization-rec">Recommended</span>
           </div>
@@ -749,7 +755,7 @@
                   <div class="notion-db-card-label">Connected Database</div>
                   <div class="notion-db-card-name" id="notion-db-name">No database selected</div>
                 </div>
-                <span class="ai-key-badge connected">Active</span>
+                <span class="ai-key-badge none" id="notion-status-badge">Choose a database</span>
               </div>
               <div class="settings-section mt-3 mb-0">
                 <label class="settings-label">Change Database</label>

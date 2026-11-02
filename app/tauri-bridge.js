@@ -45,11 +45,30 @@ window.addEventListener('beforeunload', () => {
 const _BRIDGE_TOKEN_HEADER = 'X-Plaud-Token';
 let _apiUrl = null;
 let _bridgeApiToken = '';
-let _apiInfoReady = invoke('get_api_info').then((info) => {
-  _apiUrl = info.url;
-  _bridgeApiToken = info.token || '';
-  return info;
-});
+// get_api_info's status: 'starting' | 'ready' | 'error' | 'stopped'. At page
+// load the backend usually hasn't bound its real port yet, so the URL read
+// then can be stale; until Rust says 'ready', apiCall re-reads it first.
+let _bridgeApiStatus = null;
+let _bridgeApiInfoInflight = null;
+
+/** Re-read the backend URL/token/status from Rust (one IPC call in flight at a time). */
+function _bridgeRefreshApiInfo() {
+  if (!_bridgeApiInfoInflight) {
+    _bridgeApiInfoInflight = invoke('get_api_info')
+      .then((info) => {
+        if (info && info.url) _apiUrl = info.url;
+        if (info && info.token) _bridgeApiToken = info.token;
+        _bridgeApiStatus = (info && info.status) || null;
+        return info;
+      })
+      .finally(() => {
+        _bridgeApiInfoInflight = null;
+      });
+  }
+  return _bridgeApiInfoInflight;
+}
+
+let _apiInfoReady = _bridgeRefreshApiInfo().catch(() => null);
 
 function _bridgeHeaders(extra) {
   const headers = { ...(extra || {}) };
@@ -70,7 +89,7 @@ const REPORT_ENDPOINTS = new Set([
 const NO_TIMEOUT_ENDPOINTS = new Set([
   '/device/connect', // BLE pairing — service discovery can take 30-45s on slow links
   '/device/sync', '/device/wifi-sync',
-  '/transcribe', '/summarize',
+  '/transcribe', '/summarize', '/notion/push', // Notion creates of long transcripts can exceed 30s
   '/cloud/sync',
   '/gdrive/sync', '/gdrive/upload',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
@@ -88,8 +107,63 @@ async function _fetchWithTimeout(url, opts, endpoint) {
   }
 }
 
+// --- Bug-report text from API errors ---
+// /transcribe, /summarize and /notion/* errors can quote transcript or Notion
+// page content (raw_error, traceback), so for those only the endpoint, HTTP
+// status and a short first line go out. Rust scrubs every report again
+// (src-tauri/src/commands/report_scrub.rs); this is a simplified mirror.
+
+const _BRIDGE_REPORT_SHORT_CHARS = 120;
+
+function _bridgeIsPrivateEndpoint(endpoint) {
+  const path = String(endpoint).split('?')[0];
+  return path === '/transcribe' || path === '/summarize' || path.startsWith('/notion/');
+}
+
+/** Remove URLs' queries and document paths, credentials, keys, e-mails, long tokens. */
+function _bridgeScrubReportText(text) {
+  return String(text || '')
+    .replace(/\bhttps?:\/\/[^\s"'<>`)\]}|\\]+/gi, (url) => {
+      const m = url.match(/^(https?:\/\/)(?:[^/?#@]*@)?([^/?#]*)([^?#]*)/i);
+      if (!m) return '[url]';
+      const host = m[2].toLowerCase().split(':')[0];
+      if (/(^|\.)(notion\.(so|site|com)|drive\.google\.com|docs\.google\.com|googleusercontent\.com|googleapis\.com)$/.test(host)) {
+        return `${m[1]}${m[2]}/[redacted]`;
+      }
+      return `${m[1]}${m[2]}${m[3]}${url.length > m[0].length ? '?[redacted]' : ''}`;
+    })
+    .replace(/\b(bearer|basic)([ \t]+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1$2[redacted]')
+    .replace(
+      /\b(api[_-]?key|x-api-key|access_token|refresh_token|id_token|client_secret|x-plaud-token|authorization|password|passwd|secret|token)(["']?\s*[:=]\s*["']?)[^\s"',;&)}\]]+/gi,
+      '$1$2[redacted]',
+    )
+    .replace(/(^|[^A-Za-z0-9_-])(github_pat_|sk-proj-|sk-ant-|secret_|xox[bp]-|ntn_|gh[pousr]_|sk-|hf_|pk-)[A-Za-z0-9_-]{16,}/g, '$1$2[redacted]')
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, '[email]')
+    .replace(/\b[0-9a-fA-F]{32,}\b/g, '[redacted]')
+    .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, (t) =>
+      /[A-Z]/.test(t) && /[a-z]/.test(t) && /[0-9]/.test(t) && (!t.includes('/') || t.split('/').some((s) => s.length >= 24))
+        ? '[redacted]'
+        : t,
+    );
+}
+
+/** First line of an error, scrubbed and cut to 120 characters. */
+function _bridgeShortError(text) {
+  const first = String(text || '').split(/\r?\n/).find((l) => l.trim()) || '';
+  const line = _bridgeScrubReportText(first.trim());
+  return line.length > _BRIDGE_REPORT_SHORT_CHARS ? `${line.slice(0, _BRIDGE_REPORT_SHORT_CHARS - 1)}…` : line;
+}
+
 async function apiCall(method, endpoint, body = null) {
-  if (!_apiUrl || !_bridgeApiToken) await _apiInfoReady;
+  // Until Rust reports 'ready', the cached URL may point at a port the
+  // backend hasn't bound (or has since moved off): re-read it first.
+  if (!_apiUrl || !_bridgeApiToken || _bridgeApiStatus !== 'ready') {
+    try {
+      await _bridgeRefreshApiInfo();
+    } catch {
+      await _apiInfoReady;
+    }
+  }
   const opts = {
     method,
     headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
@@ -103,13 +177,12 @@ async function apiCall(method, endpoint, body = null) {
   } catch (err) {
     // Connection failed — re-resolve the API URL in case the port changed (server restart)
     try {
-      const info = await invoke('get_api_info');
-      if (info.token) {
-        _bridgeApiToken = info.token;
+      const previousUrl = _apiUrl;
+      const info = await _bridgeRefreshApiInfo();
+      if (info && info.token) {
         opts.headers = _bridgeHeaders({ 'Content-Type': 'application/json' });
       }
-      if (info.url && info.url !== _apiUrl) {
-        _apiUrl = info.url;
+      if (info && info.url && info.url !== previousUrl) {
         // Retry once with the new URL
         res = await _fetchWithTimeout(`${_apiUrl}${endpoint}`, opts, endpoint);
       } else {
@@ -118,7 +191,7 @@ async function apiCall(method, endpoint, body = null) {
     } catch {
       if (REPORT_ENDPOINTS.has(endpoint)) {
         invoke('report_error', {
-          message: `API fetch failed: ${endpoint} — ${err.message}`,
+          message: `API fetch failed: ${endpoint} — ${_bridgeShortError(err && err.message)}`,
           stack: '',
           context: `api:${endpoint}`,
         }).catch(() => {});
@@ -144,12 +217,21 @@ async function apiCall(method, endpoint, body = null) {
   const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok) && !isTransient) {
     const snTag = data.device_sn ? ` [SN: ${data.device_sn}]` : '';
-    const reportMsg = data.raw_error || data.error || `HTTP ${res.status}`;
-    invoke('report_error', {
-      message: `API error: ${endpoint}${snTag} — ${reportMsg}`,
-      stack: data.traceback || '',
-      context: `api:${endpoint}`,
-    }).catch(() => {});
+    let message;
+    let stack;
+    if (_bridgeIsPrivateEndpoint(endpoint)) {
+      // Never raw_error / traceback here: they can quote transcript or page
+      // text. Send the exception class if raw_error starts with one, else
+      // the first line of the error.
+      const cls = (String(data.raw_error || '').match(/^\s*([A-Za-z_][\w.]*(?:Error|Exception|Timeout))\b/) || [])[1];
+      const short = cls ? _bridgeShortError(cls) : _bridgeShortError(data.error || data.raw_error);
+      message = `API error: ${endpoint} — HTTP ${res.status}${short ? `: ${short}` : ''}`;
+      stack = '';
+    } else {
+      message = `API error: ${endpoint}${snTag} — ${data.raw_error || data.error || `HTTP ${res.status}`}`;
+      stack = data.traceback || '';
+    }
+    invoke('report_error', { message, stack, context: `api:${endpoint}` }).catch(() => {});
   }
   return data;
 }
@@ -212,6 +294,7 @@ window.plaud = {
   abortSync: () => apiCall('POST', '/device/abort-sync'),
   wifiSync: () => apiCall('POST', '/device/wifi-sync'),
   wifiSyncStatus: () => apiCall('GET', '/device/wifi-sync-status'),
+  ackWifiRestoreNotice: () => apiCall('POST', '/device/wifi-restore-notice/ack'),
 
   // Transcription
   transcribe: (path, model, diarize, language) =>

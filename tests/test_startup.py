@@ -42,19 +42,25 @@ class TestDynamicPort:
 
 
 class TestPythonValidation:
-    """Verify Python minimum version enforcement (now in Rust)."""
+    """Verify the Python version/arch the runtime accepts (now in Rust)."""
 
-    def test_min_python_version_defined(self):
-        """python.rs must define MIN_PYTHON_VERSION."""
+    def test_required_python_is_312_only(self):
+        """core.txt is cp312 wheels with hashes, so python.rs accepts CPython
+        3.12 (any patch) and nothing else, Homebrew fallback included."""
         src = RUST_PYTHON.read_text()
-        assert "MIN_PYTHON_VERSION" in src
+        assert "const REQUIRED_PYTHON: (u32, u32) = (3, 12);" in src
+        assert "MIN_PYTHON_VERSION" not in src
+        assert "Plaud V2 needs Python 3.12; couldn't download it" in src
 
     def test_standalone_python_download_url(self):
-        """python.rs must have python-build-standalone download for both architectures."""
+        """python.rs downloads python-build-standalone for Apple Silicon only;
+        other architectures get UNSUPPORTED_MAC (core.txt has no x86_64 wheels)."""
         src = RUST_PYTHON.read_text()
-        assert "aarch64" in src
-        assert "x86_64" in src
+        assert 'const SUPPORTED_ARCH: &str = "aarch64";' in src
+        assert "STANDALONE_SHA256_X86_64" not in src
         assert "astral-sh/python-build-standalone" in src
+        assert "UNSUPPORTED_MAC" in src
+        assert "Intel Macs aren't supported" in src
 
 
 class TestErrorCodes:
@@ -217,5 +223,6 @@ class TestWifiRecovery:
         assert "_clean_partial_files" not in top_level_calls
         main = next(n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test))
         main_src = ast.unparse(main)
-        assert "_recover_wifi()" in main_src
+        assert "_start_wifi_recovery()" in main_src  # background thread, after bind
+        assert "_start_wifi_recovery" not in top_level_calls
         assert "_clean_partial_files()" in main_src

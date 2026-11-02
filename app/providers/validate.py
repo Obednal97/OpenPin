@@ -2,7 +2,28 @@
 
 import requests as http_requests
 
-from app.providers._models import CLAUDE_VALIDATE
+try:  # Official Anthropic SDK (also used for summaries).
+    import anthropic
+except ImportError:  # pragma: no cover
+    anthropic = None
+
+
+def _validate_anthropic(key):
+    """Check an Anthropic key with GET /v1/models — free, no tokens used."""
+    if anthropic is None:
+        return False, "The Anthropic SDK (Python package 'anthropic') isn't installed"
+    client = anthropic.Anthropic(api_key=key, timeout=10.0, max_retries=0)
+    try:
+        client.models.list(limit=1)
+        return True, None
+    except anthropic.AuthenticationError:
+        return False, "Invalid API key"
+    except anthropic.PermissionDeniedError:
+        return False, "Key lacks permissions"
+    except anthropic.APIStatusError as e:
+        return False, f"HTTP {e.status_code}"
+    except anthropic.APIConnectionError:
+        return False, "Connection failed — check your internet"
 
 
 def validate_key(provider, key):
@@ -25,20 +46,7 @@ def validate_key(provider, key):
                 return False, f"HTTP {r.status_code}"
 
         elif provider == "anthropic":
-            r = http_requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": CLAUDE_VALIDATE, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
-                timeout=10,
-            )
-            if r.status_code == 200:
-                return True, None
-            elif r.status_code == 401:
-                return False, "Invalid API key"
-            elif r.status_code == 403:
-                return False, "Key lacks permissions"
-            else:
-                return False, f"HTTP {r.status_code}"
+            return _validate_anthropic(key)
 
         elif provider == "groq":
             r = http_requests.get(
