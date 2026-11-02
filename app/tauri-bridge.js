@@ -15,23 +15,37 @@ const { listen } = window.__TAURI__.event;
 // --- BLE disconnect on page reload (Cmd+R) to prevent stale connections ---
 window.addEventListener('beforeunload', () => {
   if (_apiUrl) {
-    // Use sendBeacon (reliable in beforeunload, not deprecated like sync XHR)
+    // keepalive fetch (not sendBeacon): beacons can't carry the X-Plaud-Token
+    // header the backend requires, so they'd be rejected with 401.
     const url = `${_apiUrl}/device/disconnect`;
-    const sent = navigator.sendBeacon(url, new Blob(['{}'], { type: 'application/json' }));
-    if (!sent) {
-      // Fallback: fire-and-forget fetch (may not complete before unload)
-      fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true }).catch(() => {});
-    }
+    fetch(url, {
+      method: 'POST',
+      headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
+      body: '{}',
+      keepalive: true,
+    }).catch(() => {});
   }
 });
 
-// --- Dynamic API URL (resolved from Rust backend) ---
+// --- Dynamic API URL + per-launch API token (resolved from Rust backend) ---
+// The Python backend rejects any request without the token Rust generated at
+// launch (header X-Plaud-Token; GET /audio also accepts ?token=). It is the
+// same for the whole app session, including backend crash restarts.
 
+const _BRIDGE_TOKEN_HEADER = 'X-Plaud-Token';
 let _apiUrl = null;
+let _bridgeApiToken = '';
 let _apiInfoReady = invoke('get_api_info').then((info) => {
   _apiUrl = info.url;
+  _bridgeApiToken = info.token || '';
   return info;
 });
+
+function _bridgeHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  if (_bridgeApiToken) headers[_BRIDGE_TOKEN_HEADER] = _bridgeApiToken;
+  return headers;
+}
 
 // --- HTTP proxy (same logic as preload.js apiCall) ---
 
@@ -65,10 +79,10 @@ async function _fetchWithTimeout(url, opts, endpoint) {
 }
 
 async function apiCall(method, endpoint, body = null) {
-  if (!_apiUrl) await _apiInfoReady;
+  if (!_apiUrl || !_bridgeApiToken) await _apiInfoReady;
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
   };
   if (body) {
     opts.body = JSON.stringify(body);
@@ -80,6 +94,10 @@ async function apiCall(method, endpoint, body = null) {
     // Connection failed — re-resolve the API URL in case the port changed (server restart)
     try {
       const info = await invoke('get_api_info');
+      if (info.token) {
+        _bridgeApiToken = info.token;
+        opts.headers = _bridgeHeaders({ 'Content-Type': 'application/json' });
+      }
       if (info.url && info.url !== _apiUrl) {
         _apiUrl = info.url;
         // Retry once with the new URL
@@ -220,9 +238,12 @@ window.plaud = {
   cloudBindDevice: (sn, name, model) => apiCall('POST', '/cloud/bind-device', { sn, name, model }),
   cloudSnSign: (sn) => apiCall('POST', '/cloud/sn-sign', { sn }),
 
-  // Audio URL builder — request M4A format since WebKit can't play OGG
+  // Audio URL builder — request M4A format since WebKit can't play OGG.
+  // <audio src> can't send headers, so the API token rides in the query.
+  // The URL always has a query string already: append extra params with '&'.
   audioUrl: (filename) =>
-    `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}?format=m4a`,
+    `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}` +
+    `?format=m4a&token=${encodeURIComponent(_bridgeApiToken)}`,
 
   // Health check
   health: () => apiCall('GET', '/health'),

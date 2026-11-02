@@ -902,24 +902,24 @@ class TestSidecarManagement:
 
 
 class TestCORS:
-    """Every response must have permissive CORS headers."""
+    """Every response to the Tauri webview origin must carry CORS headers for it."""
 
     ENDPOINTS = ["/health", "/settings", "/recordings", "/transcripts"]
 
     def test_cors_on_get_endpoints(self, flask_client):
         for ep in self.ENDPOINTS:
-            r = flask_client.get(ep)
+            r = flask_client.get(ep, headers={"Origin": "tauri://localhost"})
             origin = r.headers.get("Access-Control-Allow-Origin", "")
-            assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin, (
-                f"Missing CORS header on {ep}: got '{origin}'"
-            )
+            assert origin == "tauri://localhost", f"Missing CORS header on {ep}: got '{origin}'"
 
     def test_cors_on_post_endpoints(self, flask_client):
         r = flask_client.post(
-            "/settings", json={"language": "en"}, content_type="application/json"
+            "/settings",
+            json={"language": "en"},
+            content_type="application/json",
+            headers={"Origin": "tauri://localhost"},
         )
-        origin = r.headers.get("Access-Control-Allow-Origin", "")
-        assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin
+        assert r.headers.get("Access-Control-Allow-Origin") == "tauri://localhost"
 
 
 # ---------------------------------------------------------------------------

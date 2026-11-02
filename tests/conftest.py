@@ -10,6 +10,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Token the flask_client fixture sets as PLAUD_API_TOKEN and sends by default.
+TEST_API_TOKEN = "test-token-0123456789abcdef"
+
 
 @pytest.fixture
 def tmp_config(tmp_path):
@@ -54,11 +57,15 @@ def flask_client(tmp_path):
             },
         ),
         patch("app.state.notion.load"),
+        # Enforce the per-launch API token in tests, exactly as in production;
+        # the client sends it by default (tests can override/omit per request).
+        patch.dict("os.environ", {"PLAUD_API_TOKEN": TEST_API_TOKEN}),
     ):
         from app.api_server import app
 
         app.config["TESTING"] = True
         with app.test_client() as client:
+            client.environ_base["HTTP_X_PLAUD_TOKEN"] = TEST_API_TOKEN
             yield client
 
 
