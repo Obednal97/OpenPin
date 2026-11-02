@@ -428,6 +428,10 @@ async function dismissSetup() {
     await window.plaud.saveSettings({ setup_dismissed: true });
   } catch {}
   _closeSetup();
+  // init() returned early to show setup, so background polling (reconnect,
+  // auto-sync) only starts here — same as completeSetup().
+  await updateDeviceStatus();
+  _startBgPoll();
 }
 
 async function completeSetup() {
@@ -439,14 +443,17 @@ async function completeSetup() {
 
   // Auto-sync after first pairing — check for recordings on device
   try {
+    if (app.syncing) return;
     const check = await window.plaud.checkNew();
+    if (isDeviceBusyResponse(check) || app.syncing) return; // already syncing
     if (check.new_files > 0) {
       toast(`${check.new_files} recording(s) found, syncing...`, 'info');
       showProgress('Syncing recordings...', 20);
-      app.syncing = true;
+      const syncGen = _claimSync('ble');
       try {
         const result = await window.plaud.sync();
-        if (!result.error) {
+        if (!result.error && !isDeviceBusyResponse(result)) {
+          toastPartialSync(result);
           const newFiles = (result.files || []).filter((f) => f.status === 'new');
           if (newFiles.length > 0) {
             toast(`Synced ${newFiles.length} recording(s)`, 'success');
@@ -481,9 +488,10 @@ async function completeSetup() {
           await loadRecordings();
         }
       } finally {
-        app.syncing = false;
-        hideProgress();
-        await updateDeviceStatus();
+        if (_releaseSync(syncGen)) {
+          hideProgress();
+          await updateDeviceStatus();
+        }
       }
     }
   } catch {}
