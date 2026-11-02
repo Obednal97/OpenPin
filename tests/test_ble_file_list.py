@@ -70,13 +70,31 @@ def test_missing_notification_leaves_the_list_incomplete():
     assert not lst.complete and sids(lst) == [1]
 
 
-@pytest.mark.parametrize("junk", [b"\x00", b"\x01\x02\x03", bytes(7)])
-def test_odd_length_notification_is_dropped_not_misread(junk, caplog):
+@pytest.mark.parametrize("junk", [b"\x00", b"\x01\x02\x03", bytes(9)])
+def test_trailing_bytes_are_ignored_and_whole_entries_listed(junk, caplog):
+    """Like the SDK and v2.4.0: parse every whole 10-byte entry, ignore the rest."""
     lst = FileListAssembler()
     with caplog.at_level("WARNING"):
-        assert not lst.add(page(2, 0, [entry(1, 900), entry(2, 900)], extra=junk))
-    assert lst.records == [] and not lst.complete
-    assert "not a multiple of the entry width" in caplog.text
+        assert lst.add(page(3, 0, [entry(1, 900), entry(2, 900), entry(3, 900)], extra=junk))
+    assert lst.complete and sids(lst) == [1, 2, 3]
+    assert lst.width == 10
+    assert f"ignoring the last {len(junk)}" in caplog.text
+    assert caplog.text.count("ignoring the last") == 1
+
+
+def test_trailing_bytes_do_not_break_the_next_notification():
+    lst = FileListAssembler()
+    lst.add(page(3, 0, [entry(1, 900), entry(2, 900)], extra=bytes(3)))
+    lst.add(page(3, 2, [entry(3, 900)]))
+    assert lst.complete and sids(lst) == [1, 2, 3]
+
+
+def test_notification_without_one_whole_entry_is_dropped(caplog):
+    lst = FileListAssembler()
+    with caplog.at_level("WARNING"):
+        assert not lst.add(page(2, 0, [], extra=bytes(9)))
+    assert lst.records == [] and lst.count == 0 and not lst.complete
+    assert "less than one 10-byte entry" in caplog.text
 
 
 def test_short_packet_is_dropped():
@@ -140,8 +158,13 @@ def test_list_device_files_ignores_a_bad_notification(caplog, monkeypatch):
         return await real_sleep(min(delay, 0.001), *a, **k)
 
     monkeypatch.setattr(dev.asyncio, "sleep", fast_sleep)  # the 3 s wait for the missing page
-    pages = [page(2, 0, [entry(1, 900)]), page(2, 1, [entry(2, 900)], extra=b"\x00")]
+    pages = [page(2, 0, [entry(1, 900)]), page(2, 1, [], extra=b"\x00")]  # no whole entry
     with caplog.at_level("WARNING"):
         files = run_list(pages)
     assert [f["session_id"] for f in files] == [1]
     assert "file list incomplete: 1 of 2" in caplog.text
+
+
+def test_list_device_files_keeps_whole_entries_before_trailing_bytes():
+    pages = [page(3, 0, [entry(1, 900), entry(2, 900)], extra=b"\x00"), page(3, 2, [entry(3, 900)])]
+    assert [f["session_id"] for f in run_list(pages)] == [1, 2, 3]

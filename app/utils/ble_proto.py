@@ -239,9 +239,9 @@ class FileListAssembler:
 
     Entry width: 10 bytes (confirmed for the NotePin S). If a notification's
     entry area isn't a multiple of 10 but is a multiple of the width the port
-    version suggests, that width is used. Otherwise the notification is
-    dropped and logged: misreading entries would produce bogus session ids,
-    while a missing entry only means that file waits for the next sync.
+    version suggests, that width is used. Otherwise, like the SDK and v2.4.0,
+    the whole entries are parsed and the trailing bytes ignored (with a
+    warning); a notification without even one whole entry is dropped.
     """
 
     def __init__(self, port_version=None):
@@ -279,10 +279,19 @@ class FileListAssembler:
             self._problem(f"total changed from {self.total} to {total}", pkt)
             return False
         if body:
-            width = self.width or next((w for w in self.widths if len(body) % w == 0), None)
-            if width is None or len(body) % width:
-                self._problem(f"{len(body)} entry bytes is not a multiple of the entry width", pkt)
+            # An exact fit decides the width; otherwise the confirmed 10 bytes.
+            width = self.width or next((w for w in self.widths if len(body) % w == 0), self.widths[0])
+            whole = len(body) // width * width
+            if not whole:
+                self._problem(f"{len(body)} entry bytes is less than one {width}-byte entry", pkt)
                 return False
+            if whole < len(body):
+                # Like the SDK (and v2.4.0): parse the whole entries, ignore the rest.
+                logging.warning(
+                    f"[BLE] file list: {len(body)} entry bytes is not a multiple of {width}; "
+                    f"ignoring the last {len(body) - whole} ({bytes(pkt[:64]).hex()})"
+                )
+                body = body[:whole]
             if self.width is None:
                 if width != 10:
                     logging.warning(f"[BLE] file list: using {width}-byte entries (not the usual 10)")
