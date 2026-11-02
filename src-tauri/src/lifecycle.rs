@@ -28,10 +28,6 @@ use crate::{commands, python};
 
 /// Event python.rs emits with human-readable progress ("Looking for Python...").
 const STARTUP_STATUS_EVENT: &str = "startup-status";
-/// Startup error codes that don't stop the server from starting when
-/// start_python_server still returns Ok (older python.rs set DEPS_FAILED and
-/// carried on). Whenever start_python_server returns Err, any code is fatal.
-const NON_FATAL_ERROR_CODES: &[&str] = &["DEPS_FAILED"];
 
 /// True while a `start_python_server` call is in progress.
 static STARTUP_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -90,11 +86,13 @@ fn decide_phase(
     }
     match outcome {
         Some(Err(_)) => "error",
-        // Server spawned; python.rs is waiting for /health. A fatal error set
-        // after the spawn (SERVER_TIMEOUT, SERVER_CRASH...) ends the wait.
+        // Server spawned; python.rs is waiting for /health. An error set after
+        // the spawn (SERVER_TIMEOUT, SERVER_CRASH...) shows the failure screen.
+        // SERVER_TIMEOUT isn't final: python.rs keeps polling, and a late
+        // answer sets SERVER_READY and clears the error ("ready" above).
         Some(Ok(())) => match error_code {
-            Some(code) if !NON_FATAL_ERROR_CODES.contains(&code) => "error",
-            _ => "starting",
+            Some(_) => "error",
+            None => "starting",
         },
         // The startup thread hasn't been spawned yet.
         None => "starting",
@@ -186,6 +184,14 @@ pub fn spawn_backend_startup(app: &AppHandle, restart: bool) -> bool {
         .spawn(move || {
             if restart {
                 if backend_process_running() {
+                    // It may have come up since the page last looked (a slow
+                    // first start past SERVER_TIMEOUT): never kill a healthy one.
+                    if python::confirm_ready_now() {
+                        log::info!("[Startup] Retry: backend is already healthy, not restarting");
+                        startup_state().outcome = Some(Ok(()));
+                        STARTUP_RUNNING.store(false, Ordering::Release);
+                        return;
+                    }
                     set_startup_message("Stopping the previous backend…");
                     python::stop_python_server();
                 }
@@ -215,8 +221,9 @@ pub fn spawn_backend_startup(app: &AppHandle, restart: bool) -> bool {
             startup_state().outcome = Some(outcome);
             STARTUP_RUNNING.store(false, Ordering::Release);
 
-            // Quit was requested while we were starting: shutdown_backend may
-            // have found no process to stop, so stop the one we just spawned.
+            // Belt and braces: python.rs stops a backend spawned after quit
+            // began (spawn_and_register), but if one is still registered here
+            // while quitting, stop it rather than orphan it.
             if SHUTDOWN_STARTED.load(Ordering::Acquire) && backend_process_running() {
                 python::stop_python_server();
             }
@@ -245,10 +252,11 @@ pub fn get_startup_status() -> StartupStatus {
 }
 
 /// Retry after a failed startup: stop any half-started backend and start again.
-/// No-op when the backend is ready or a start is already running.
+/// No-op when the backend is ready (checked against /health right now, since a
+/// slow start can come up after SERVER_TIMEOUT) or a start is already running.
 #[tauri::command]
 pub fn retry_startup(app: AppHandle) -> StartupStatus {
-    if !python::SERVER_READY.load(Ordering::Acquire) {
+    if !python::confirm_ready_now() {
         spawn_backend_startup(&app, true);
     }
     current_status()
@@ -278,6 +286,10 @@ pub fn shutdown_backend() {
         }
         return;
     }
+    // Block new spawns and let one in flight register, so a backend spawned
+    // mid-startup is found here (or stopped by the spawner) instead of being
+    // orphaned when the app exits.
+    python::begin_shutdown();
     // Nothing to stop if the backend never started or was already stopped
     // (install_update stops it itself before calling app.exit).
     if backend_process_running() {
@@ -381,13 +393,21 @@ mod tests {
     #[test]
     fn spawned_and_waiting_is_starting() {
         assert_eq!(decide_phase(false, false, Some(&Ok(())), None), "starting");
-        // pip failed but the server may still come up
-        assert_eq!(decide_phase(false, false, Some(&Ok(())), Some("DEPS_FAILED")), "starting");
     }
 
     #[test]
-    fn health_timeout_after_spawn_is_error() {
+    fn error_after_spawn_is_error() {
         assert_eq!(decide_phase(false, false, Some(&Ok(())), Some("SERVER_TIMEOUT")), "error");
+        assert_eq!(decide_phase(false, false, Some(&Ok(())), Some("SERVER_CRASH")), "error");
+    }
+
+    #[test]
+    fn late_ready_after_timeout_is_ready() {
+        // python.rs keeps polling after SERVER_TIMEOUT; once /health answers
+        // SERVER_READY is set (and the error cleared), and ready wins even if
+        // the page reads the status between the two.
+        assert_eq!(decide_phase(true, false, Some(&Ok(())), Some("SERVER_TIMEOUT")), "ready");
+        assert_eq!(decide_phase(true, false, Some(&Ok(())), None), "ready");
     }
 
     #[test]
