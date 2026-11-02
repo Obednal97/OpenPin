@@ -11,8 +11,6 @@ error and the cascade moves on.
 
 import json
 import logging
-import subprocess
-import sys
 import textwrap
 import threading
 
@@ -412,10 +410,11 @@ def _prepare_local_model():
             import transformers  # noqa: F401
         except ImportError:
             logging.info("Installing transformers for the local summariser...")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--break-system-packages", "--user", "-q",
-                 "transformers", "sentencepiece"]
-            )
+            from app.utils.system import ensure_installed
+
+            # Pinned extra (transformers + sentencepiece + torch), installed into the
+            # app's managed venv; raises with pip's error if it fails.
+            ensure_installed("transformers", required=True, extra="local-summary")
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
         logging.info("Downloading local summary model %s (~1.2 GB)...", LOCAL_SUMMARIZE)
