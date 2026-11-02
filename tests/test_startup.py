@@ -162,3 +162,60 @@ class TestFlaskErrorResponses:
         """transcribe.py error responses must include traceback."""
         src = (ROOT / "app" / "routes" / "transcribe.py").read_text()
         assert "_error_json" in src
+
+
+class TestWifiRecovery:
+    """_recover_wifi uses the detected Wi-Fi interface and never runs on import."""
+
+    def _run(self, ssid_line, iface="en1"):
+        from unittest.mock import MagicMock, patch
+
+        from app import api_server
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return MagicMock(stdout=ssid_line, returncode=0)
+
+        with (
+            patch("app.utils.wifi_sync_worker.get_wifi_interface", return_value=iface),
+            patch("subprocess.run", side_effect=fake_run),
+            patch("time.sleep"),
+        ):
+            api_server._recover_wifi()
+        return calls
+
+    def test_power_cycles_detected_interface(self):
+        calls = self._run("Current Wi-Fi Network: PLAUD_NOTEPIN_1234\n", iface="en1")
+        assert calls == [
+            ["networksetup", "-getairportnetwork", "en1"],
+            ["networksetup", "-setairportpower", "en1", "off"],
+            ["networksetup", "-setairportpower", "en1", "on"],
+        ]
+
+    def test_leaves_normal_network_alone(self):
+        calls = self._run("Current Wi-Fi Network: Home\n", iface="en0")
+        assert calls == [["networksetup", "-getairportnetwork", "en0"]]
+
+    def test_no_hardcoded_en0(self):
+        src = (ROOT / "app" / "api_server.py").read_text()
+        assert '"en0"' not in src
+
+    def test_startup_helpers_only_run_from_main(self):
+        """Importing api_server (tests, REPL) must not run networksetup or delete
+        partial files: both helpers are called only under __main__."""
+        import ast
+
+        tree = ast.parse((ROOT / "app" / "api_server.py").read_text())
+        top_level_calls = [
+            node.value.func.id
+            for node in tree.body
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+        ]
+        assert "_recover_wifi" not in top_level_calls
+        assert "_clean_partial_files" not in top_level_calls
+        main = next(n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test))
+        main_src = ast.unparse(main)
+        assert "_recover_wifi()" in main_src
+        assert "_clean_partial_files()" in main_src

@@ -135,6 +135,52 @@ def test_query_token_not_accepted_outside_audio(flask_client):
     assert r.status_code == 401
 
 
+def test_query_token_accepted_for_device_disconnect_beacon(flask_client):
+    """Cmd+R sends navigator.sendBeacon(.../device/disconnect?token=…, text/plain):
+    no custom header, so no CORS preflight during unload."""
+    with patch("app.routes.device.dev.run_async", return_value={"disconnected": True}) as run:
+        r = flask_client.post(
+            f"/device/disconnect?token={TEST_API_TOKEN}",
+            data="{}",
+            content_type="text/plain",
+            headers={"X-Plaud-Token": "", "Origin": "tauri://localhost"},
+        )
+    assert r.status_code == 200
+    run.assert_called_once()
+    # Run's argument is the disconnect coroutine; close it to avoid a warning
+    run.call_args[0][0].close()
+
+
+def test_query_token_device_disconnect_empty_body(flask_client):
+    with patch("app.routes.device.dev.run_async", return_value={"disconnected": True}) as run:
+        r = flask_client.post(f"/device/disconnect?token={TEST_API_TOKEN}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 200
+    run.call_args[0][0].close()
+
+
+def test_wrong_query_token_rejected_for_device_disconnect(flask_client):
+    with patch("app.routes.device.dev.run_async") as run:
+        r = flask_client.post("/device/disconnect?token=wrong", data="{}", headers={"X-Plaud-Token": ""})
+        r2 = flask_client.post("/device/disconnect", data="{}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+    assert r2.status_code == 401
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/device/connect", "/device/depair", "/recordings/delete", "/settings", "/device/disconnect/x"],
+)
+def test_query_token_rejected_for_other_posts(flask_client, path):
+    r = flask_client.post(f"{path}?token={TEST_API_TOKEN}", json={}, headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+
+
+def test_query_token_rejected_for_get_device_disconnect(flask_client):
+    r = flask_client.get(f"/device/disconnect?token={TEST_API_TOKEN}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+
+
 def test_no_token_configured_skips_token_check(flask_client):
     """Dev mode: without PLAUD_API_TOKEN the token check is off, Host/CORS still apply."""
     with patch.dict(os.environ, {}, clear=False):
@@ -180,6 +226,27 @@ def test_audio_valid_recording_served(flask_client, audio_env):
     assert r.data == audio_env["ogg"]
 
 
+@pytest.mark.parametrize(
+    "stem",
+    [
+        # Ids older builds made from names like "Plan.", "Wait...", "a\\b"
+        "cloud_2026-01-01_1200_Plan.",
+        "cloud_2026-01-01_1200_Wait...",
+        "cloud_2026-01-01_1200_a\\b",
+        "cloud_2026-01-01_1200_Q&A_(draft)",
+        "x..y",
+    ],
+)
+def test_audio_odd_cloud_names_served(flask_client, audio_env, stem):
+    from urllib.parse import quote
+
+    (audio_env["rec_dir"] / f"{stem}.ogg").write_bytes(audio_env["ogg"])
+    # Same encoding the bridge uses (encodeURIComponent)
+    r = flask_client.get("/audio/" + quote(f"{stem}.ogg", safe="()!*'"), headers={"Accept": "*/*"})
+    assert r.status_code == 200, stem
+    assert r.data == audio_env["ogg"]
+
+
 def test_audio_cloud_name_with_spaces_served(flask_client, audio_env):
     r = flask_client.get("/audio/cloud_2026-01-01_1200_Team%20sync%20(v2).ogg", headers={"Accept": "*/*"})
     assert r.status_code == 200
@@ -192,6 +259,9 @@ def test_audio_cloud_name_with_spaces_served(flask_client, audio_env):
         "/audio/..%2Foutside%2Fsecret.ogg",
         "/audio/%2E%2E%2Foutside%2Fsecret.ogg",
         "/audio/..%5Coutside%5Csecret.ogg",
+        "/audio/x%5C..%5C..%5Coutside%5Csecret.ogg",  # backslash is not a separator on macOS
+        "/audio/..",
+        "/audio/..ogg",
         "/audio/link.ogg",  # symlink escaping the recordings dir
         "/audio/.hidden.ogg",
         "/audio/20260101_120000.txt",
@@ -222,6 +292,9 @@ def test_audio_view_refuses_absolute_filename(flask_client, audio_env):
     with app.test_request_context("/audio/x", headers={"Accept": "*/*"}), pytest.raises(NotFound):
         core.serve_audio(str(audio_env["secret"]))
     assert core._validate_audio_name("/etc/passwd.ogg") is None
+    assert core._validate_audio_name("..") is None
+    assert core._validate_audio_name("a\x00.ogg") is None
+    assert core._validate_audio_name("Wait....ogg") == "Wait....ogg"
     assert core._validate_audio_name("20260101_120000.ogg") == "20260101_120000.ogg"
 
 
