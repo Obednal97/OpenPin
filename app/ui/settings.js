@@ -388,30 +388,128 @@ function renderWebhooks() {
 
 // ---- Notion ----
 
+let _notionQueueFetchedAt = 0;
+
 async function loadNotionStatus() {
   try {
     app.notionState = await window.plaud.notionStatus();
   } catch {
     app.notionState = { connected: false };
   }
+  try {
+    app.notionQueue = await window.plaud.notionQueueStatus();
+  } catch {
+    app.notionQueue = null;
+  }
 }
 
 function renderNotion() {
+  const state = app.notionState || {};
+  const queueSnap = app.notionQueue || {};
   const disconnected = $('#notion-disconnected');
   const connected = $('#notion-connected');
-  if (app.notionState.connected) {
+  // A login Notion no longer accepts: keep showing the database, offer Reconnect.
+  const reconnect = !!state.needs_reconnect;
+  if (state.connected || reconnect) {
     disconnected.classList.add('hidden');
     connected.classList.remove('hidden');
-    $('#notion-db-name').textContent = app.notionState.database_name || 'No database selected';
+    $('#notion-db-name').textContent = state.database_name || 'No database selected';
   } else {
     disconnected.classList.remove('hidden');
     connected.classList.add('hidden');
+  }
+  renderNotionBadge(state, reconnect);
+  renderNotionQueueNotice(queueSnap, reconnect);
+  // Settings is opened long after startup: refresh the queue snapshot so a
+  // push that failed meanwhile shows up (throttled; re-renders only the notice).
+  if (state.connected && Date.now() - _notionQueueFetchedAt > 10000) {
+    _notionQueueFetchedAt = Date.now();
+    window.plaud
+      .notionQueueStatus()
+      .then((snap) => {
+        app.notionQueue = snap;
+        renderNotionQueueNotice(snap, !!(app.notionState || {}).needs_reconnect);
+      })
+      .catch(() => {});
   }
   // Set auto-push toggle state
   const autoPushToggle = $('#notion-auto-push-toggle');
   if (autoPushToggle) {
     autoPushToggle.checked = app.settings.notion_auto_push || false;
   }
+}
+
+function renderNotionBadge(state, reconnect) {
+  const badge = $('#notion-status-badge');
+  if (!badge) return;
+  badge.onclick = null;
+  badge.removeAttribute('role');
+  badge.removeAttribute('tabindex');
+  badge.style.background = '';
+  badge.style.cursor = '';
+  if (reconnect) {
+    badge.className = 'ai-key-badge';
+    badge.textContent = 'Reconnect';
+    badge.title = 'Notion no longer accepts this login. Click to sign in again.';
+    badge.style.background = 'var(--orange)';
+    badge.style.cursor = 'pointer';
+    badge.setAttribute('role', 'button');
+    badge.setAttribute('tabindex', '0');
+    badge.onclick = () => $('#notion-connect-btn').click();
+  } else if (!state.database_id) {
+    badge.className = 'ai-key-badge none';
+    badge.textContent = 'Choose a database';
+    badge.title = 'Search for a database below or paste its URL';
+  } else {
+    badge.className = 'ai-key-badge connected';
+    badge.textContent = `Connected · ${state.database_name || 'database'}`;
+    badge.title = badge.textContent;
+  }
+}
+
+// "N Notion pushes failed — Retry" under the database card.
+function renderNotionQueueNotice(queueSnap, reconnect) {
+  let notice = $('#notion-queue-notice');
+  const failed = queueSnap.failed_count || 0;
+  const paused = !!queueSnap.paused && !reconnect;
+  if (!failed && !paused) {
+    if (notice) notice.remove();
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.id = 'notion-queue-notice';
+    notice.className = 'settings-desc mt-2';
+    notice.style.color = 'var(--orange)';
+    const card = $('#notion-db-card');
+    if (!card) return;
+    card.insertAdjacentElement('afterend', notice);
+  }
+  notice.textContent = '';
+  const text = document.createElement('span');
+  if (failed) {
+    text.textContent = `${failed} Notion push${failed === 1 ? '' : 'es'} failed — `;
+    const last = (queueSnap.failed || [])[failed - 1];
+    if (last && last.error) notice.title = last.error;
+  } else {
+    text.textContent = 'Notion pushes are paused — ';
+    notice.title = queueSnap.pause_reason || '';
+  }
+  const retry = document.createElement('button');
+  retry.className = 'btn-small';
+  retry.textContent = 'Retry';
+  retry.addEventListener('click', async () => {
+    retry.disabled = true;
+    try {
+      app.notionQueue = await window.plaud.notionQueueResume();
+      renderNotion();
+      toast('Retrying Notion pushes', 'info');
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+      retry.disabled = false;
+    }
+  });
+  notice.append(text, retry);
 }
 
 // ---- Google Drive ----
