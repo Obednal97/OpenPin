@@ -767,6 +767,8 @@ async function executeWifiSync(claimedGen) {
       );
     }
 
+    if (result.wifi_restore_notice) _maybeShowWifiRestoreNotice(result.wifi_restore_notice);
+
     const newFiles = (result.files || []).filter((f) => f.status === 'new');
     toastPartialSync(result);
 
@@ -1054,7 +1056,24 @@ async function init() {
     } catch {}
   }
 
+  _maybeShowWifiRestoreNotice();
   _startBgPoll();
+}
+
+// Shown once if a crashed/aborted WiFi sync couldn't put back every saved
+// WiFi network (the backend gave up after repeated failed restores).
+async function _maybeShowWifiRestoreNotice(notice) {
+  try {
+    if (!notice) {
+      const s = await window.plaud.wifiSyncStatus();
+      notice = s && s.restore_notice;
+    }
+    if (!notice || !notice.message) return;
+    toastAction(notice.message, 'OK', () => {}, 30000);
+    await window.plaud.ackWifiRestoreNotice();
+  } catch (err) {
+    console.warn('[wifi] restore notice check failed:', err);
+  }
 }
 
 let _bgPollStarted = false;

@@ -450,3 +450,15 @@ def test_status_reports_restore_notice_until_acknowledged(parent, tmp_path):
     assert notice["networks"] == ["Office"]
     assert dev.acknowledge_wifi_restore_notice() is True
     assert dev.get_wifi_sync_status()["restore_notice"] is None
+
+
+def test_restore_notice_ack_route(flask_client, monkeypatch):
+    """The UI acknowledges the one-time 'networks couldn't be restored' notice."""
+    import app.state.device as dev
+
+    calls = []
+    monkeypatch.setattr(dev, "acknowledge_wifi_restore_notice", lambda: calls.append(1) or True)
+    r = flask_client.post("/device/wifi-restore-notice/ack")
+    assert r.status_code == 200
+    assert r.get_json() == {"acknowledged": True}
+    assert calls == [1]
