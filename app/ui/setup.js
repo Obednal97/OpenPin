@@ -251,7 +251,7 @@ function _showDevices(devices) {
         <div class="setup-device-name">${name}</div>
         <div class="setup-device-meta">${sn}</div>
       </div>
-      <div class="setup-device-rssi"><div class="dm-signal" title="${rssi} dBm">${bars}</div></div>
+      <div class="setup-device-rssi"><div class="dm-signal" title="${escapeHtml(rssi)} dBm">${bars}</div></div>
     </div>`;
   }).join('');
 

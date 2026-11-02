@@ -163,10 +163,12 @@ function setLoading(btn, loading) {
   }
 }
 
+// Escapes for BOTH element content and quoted attribute values ("..." or '...').
+// Callers interpolating into attributes must still quote the attribute.
+const _ESCAPE_HTML_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  if (text === null || text === undefined) return '';
+  return String(text).replace(/[&<>"']/g, (c) => _ESCAPE_HTML_MAP[c]);
 }
 
 /**
@@ -265,6 +267,7 @@ function showConfirmDialog(opts) {
     try { cancelBtn.focus(); } catch {}
   });
 }
+
 
 function renderMarkdown(md) {
   // Process line by line for proper list nesting

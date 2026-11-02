@@ -612,7 +612,7 @@ function renderTranscriptSegments(container, t, sessionId) {
     container.innerHTML = t.segments
       .map(
         (seg, i) => `
-      <div class="segment" data-index="${i}" data-start="${seg.start}">
+      <div class="segment" data-index="${i}" data-start="${escapeHtml(seg.start)}">
         <span class="segment-time">${formatTime(seg.start)}</span>
         ${seg.speaker ? `<span class="segment-speaker">${escapeHtml(seg.speaker)}</span>` : ''}
         <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
