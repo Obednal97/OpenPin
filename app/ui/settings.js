@@ -90,39 +90,8 @@ function renderProcessingSections() {
   // Render inline key input for cloud provider
   renderInlineKey('transcription-key-area', transProv);
 
-  // 2. Diarization
-  const diarizeEnabled = s.diarize || false;
-  const diarizeToggle = $('#diarize-toggle');
-  if (diarizeToggle) diarizeToggle.checked = diarizeEnabled;
-  const diarOpts = $('#diarization-options');
-
-  // If transcription is set to Deepgram and the key is connected,
-  // auto-select Deepgram for diarization and hide the provider choice
-  const deepgramHandlesDiarization = transProv === 'deepgram' && s.deepgram_key_set;
-
-  if (diarOpts) diarOpts.classList.toggle('hidden', !diarizeEnabled || deepgramHandlesDiarization);
-
-  // Show a simple note when Deepgram handles it automatically
-  const diarAutoNote = $('#diarization-auto-note');
-  if (diarAutoNote) diarAutoNote.classList.toggle('hidden', !diarizeEnabled || !deepgramHandlesDiarization);
-
-  if (deepgramHandlesDiarization) {
-    // Silently set diarization provider to deepgram
-    s.diarization_provider = 'deepgram';
-    renderInlineKey('diarization-key-area', 'local'); // clear the key area
-  } else if (diarizeEnabled) {
-    const diarProv = s.diarization_provider || 'deepgram';
-    const diarSelect = $('#diarization-provider');
-    if (diarSelect) diarSelect.value = diarProv;
-
-    const diarRec = $('#diarization-rec');
-    if (diarRec) diarRec.classList.toggle('hidden', diarProv !== 'deepgram');
-
-    const localNote = $('#diarization-local-note');
-    if (localNote) localNote.classList.toggle('hidden', diarProv !== 'local');
-
-    renderInlineKey('diarization-key-area', diarProv);
-  }
+  // 2. Speaker identification
+  renderDiarizationSection(transProv);
 
   // 3. Summarization
   const sumProv = s.summarization_provider || 'anthropic';
@@ -139,6 +108,69 @@ function renderProcessingSections() {
 
   // Bind tooltips (info icons with data-tooltip attributes)
   initTooltips();
+}
+
+// Speaker identification follows the transcription provider: Deepgram labels
+// speakers itself; any other provider (or a fallback after Deepgram fails)
+// runs the local model after transcription. There's no separate provider choice.
+function renderDiarizationSection(transProv) {
+  const s = app.settings;
+  const enabled = s.diarize || false;
+  const toggle = $('#diarize-toggle');
+  if (toggle) toggle.checked = enabled;
+
+  const deepgramLabels = transProv === 'deepgram' && s.deepgram_key_set;
+  const note = $('#diarization-mode-note');
+  if (note) {
+    note.textContent = deepgramLabels
+      ? 'Deepgram labels speakers as it transcribes.'
+      : 'Runs on this Mac after transcription, with a built-in speaker model (no account needed). '
+        + 'The first run installs it, which can take a few minutes. If it can’t run, the transcript is saved without speaker labels.';
+    note.classList.toggle('hidden', !enabled);
+  }
+
+  // The token only matters when the local model runs; keep it reachable if one
+  // is saved so it can be removed.
+  const area = $('#hf-token-area');
+  if (area) area.classList.toggle('hidden', !enabled || (deepgramLabels && !s.hf_token_set));
+  const entry = $('#hf-token-entry');
+  const saved = $('#hf-token-saved');
+  if (entry) entry.classList.toggle('hidden', !!s.hf_token_set);
+  if (saved) saved.classList.toggle('hidden', !s.hf_token_set);
+}
+
+function _setHfTokenStatus(text, kind) {
+  const el = $('#hf-token-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = `ai-key-status${kind ? ` ${kind}` : ''}${text ? '' : ' hidden'}`;
+}
+
+let _hfTokenSaving = false; // paste + Enter must not submit twice
+
+async function saveHfTokenFromInput() {
+  const input = $('#hf-token-input');
+  if (!input || _hfTokenSaving) return;
+  const token = input.value.trim();
+  if (!token) return;
+  _hfTokenSaving = true;
+  _setHfTokenStatus('Checking token with Hugging Face...', 'validating');
+  try {
+    const result = await window.plaud.saveSettings({ hf_token: token });
+    if (result && result.error) {
+      _setHfTokenStatus(result.error, 'error');
+      return;
+    }
+    input.value = '';
+    app.settings.hf_token_set = true;
+    _setHfTokenStatus('', '');
+    toast('Hugging Face token saved', 'success');
+    renderDiarizationSection(app.settings.transcription_provider || 'deepgram');
+  } catch (err) {
+    _setHfTokenStatus(`Couldn't save the token: ${err.message}`, 'error');
+  } finally {
+    _hfTokenSaving = false;
+  }
 }
 
 function renderModelSelector() {
@@ -1296,10 +1328,22 @@ function initSettingsEvents() {
     renderProcessingSections();
   });
 
-  $('#diarization-provider').addEventListener('change', async (e) => {
-    app.settings.diarization_provider = e.target.value;
-    await window.plaud.saveSettings({ diarization_provider: e.target.value });
-    renderProcessingSections();
+  // Hugging Face token (optional pyannote fallback). The backend validates it
+  // and keeps it in its own file; settings only ever report hf_token_set.
+  $('#hf-token-save-btn').addEventListener('click', () => saveHfTokenFromInput());
+  $('#hf-token-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveHfTokenFromInput();
+  });
+  $('#hf-token-input').addEventListener('paste', () => setTimeout(() => saveHfTokenFromInput(), 50));
+  $('#hf-token-remove-btn').addEventListener('click', async () => {
+    try {
+      await window.plaud.saveSettings({ remove_hf_token: true });
+      app.settings.hf_token_set = false;
+      toast('Hugging Face token removed', 'info');
+      renderDiarizationSection(app.settings.transcription_provider || 'deepgram');
+    } catch (err) {
+      toast(`Couldn't remove the token: ${err.message}`, 'error');
+    }
   });
 
   $('#summarization-provider').addEventListener('change', async (e) => {
