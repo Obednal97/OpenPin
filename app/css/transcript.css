@@ -561,3 +561,33 @@
   justify-content: flex-end;
   margin-top: var(--sp-2);
 }
+
+/* Recording waiting for "Re-download from device" (ui/transcript.js) */
+.redownload-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--yellow-subtle);
+  color: var(--yellow);
+  font-size: var(--text-sm);
+}
+.redownload-notice span { flex: 1; }
+
+/* Summary older than the transcript (summary_stale) */
+.summary-stale-hint {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--sp-3);
+}
+.summary-stale-action {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.summary-stale-action:hover { text-decoration: underline; }

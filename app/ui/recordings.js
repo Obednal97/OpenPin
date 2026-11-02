@@ -117,6 +117,9 @@ function renderRecordingsList() {
       if (rec.partial) {
         badgeClass = 'badge-partial';
         badgeText = 'Incomplete';
+      } else if (rec.redownload_pending) {
+        badgeClass = 'badge-partial';
+        badgeText = 'Waiting for re-download';
       } else if (processing) {
         badgeClass = 'badge-processing';
         badgeText = processing === 'transcribing' ? 'Transcribing' : 'Summarizing';
@@ -402,13 +405,26 @@ async function showDeleteDialog(ids, count, onDeleted) {
     const res = await window.plaud.deleteRecordings(ids);
     if (res && res.error) {
       toast(`Delete failed: ${res.error}`, 'error');
+      await loadRecordings();
       return false;
     }
     const n = res && typeof res.count === 'number' ? res.count : count;
     const nPlural = n === 1 ? 'recording' : 'recordings';
     const localMsg = res && res.trashed ? `Moved ${n} ${nPlural} to Trash` : `Deleted ${n} ${nPlural}`;
+    const errs = res && Array.isArray(res.errors) ? res.errors : [];
 
-    if (choice === 'both') {
+    if (errs.length > 0) {
+      const first = _describeApiError(errs[0]);
+      const more = errs.length > 1 ? ` (+${errs.length - 1} more)` : '';
+      toast(
+        n > 0
+          ? `${localMsg}; ${errs.length} couldn't be removed: ${first}${more}`
+          : `Delete failed: ${first}${more}`,
+        'error',
+      );
+      // Don't touch Plaud Cloud when the local delete didn't fully succeed
+      if (choice === 'both' && cloudIds.length > 0) toast('Plaud Cloud copies were left untouched', 'info');
+    } else if (choice === 'both') {
       if (cloudIds.length > 0) {
         try {
           const cr = await window.plaud.cloudTrash(cloudIds);
@@ -434,13 +450,21 @@ async function showDeleteDialog(ids, count, onDeleted) {
   }
 }
 
-// Re-download clears the local audio so the next sync fetches it again from
-// the device. Confirm first: if the device no longer has it, it's gone.
+// Errors in API `errors` arrays may be strings or {session_id, error} objects.
+function _describeApiError(e) {
+  if (!e) return 'unknown error';
+  if (typeof e === 'string') return e;
+  const what = e.error || e.message || 'error';
+  return e.session_id ? `${_recordingLabel(e.session_id)}: ${what}` : String(what);
+}
+
+// Re-download sets the local audio aside (backend keeps a backup) so the next
+// sync fetches it again from the device. Confirm first.
 async function confirmRedownload(sessionId) {
   const autoDelete = !!(app.settings && app.settings.auto_delete_after_sync);
   const choice = await showConfirmDialog({
     title: 'Re-download from device?',
-    message: `The local copy of "${_recordingLabel(sessionId)}" will be replaced with the copy on your Plaud device the next time you sync.`,
+    message: `The local copy of "${_recordingLabel(sessionId)}" will be set aside and replaced with the copy on your Plaud device the next time you sync. You can restore the old copy until then.`,
     note: autoDelete
       ? '"Delete recordings from device after sync" is on, so the device may no longer have this recording.'
       : '',
@@ -453,13 +477,44 @@ async function confirmRedownload(sessionId) {
       toast(`Failed: ${res.error}`, 'error');
       return false;
     }
-    toast('Recording cleared — connect device and sync to re-download', 'info');
+    const errs = res && Array.isArray(res.errors) ? res.errors : [];
+    if (errs.length > 0) toast(`Re-download: ${_describeApiError(errs[0])}`, 'error');
+    else toast('Old copy set aside — connect your device and sync to re-download', 'info');
     await loadRecordings();
+    _refreshOpenTranscript(sessionId);
     return true;
   } catch (err) {
     toast(`Failed: ${err.message}`, 'error');
     return false;
   }
+}
+
+// Put back the copy that "Re-download from device" set aside.
+async function restoreRedownload(sessionId) {
+  if (!window.plaud || typeof window.plaud.restoreRedownload !== 'function') {
+    toast('Restore is not available in this version', 'error');
+    return false;
+  }
+  try {
+    const res = await window.plaud.restoreRedownload([sessionId]);
+    if (res && res.error) {
+      toast(`Restore failed: ${res.error}`, 'error');
+      return false;
+    }
+    const errs = res && Array.isArray(res.errors) ? res.errors : [];
+    if (errs.length > 0) toast(`Restore failed: ${_describeApiError(errs[0])}`, 'error');
+    else toast('Previous copy restored', 'success');
+    await loadRecordings();
+    _refreshOpenTranscript(sessionId);
+    return errs.length === 0;
+  } catch (err) {
+    toast(`Restore failed: ${err.message}`, 'error');
+    return false;
+  }
+}
+
+function _refreshOpenTranscript(sessionId) {
+  if (app.currentView === 'transcript' && app.currentSessionId === sessionId) openTranscript(sessionId);
 }
 
 
@@ -627,9 +682,16 @@ function _showContextMenu(x, y, sessionId) {
   items.push({ label: 'Move to...', icon: 'move', action: () => {
     showMoveDialog([sessionId], () => { loadRecordings(); });
   }});
-  items.push({ label: 'Re-download from device', icon: 'refresh', action: () => {
-    confirmRedownload(sessionId);
-  }});
+  const ctxRec = app.recordings.find((r) => r.session_id === sessionId);
+  if (ctxRec && ctxRec.redownload_pending) {
+    items.push({ label: 'Restore previous copy', icon: 'refresh', action: () => {
+      restoreRedownload(sessionId);
+    }});
+  } else {
+    items.push({ label: 'Re-download from device', icon: 'refresh', action: () => {
+      confirmRedownload(sessionId);
+    }});
+  }
   items.push({ label: 'Delete', icon: 'delete', destructive: true, action: () => {
     showDeleteDialog([sessionId], 1, () => { loadRecordings(); });
   }});

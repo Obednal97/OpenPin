@@ -170,9 +170,15 @@ function openTranscript(sessionId, autoPlay = false) {
   const hasSummary = t && t.summary;
   const hasTranscriptText = !!(t && (t.text || (t.segments && t.segments.length > 0)));
   const isTranscribing = app.processingIds.get(sessionId) === 'transcribing';
+  const awaitingRedownload = !!rec.redownload_pending;
   const transcribeLabel = hasTranscriptText ? 'Re-transcribe' : 'Transcribe';
   actionsBar.innerHTML = `
-    <button class="action-btn subtle" id="retranscribe-btn" title="${hasTranscriptText ? 'Replace the transcript with a new transcription' : 'Transcribe this recording'}" ${isTranscribing ? 'disabled' : ''}>
+    ${awaitingRedownload ? `
+    <div class="redownload-notice" id="redownload-notice">
+      <span>Waiting for re-download — connect your device and sync.</span>
+      ${rec.redownload_pending ? '<button class="action-btn subtle" id="restore-redownload-btn">Restore</button>' : ''}
+    </div>` : ''}
+    <button class="action-btn subtle" id="retranscribe-btn" title="${!rec.ogg_path ? 'No local audio to transcribe' : hasTranscriptText ? 'Replace the transcript with a new transcription' : 'Transcribe this recording'}" ${isTranscribing || awaitingRedownload || !rec.ogg_path ? 'disabled' : ''}>
       <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
         <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -229,8 +235,21 @@ function openTranscript(sessionId, autoPlay = false) {
 
   // (Re-)transcribe. The backend merges a re-transcription into the existing
   // transcript file and keeps the summary, so nothing is deleted up front.
+  const restoreBtn = $('#restore-redownload-btn');
+  if (restoreBtn) {
+    restoreBtn.addEventListener('click', async () => {
+      restoreBtn.disabled = true;
+      const ok = await restoreRedownload(sessionId);
+      if (!ok && restoreBtn.isConnected) restoreBtn.disabled = false;
+    });
+  }
+
   const retxBtn = $('#retranscribe-btn');
   retxBtn.addEventListener('click', async () => {
+    if (!rec.ogg_path) {
+      toast('No local audio yet — sync to re-download it first', 'info');
+      return;
+    }
     if (app.processingIds.get(sessionId) === 'transcribing') {
       toast('Already transcribing this recording', 'info');
       return;
@@ -445,6 +464,7 @@ function openTranscript(sessionId, autoPlay = false) {
           if (t) {
             t.summary = result.summary;
             t.auto_title = result.title;
+            t.summary_stale = false;
           }
           if (result.title && !rec.title) {
             rec.title = result.title;
@@ -750,6 +770,23 @@ function renderEditableSummary(container, t, sessionId, rec) {
     editHint.textContent = 'Edit';
     editHint.addEventListener('click', () => startEditing());
     container.prepend(editHint);
+    if (t.summary_stale) {
+      // Transcript changed (e.g. re-transcribed) after this summary was made
+      const stale = document.createElement('div');
+      stale.className = 'summary-stale-hint';
+      const msg = document.createElement('span');
+      msg.textContent = 'Summary may be out of date — ';
+      const link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'summary-stale-action';
+      link.textContent = 'Re-summarize';
+      link.addEventListener('click', () => {
+        const sb = document.getElementById('summarize-btn');
+        if (sb && !sb.disabled && app.currentSessionId === sessionId) sb.click();
+      });
+      stale.append(msg, link);
+      container.prepend(stale);
+    }
   };
 
   const startEditing = () => {
