@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
 import time as _time
 import traceback
@@ -10,8 +12,10 @@ import traceback
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
-from app.utils.config import load_config, save_config
+from app.utils.config import load_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.paths import InvalidSessionIdError, validate_session_id
+from app.utils.transcript_locks import get_transcript_lock
 
 
 def _error_json(base, exc):
@@ -22,6 +26,54 @@ def _error_json(base, exc):
 
 
 bp = Blueprint("notion", __name__, url_prefix="/notion")
+
+
+def _invalid_session_id():
+    return jsonify({"error": "Invalid session_id"}), 400
+
+
+def _read_transcript_json(session_id):
+    """Read TRANSCRIPTS_DIR/<session_id>.json under the transcript lock.
+
+    Returns the parsed dict, or None if the file is missing.
+    """
+    validate_session_id(session_id)
+    path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    with get_transcript_lock(session_id):
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())
+
+
+def _update_transcript_json(session_id, updates):
+    """Merge ``updates`` into the transcript JSON for ``session_id``.
+
+    Re-reads the file under the per-session transcript lock (so keys written
+    concurrently by transcription/diarization/tagging survive) and writes it
+    back atomically (temp file + os.replace). Does nothing if the transcript
+    does not exist. Returns True if the file was written.
+    """
+    validate_session_id(session_id)
+    path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    with get_transcript_lock(session_id):
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            return False
+        data.update(updates)
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".notion_", suffix=".json.tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False))
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return True
 
 
 _last_notion_verify = 0
@@ -247,60 +299,51 @@ def _extract_page_url(result):
 
 def _save_notion_page_url(session_id, url):
     """Save the Notion page URL for a recording."""
-    config = load_config()
-    pages = config.get("notion_page_urls", {})
-    pages[session_id] = url
-    config["notion_page_urls"] = pages
-    save_config(config)
+    validate_session_id(session_id)
+    update_config(lambda c: c.setdefault("notion_page_urls", {}).__setitem__(session_id, url))
 
     # Also persist in transcript JSON for recovery after config resets
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if transcript_path.exists():
-        try:
-            t_data = json.loads(transcript_path.read_text())
-            t_data["notion_page_url"] = url
-            transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+    try:
+        _update_transcript_json(session_id, {"notion_page_url": url})
+    except Exception as e:
+        logging.warning(f"Could not save Notion page URL into transcript {session_id}: {e}")
 
 
 def _get_notion_page_url(session_id):
     """Get the saved Notion page URL for a recording, if any."""
-    config = load_config()
-    url = config.get("notion_page_urls", {}).get(session_id, "")
+    validate_session_id(session_id)
+    url = load_config().get("notion_page_urls", {}).get(session_id, "")
     if not url:
         # Try recovering from transcript JSON
-        transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-        if transcript_path.exists():
-            try:
-                t_data = json.loads(transcript_path.read_text())
-                url = t_data.get("notion_page_url", "")
-                if url:
-                    # Re-save to config for future lookups
-                    config = load_config()
-                    pages = config.get("notion_page_urls", {})
-                    pages[session_id] = url
-                    config["notion_page_urls"] = pages
-                    save_config(config)
-            except Exception:
-                pass
+        try:
+            t_data = _read_transcript_json(session_id)
+            url = t_data.get("notion_page_url", "") if isinstance(t_data, dict) else ""
+            if url:
+                # Re-save to config for future lookups (never clobber a URL saved meanwhile).
+                # update_config treats a non-None return as the new config, so don't return.
+                def _recover(c):
+                    c.setdefault("notion_page_urls", {}).setdefault(session_id, url)
+
+                update_config(_recover)
+        except Exception:
+            pass
     return url
 
 
 @bp.route("/page-url/<session_id>")
 def page_url(session_id):
     """Get the Notion page URL for a recording."""
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError:
+        return _invalid_session_id()
     url = _get_notion_page_url(session_id)
     return jsonify({"url": url, "has_page": bool(url)})
 
 
 def _save_notion_pushed_title(session_id, title):
     """Store the title we last pushed to Notion for this recording."""
-    config = load_config()
-    titles = config.get("notion_pushed_titles", {})
-    titles[session_id] = title
-    config["notion_pushed_titles"] = titles
-    save_config(config)
+    update_config(lambda c: c.setdefault("notion_pushed_titles", {}).__setitem__(session_id, title))
 
 
 def _get_notion_pushed_title(session_id):
@@ -523,16 +566,19 @@ def push_to_notion(session_id, t_data=None, config=None):
 
     Returns dict with keys: pushed, updated, url, error (if any).
     """
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError:
+        return {"error": "Invalid session_id"}
     if not notion.is_connected():
         return {"error": "Not connected to Notion"}
     if not notion.get_database_id():
         return {"error": "No database selected — configure in Settings"}
 
     if t_data is None:
-        transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-        if not transcript_path.exists():
+        t_data = _read_transcript_json(session_id)
+        if t_data is None:
             return {"error": "Transcript not found"}
-        t_data = json.loads(transcript_path.read_text())
 
     if config is None:
         config = load_config()
@@ -623,6 +669,10 @@ def push():
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError:
+        return _invalid_session_id()
 
     try:
         result = push_to_notion(session_id)
