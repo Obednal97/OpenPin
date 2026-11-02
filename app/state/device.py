@@ -141,11 +141,64 @@ async def _disconnect_quietly(cl, timeout=5):
         logging.debug(f"Disconnect of stale BLE client failed (ignored): {e}")
 
 
+_END_OFFSET = 0xFFFFFFFF
+# Data packets (portVersion >= 7 layout): byte offsets must be contiguous. A
+# packet at an offset already received is a retransmission and is dropped; one
+# past the end leaves a gap, which ends the download as partial. Set False to go
+# back to appending every packet in arrival order (diagnostics only) if hardware
+# ever shows the offset field means something else.
+ENFORCE_DATA_OFFSETS = True
+
+
+def _count_stray(file_meta, what):
+    file_meta["stray"] = file_meta.get("stray", 0) + 1
+    logging.debug(f"[BLE] ignored {what} (downloading {file_meta.get('sid')})")
+
+
+def _on_file_data(dd, file_data, file_done, file_meta):
+    """One type-2 data packet: [2][sessionId u32][offset u32][len u8][bytes].
+
+    Only packets for the session being downloaded (file_meta["sid"]) count; a
+    late packet from an earlier or stalled file is ignored and counted.
+    """
+    psid, off = struct.unpack_from("<II", dd, 1)
+    want = file_meta.get("sid")
+    if want is None or psid != want:
+        _count_stray(file_meta, f"data packet for session {psid} at offset {off:#x}")
+        return
+    if off == _END_OFFSET:
+        file_meta["end"] = True
+        file_meta["end_error"] = dd[9]
+        file_meta["end_sid"] = psid
+        file_done.set()
+        return
+    if file_meta.get("gap"):
+        return  # already incomplete; the sync loop is stopping this download
+    payload = dd[10 : 10 + dd[9]]
+    have = len(file_data)
+    if off != have and "offset_mismatch" not in file_meta:
+        file_meta["offset_mismatch"] = (off, have)
+    if not ENFORCE_DATA_OFFSETS or off == have:
+        file_data.extend(payload)
+    elif off < have:
+        # Retransmission: drop what we already have; keep any new bytes past the end.
+        file_meta["duplicates"] = file_meta.get("duplicates", 0) + 1
+        logging.debug(f"[BLE] session {psid}: retransmitted data at offset {off} (have {have})")
+        file_data.extend(payload[have - off :])
+    else:
+        file_meta["gap"] = (off, have)
+        logging.warning(f"[BLE] session {psid}: data gap — packet at offset {off}, only {have} bytes received")
+        file_done.set()
+
+
 def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_done, file_meta):
     """Build the encrypted-channel notification handler.
 
     File transfer bookkeeping goes into `file_meta` (reset by the sync loop per
-    file) so the sync can decide whether a download really completed:
+    file, which then sets "sid" to the session it requests) so the sync can
+    decide whether a download really completed. Data packets, the end marker,
+    the cmd-28 reply and the cmd-29 tail only count when their session id is
+    "sid"; others are ignored and counted in "stray".
       - "end" / "end_error": data packet with offset 0xFFFFFFFF; byte 9 is the
         device's error code for the transfer (0 = OK).
       - "tail" / "tail_sid" / "tail_crc": cmd 29 SyncFileTail (sessionId@3-6,
@@ -153,8 +206,11 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
       - "start_status": cmd 28 SyncFileHead reply byte 7. Assumed to be a
         status (0 = accepted) but UNCONFIRMED: logged, never used to reject a
         file that delivered data.
+      - "duplicates": retransmitted data packets dropped (offset already had).
+      - "gap": (offset, bytes had) of the first packet past the end of the
+        data received: the download is incomplete.
       - "offset_mismatch": first data packet whose offset != bytes received so
-        far (diagnostic only).
+        far (diagnostic).
     """
 
     def handler(s, d):
@@ -166,28 +222,25 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
         if len(dd) < 1:
             return
         if dd[0] == 2 and len(dd) >= 10:
-            off = struct.unpack_from("<I", dd, 5)[0]
-            if off == 0xFFFFFFFF:
-                file_meta["end"] = True
-                file_meta["end_error"] = dd[9]
-                file_meta["end_sid"] = struct.unpack_from("<I", dd, 1)[0]
-                file_done.set()
-            else:
-                if off != len(file_data) and "offset_mismatch" not in file_meta:
-                    file_meta["offset_mismatch"] = (off, len(file_data))
-                file_data.extend(dd[10 : 10 + dd[9]])
+            _on_file_data(dd, file_data, file_done, file_meta)
         elif dd[0] == 1:
             cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
             logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
             if cid == 29:
-                file_meta["tail"] = True
-                if len(dd) >= 7:
-                    file_meta["tail_sid"] = struct.unpack_from("<I", dd, 3)[0]
-                if len(dd) >= 9:
-                    file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
-                file_done.set()
+                tail_sid = struct.unpack_from("<I", dd, 3)[0] if len(dd) >= 7 else None
+                if tail_sid is None or tail_sid != file_meta.get("sid"):
+                    _count_stray(file_meta, f"cmd-29 tail for session {tail_sid}")
+                else:
+                    file_meta["tail"] = True
+                    file_meta["tail_sid"] = tail_sid
+                    if len(dd) >= 9:
+                        file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
+                    file_done.set()
             elif cid == 28 and len(dd) >= 8:
-                file_meta["start_status"] = dd[7]
+                if struct.unpack_from("<I", dd, 3)[0] == file_meta.get("sid"):
+                    file_meta["start_status"] = dd[7]
+                else:
+                    _count_stray(file_meta, "cmd-28 reply for another session")
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))
@@ -1282,8 +1335,10 @@ def evaluate_download(sid, expected_size, data, meta, interrupted=None):
     say the request is start=0/end=fileSize and that offset 0xFFFFFFFF is the
     end packet carrying an error code), so they fail SAFE:
 
-    - interrupted (abort / stall / disconnect / refused), no end-of-file marker,
-      or an end packet with a non-zero error byte → DOWNLOAD_PARTIAL.
+    - interrupted (abort / stall / disconnect / refused / data gap), a gap in
+      the data offsets, no end-of-file marker, or an end packet with a non-zero
+      error byte → DOWNLOAD_PARTIAL. End markers and tails only count for the
+      session requested (the notify handler ignores the rest).
     - The cmd-28 reply status is NOT checked here: its meaning is unconfirmed.
       (The receive loop treats it as a refusal only if no data arrives at all.)
     - Byte count == size from the file list → DOWNLOAD_OK.
@@ -1294,6 +1349,8 @@ def evaluate_download(sid, expected_size, data, meta, interrupted=None):
     """
     if interrupted:
         return DOWNLOAD_PARTIAL, interrupted
+    if meta.get("gap"):
+        return DOWNLOAD_PARTIAL, "gap in the received data"
     if not (meta.get("end") or meta.get("tail")):
         return DOWNLOAD_PARTIAL, "no end-of-file marker"
     if meta.get("end") and meta.get("end_error"):
@@ -2010,6 +2067,7 @@ async def _sync_files_inner(progress_callback=None, background=False):
         file_data.clear()
         file_done.clear()
         file_meta.clear()
+        file_meta["sid"] = sid  # the notify handler ignores packets for any other session
 
         cipher = _device_state["cipher"]
         key, nonce, aad = _device_state["session_keys"]
@@ -2076,6 +2134,9 @@ async def _sync_files_inner(progress_callback=None, background=False):
                     interrupted = "stalled"
                     break
 
+        if interrupted is None and file_meta.get("gap"):
+            got_off, have = file_meta["gap"]
+            interrupted = f"data gap (packet at offset {got_off} after {have} bytes)"
         # The end-of-file data packet and the cmd-29 tail (which carries the CRC)
         # may arrive in either order — give the tail a moment to land.
         if interrupted is None and file_meta.get("end") and not file_meta.get("tail"):
@@ -2086,9 +2147,14 @@ async def _sync_files_inner(progress_callback=None, background=False):
 
         raw_data = bytes(file_data)
         meta = dict(file_meta)
+        file_meta["sid"] = None  # late packets for this file are now stray
         if meta.get("offset_mismatch"):
             got_off, have = meta["offset_mismatch"]
             logging.info(f"[BLE] session {sid}: first out-of-sequence data packet offset={got_off}, had {have} bytes")
+        if meta.get("duplicates"):
+            logging.info(f"[BLE] session {sid}: dropped {meta['duplicates']} retransmitted data packet(s)")
+        if meta.get("stray"):
+            logging.info(f"[BLE] session {sid}: ignored {meta['stray']} packet(s) for other sessions")
         if meta.get("start_status") not in (None, 0):
             logging.warning(
                 f"[BLE] session {sid}: cmd-28 reply status {meta['start_status']} with {len(raw_data)} bytes "
