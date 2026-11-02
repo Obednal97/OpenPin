@@ -3,6 +3,8 @@
 # app/requirements/core.txt.
 flask
 requests
+# Official Anthropic SDK: summaries + API key validation
+anthropic==2.3.0
 # BLE (on macOS pulls pyobjc-core, -CoreBluetooth and -libdispatch)
 bleak
 # RSA file key + ChaCha20 audio decryption

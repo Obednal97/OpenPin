@@ -3,7 +3,7 @@
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
-    # via pydantic
+    # via pydantic, -c app/requirements/core.txt
 cffi==2.1.1 \
     --hash=sha256:046bfc24911b37851ee1b51aab8bffe713d89c68c6a057b09484ce9fd5f69b4e \
     --hash=sha256:06c72bb76605a4b0cd0aad6930b69d4baf7dd5d806cfc409b824191099700e66 \
@@ -423,7 +423,7 @@ pycparser==3.12 \
 pydantic==2.14.2 \
     --hash=sha256:7efbf7507b937931cd32a5755acb00ea1cf5ccb1d4e8067a5850d5069e382118 \
     --hash=sha256:fb7b2db6cefe8414dd612edeede49c4c433acb0432b0f92b95024e45f66c505d
-    # via diarize
+    # via diarize, -c app/requirements/core.txt
 pydantic-core==2.50.2 \
     --hash=sha256:01eb0282d0b3a065d55956d1be9ce398c46db3dd6d277a6cb2358c8aa8c53179 \
     --hash=sha256:04cf672960b8c4fc28bb159c8cdd101fbd311c520237a5c0360448b851adfb41 \
@@ -566,7 +566,7 @@ pydantic-core==2.50.2 \
     --hash=sha256:f73930dacad5e611fe019e18df6f53c30629b1843d038d303b8dec86a32493bd \
     --hash=sha256:f81df206b937d0dca5efb38c25fc99037d82dbcd3740e34c3f81997d2322ac1c \
     --hash=sha256:fd9aa71a800c87c0f7ab53fa38009169a23a82c685989626ca74a4bd483e1b67
-    # via pydantic
+    # via pydantic, -c app/requirements/core.txt
 scikit-learn==1.9.1 \
     --hash=sha256:09f4d73049cd63575157f6b1060e06a8c83a4bd3488dbfaeedf35ccba7aad712 \
     --hash=sha256:0c0f8b5d09b44101cea2767f300680bada1ea27f976fe4b48b83950a4f55a49a \
@@ -769,11 +769,11 @@ tqdm==4.70.1 \
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
-    # via pydantic, pydantic-core, soundfile, torch, typing-inspection, -c app/requirements/local-summary.txt, -c app/requirements/whisper.txt
+    # via pydantic, pydantic-core, soundfile, torch, typing-inspection, -c app/requirements/core.txt, -c app/requirements/local-summary.txt, -c app/requirements/whisper.txt
 typing-inspection==0.4.4 \
     --hash=sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47 \
     --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
-    # via pydantic
+    # via pydantic, -c app/requirements/core.txt
 wespeakerruntime==1.0.1 \
     --hash=sha256:862eafc82f8d788ea2bb30ccdbd519b82019b75725399dcf3b0db388e87600da \
     --hash=sha256:863e0e72bfb8a1271c6192aa6c1f90e89c72fb353aff44a1fd19764d0191f343
