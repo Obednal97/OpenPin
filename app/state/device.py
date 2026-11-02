@@ -67,6 +67,17 @@ _RECV_POLL_S = 2  # how often the receive loop checks abort / disconnect / stall
 _STALL_TIMEOUT_S = 60  # no new bytes for this long = stalled transfer
 _TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail (CRC)
 _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
+# cmd-28 reply with a non-zero status and still no data after this long = the
+# device refused the download; fail fast instead of waiting out the stall window.
+_REFUSED_GRACE_S = 5
+
+# Background retry cap: after this many consecutive failed downloads (partial or
+# undecryptable) of one session, background syncs stop retrying it (and
+# /device/check-new stops counting it). An explicit user sync still retries.
+# In memory only: reset on success or app restart.
+RETRY_CAP = 3
+_download_failures = {}  # str(session id) -> consecutive failed attempts
+_download_failures_lock = threading.Lock()
 
 
 def _update_config(mutate):
@@ -139,7 +150,9 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
         device's error code for the transfer (0 = OK).
       - "tail" / "tail_sid" / "tail_crc": cmd 29 SyncFileTail (sessionId@3-6,
         crc16@7-8).
-      - "start_status": cmd 28 SyncFileHead reply status@7 (0 = accepted).
+      - "start_status": cmd 28 SyncFileHead reply byte 7. Assumed to be a
+        status (0 = accepted) but UNCONFIRMED: logged, never used to reject a
+        file that delivered data.
       - "offset_mismatch": first data packet whose offset != bytes received so
         far (diagnostic only).
     """
@@ -745,7 +758,7 @@ async def send_cmd(pt, timeout=5):
         return None
     try:
         await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
         pass
     return cmd_resp[0]
 
@@ -816,7 +829,7 @@ async def depair_device():
             try:
                 await asyncio.wait_for(verify_ack.wait(), timeout=5)
                 depair_verified = True
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
                 depair_verified = False
 
         await cl.stop_notify(N)
@@ -1132,12 +1145,15 @@ def release_sync():
     _syncing.release()
 
 
-async def sync_files(progress_callback=None, _claimed=False):
+async def sync_files(progress_callback=None, _claimed=False, background=False):
     """Download all files from device, decrypt, save as .ogg.
 
     `_claimed=True` means the caller already took the sync slot via
     claim_sync() (in the Flask thread, before queueing behind _ble_lock); this
     coroutine then owns it and releases it when done.
+
+    `background=True` (automatic syncs) skips sessions that hit the retry cap;
+    an explicit user sync (the default) retries them.
     """
     if not _claimed and not claim_sync():
         return {"error": SYNC_BUSY_ERROR, "busy": True}
@@ -1146,13 +1162,13 @@ async def sync_files(progress_callback=None, _claimed=False):
         # Suppress macOS App Nap so backgrounding the window can't throttle the
         # CoreBluetooth stream and trip the stall watchdog mid-transfer.
         with _keep_awake("Plaud BLE sync"):
-            return await _sync_files_inner(progress_callback)
+            return await _sync_files_inner(progress_callback, background=background)
     finally:
         _ble_sync_status.update({"message": "", "percent": 0, "active": False})
         _syncing.release()
 
 
-def run_sync_blocking(timeout=1800):
+def run_sync_blocking(timeout=1800, background=False):
     """Run a BLE sync from a Flask thread. Returns None if a sync is already running.
 
     The sync slot is claimed HERE, before queueing behind _ble_lock, so a second
@@ -1161,7 +1177,7 @@ def run_sync_blocking(timeout=1800):
     """
     if not claim_sync():
         return None
-    coro = sync_files(_claimed=True)
+    coro = sync_files(_claimed=True, background=background)
     try:
         return run_async(coro, timeout=timeout)
     except BaseException:
@@ -1194,66 +1210,151 @@ def _crc16_reflected(data, poly_rev, init):
     return crc & 0xFFFF
 
 
+_CRC16_FUNCS = {
+    # name: (fast, fn). Fast = binascii's C implementation; the reflected
+    # variants are pure Python (~1 s per MB) and must stay off the BLE loop.
+    "XMODEM": (True, lambda d: binascii.crc_hqx(d, 0)),
+    "CCITT-FALSE": (True, lambda d: binascii.crc_hqx(d, 0xFFFF)),
+    "ARC": (False, lambda d: _crc16_reflected(d, 0xA001, 0)),
+    "MODBUS": (False, lambda d: _crc16_reflected(d, 0xA001, 0xFFFF)),
+    "KERMIT": (False, lambda d: _crc16_reflected(d, 0x8408, 0)),
+}
+
+
+def crc16_variant(data, name):
+    """One named CRC-16 variant of `data` (a key of crc16_variants())."""
+    return _CRC16_FUNCS[name][1](data)
+
+
 def crc16_variants(data, slow_limit=1_000_000):
     """Common CRC-16 variants of `data` → {name: crc}.
 
-    XMODEM / CCITT-FALSE use binascii's C implementation (fast at any size); the
-    reflected variants are pure Python, so they're only computed for files up to
-    `slow_limit` bytes to keep the event loop responsive.
+    The reflected (pure-Python) variants are only computed for files up to
+    `slow_limit` bytes. This is slow: the sync never calls it on the BLE event
+    loop — it runs in an executor via _schedule_crc_diagnostic().
     """
-    out = {
-        "XMODEM": binascii.crc_hqx(data, 0),
-        "CCITT-FALSE": binascii.crc_hqx(data, 0xFFFF),
-    }
-    if len(data) <= slow_limit:
-        out["ARC"] = _crc16_reflected(data, 0xA001, 0)
-        out["MODBUS"] = _crc16_reflected(data, 0xA001, 0xFFFF)
-        out["KERMIT"] = _crc16_reflected(data, 0x8408, 0)
-    return out
+    return {name: fn(data) for name, (fast, fn) in _CRC16_FUNCS.items() if fast or len(data) <= slow_limit}
 
 
-def _check_tail_crc(sid, data, device_crc):
-    """Compare the device's cmd-29 CRC with candidate CRC-16s of `data`.
+def _log_tail_crc(sid, data, device_crc):
+    """Diagnostic only: log which CRC-16 variant(s) match the device's cmd-29 CRC.
 
-    Returns (ok, matched_variant). ok is False only when CRC16_ENFORCED_VARIANT
-    is set and doesn't match.
+    Runs in a worker thread after the file is saved. Never raises.
     """
+    try:
+        variants = crc16_variants(data)
+        matched = [name for name, v in variants.items() if v == device_crc]
+        if matched:
+            logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches {','.join(matched)}")
+        else:
+            logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches none of {sorted(variants)}")
+    except Exception as e:
+        logging.debug(f"[BLE] CRC diagnostic for session {sid} failed: {e}")
+
+
+def _schedule_crc_diagnostic(sid, data, device_crc):
+    """Fire-and-forget _log_tail_crc on the default executor, off the BLE loop."""
     if device_crc is None:
-        return True, None
-    variants = crc16_variants(data)
-    matched = [name for name, v in variants.items() if v == device_crc]
-    if matched:
-        logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches {','.join(matched)}")
-    else:
-        logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches none of {sorted(variants)}")
-    if CRC16_ENFORCED_VARIANT and CRC16_ENFORCED_VARIANT in variants:
-        if variants[CRC16_ENFORCED_VARIANT] != device_crc:
-            return False, None
-    return True, (matched[0] if matched else None)
+        return
+    try:
+        asyncio.get_running_loop().run_in_executor(None, _log_tail_crc, sid, data, device_crc)
+    except RuntimeError:  # no running loop (direct call from sync code)
+        _log_tail_crc(sid, data, device_crc)
+
+
+def _crc_enforced_ok(data, device_crc):
+    """False only when CRC16_ENFORCED_VARIANT is set and doesn't match the device CRC."""
+    if device_crc is None or CRC16_ENFORCED_VARIANT not in _CRC16_FUNCS:
+        return True
+    return crc16_variant(data, CRC16_ENFORCED_VARIANT) == device_crc
+
+
+# evaluate_download() verdicts
+DOWNLOAD_OK = "ok"  # exact size + clean end: save; eligible for auto-delete
+DOWNLOAD_SIZE_MISMATCH = "size_mismatch"  # clean end, size != list: keep only if it decrypts; never auto-delete
+DOWNLOAD_PARTIAL = "partial"  # keep as {sid}_partial.bin and retry
 
 
 def evaluate_download(sid, expected_size, data, meta, interrupted=None):
-    """Decide whether a received file is complete. Returns (ok, reason).
+    """Decide what to do with a received file. Returns (verdict, reason).
 
-    Accepted only if: the transfer wasn't interrupted (abort/stall/disconnect);
-    the device signalled the end (0xFFFFFFFF end packet and/or the cmd-29 tail)
-    with no error code; the device didn't reject the cmd-28 request; the byte
-    count equals the size from the file list; and the CRC (when enforced) matches.
+    None of these rules is confirmed on real hardware (the protocol notes only
+    say the request is start=0/end=fileSize and that offset 0xFFFFFFFF is the
+    end packet carrying an error code), so they fail SAFE:
+
+    - interrupted (abort / stall / disconnect / refused), no end-of-file marker,
+      or an end packet with a non-zero error byte → DOWNLOAD_PARTIAL.
+    - The cmd-28 reply status is NOT checked here: its meaning is unconfirmed.
+      (The receive loop treats it as a refusal only if no data arrives at all.)
+    - Byte count == size from the file list → DOWNLOAD_OK.
+    - Otherwise, if the end packet arrived with error 0 → DOWNLOAD_SIZE_MISMATCH:
+      the caller keeps the file only if it decrypts to valid Opus, and never
+      auto-deletes it from the device. Tail-only (no end packet) → PARTIAL.
+    - A CRC mismatch rejects only when CRC16_ENFORCED_VARIANT is set.
     """
     if interrupted:
-        return False, interrupted
+        return DOWNLOAD_PARTIAL, interrupted
     if not (meta.get("end") or meta.get("tail")):
-        return False, "no end-of-file marker"
+        return DOWNLOAD_PARTIAL, "no end-of-file marker"
     if meta.get("end") and meta.get("end_error"):
-        return False, f"device reported transfer error {meta['end_error']}"
-    if meta.get("start_status") not in (None, 0):
-        return False, f"device rejected download (status {meta['start_status']})"
-    if len(data) != expected_size:
-        return False, f"size mismatch ({len(data)} of {expected_size} bytes)"
-    ok, _ = _check_tail_crc(sid, data, meta.get("tail_crc"))
-    if not ok:
-        return False, "CRC mismatch"
-    return True, None
+        return DOWNLOAD_PARTIAL, f"device reported transfer error {meta['end_error']}"
+    if not _crc_enforced_ok(data, meta.get("tail_crc")):
+        return DOWNLOAD_PARTIAL, "CRC mismatch"
+    if len(data) == expected_size:
+        return DOWNLOAD_OK, None
+    reason = f"size mismatch ({len(data)} of {expected_size} bytes)"
+    if meta.get("end") and data:
+        return DOWNLOAD_SIZE_MISMATCH, reason
+    return DOWNLOAD_PARTIAL, reason
+
+
+# ---------------------------------------------------------------------------
+# Background retry cap (in memory; reset on success or app restart)
+# ---------------------------------------------------------------------------
+
+
+def record_download_failure(sid):
+    """Count one more consecutive failed download of `sid`; returns the new count."""
+    key = str(sid)
+    with _download_failures_lock:
+        _download_failures[key] = _download_failures.get(key, 0) + 1
+        return _download_failures[key]
+
+
+def clear_download_failures(sid):
+    with _download_failures_lock:
+        _download_failures.pop(str(sid), None)
+
+
+def download_failures(sid):
+    with _download_failures_lock:
+        return _download_failures.get(str(sid), 0)
+
+
+def is_retry_capped(sid):
+    """True once `sid` has failed RETRY_CAP times in a row (background syncs skip it)."""
+    return download_failures(sid) >= RETRY_CAP
+
+
+def track_download_result(entry):
+    """Update the retry counter from one download result entry (BLE or WiFi).
+
+    "new" resets it; "partial" / "decrypt_failed" count as a failure, except a
+    user abort (switching to WiFi), which says nothing about the file.
+    """
+    sid = entry.get("session_id")
+    status = entry.get("status")
+    if sid is None:
+        return
+    if status == "new":
+        clear_download_failures(sid)
+    elif status in ("partial", "decrypt_failed") and entry.get("reason") != "aborted":
+        n = record_download_failure(sid)
+        if n >= RETRY_CAP:
+            logging.warning(
+                f"[Sync] session {sid} failed {n} times in a row — background sync stops retrying it "
+                "(an explicit Sync still does)"
+            )
 
 
 def gdrive_cloud_synced_ids():
@@ -1503,6 +1604,7 @@ def do_wifi_sync_blocking():
         if stdout_str:
             result = json.loads(stdout_str)
             for f in result.get("files", []):
+                track_download_result(f)
                 if f.get("status") == "new" and f.get("session_id") is not None:
                     _finalize_redownload_backup(f["session_id"])
             done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
@@ -1551,12 +1653,36 @@ def _save_partial(sid, raw, expected, reason, rec_dir):
     }
 
 
-def _save_complete(sid, raw, app_rsa_key, rec_dir):
+def _save_size_mismatch(sid, raw, expected, reason, app_rsa_key, rec_dir):
+    """Clean end-of-file but byte count != the file list's size.
+
+    The size semantics are unconfirmed on real hardware, so instead of looping
+    forever on a file that may well be complete, keep it if it decrypts to valid
+    Opus — flagged with size_mismatch and never auto-deleted from the device
+    (the device copy stays as the fallback). If it doesn't decrypt, it's a
+    partial like any other incomplete download.
+    """
+    try:
+        frames = decrypt_ble_file(raw, app_rsa_key)
+    except BleDecryptError as e:
+        return _save_partial(sid, raw, expected, f"{reason}; decrypt failed: {e}", rec_dir)
+    logging.warning(
+        f"[BLE] size mismatch accepted for session {sid}: received {len(raw)} bytes, file list said {expected} "
+        "(end packet OK, decrypts to valid Opus) — kept, NOT auto-deleted from device"
+    )
+    entry = _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=frames, keep_encrypted=True)
+    if entry["status"] == "new":
+        entry["size_mismatch"] = {"received": len(raw), "expected": expected}
+    return entry
+
+
+def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encrypted=False):
     """Persist a verified download: encrypted original first, then the .ogg.
 
     The encrypted original ({sid}_encrypted.bin) is written before decrypting
-    and kept whenever decrypt or the .ogg write fails. Only status "new" means
-    the recording is safely on disk (and may be auto-deleted from the device).
+    and kept whenever decrypt or the .ogg write fails (and always when
+    keep_encrypted). Only status "new" means the recording is safely on disk.
+    `opus_frames` skips the decrypt when the caller already did it.
     """
     enc_path = rec_dir / f"{sid}_encrypted.bin"
     ogg_path = rec_dir / f"{sid}.ogg"
@@ -1569,7 +1695,8 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir):
     # The complete encrypted copy supersedes any earlier partial.
     partial_path.unlink(missing_ok=True)
     try:
-        opus_frames = decrypt_ble_file(raw, app_rsa_key)
+        if opus_frames is None:
+            opus_frames = decrypt_ble_file(raw, app_rsa_key)
     except BleDecryptError as e:
         logging.warning(f"Decrypt failed for session {sid}: {e} — encrypted original kept")
         return {
@@ -1588,13 +1715,13 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir):
     # Fresh .ogg is in place (runs before the caller's maybe_auto_upload).
     _finalize_redownload_backup(sid)
     # Long recordings keep their encrypted backup (allows re-decrypt), as before.
-    if len(raw) <= 500_000:
+    if len(raw) <= 500_000 and not keep_encrypted:
         enc_path.unlink(missing_ok=True)
     duration = len(opus_frames) // 80 * 0.02
     return {"session_id": sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
 
 
-async def _sync_files_inner(progress_callback=None):
+async def _sync_files_inner(progress_callback=None, background=False):
     """Internal BLE sync implementation."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
@@ -1616,7 +1743,8 @@ async def _sync_files_inner(progress_callback=None):
     cloud_ids = gdrive_cloud_synced_ids()
 
     new_files = []
-    verified_sids = []  # passed every integrity check AND written to disk
+    verified_sids = []  # exact size + clean end + written to disk: eligible for auto-delete
+    retry_capped = []  # background only: skipped after RETRY_CAP consecutive failures
     aborted = False
     total = len(files)
     for i, f in enumerate(files):
@@ -1650,6 +1778,21 @@ async def _sync_files_inner(progress_callback=None):
                     "duration": f["duration_est"],
                     "status": "exists",
                     "location": "gdrive",
+                }
+            )
+            continue
+        if background and is_retry_capped(sid):
+            # Stops the 45 s background poll re-downloading a file that keeps
+            # failing (e.g. a protocol assumption that's wrong on real hardware).
+            retry_capped.append(sid)
+            new_files.append(
+                {
+                    "session_id": sid,
+                    "ogg_path": None,
+                    "duration": 0,
+                    "status": "skipped",
+                    "reason": "retry limit reached — use Sync to retry",
+                    "attempts": download_failures(sid),
                 }
             )
             continue
@@ -1689,6 +1832,7 @@ async def _sync_files_inner(progress_callback=None):
         interrupted = None
         last_progress_len = 0
         last_progress_time = time.time()
+        request_time = last_progress_time
         # Abort only when data genuinely stops arriving. 60s tolerates background
         # throttling / transient BLE pauses that the old 15s window cut short
         # mid-transfer on large files. A real disconnect is caught immediately
@@ -1702,13 +1846,21 @@ async def _sync_files_inner(progress_callback=None):
                 break
             try:
                 await asyncio.wait_for(file_done.wait(), timeout=_RECV_POLL_S)
-            except TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
                 now = time.time()
                 # Connection genuinely dropped — stop immediately rather than
                 # waiting out the stall window.
                 if not _device_state["connected"] or _device_state["file_data"] is not file_data:
                     logging.warning(f"Sync: device disconnected mid-file for session {sid}")
                     interrupted = "disconnected"
+                    break
+                # cmd-28 reply status: meaning unconfirmed, so it only counts as a
+                # refusal when NO data has arrived at all — then fail fast
+                # instead of waiting out the full stall window.
+                start_status = file_meta.get("start_status")
+                if start_status not in (None, 0) and not file_data and now - request_time >= _REFUSED_GRACE_S:
+                    logging.warning(f"[BLE] session {sid}: device refused download (cmd-28 status {start_status})")
+                    interrupted = f"device refused download (status {start_status})"
                     break
                 # Check if data is still flowing
                 current_len = len(file_data)
@@ -1743,14 +1895,21 @@ async def _sync_files_inner(progress_callback=None):
         if meta.get("offset_mismatch"):
             got_off, have = meta["offset_mismatch"]
             logging.info(f"[BLE] session {sid}: first out-of-sequence data packet offset={got_off}, had {have} bytes")
-        if interrupted in ("aborted", "stalled") and _device_state["connected"]:
+        if meta.get("start_status") not in (None, 0):
+            logging.warning(
+                f"[BLE] session {sid}: cmd-28 reply status {meta['start_status']} with {len(raw_data)} bytes "
+                "received (meaning unconfirmed — logged only)"
+            )
+        if interrupted is not None and interrupted != "disconnected" and _device_state["connected"]:
             # Stop the device streaming this file so stale packets don't bleed
             # into the next transfer.
             await _send_stop_sync()
 
-        ok, reason = evaluate_download(sid, fsize, raw_data, meta, interrupted)
-        if not ok:
-            new_files.append(_save_partial(sid, raw_data, fsize, reason, active_rec_dir))
+        verdict, reason = evaluate_download(sid, fsize, raw_data, meta, interrupted)
+        if verdict == DOWNLOAD_PARTIAL:
+            entry = _save_partial(sid, raw_data, fsize, reason, active_rec_dir)
+            new_files.append(entry)
+            track_download_result(entry)
             if interrupted == "aborted":
                 aborted = True
                 logging.info(f"BLE sync aborted mid-file (session {sid})")
@@ -1759,11 +1918,19 @@ async def _sync_files_inner(progress_callback=None):
                 break
             continue
 
-        entry = _save_complete(sid, raw_data, app_rsa_key, active_rec_dir)
+        if verdict == DOWNLOAD_SIZE_MISMATCH:
+            entry = _save_size_mismatch(sid, raw_data, fsize, reason, app_rsa_key, active_rec_dir)
+        else:
+            entry = _save_complete(sid, raw_data, app_rsa_key, active_rec_dir)
         new_files.append(entry)
+        track_download_result(entry)
         if entry["status"] != "new":
             continue
-        verified_sids.append(sid)
+        # CRC is diagnostic only (unconfirmed variant): computed off the BLE loop.
+        _schedule_crc_diagnostic(sid, raw_data, meta.get("tail_crc"))
+        if verdict == DOWNLOAD_OK:
+            # Only exact-size downloads may be auto-deleted from the device.
+            verified_sids.append(sid)
         # Auto-upload to Google Drive if storage mode requires it. gdrive keys
         # its synced-files map by str (JSON object keys), so pass a str id —
         # an int never matches after a config reload.
@@ -1774,8 +1941,9 @@ async def _sync_files_inner(progress_callback=None):
         except Exception:
             pass
 
-    # Auto-delete synced files from the device — only files that passed every
-    # integrity check AND whose .ogg was written successfully.
+    # Auto-delete synced files from the device — only exact-size files that
+    # passed every integrity check AND whose .ogg was written successfully
+    # (size-mismatch files stay on the device as the fallback copy).
     auto_delete = load_config().get("auto_delete_after_sync", False)
     deleted_from_device = []
     delete_failed = []
@@ -1796,6 +1964,8 @@ async def _sync_files_inner(progress_callback=None):
         result["delete_failed"] = delete_failed
     if aborted:
         result["aborted"] = True
+    if retry_capped:
+        result["retry_capped"] = retry_capped
     return result
 
 

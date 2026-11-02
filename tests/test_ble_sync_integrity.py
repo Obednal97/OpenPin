@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 import app.state.device as dev
 from app.utils.audio import BleDecryptError, decrypt_ble_file
-from tests.plaud_fakes import TOC, make_plaud_file
+from tests.plaud_fakes import TOC, make_plaud_file, py310_asyncio
 
 CHUNK = 240
 
@@ -45,12 +45,15 @@ class FakeDevice:
       stall         40 % of the bytes, then silence (link still up)
       drop          40 % of the bytes, then the link drops
       slow          40 % of the bytes, then silence (used for mid-file abort)
+      refuse        cmd-28 reply only (status from start_status, default 1), no data
+    start_status[sid]: byte 7 of the cmd-28 reply (default 0).
     delete_mode: ok | none (no reply) | fail (status 1) | wrong_sid
     """
 
-    def __init__(self, files, behaviours=None, delete_mode="ok"):
+    def __init__(self, files, behaviours=None, delete_mode="ok", start_status=None):
         self.files = files  # sid -> bytes
         self.behaviours = behaviours or {}
+        self.start_status = start_status or {}
         self.delete_mode = delete_mode
         self.key, self.nonce, self.aad = os.urandom(32), os.urandom(12), os.urandom(12)
         self.cipher = ChaCha20Poly1305(self.key)
@@ -70,7 +73,10 @@ class FakeDevice:
     async def stream(self, sid, mode):
         data = self.files[sid]
         cut = len(data) if mode in ("complete", "end_only", "error_end") else int(len(data) * 0.4)
-        self.reply(28, struct.pack("<I", sid) + bytes([0]))
+        if mode == "refuse":
+            self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 1)]))
+            return
+        self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 0)]))
         for off in range(0, cut, CHUNK):
             chunk = data[off : min(off + CHUNK, cut)]
             self.notify(bytes([2]) + struct.pack("<II", sid, off) + bytes([len(chunk)]) + chunk)
@@ -175,13 +181,14 @@ def env(tmp_path, monkeypatch, app_key):
     monkeypatch.setattr(gdrive, "maybe_auto_upload", lambda sid, path: uploads.append((sid, path)))
     monkeypatch.setattr(gdrive, "get_synced_files", lambda: {})
     monkeypatch.setattr(dev, "_sync_abort", False)
+    monkeypatch.setattr(dev, "_download_failures", {})
     yield {"rec": rec, "config": config, "uploads": uploads}
     dev._reset_state()
     if dev._syncing.locked():
         dev._syncing.release()
 
 
-def run_sync(device, file_list):
+def run_sync(device, file_list, background=False):
     async def go():
         device.install()
 
@@ -189,7 +196,7 @@ def run_sync(device, file_list):
             return [{"session_id": sid, "size": size, "duration_est": 0} for sid, size in file_list]
 
         dev.list_device_files = fake_list
-        return await dev.sync_files()
+        return await dev.sync_files(background=background)
 
     original = dev.list_device_files
     try:
@@ -227,7 +234,7 @@ def test_redownload_backup_hook_only_after_ogg_written(env, app_key, monkeypatch
     calls = []
     monkeypatch.setattr(dev, "_finalize_redownload_backup", lambda sid: calls.append(sid))
     good, bad = make_plaud_file(app_key), make_plaud_file(app_key)
-    run_sync(FakeDevice({111: good, 112: bad}, {112: "truncate_end"}), [(111, len(good)), (112, len(bad))])
+    run_sync(FakeDevice({111: good, 112: bad}, {112: "error_end"}), [(111, len(good)), (112, len(bad))])
     assert calls == [111]
 
 
@@ -238,7 +245,7 @@ def test_complete_with_end_packet_but_no_tail_is_accepted(env, app_key):
     assert entry(result, 102)["status"] == "new"
 
 
-@pytest.mark.parametrize("mode", ["drop", "stall", "truncate_end", "error_end"])
+@pytest.mark.parametrize("mode", ["drop", "stall", "error_end"])
 def test_incomplete_download_kept_as_partial_never_deleted(env, app_key, mode):
     data = make_plaud_file(app_key)
     device = FakeDevice({201: data}, {201: mode})
@@ -381,26 +388,71 @@ def test_existing_ogg_and_cloud_synced_files_are_skipped(env, app_key, monkeypat
 
 
 def test_evaluate_download_rules():
+    ok, mismatch, partial = dev.DOWNLOAD_OK, dev.DOWNLOAD_SIZE_MISMATCH, dev.DOWNLOAD_PARTIAL
     meta_ok = {"end": True, "end_error": 0}
-    assert dev.evaluate_download(1, 3, b"abc", meta_ok) == (True, None)
-    assert dev.evaluate_download(1, 4, b"abc", meta_ok)[0] is False
-    assert dev.evaluate_download(1, 2, b"abc", meta_ok)[0] is False
-    assert dev.evaluate_download(1, 3, b"abc", {})[0] is False
-    assert dev.evaluate_download(1, 3, b"abc", {"end": True, "end_error": 5})[0] is False
-    assert dev.evaluate_download(1, 3, b"abc", {"tail": True, "start_status": 2})[0] is False
-    assert dev.evaluate_download(1, 3, b"abc", meta_ok, interrupted="stalled") == (False, "stalled")
+    assert dev.evaluate_download(1, 3, b"abc", meta_ok) == (ok, None)
+    # Clean end packet but size != file list → only kept if it decrypts (caller's job)
+    assert dev.evaluate_download(1, 4, b"abc", meta_ok)[0] == mismatch
+    assert dev.evaluate_download(1, 2, b"abc", meta_ok)[0] == mismatch
+    # Tail-only (no end packet) or no data at all with a size mismatch → partial
+    assert dev.evaluate_download(1, 4, b"abc", {"tail": True})[0] == partial
+    assert dev.evaluate_download(1, 4, b"", meta_ok)[0] == partial
+    assert dev.evaluate_download(1, 3, b"abc", {})[0] == partial
+    assert dev.evaluate_download(1, 3, b"abc", {"end": True, "end_error": 5})[0] == partial
+    assert dev.evaluate_download(1, 4, b"abc", {"end": True, "end_error": 5})[0] == partial
+    # cmd-28 reply status: meaning unconfirmed → never rejects on its own
+    assert dev.evaluate_download(1, 3, b"abc", {"tail": True, "start_status": 2}) == (ok, None)
+    assert dev.evaluate_download(1, 3, b"abc", meta_ok, interrupted="stalled") == (partial, "stalled")
+    assert dev.evaluate_download(1, 4, b"abc", meta_ok, interrupted="stalled") == (partial, "stalled")
 
 
-def test_crc_logged_not_enforced_by_default(monkeypatch):
+def test_crc_logged_not_enforced_by_default(monkeypatch, caplog):
     data = b"123456789"
     v = dev.crc16_variants(data)
     # Standard check values for the catalogued CRC-16 variants
     assert v == {"XMODEM": 0x31C3, "CCITT-FALSE": 0x29B1, "ARC": 0xBB3D, "MODBUS": 0x4B37, "KERMIT": 0x2189}
+    assert set(dev.crc16_variants(data, slow_limit=4)) == {"XMODEM", "CCITT-FALSE"}
     meta = {"tail": True, "tail_crc": 0xDEAD}
-    assert dev.evaluate_download(1, len(data), data, meta) == (True, None)
+    assert dev.evaluate_download(1, len(data), data, meta) == (dev.DOWNLOAD_OK, None)
     monkeypatch.setattr(dev, "CRC16_ENFORCED_VARIANT", "XMODEM")
-    assert dev.evaluate_download(1, len(data), data, meta) == (False, "CRC mismatch")
-    assert dev.evaluate_download(1, len(data), data, {"tail": True, "tail_crc": 0x31C3}) == (True, None)
+    assert dev.evaluate_download(1, len(data), data, meta) == (dev.DOWNLOAD_PARTIAL, "CRC mismatch")
+    assert dev.evaluate_download(1, len(data), data, {"tail": True, "tail_crc": 0x31C3}) == (dev.DOWNLOAD_OK, None)
+    with caplog.at_level("INFO"):
+        dev._log_tail_crc(7, data, 0xBB3D)
+    assert "CRC session 7: device=0xbb3d matches ARC" in caplog.text
+
+
+def test_crc_diagnostic_runs_off_the_event_loop(env, app_key, monkeypatch):
+    """The pure-Python CRC variants must not run on the BLE loop thread."""
+    threads = []
+    real = dev._log_tail_crc
+
+    def spy(sid, data, crc):
+        threads.append(threading.get_ident())
+        real(sid, data, crc)
+
+    monkeypatch.setattr(dev, "_log_tail_crc", spy)
+    data = make_plaud_file(app_key)
+    loop_thread = []
+
+    async def go():
+        loop_thread.append(threading.get_ident())
+        device = FakeDevice({121: data})
+        device.install()
+
+        async def fake_list():
+            return [{"session_id": 121, "size": len(data), "duration_est": 0}]
+
+        dev.list_device_files = fake_list
+        return await dev.sync_files()
+
+    original = dev.list_device_files
+    try:
+        result = asyncio.run(go())  # asyncio.run waits for the default executor
+    finally:
+        dev.list_device_files = original
+    assert entry(result, 121)["status"] == "new"
+    assert len(threads) == 1 and threads[0] != loop_thread[0]
 
 
 def test_decrypt_ble_file_raises_on_undecryptable(app_key):
@@ -491,7 +543,7 @@ def test_second_sync_rejected_while_first_waits_for_ble_lock(env, monkeypatch):
     can't slip in behind the first and run a full second sync."""
     calls = []
 
-    async def fake_inner(progress_callback=None):
+    async def fake_inner(progress_callback=None, background=False):
         calls.append(1)
         return {"files": []}
 
@@ -532,3 +584,188 @@ def test_check_new_counts_partials_as_new(flask_client, env, monkeypatch):
     body = flask_client.get("/device/check-new").get_json()
     assert body["new_files"] == 1
     assert body["files"][0]["session_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Fail-safe acceptance: the protocol assumptions are unconfirmed on hardware
+# ---------------------------------------------------------------------------
+
+
+def test_nonzero_start_status_with_full_data_is_accepted(env, app_key, caplog):
+    data = make_plaud_file(app_key)
+    device = FakeDevice({131: data}, start_status={131: 2})
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(131, len(data))])
+    e = entry(result, 131)
+    assert e["status"] == "new"
+    assert "size_mismatch" not in e
+    assert result["deleted_from_device"] == [131]  # exact size: still eligible
+    assert "cmd-28 reply status 2" in caplog.text
+
+
+def test_refused_download_without_data_fails_fast(env, app_key, monkeypatch):
+    monkeypatch.setattr(dev, "_STALL_TIMEOUT_S", 30)  # would hang the test if refusal weren't detected
+    monkeypatch.setattr(dev, "_REFUSED_GRACE_S", 0.05)
+    data = make_plaud_file(app_key)
+    device = FakeDevice({132: data}, {132: "refuse"}, start_status={132: 4})
+    t0 = time.time()
+    result = run_sync(device, [(132, len(data))])
+    assert time.time() - t0 < 5
+    e = entry(result, 132)
+    assert e["status"] == "partial"
+    assert e["reason"] == "device refused download (status 4)"
+    assert e["received"] == 0
+    assert not (env["rec"] / "132.ogg").exists()
+    assert 31 not in device.sent
+
+
+@pytest.mark.parametrize("case", ["list_larger", "list_smaller", "truncate_end"])
+def test_size_mismatch_accepted_if_it_decrypts_and_never_auto_deleted(env, app_key, caplog, case):
+    assert env["config"]["auto_delete_after_sync"] is True
+    data, exact = make_plaud_file(app_key), make_plaud_file(app_key)
+    if case == "truncate_end":
+        device = FakeDevice({141: data, 142: exact}, {141: "truncate_end"})
+        listed, received = len(data), int(len(data) * 0.4)
+    else:
+        device = FakeDevice({141: data, 142: exact})
+        listed, received = len(data) + (1000 if case == "list_larger" else -1000), len(data)
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(141, listed), (142, len(exact))])
+
+    e = entry(result, 141)
+    assert e["status"] == "new"
+    assert e["size_mismatch"] == {"received": received, "expected": listed}
+    assert (env["rec"] / "141.ogg").exists()
+    assert (env["rec"] / "141_encrypted.bin").read_bytes() == data[:received]  # kept for diagnosis
+    assert not (env["rec"] / "141_partial.bin").exists()
+    assert "[BLE] size mismatch accepted for session 141" in caplog.text
+    # Only the exact-size file is auto-deleted; the mismatched one stays on the device.
+    assert result["deleted_from_device"] == [142]
+    assert 141 not in result.get("delete_failed", [])
+    assert dev.download_failures(141) == 0
+
+
+def test_size_mismatch_that_does_not_decrypt_is_partial(env, app_key):
+    data = make_plaud_file(app_key, decryptable=False)
+    device = FakeDevice({151: data})
+    result = run_sync(device, [(151, len(data) + 500)])
+    e = entry(result, 151)
+    assert e["status"] == "partial"
+    assert "size mismatch" in e["reason"] and "decrypt failed" in e["reason"]
+    assert not (env["rec"] / "151.ogg").exists()
+    assert (env["rec"] / "151_partial.bin").read_bytes() == data
+    assert 31 not in device.sent
+
+
+# ---------------------------------------------------------------------------
+# Background retry cap
+# ---------------------------------------------------------------------------
+
+
+def test_retry_counter_rules(env):
+    track = dev.track_download_result
+    track({"session_id": 5, "status": "partial", "reason": "aborted"})  # user switched to WiFi
+    assert dev.download_failures(5) == 0
+    track({"session_id": 5, "status": "partial", "reason": "stalled"})
+    track({"session_id": "5", "status": "decrypt_failed"})  # str and int ids share a counter
+    track({"session_id": 5, "status": "exists"})
+    assert dev.download_failures(5) == 2 and not dev.is_retry_capped(5)
+    track({"session_id": 5, "status": "partial", "reason": "size mismatch"})
+    assert dev.is_retry_capped(5)
+    track({"session_id": 5, "status": "new"})
+    assert dev.download_failures(5) == 0
+
+
+def _fake_listing(monkeypatch, env, listing):
+    import app.routes.device as routes
+
+    monkeypatch.setitem(dev._device_state, "connected", True)
+    monkeypatch.setattr(routes, "get_all_recordings_dirs", lambda: [env["rec"]])
+    monkeypatch.setattr(routes, "load_config", lambda: {})
+
+    def fake_run_async(coro, **kw):
+        coro.close()
+        return listing
+
+    monkeypatch.setattr(dev, "run_async", fake_run_async)
+
+
+def test_retry_cap_stops_background_but_not_manual_sync(env, app_key, flask_client, monkeypatch):
+    data, other = make_plaud_file(app_key), make_plaud_file(app_key)
+    for _ in range(dev.RETRY_CAP):
+        r = run_sync(FakeDevice({161: data}, {161: "error_end"}), [(161, len(data))], background=True)
+        assert entry(r, 161)["status"] == "partial"
+    assert dev.is_retry_capped(161)
+
+    # Background sync skips it without requesting it from the device…
+    bg = FakeDevice({161: data, 162: other})
+    r = run_sync(bg, [(161, len(data)), (162, len(other))], background=True)
+    e = entry(r, 161)
+    assert e["status"] == "skipped" and e["attempts"] == dev.RETRY_CAP
+    assert r["retry_capped"] == [161]
+    assert bg.sent.count(28) == 1  # only 162
+    assert entry(r, 162)["status"] == "new"
+
+    # …and /device/check-new (background by default) stops counting it.
+    _fake_listing(monkeypatch, env, [{"session_id": 161, "size": len(data)}, {"session_id": 163, "size": 7}])
+    body = flask_client.get("/device/check-new").get_json()
+    assert body["new_files"] == 1 and body["total_size"] == 7
+    assert [f["session_id"] for f in body["files"]] == [163]
+    assert body["retry_capped"] == [{"session_id": 161, "size": len(data), "attempts": dev.RETRY_CAP}]
+    body = flask_client.get("/device/check-new?background=0").get_json()
+    assert body["new_files"] == 2 and "retry_capped" not in body
+
+    # An explicit (manual) sync still retries it; success resets the counter.
+    manual = FakeDevice({161: data})
+    r = run_sync(manual, [(161, len(data))])
+    assert 28 in manual.sent
+    assert entry(r, 161)["status"] == "new"
+    assert dev.download_failures(161) == 0 and not dev.is_retry_capped(161)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, False),
+        ({"json": {}}, False),
+        ({"json": {"background": True}}, True),
+        ({"json": {"background": False}}, False),
+        ({"query_string": {"background": "1"}}, True),
+    ],
+)
+def test_sync_route_background_flag(flask_client, monkeypatch, kwargs, expected):
+    monkeypatch.setitem(dev._device_state, "connected", True)
+    seen = {}
+
+    def fake_run_sync_blocking(timeout=1800, background=False):
+        seen["background"] = background
+        return {"files": []}
+
+    monkeypatch.setattr(dev, "run_sync_blocking", fake_run_sync_blocking)
+    r = flask_client.post("/device/sync", **kwargs)
+    assert r.status_code == 200
+    assert seen["background"] is expected
+
+
+# ---------------------------------------------------------------------------
+# Python 3.10: asyncio.TimeoutError is not the builtin TimeoutError
+# ---------------------------------------------------------------------------
+
+
+def test_send_cmd_timeout_handled_with_py310_asyncio(env, monkeypatch):
+    monkeypatch.setattr(dev, "asyncio", py310_asyncio())
+    device = FakeDevice({})
+
+    async def go():
+        device.install()
+        return await dev.send_cmd(bytes([1, 9, 0]), timeout=0.05)  # fake device never answers cmd 9
+
+    assert asyncio.run(go()) is None
+
+
+def test_stall_detected_with_py310_asyncio(env, app_key, monkeypatch):
+    monkeypatch.setattr(dev, "asyncio", py310_asyncio())
+    data = make_plaud_file(app_key)
+    result = run_sync(FakeDevice({171: data}, {171: "stall"}), [(171, len(data))])
+    e = entry(result, 171)
+    assert e["status"] == "partial" and e["reason"] == "stalled"

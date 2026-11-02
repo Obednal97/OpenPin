@@ -22,6 +22,27 @@ def _error_json(base, exc):
 bp = Blueprint("device", __name__, url_prefix="/device")
 
 
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _background_flag(default):
+    """The caller's `background` flag: JSON body {"background": true} or ?background=1.
+
+    Automatic syncs (45 s poll, wake, after pairing) are "background"; an
+    explicit user Sync is not. Background requests skip sessions that hit the
+    retry cap (dev.RETRY_CAP consecutive failed downloads).
+    """
+    body = request.get_json(silent=True)
+    if isinstance(body, dict) and "background" in body:
+        return _truthy(body["background"])
+    if "background" in request.args:
+        return _truthy(request.args["background"])
+    return default
+
+
 def _busy_response():
     """409 returned while a BLE sync owns the link (it holds _ble_lock for its
     whole run, so other BLE calls would just queue behind it)."""
@@ -274,7 +295,15 @@ def scan_known():
 
 @bp.route("/check-new")
 def check_new():
-    """Check if device has files not yet synced locally."""
+    """Check if device has files not yet synced locally.
+
+    Background by default (every automatic caller uses this count to decide
+    whether to start a sync): sessions that failed dev.RETRY_CAP times in a row
+    are left out of new_files / total_size / files and listed under
+    retry_capped instead, so the poll stops re-triggering syncs for them.
+    ?background=0 counts them too.
+    """
+    background = _background_flag(default=True)
     if not dev.is_connected():
         return jsonify({"new_files": 0})
     if dev.is_syncing():
@@ -289,13 +318,22 @@ def check_new():
         # recordings dir, or (cloud storage mode) uploaded to Google Drive.
         # Partial downloads count as new so they get retried.
         cloud_ids = dev.gdrive_cloud_synced_ids()
-        new_files = [
+        unsynced = [
             f
             for f in files
             if str(f["session_id"]) not in dismissed and not dev.is_already_synced(f["session_id"], rec_dirs, cloud_ids)
         ]
+        new_files, retry_capped = [], []
+        for f in unsynced:
+            if background and dev.is_retry_capped(f["session_id"]):
+                retry_capped.append({**f, "attempts": dev.download_failures(f["session_id"])})
+            else:
+                new_files.append(f)
         total_size = sum(f.get("size", 0) for f in new_files)
-        return jsonify({"new_files": len(new_files), "total_size": total_size, "files": new_files})
+        body = {"new_files": len(new_files), "total_size": total_size, "files": new_files}
+        if retry_capped:
+            body["retry_capped"] = retry_capped
+        return jsonify(body)
     except Exception:
         return jsonify({"new_files": 0})
 
@@ -338,12 +376,16 @@ def record():
 
 @bp.route("/sync", methods=["POST"])
 def sync():
+    """BLE sync. Body {"background": true} for automatic syncs: sessions at the
+    retry cap are skipped (status "skipped"). Without it (the Sync button) every
+    unsynced session is retried."""
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
+    background = _background_flag(default=False)
     try:
         # Claims the sync slot before queueing for the BLE lock: a concurrent
         # /sync gets 409 at once instead of running a second full sync later.
-        result = dev.run_sync_blocking(timeout=1800)  # 30 min for large multi-file syncs
+        result = dev.run_sync_blocking(timeout=1800, background=background)  # 30 min for large multi-file syncs
         if result is None:
             return _busy_response()
         return jsonify(result)
