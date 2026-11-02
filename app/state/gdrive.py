@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests as http_requests
 
-from app.utils.config import load_config, save_config
+from app.utils.config import load_config, update_config
 from app.utils.constants import (
     GDRIVE_API_BASE,
     GDRIVE_AUTH_ENDPOINT,
@@ -25,6 +25,7 @@ from app.utils.constants import (
     GDRIVE_SCOPE,
     GDRIVE_TOKEN_ENDPOINT,
 )
+from app.utils.paths import is_auxiliary_stem
 
 # Module-level state
 _gdrive_state = {
@@ -82,9 +83,16 @@ def load():
     if GDRIVE_CONFIG_PATH.exists():
         try:
             data = json.loads(GDRIVE_CONFIG_PATH.read_text())
-            for k in ("access_token", "refresh_token", "token_expires_at",
-                       "user_email", "folder_id", "folder_name",
-                       "client_id", "client_secret"):
+            for k in (
+                "access_token",
+                "refresh_token",
+                "token_expires_at",
+                "user_email",
+                "folder_id",
+                "folder_name",
+                "client_id",
+                "client_secret",
+            ):
                 if k in data:
                     _gdrive_state[k] = data[k]
             if _gdrive_state.get("access_token"):
@@ -96,9 +104,16 @@ def load():
 def save():
     """Persist Google Drive tokens and config."""
     save_data = {}
-    for k in ("access_token", "refresh_token", "token_expires_at",
-              "user_email", "folder_id", "folder_name",
-              "client_id", "client_secret"):
+    for k in (
+        "access_token",
+        "refresh_token",
+        "token_expires_at",
+        "user_email",
+        "folder_id",
+        "folder_name",
+        "client_id",
+        "client_secret",
+    ):
         if _gdrive_state.get(k) is not None:
             save_data[k] = _gdrive_state[k]
     GDRIVE_CONFIG_PATH.write_text(json.dumps(save_data, indent=2))
@@ -109,9 +124,7 @@ def save():
 
 def _generate_pkce():
     code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
+    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
     return code_verifier, code_challenge
 
 
@@ -208,6 +221,7 @@ def start_connect(client_id=None, client_secret=None):
     _gdrive_state["code_verifier"] = code_verifier
 
     import uuid as uuid_mod
+
     state = str(uuid_mod.uuid4())
     _gdrive_state["state"] = state
 
@@ -250,7 +264,9 @@ def _start_callback_server():
                 error = params.get("error", [None])[0]
 
                 if error:
-                    self._respond(f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>")
+                    self._respond(
+                        f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>"
+                    )
                     self._signal({"error": error})
                     return
 
@@ -287,7 +303,8 @@ def _start_callback_server():
                         headers = {"Authorization": f"Bearer {tokens['access_token']}"}
                         info = http_requests.get(
                             "https://www.googleapis.com/oauth2/v2/userinfo",
-                            headers=headers, timeout=10,
+                            headers=headers,
+                            timeout=10,
                         ).json()
                         _gdrive_state["user_email"] = info.get("email", "")
                     except Exception:
@@ -429,12 +446,16 @@ def _simple_upload(path, file_name, folder_id):
 
     boundary = "plaud_v2_boundary"
     body = (
-        f"--{boundary}\r\n"
-        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
-        f"{metadata}\r\n"
-        f"--{boundary}\r\n"
-        f"Content-Type: audio/ogg\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--".encode()
+        (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{metadata}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: audio/ogg\r\n\r\n"
+        ).encode()
+        + file_data
+        + f"\r\n--{boundary}--".encode()
+    )
 
     r = http_requests.post(
         f"{GDRIVE_API_BASE}/upload/drive/v3/files?uploadType=multipart",
@@ -496,25 +517,45 @@ def _resumable_upload(path, file_name, folder_id, file_size):
 
 
 def get_synced_files():
-    """Get the dict of session_id → sync info from config."""
-    config = load_config()
-    return config.get("gdrive_synced_files", {})
+    """Get the dict of session_id → sync info from config.
+
+    Keys are always ``str``: the config is JSON, so ids come back as strings
+    even if a caller once stored an int, and callers may pass either.
+    """
+    synced = load_config().get("gdrive_synced_files", {})
+    if not isinstance(synced, dict):
+        return {}
+    return {str(k): v for k, v in synced.items()}
 
 
 def is_synced(session_id):
-    return session_id in get_synced_files()
+    """True if ``session_id`` (int or str) has been uploaded to Drive.
+
+    Device session ids are ints at some call sites; comparing an int against
+    the JSON string keys was always False, so "Cloud" storage mode re-uploaded
+    (and re-downloaded) the same recording forever.
+    """
+    return str(session_id) in get_synced_files()
 
 
 def mark_synced(session_id, drive_file_id, file_size=0):
-    config = load_config()
-    synced = config.get("gdrive_synced_files", {})
-    synced[session_id] = {
+    entry = {
         "drive_file_id": drive_file_id,
         "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "file_size": file_size,
     }
-    config["gdrive_synced_files"] = synced
-    save_config(config)
+
+    def _mark(cfg):
+        synced = cfg.get("gdrive_synced_files")
+        if not isinstance(synced, dict):
+            synced = cfg["gdrive_synced_files"] = {}
+        synced[str(session_id)] = entry
+
+    update_config(_mark)
+
+
+def _dismissed_ids(config):
+    return {str(x) for x in config.get("deleted_ids", [])}
 
 
 def sync_all():
@@ -524,15 +565,16 @@ def sync_all():
     if not is_connected() or not get_folder_id():
         return {"error": "Not connected or no folder selected"}
 
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
+    dismissed = _dismissed_ids(load_config())
+    synced = get_synced_files()
 
     all_ogg = []
     for rec_dir in get_all_recordings_dirs():
         if rec_dir.exists():
-            all_ogg.extend(rec_dir.glob("*.ogg"))
+            # Skip crop backups / temp files (<sid>_uncropped.ogg, <sid>_crop_tmp.ogg)
+            all_ogg.extend(f for f in rec_dir.glob("*.ogg") if not is_auxiliary_stem(f.stem))
 
-    unsynced = [f for f in all_ogg if f.stem not in dismissed and not is_synced(f.stem)]
+    unsynced = [f for f in all_ogg if f.stem not in dismissed and f.stem not in synced]
 
     _upload_progress["active"] = True
     _upload_progress["total_files"] = len(unsynced)
@@ -561,8 +603,7 @@ def get_sync_status():
     """Get counts of synced vs total recordings."""
     from app.utils.constants import get_all_recordings_dirs
 
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
+    dismissed = _dismissed_ids(load_config())
     synced = get_synced_files()
 
     total = 0
@@ -570,6 +611,8 @@ def get_sync_status():
     for rec_dir in get_all_recordings_dirs():
         if rec_dir.exists():
             for f in rec_dir.glob("*.ogg"):
+                if is_auxiliary_stem(f.stem):
+                    continue
                 if f.stem not in dismissed:
                     total += 1
                     if f.stem in synced:
@@ -644,18 +687,22 @@ def get_cloud_only_recordings():
             for f in rec_dir.glob("*.ogg"):
                 local_ids.add(f.stem)
 
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
+    dismissed = _dismissed_ids(load_config())
 
     cloud_only = []
     for sid, info in synced.items():
+        # Crop backups uploaded by older versions are not recordings of their own.
+        if is_auxiliary_stem(sid) or not isinstance(info, dict):
+            continue
         if sid not in local_ids and sid not in dismissed:
-            cloud_only.append({
-                "session_id": sid,
-                "drive_file_id": info.get("drive_file_id", ""),
-                "synced_at": info.get("synced_at", ""),
-                "file_size": info.get("file_size", 0),
-            })
+            cloud_only.append(
+                {
+                    "session_id": sid,
+                    "drive_file_id": info.get("drive_file_id", ""),
+                    "synced_at": info.get("synced_at", ""),
+                    "file_size": info.get("file_size", 0),
+                }
+            )
 
     return cloud_only
 
