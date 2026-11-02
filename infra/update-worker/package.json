@@ -1,0 +1,10 @@
+{
+  "name": "plaud-v2-update-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/",
+    "deploy": "npx --yes wrangler@3 deploy",
+    "tail": "npx --yes wrangler@3 tail"
+  }
+}

@@ -1,0 +1,9 @@
+# Cloudflare Worker that proxies the Plaud V2 updater + bug reporter to GitHub.
+# No secrets in this file: GH_TOKEN is a Worker secret (`npx wrangler secret put GH_TOKEN`).
+name = "plaud-v2-updates"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[observability]
+enabled = true
