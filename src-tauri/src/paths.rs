@@ -45,7 +45,9 @@ pub fn app_support_dir() -> PathBuf {
 /// Shared by dev and release builds: the managed Python runtime and the
 /// FFmpeg download (`app/utils/system.py` hard-codes that `bin/` path).
 pub fn shared_support_dir() -> PathBuf {
-    library().join("Application Support").join(RELEASE_SUPPORT_DIR)
+    library()
+        .join("Application Support")
+        .join(RELEASE_SUPPORT_DIR)
 }
 
 /// Folder for `app.log` and `update.log`.
@@ -67,7 +69,11 @@ pub fn config_path() -> PathBuf {
 }
 
 fn support_dir_for(library: &Path, dev: bool) -> PathBuf {
-    let name = if dev { DEV_SUPPORT_DIR } else { RELEASE_SUPPORT_DIR };
+    let name = if dev {
+        DEV_SUPPORT_DIR
+    } else {
+        RELEASE_SUPPORT_DIR
+    };
     library.join("Application Support").join(name)
 }
 
@@ -124,7 +130,10 @@ mod tests {
     fn env_override_wins_in_both_builds() {
         for dev in [true, false] {
             assert_eq!(resolve(Some("/data/plaud"), dev), Path::new("/data/plaud"));
-            assert_eq!(resolve(Some("  /data/plaud  "), dev), Path::new("/data/plaud"));
+            assert_eq!(
+                resolve(Some("  /data/plaud  "), dev),
+                Path::new("/data/plaud")
+            );
         }
     }
 
@@ -137,7 +146,10 @@ mod tests {
     #[test]
     fn env_tilde_and_relative_paths_are_made_absolute() {
         assert_eq!(resolve(Some("~"), true), Path::new(HOME));
-        assert_eq!(resolve(Some("~/plaud-dev"), true), Path::new("/Users/x/plaud-dev"));
+        assert_eq!(
+            resolve(Some("~/plaud-dev"), true),
+            Path::new("/Users/x/plaud-dev")
+        );
         assert_eq!(resolve(Some("rel/dir"), false), Path::new("/work/rel/dir"));
     }
 
