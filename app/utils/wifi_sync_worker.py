@@ -63,6 +63,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.append(_PROJECT_ROOT)
 
+from app.utils import ble_proto  # noqa: E402 — needs the path set above
 from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     HANDSHAKE_REJECTED,
     HANDSHAKE_REJECTED_ERROR,
@@ -1491,7 +1492,7 @@ async def ble_connect_and_setup():
         verdict, _info = await bind_handshake(
             lambda pt: cmd("handshake", pt, timeout=HANDSHAKE_REPLY_TIMEOUT_S), token32, log=lambda m: status(m, 3)
         )
-        if verdict == HANDSHAKE_REJECTED:
+        if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
             raise ValueError(HANDSHAKE_REJECTED_ERROR)
     except ValueError:
         try:
