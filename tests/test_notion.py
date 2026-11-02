@@ -43,7 +43,9 @@ def _write_transcript(trn, sid, data):
 # Path traversal
 # ---------------------------------------------------------------------------
 
-TRAVERSAL = ["../victim/secret", "../../etc/passwd", "/etc/passwd", "a\\b", ".hidden", "a:b", "..", "a\x00b"]
+# A backslash alone is not a separator on macOS (older cloud ids can contain
+# one; see app/utils/paths.py), so "..\\b" is the backslash case here.
+TRAVERSAL = ["../victim/secret", "../../etc/passwd", "/etc/passwd", "..\\b", ".hidden", "a:b", "..", "a\x00b"]
 
 
 @pytest.mark.parametrize("sid", TRAVERSAL)
@@ -55,7 +57,7 @@ def test_push_rejects_traversal_ids(env, sid):
     mcp.assert_not_called()
 
 
-@pytest.mark.parametrize("sid", [".hidden", "a:b", "a%5Cb", "..evil", "x" * 129])
+@pytest.mark.parametrize("sid", [".hidden", "a:b", "..%5Cb", "..evil", "x" * 129])
 def test_page_url_rejects_bad_ids(env, sid):
     r = env.client.get(f"/notion/page-url/{sid}")
     assert r.status_code == 400

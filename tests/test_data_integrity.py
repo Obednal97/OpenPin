@@ -93,6 +93,16 @@ GOOD_IDS = [
     "fake_id_999",
     "a",
     "x" * 128,
+    # Ids older builds produced from free-text cloud names (only / and :
+    # were replaced) must stay deletable / taggable / renamable.
+    "cloud_2026-03-27_1234_Plan.",
+    "cloud_2026-03-27_1234_Wait...",
+    "cloud_2026-03-27_1234_a\\b",
+    "cloud_2026-03-27_1234_Q&A_(draft)",
+    "cloud_2026-03-27_1234_tab\there",
+    "a\\b",
+    "a\nb",
+    "a..b",
 ]
 
 BAD_IDS = [
@@ -103,10 +113,10 @@ BAD_IDS = [
     "../../etc/passwd",
     "/etc/passwd",
     "a/b",
-    "a\\b",
+    "a/../b",
     ".hidden",
+    "..\\x",
     "a\x00b",
-    "a\nb",
     "a:b",
     "x" * 129,
     None,
@@ -794,3 +804,76 @@ def test_listing_hides_backups_of_deleted_ids(env):
     # e.g. an older build deleted the recording but left the backup behind
     save_config({"deleted_ids": [sid]})
     assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+# ---------------------------------------------------------------------------
+# Cloud session ids built from free-text names
+# ---------------------------------------------------------------------------
+
+ODD_CLOUD_NAMES = ["Plan.", "Wait...", "a\\b", "Q&A (draft)"]
+
+
+@pytest.mark.parametrize("name", ODD_CLOUD_NAMES)
+def test_legacy_odd_cloud_ids_can_be_tagged_renamed_deleted(env, name):
+    from app.state.cloud import legacy_cloud_session_id
+
+    sid = legacy_cloud_session_id("2026-03-27_1234", name)
+    (env.rec / f"{sid}.ogg").write_bytes(b"audio")
+
+    listing = env.client.get("/recordings").get_json()
+    assert [x["session_id"] for x in listing] == [sid]
+
+    assert _post(env.client, "/recordings/tag", {"session_id": sid, "tags": ["X"]}).status_code == 200
+    assert _post(env.client, "/recordings/rename", {"session_id": sid, "title": "T"}).status_code == 200
+    cfg = _cfg()
+    assert cfg["recording_tags"][sid] == ["X"]
+    assert cfg["recording_names"][sid] == "T"
+
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    assert r.status_code == 200
+    assert r.get_json()["count"] == 1
+    assert [p.name for p in env.system_trash] == [f"{sid}.ogg"]
+    # Nothing outside the recordings dir was touched
+    assert sorted(p.name for p in env.rec.iterdir()) == [f"{sid}.deleted"]
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("Plan.", "cloud_D_Plan"),
+        ("Wait...", "cloud_D_Wait"),
+        ("a\\b", "cloud_D_a-b"),
+        ("Q&A (draft)", "cloud_D_Q&A_(draft)"),
+        ("Team sync: 1/2", "cloud_D_Team_sync-_1-2"),
+        ("...hidden", "cloud_D_hidden"),
+        ("tab\there\nline\x00nul\x7f", "cloud_D_tab-here-line-nul-"),
+        ("  padded  ", "cloud_D_padded"),
+        ("...", "cloud_D_recording"),
+        ("x" * 39 + ". tail", "cloud_D_" + "x" * 39),
+    ],
+)
+def test_new_cloud_session_ids_are_sanitised(name, expected):
+    from app.state.cloud import cloud_session_id
+
+    sid = cloud_session_id("D", name)
+    assert sid == expected
+    assert validate_session_id(sid) == sid
+    assert ".." not in sid and not sid.endswith((".", " "))
+
+
+def test_cloud_id_keeps_legacy_name_for_known_recordings(tmp_path):
+    from app.state.cloud import _resolve_cloud_session_id
+
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    # Unknown recording: new, sanitised id
+    assert _resolve_cloud_session_id("D", "Plan.", rec, set(), {}) == "cloud_D_Plan"
+    # Already downloaded by an older build: keep its id (no duplicate download)
+    (rec / "cloud_D_Plan..ogg").write_bytes(b"x")
+    assert _resolve_cloud_session_id("D", "Plan.", rec, set(), {}) == "cloud_D_Plan."
+    # Deleted under its legacy id: stays deleted
+    assert _resolve_cloud_session_id("D", "Wait...", rec, {"cloud_D_Wait..."}, {}) == "cloud_D_Wait..."
+    # Known via cloud_file_ids (e.g. moved to another folder)
+    assert _resolve_cloud_session_id("D", "a\\b", rec, set(), {"cloud_D_a\\b": "fid"}) == "cloud_D_a\\b"
+    # Names that never differed are unaffected
+    assert _resolve_cloud_session_id("D", "Q&A (draft)", rec, set(), {}) == "cloud_D_Q&A_(draft)"

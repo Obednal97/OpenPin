@@ -226,6 +226,27 @@ def test_audio_valid_recording_served(flask_client, audio_env):
     assert r.data == audio_env["ogg"]
 
 
+@pytest.mark.parametrize(
+    "stem",
+    [
+        # Ids older builds made from names like "Plan.", "Wait...", "a\\b"
+        "cloud_2026-01-01_1200_Plan.",
+        "cloud_2026-01-01_1200_Wait...",
+        "cloud_2026-01-01_1200_a\\b",
+        "cloud_2026-01-01_1200_Q&A_(draft)",
+        "x..y",
+    ],
+)
+def test_audio_odd_cloud_names_served(flask_client, audio_env, stem):
+    from urllib.parse import quote
+
+    (audio_env["rec_dir"] / f"{stem}.ogg").write_bytes(audio_env["ogg"])
+    # Same encoding the bridge uses (encodeURIComponent)
+    r = flask_client.get("/audio/" + quote(f"{stem}.ogg", safe="()!*'"), headers={"Accept": "*/*"})
+    assert r.status_code == 200, stem
+    assert r.data == audio_env["ogg"]
+
+
 def test_audio_cloud_name_with_spaces_served(flask_client, audio_env):
     r = flask_client.get("/audio/cloud_2026-01-01_1200_Team%20sync%20(v2).ogg", headers={"Accept": "*/*"})
     assert r.status_code == 200
@@ -238,6 +259,9 @@ def test_audio_cloud_name_with_spaces_served(flask_client, audio_env):
         "/audio/..%2Foutside%2Fsecret.ogg",
         "/audio/%2E%2E%2Foutside%2Fsecret.ogg",
         "/audio/..%5Coutside%5Csecret.ogg",
+        "/audio/x%5C..%5C..%5Coutside%5Csecret.ogg",  # backslash is not a separator on macOS
+        "/audio/..",
+        "/audio/..ogg",
         "/audio/link.ogg",  # symlink escaping the recordings dir
         "/audio/.hidden.ogg",
         "/audio/20260101_120000.txt",
@@ -268,6 +292,9 @@ def test_audio_view_refuses_absolute_filename(flask_client, audio_env):
     with app.test_request_context("/audio/x", headers={"Accept": "*/*"}), pytest.raises(NotFound):
         core.serve_audio(str(audio_env["secret"]))
     assert core._validate_audio_name("/etc/passwd.ogg") is None
+    assert core._validate_audio_name("..") is None
+    assert core._validate_audio_name("a\x00.ogg") is None
+    assert core._validate_audio_name("Wait....ogg") == "Wait....ogg"
     assert core._validate_audio_name("20260101_120000.ogg") == "20260101_120000.ogg"
 
 
