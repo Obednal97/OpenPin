@@ -16,7 +16,24 @@ Keeping the Mac's WiFi safe:
 - Before any network change a restore record is fsynced to
   <state_dir>/wifi_restore.json; it's deleted only after a verified restore.
   recover_from_record() replays it (startup, or after the parent kills an
-  over-time worker).
+  over-time worker). If the record can't be fsynced, the saved networks are
+  never paused (HotspotHold just keeps rejoining).
+- isolate() and restore_networks() are serialised by WifiRun's lock, and once
+  a restore has begun no isolation can start; cleanup also waits for an
+  in-flight isolate() before restoring (cancelling its asyncio task doesn't
+  stop the thread).
+- A restore that keeps failing (MAX_RESTORE_ATTEMPTS, or every missing network
+  failing with a "not found / invalid" error, e.g. one the user has since
+  deleted) is given up: the record moves to wifi_restore.stuck.json for
+  diagnostics and restore_notice() tells the UI once which networks are gone.
+  Otherwise every sync would refuse and every launch would retry forever.
+- Passwords: restore re-adds each network by SSID + security type only and
+  passes NO password. That relies on macOS keeping the keychain items ("AirPort
+  network password", keyed by SSID) when -removeallpreferredwirelessnetworks
+  removes the profiles. That's expected (networksetup only edits the preferred
+  list) but NOT yet verified on real hardware for every macOS version: before
+  relying on isolation, check on a real Mac that a paused network rejoins
+  without a password prompt after the sync.
 - <state_dir>/wifi_sync.lock (flock) allows one worker at a time.
 - SIGTERM cancels the transfer; the restore always runs (run_guarded).
 - Progress lines carry budget_s / remaining_s (compute_budget) so the parent
@@ -33,6 +50,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -179,33 +197,49 @@ def _get_current_ssid():
 # (recover_from_record), and a new worker refuses to start until it has.
 
 RESTORE_RECORD_NAME = "wifi_restore.json"
+STUCK_RECORD_NAME = "wifi_restore.stuck.json"
 LOCK_NAME = "wifi_sync.lock"
 RECORD_VERSION = 1
+# Failed restores (in the run, at the next worker start, after a kill, at app
+# launch) before the leftover networks are given up on.
+MAX_RESTORE_ATTEMPTS = 3
 
 
 def _fsync_dir(path):
+    """fsync a directory (makes a rename/unlink durable). False if it failed."""
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError:
-        return
+        return False
     try:
         os.fsync(fd)
+        return True
     except OSError:
-        pass
+        return False
     finally:
         os.close(fd)
 
 
-def write_restore_record(state_dir, record):
-    """Atomically replace the restore record and fsync it (file + directory)."""
-    path = Path(state_dir) / RESTORE_RECORD_NAME
+def _write_json_durably(path, data, strict=False):
+    """Atomically replace `path` with JSON and fsync it. Raises OSError if the
+    file can't be written or fsynced (with strict, also if the directory can't)."""
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as f:
-        f.write(json.dumps(record, indent=2).encode("utf-8"))
+        f.write(json.dumps(data, indent=2).encode("utf-8"))
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    _fsync_dir(path.parent)
+    if not _fsync_dir(path.parent) and strict:
+        raise OSError(f"could not fsync {path.parent}")
+
+
+def write_restore_record(state_dir, record, strict=False):
+    """Atomically replace the restore record and fsync it (file + directory).
+
+    strict=True (used before pausing the saved networks) also raises when the
+    directory fsync fails, so the caller can refuse the change.
+    """
+    _write_json_durably(Path(state_dir) / RESTORE_RECORD_NAME, record, strict)
 
 
 def read_restore_record(state_dir):
@@ -232,6 +266,102 @@ def clear_restore_record(state_dir):
     except FileNotFoundError:
         return
     _fsync_dir(path.parent)
+
+
+# -- giving up on a restore that can't succeed ------------------------------
+
+# networksetup / CoreWLAN errors meaning "this network can't be added back"
+# (e.g. the user deleted it, or its parameters aren't accepted). Retrying those
+# would only fail again.
+_PERMANENT_ADD_ERRORS = ("not found", "could not find", "does not exist", "invalid", "not valid", "unknown network")
+
+
+def is_permanent_add_error(err):
+    err = (err or "").lower()
+    return any(marker in err for marker in _PERMANENT_ADD_ERRORS)
+
+
+def _stuck_notice_message(networks):
+    return f"Some saved WiFi networks couldn't be restored: {', '.join(networks) if networks else 'unknown'}"
+
+
+def read_stuck_record(state_dir):
+    try:
+        data = json.loads((Path(state_dir) / STUCK_RECORD_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def note_failed_restore(state_dir, record, check, keep_record=False):
+    """Count one failed restore of `record`'s saved networks.
+
+    Gives up after MAX_RESTORE_ATTEMPTS, or straight away when every missing
+    network failed with a permanent error: a copy goes to
+    wifi_restore.stuck.json (for diagnostics and the UI's one-time notice) and
+    the active record is cleared, so syncs aren't refused and launches don't
+    retry forever. With keep_record (e.g. still on the hotspot) the record
+    stays, minus the saved networks, for the hotspot part of the recovery.
+
+    Returns "gave_up", or "incomplete" (record rewritten with the attempt count).
+    """
+    missing = list(check.get("missing") or [])
+    errors = dict(check.get("errors") or {})
+    attempts = int(record.get("restore_attempts") or 0) + 1
+    record = {**record, "restore_attempts": attempts, "last_missing": missing, "last_errors": errors}
+    permanent = bool(missing) and all(is_permanent_add_error(errors.get(s)) for s in missing)
+    if attempts < MAX_RESTORE_ATTEMPTS and not permanent:
+        write_restore_record(state_dir, record)
+        logging.warning(f"[WiFi] Restore attempt {attempts}/{MAX_RESTORE_ATTEMPTS} failed; missing {missing}")
+        return "incomplete"
+
+    previous = read_stuck_record(state_dir) or {}
+    networks = list(missing)
+    if not previous.get("acknowledged"):
+        networks += [s for s in previous.get("missing") or [] if s not in networks]
+    stuck = {
+        **record,
+        "gave_up_at": time.time(),
+        "reason": "permanent errors" if permanent else f"{attempts} failed attempts",
+        "missing": networks,
+        "acknowledged": False,
+    }
+    try:
+        _write_json_durably(Path(state_dir) / STUCK_RECORD_NAME, stuck)
+    except OSError as e:
+        logging.error(f"[WiFi] Could not write {STUCK_RECORD_NAME}: {e}")
+    if keep_record:
+        write_restore_record(state_dir, {**record, "isolated": False, "saved_networks": None})
+    else:
+        clear_restore_record(state_dir)
+    logging.error(
+        f"[WiFi] Gave up restoring saved networks {missing} after {attempts} attempt(s) "
+        f"({stuck['reason']}; errors: {errors}); kept as {STUCK_RECORD_NAME}"
+    )
+    status(_stuck_notice_message(missing), None)
+    return "gave_up"
+
+
+def restore_notice(state_dir):
+    """The one-time "couldn't restore" notice for the UI, or None (none, or acknowledged).
+
+    {"message": "Some saved WiFi networks couldn't be restored: A, B",
+     "networks": ["A", "B"], "since": <unix time>}
+    """
+    stuck = read_stuck_record(state_dir) if state_dir else None
+    if not stuck or stuck.get("acknowledged"):
+        return None
+    networks = list(stuck.get("missing") or [])
+    return {"message": _stuck_notice_message(networks), "networks": networks, "since": stuck.get("gave_up_at")}
+
+
+def acknowledge_restore_notice(state_dir):
+    """The UI has shown the notice: stop returning it (the file stays for diagnostics)."""
+    stuck = read_stuck_record(state_dir) if state_dir else None
+    if not stuck or stuck.get("acknowledged"):
+        return False
+    _write_json_durably(Path(state_dir) / STUCK_RECORD_NAME, {**stuck, "acknowledged": True})
+    return True
 
 
 class WorkerLock:
@@ -453,17 +583,21 @@ def restore_preferred_networks(networks):
     CoreWLAN first, then networksetup, adding each missing network at its
     original index (ascending, so the order is rebuilt front to back) with its
     recorded security type. No passwords are passed: macOS keeps them in the
-    keychain under the SSID. Returns check_preferred_restored()'s dict.
+    keychain under the SSID, and removing a preferred network is expected to
+    leave that keychain item alone (unverified on real hardware: see the module
+    docstring). Returns check_preferred_restored()'s dict plus "errors"
+    ({ssid: error} for re-adds that failed).
     """
     if not networks:
-        return {"verified": True, "missing": [], "order_ok": True}
+        return {"verified": True, "missing": [], "order_ok": True, "errors": {}}
     if _restore_via_corewlan(networks):
         result = check_preferred_restored(networks, list_preferred_networks())
         if result["verified"]:
             status(f"Restored {len(networks)} saved WiFi networks", None)
-            return result
+            return {**result, "errors": {}}
     current = list_preferred_networks() or []
     iface = get_wifi_interface()
+    errors = {}
     for index, net in enumerate(networks):
         if net["ssid"] in current:
             continue
@@ -471,8 +605,9 @@ def restore_preferred_networks(networks):
         r = _networksetup("-addpreferredwirelessnetworkatindex", iface, net["ssid"], str(index), security)
         if r is None or r.returncode != 0:
             err = ((r.stderr or r.stdout or "").strip() if r else "did not run")[:200]
+            errors[net["ssid"]] = err
             logging.error(f"[WiFi] Could not re-add saved network #{index}: {err}")
-    result = check_preferred_restored(networks, list_preferred_networks())
+    result = {**check_preferred_restored(networks, list_preferred_networks()), "errors": errors}
     if result["verified"]:
         status(f"Restored {len(networks)} saved WiFi networks", None)
         if not result["order_ok"]:
@@ -495,6 +630,13 @@ class WifiRun:
     networks stay, and HotspotHold rejoins if macOS auto-joins away. Only when
     auto-join keeps pulling the Mac off the hotspot does isolate() pause the
     saved networks, after first recording them durably.
+
+    isolate() runs on a worker thread (HotspotHold), so every method that
+    changes the networks or the record holds self._lock: a restore can't run
+    between isolate()'s record write and its removal (it would see every
+    network still present, report success, and finish() would clear the record
+    just before the removal). Once restore_networks() has started, isolate()
+    refuses.
     """
 
     def __init__(self, state_dir, hotspot_ssid, original_ip="", original_ssid=""):
@@ -507,7 +649,12 @@ class WifiRun:
         self.saved_networks = None
         self.isolated = False
         self.touched = False
+        self.restoring = False  # set by restore_networks(); no isolation after it
+        self.restore_attempts = 0
+        self.last_check = None  # restore_preferred_networks()'s result
+        self.gave_up = False  # the saved networks couldn't be restored (see note_failed_restore)
         self.started = time.time()
+        self._lock = threading.Lock()
 
     def record(self):
         return {
@@ -522,58 +669,111 @@ class WifiRun:
             "plaud_was_preferred": self.plaud_was_preferred,
             "isolated": self.isolated,
             "saved_networks": self.saved_networks,
+            "restore_attempts": self.restore_attempts,
         }
 
-    def _save(self):
+    def _save(self, strict=False):
+        """Write the record. Caller holds self._lock."""
         if self.state_dir is not None:
-            write_restore_record(self.state_dir, self.record())
+            write_restore_record(self.state_dir, self.record(), strict=strict)
 
     def begin(self):
         """Call right before the first network change (joining the hotspot)."""
-        names = list_preferred_networks()
-        self.plaud_was_preferred = bool(names) and self.hotspot_ssid in names
-        self.touched = True
-        self._save()
+        with self._lock:
+            names = list_preferred_networks()
+            self.plaud_was_preferred = bool(names) and self.hotspot_ssid in names
+            self.touched = True
+            self._save()
 
     def set_hotspot_ip(self, ip):
-        self.hotspot_ip = ip
-        self._save()
+        with self._lock:
+            self.hotspot_ip = ip
+            self._save()
 
     def isolate(self):
-        """Pause all saved networks so auto-join can't leave the hotspot. Last resort."""
-        if self.isolated:
-            return True
-        snapshot = snapshot_preferred_networks()
-        if snapshot is not None:
-            # The hotspot itself (when it was saved before) is restored like any other.
-            snapshot = [n for n in snapshot if n["ssid"] != self.hotspot_ssid or self.plaud_was_preferred]
-        if not can_isolate(snapshot):
-            status("Keeping saved WiFi networks (they couldn't be restored exactly)", None)
-            return False
-        self.saved_networks = snapshot
-        self.isolated = True
-        self._save()  # durable BEFORE the removal
-        return remove_all_preferred_networks()
+        """Pause all saved networks so auto-join can't leave the hotspot. Last resort.
+
+        Refused (False, nothing removed) when the networks couldn't be put back
+        exactly, when there's nowhere durable to record them, when the record
+        can't be fsynced, or once a restore has started.
+        """
+        with self._lock:
+            if self.isolated:
+                return True
+            if self.restoring:
+                return False
+            if self.state_dir is None:
+                return False  # no restore record possible: never remove anything
+            snapshot = snapshot_preferred_networks()
+            if snapshot is not None:
+                # The hotspot itself (when it was saved before) is restored like any other.
+                snapshot = [n for n in snapshot if n["ssid"] != self.hotspot_ssid or self.plaud_was_preferred]
+            if not can_isolate(snapshot):
+                status("Keeping saved WiFi networks (they couldn't be restored exactly)", None)
+                return False
+            self.saved_networks = snapshot
+            self.isolated = True
+            try:
+                self._save(strict=True)  # durable BEFORE the removal
+            except OSError as e:
+                self.saved_networks = None
+                self.isolated = False
+                logging.error(f"[WiFi] Could not save the restore record ({e}); not pausing saved networks")
+                status("Keeping saved WiFi networks (couldn't save a restore record)", None)
+                return False
+            return remove_all_preferred_networks()
+
+    def _recorded_networks(self):
+        """The saved networks as the durable record has them (the source of truth
+        once isolation started), falling back to memory. Caller holds the lock."""
+        rec = read_restore_record(self.state_dir) if self.state_dir is not None else None
+        if rec and rec.get("isolated") and rec.get("saved_networks"):
+            return rec["saved_networks"]
+        return self.saved_networks
 
     def restore_networks(self):
-        """Saved networks back (if paused) and the hotspot forgotten. True if verified."""
-        ok = True
-        if self.isolated:
-            ok = restore_preferred_networks(self.saved_networks)["verified"]
-        if not self.plaud_was_preferred:
-            forget_network(self.hotspot_ssid)
-        return ok
+        """Saved networks back (if paused) and the hotspot forgotten. True if verified.
+
+        Waits for an isolate() in progress (the lock) and stops any later one.
+        After isolation, the networks come from the restore record and are
+        verified against the list as it is now, after the removal finished.
+        """
+        with self._lock:
+            self.restoring = True
+            ok = True
+            self.last_check = None
+            if self.isolated:
+                self.last_check = restore_preferred_networks(self._recorded_networks())
+                ok = self.last_check["verified"]
+            if not self.plaud_was_preferred:
+                forget_network(self.hotspot_ssid)
+            return ok
 
     def finish(self, networks_ok):
-        """Delete the record once the saved networks are verified and we're off the hotspot."""
-        if self.state_dir is None or not self.touched:
-            return True
-        on_hotspot = bool(self.hotspot_ip) and get_wifi_ip() == self.hotspot_ip
-        if networks_ok and not on_hotspot:
-            clear_restore_record(self.state_dir)
-            return True
-        status("WiFi settings not fully restored — the app will retry when it next starts", None)
-        return False
+        """Delete the record once the saved networks are verified and we're off the hotspot.
+
+        A failed network restore counts as an attempt (note_failed_restore);
+        after MAX_RESTORE_ATTEMPTS, or permanent errors, it's given up.
+        """
+        with self._lock:
+            if self.state_dir is None or not self.touched:
+                return True
+            on_hotspot = bool(self.hotspot_ip) and get_wifi_ip() == self.hotspot_ip
+            if networks_ok and not on_hotspot:
+                clear_restore_record(self.state_dir)
+                return True
+            if not networks_ok and self.isolated:
+                check = self.last_check or {"missing": [n["ssid"] for n in self.saved_networks or []]}
+                outcome = note_failed_restore(self.state_dir, self.record(), check, keep_record=on_hotspot)
+                self.restore_attempts += 1
+                if outcome == "gave_up":
+                    self.gave_up = True
+                    self.isolated = False
+                    self.saved_networks = None
+                    if not on_hotspot:
+                        return False
+            status("WiFi settings not fully restored — the app will retry when it next starts", None)
+            return False
 
 
 # ── Joining and holding the device hotspot ───────────────────────────────────
@@ -699,6 +899,17 @@ class HotspotHold:
         self.drifts = 0
         self.rejoining = False
         self.failed = None  # reason string once it gives up
+        self._isolation = None  # in-flight run.isolate() (a thread; cancelling us doesn't stop it)
+
+    async def wait_isolation(self):
+        """Wait for an isolate() that's still running on its thread (cleanup calls
+        this before restoring). Each networksetup call in it has a timeout."""
+        fut = self._isolation
+        if fut is not None and not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except BaseException:
+                pass
 
     async def watch(self):
         misses = 0
@@ -721,7 +932,9 @@ class HotspotHold:
             try:
                 status(f"Mac left the device hotspot (WiFi now {ip or 'disconnected'}), rejoining...", None)
                 if self.drifts >= 2:
-                    await asyncio.to_thread(self.run.isolate)
+                    # Refused (False) if it isn't safe; we then just rejoin again.
+                    self._isolation = asyncio.ensure_future(asyncio.to_thread(self.run.isolate))
+                    await asyncio.shield(self._isolation)
                 new_ip = await connect_to_hotspot(self.ssid, self.password, self.run.original_ip, self.rejoin_timeout)
                 if not new_ip:
                     self.failed = "Could not rejoin the device hotspot"
@@ -896,9 +1109,14 @@ def recover_locked(state_dir, record):
     Restores the saved networks in their original order, forgets the hotspot,
     power-cycles WiFi if the Mac is still on the hotspot (macOS then auto-joins
     a saved network), and deletes the record only once the networks verify.
+
+    A failed restore is counted in the record; after MAX_RESTORE_ATTEMPTS (or
+    when only networks that fail permanently are missing) it's given up
+    ("gave_up": the record is cleared and wifi_restore.stuck.json kept), so a
+    network the user deleted can't block WiFi sync forever.
     """
     networks = record.get("saved_networks") if record.get("isolated") else None
-    check = restore_preferred_networks(networks) if networks else {"verified": True, "missing": []}
+    check = restore_preferred_networks(networks) if networks else {"verified": True, "missing": [], "errors": {}}
     if record.get("hotspot_ssid") and not record.get("plaud_was_preferred"):
         forget_network(record["hotspot_ssid"])
     if _stuck_on_hotspot(record):
@@ -907,14 +1125,19 @@ def recover_locked(state_dir, record):
     if check["verified"]:
         clear_restore_record(state_dir)
         return {"status": "restored", "networks": len(networks or [])}
-    return {"status": "incomplete", "missing": check["missing"]}
+    outcome = note_failed_restore(state_dir, record, check)
+    return {
+        "status": outcome,
+        "missing": check["missing"],
+        "attempts": int(record.get("restore_attempts") or 0) + 1,
+    }
 
 
 def recover_from_record(state_dir):
     """Restore the Mac's WiFi from a leftover record (startup, or after the parent
     killed an over-time worker). Never runs while a live worker holds the lock.
 
-    Returns {"status": "none" | "busy" | "restored" | "incomplete", ...}.
+    Returns {"status": "none" | "busy" | "restored" | "incomplete" | "gave_up", ...}.
     """
     if read_restore_record(state_dir) is None:
         return {"status": "none"}
@@ -1622,6 +1845,10 @@ async def transfer(args):
                 await ctx["hold_task"]
             except BaseException:
                 pass
+        # Cancelling the watcher doesn't stop an isolate() on its thread: let it
+        # finish (restore_networks also waits on WifiRun's lock) so the restore
+        # below works from the record it wrote.
+        await hold.wait_isolation()
         await wait_for_pending_join()
         if ctx["server"] is not None:
             await asyncio.sleep(1)  # let the last frames flush
@@ -1647,6 +1874,8 @@ async def transfer(args):
         result = {"error": "WiFi transfer stopped before it finished", "terminated": True, "files": session.new_files}
     if ctx["wifi_restore"]:
         result["wifi_restore"] = ctx["wifi_restore"]
+    if run.gave_up:
+        result["wifi_restore_notice"] = restore_notice(run.state_dir)
     return result
 
 
@@ -1676,7 +1905,9 @@ async def main():
             if leftover is not None:
                 status("Restoring WiFi settings from an interrupted transfer...", 2)
                 outcome = await asyncio.to_thread(recover_locked, state_dir, leftover)
-                if outcome["status"] != "restored":
+                # "gave_up": the record is cleared and the UI gets restore_notice();
+                # the sync goes ahead.
+                if outcome["status"] not in ("restored", "gave_up"):
                     _emit_result(
                         {
                             "error": "WiFi settings from an interrupted transfer couldn't be fully restored "
