@@ -246,6 +246,12 @@ app.register_blueprint(settings.bp)
 if __name__ == "__main__":
     from werkzeug.serving import make_server
 
+    from app.utils import parent_watch
+
+    # Exit if the Tauri shell that spawned us dies (SIGTERM/crash/force quit)
+    # instead of lingering on the old port with the old token.
+    parent_watch.start()
+
     _clean_partial_files()
 
     # Recover metadata from transcript files and start background workers
@@ -259,6 +265,7 @@ if __name__ == "__main__":
 
     _cloud_state.init()
     from app.utils import notion_queue as _notion_queue
+
     _notion_queue.start_worker()
 
     start_port = int(os.environ.get("PLAUD_API_PORT", "5123"))
