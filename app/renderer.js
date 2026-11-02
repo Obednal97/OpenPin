@@ -418,30 +418,28 @@ $('#search-clear').addEventListener('click', () => {
   renderRecordingsList();
 });
 
-// OAuth callback listener — routes to setup flow or settings depending on context
+// Plaud sign-in link (plaud://login?auth_code=…, delivered by tauri-bridge.js once
+// the backend is ready) — routes to the setup flow or to Settings › Plaud Cloud
 window.plaud.onOAuthCallback(async (authCode) => {
   if (!authCode) return;
 
   // If setup flow has a handler, route there
   if (window._setupOAuthHandler) {
-    window._setupOAuthHandler(authCode);
+    const handler = window._setupOAuthHandler;
     window._setupOAuthHandler = null;
+    handler(authCode);
     return;
   }
 
   // Normal settings flow
-  toast('Received login callback, authenticating...', 'info');
+  toast('Received Plaud sign-in link, signing in...', 'info');
   try {
     const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
-    if (res.logged_in) {
-      app.cloudState = { logged_in: true, user: res.user };
-      toast('Plaud account connected!', 'success');
-      renderCloudAccount();
-    } else {
-      toast(res.error || 'Login failed', 'error');
-    }
+    finishCloudSignIn(res);
   } catch (err) {
+    app.cloudLoginPending = false;
     toast(`Error: ${err.message}`, 'error');
+    renderCloudAccount();
   }
   app.pendingDesktopUuid = null;
 });

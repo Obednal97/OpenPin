@@ -756,11 +756,16 @@ function initGdriveEvents() {
 // ---- Cloud Account ----
 
 async function loadCloudStatus() {
+  // A sign-in link that launched the app can finish while this request is in
+  // flight; don't let its older answer undo that sign-in.
+  const seq = app.cloudSignInSeq;
+  let state;
   try {
-    app.cloudState = await window.plaud.cloudStatus();
+    state = await window.plaud.cloudStatus();
   } catch {
-    app.cloudState = { logged_in: false, user: null };
+    state = { logged_in: false, user: null };
   }
+  if (seq === app.cloudSignInSeq) app.cloudState = state;
 }
 
 function renderCloudAccount() {
@@ -786,6 +791,13 @@ function renderCloudAccount() {
   const savedInterval = app.settings.cloud_sync_interval || 'manual';
   if (syncIntervalSection) syncIntervalSection.value = savedInterval;
 
+  // Three states: logged in, waiting for the browser sign-in, logged out.
+  // Only classes change here: the markup (and its listeners) is static in index.html.
+  const waiting = $('#cloud-login-waiting');
+  if (app.cloudState.logged_in) app.cloudLoginPending = false;
+  const showWaiting = !app.cloudState.logged_in && app.cloudLoginPending;
+  if (waiting) waiting.classList.toggle('hidden', !showWaiting);
+
   if (app.cloudState.logged_in) {
     loggedOut.classList.add('hidden');
     loggedIn.classList.remove('hidden');
@@ -798,8 +810,45 @@ function renderCloudAccount() {
       userName.textContent = 'Plaud User';
     }
   } else {
-    loggedOut.classList.remove('hidden');
+    loggedOut.classList.toggle('hidden', showWaiting);
     loggedIn.classList.add('hidden');
+  }
+}
+
+/**
+ * Settings › Plaud Cloud: apply the reply of a sign-in attempt (pasted token or
+ * code, or a plaud:// sign-in link). Success or failure, the waiting state ends.
+ * Returns true when signed in.
+ */
+function finishCloudSignIn(res) {
+  app.cloudLoginPending = false;
+  const ok = !!(res && res.logged_in);
+  if (ok) {
+    app.cloudState = { logged_in: true, user: res.user };
+    app.cloudSignInSeq += 1;
+    app.pendingDesktopUuid = null;
+    toast('Plaud account connected!', 'success');
+  } else {
+    toast((res && res.error) || 'Sign-in failed', 'error');
+  }
+  renderCloudAccount();
+  return ok;
+}
+
+/** Settings › Plaud Cloud: sign in with a paste box's contents (link, code or token). */
+async function _cloudSignInFromInput(input, btn) {
+  setLoading(btn, true);
+  try {
+    const res = await submitPlaudSignInInput(input.value);
+    if (!res) return;
+    input.value = '';
+    finishCloudSignIn(res);
+  } catch (err) {
+    app.cloudLoginPending = false;
+    toast(`Error: ${err.message}`, 'error');
+    renderCloudAccount();
+  } finally {
+    setLoading(btn, false);
   }
 }
 
@@ -1501,82 +1550,38 @@ function initSettingsEvents() {
     }
   });
 
-  // Cloud login (OAuth browser flow)
+  // Cloud login (OAuth browser flow). The waiting panel (#cloud-login-waiting) is
+  // static markup in index.html; renderCloudAccount() shows it while
+  // app.cloudLoginPending. Never replace #cloud-logged-out's markup: its buttons'
+  // listeners are bound once, here.
   $('#cloud-login-browser-btn').addEventListener('click', async () => {
     try {
       const result = await window.plaud.cloudLoginUrl('eu');
       if (result.url) {
         app.pendingDesktopUuid = result.desktop_uuid;
         window.plaud.openExternal(result.url);
-
-        const loggedOut = $('#cloud-logged-out');
-        loggedOut.innerHTML = `
-          <div style="text-align:center;padding:16px 0;">
-            <div class="settings-desc" style="margin-bottom:12px;">Waiting for login in browser...</div>
-            <div style="color:var(--text-muted);font-size:12px;margin-bottom:16px;">
-              Sign into your Plaud account in the browser. You'll be redirected back automatically.
-            </div>
-            <div class="cloud-divider" style="margin:12px 0;"><span>or paste your bearer token</span></div>
-            <div class="token-input-row" style="margin-top:12px;">
-              <input type="password" id="cloud-token-input-waiting" class="settings-input" placeholder="Paste bearer token...">
-              <button id="cloud-token-login-btn-waiting" class="btn-small">Login</button>
-            </div>
-            <button id="cloud-cancel-login" class="action-btn subtle" style="margin-top:12px;width:100%;justify-content:center;font-size:12px;">
-              Cancel
-            </button>
-          </div>
-        `;
-        $('#cloud-token-login-btn-waiting').addEventListener('click', async () => {
-          let token = $('#cloud-token-input-waiting').value.trim();
-          if (token.toLowerCase().startsWith('bearer ')) token = token.slice(7).trim();
-          if (!token) {
-            toast('Please paste a token', 'error');
-            return;
-          }
-          try {
-            const res = await window.plaud.cloudLoginToken(token, 'eu');
-            if (res.logged_in) {
-              app.cloudState = { logged_in: true, user: res.user };
-              toast('Plaud account connected!', 'success');
-              renderCloudAccount();
-            } else {
-              toast(res.error || 'Token invalid', 'error');
-            }
-          } catch (err) {
-            toast(`Error: ${err.message}`, 'error');
-          }
-        });
-        $('#cloud-cancel-login').addEventListener('click', () => {
-          app.pendingDesktopUuid = null;
-          renderCloudAccount();
-        });
-      }
-    } catch (err) {
-      toast(`Error: ${err.message}`, 'error');
-    }
-  });
-
-  // Direct token login
-  $('#cloud-token-login-btn').addEventListener('click', async () => {
-    let token = $('#cloud-token-input').value.trim();
-    if (token.toLowerCase().startsWith('bearer ')) token = token.slice(7).trim();
-    if (!token) {
-      toast('Please paste a token', 'error');
-      return;
-    }
-    try {
-      const res = await window.plaud.cloudLoginToken(token, 'eu');
-      if (res.logged_in) {
-        app.cloudState = { logged_in: true, user: res.user };
-        toast('Plaud account connected!', 'success');
+        app.cloudLoginPending = true;
         renderCloudAccount();
-      } else {
-        toast(res.error || 'Token invalid', 'error');
       }
     } catch (err) {
       toast(`Error: ${err.message}`, 'error');
     }
   });
+
+  $('#cloud-token-login-btn-waiting').addEventListener('click', () =>
+    _cloudSignInFromInput($('#cloud-token-input-waiting'), $('#cloud-token-login-btn-waiting')),
+  );
+  $('#cloud-cancel-login').addEventListener('click', () => {
+    app.pendingDesktopUuid = null;
+    app.cloudLoginPending = false;
+    $('#cloud-token-input-waiting').value = '';
+    renderCloudAccount();
+  });
+
+  // Direct sign-in: pasted link, code or token
+  $('#cloud-token-login-btn').addEventListener('click', () =>
+    _cloudSignInFromInput($('#cloud-token-input'), $('#cloud-token-login-btn')),
+  );
 
   // Sync direction
   for (const radio of ['sync-none', 'sync-download', 'sync-twoway']) {
@@ -1666,6 +1671,8 @@ function initSettingsEvents() {
     try {
       await window.plaud.cloudLogout();
       app.cloudState = { logged_in: false, user: null };
+      app.cloudLoginPending = false;
+      app.pendingDesktopUuid = null;
       toast('Plaud account disconnected', 'info');
       renderCloudAccount();
     } catch (err) {
