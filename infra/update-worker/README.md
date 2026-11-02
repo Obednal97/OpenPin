@@ -64,12 +64,16 @@ The response carries `Cache-Control: public, max-age=60`.
 
 ```bash
 cd infra/update-worker
-source ~/.secrets/cloudflare.env          # CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+node --test test/                         # unit tests first (no network)
+# Cloudflare credentials in the environment: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+# (on the owner's Mac mini: source ~/.secrets/cloudflare.env)
 npx --yes wrangler@4 deploy
-node --test test/                         # unit tests (no network)
 ```
 
 ## Rotate the GitHub token (no app release needed)
+
+Also in [docs/RELEASING.md](../../docs/RELEASING.md#rotating-the-workers-github-token), which notes the
+current status of the token.
 
 1. GitHub → Settings → Developer settings → Fine-grained tokens → generate a token for
    **Obednal97/Plaud-V2** only, with **Contents: Read-only** and **Issues: Read and write**
