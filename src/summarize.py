@@ -17,6 +17,15 @@ from pathlib import Path
 
 from .transcribe import Transcript
 
+# Default model IDs come from the app's provider table so the CLI never drifts
+# onto a retired model; the literals are a fallback for standalone use.
+try:
+    from app.providers._models import CLAUDE_SUMMARIZE as DEFAULT_ANTHROPIC_MODEL
+    from app.providers._models import OPENAI_SUMMARIZE as DEFAULT_OPENAI_MODEL
+except ImportError:  # pragma: no cover
+    DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
+    DEFAULT_OPENAI_MODEL = "gpt-6-luna"
+
 
 @dataclass
 class Summary:
@@ -78,7 +87,7 @@ TRANSCRIPT:
 """
 
 
-def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> Summary:
+def summarize_with_openai(transcript_text: str, model: str = DEFAULT_OPENAI_MODEL) -> Summary:
     """Summarize using OpenAI API."""
     try:
         from openai import OpenAI
@@ -95,8 +104,8 @@ def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> S
 
     client = OpenAI(api_key=api_key)
 
-    # Truncate long transcripts to fit context
-    max_chars = 100_000
+    # Current models have ~1M-token windows; only truncate truly huge input.
+    max_chars = 2_000_000
     text = transcript_text[:max_chars]
     if len(transcript_text) > max_chars:
         text += "\n\n[TRANSCRIPT TRUNCATED]"
@@ -111,7 +120,8 @@ def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> S
             {"role": "user", "content": SUMMARY_PROMPT + text},
         ],
         response_format={"type": "json_object"},
-        temperature=0.3,
+        reasoning_effort="low",
+        max_completion_tokens=32000,  # includes reasoning tokens
     )
 
     raw = response.choices[0].message.content
@@ -127,7 +137,7 @@ def summarize_with_openai(transcript_text: str, model: str = "gpt-4o-mini") -> S
     )
 
 
-def summarize_with_anthropic(transcript_text: str, model: str = "claude-sonnet-4-20250514") -> Summary:
+def summarize_with_anthropic(transcript_text: str, model: str = DEFAULT_ANTHROPIC_MODEL) -> Summary:
     """Summarize using Anthropic API."""
     try:
         import anthropic
@@ -144,21 +154,25 @@ def summarize_with_anthropic(transcript_text: str, model: str = "claude-sonnet-4
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    max_chars = 150_000
+    max_chars = 2_000_000
     text = transcript_text[:max_chars]
 
-    response = client.messages.create(
+    with client.messages.stream(
         model=model,
-        max_tokens=4096,
+        max_tokens=64000,
+        output_config={"effort": "low"},
         messages=[
             {
                 "role": "user",
                 "content": SUMMARY_PROMPT + text + "\n\nRespond with ONLY the JSON object, no other text.",
             },
         ],
-    )
+    ) as stream:
+        response = stream.get_final_message()
+    if response.stop_reason in ("refusal", "max_tokens"):
+        raise RuntimeError(f"Claude returned no complete summary (stop_reason={response.stop_reason})")
 
-    raw = response.content[0].text
+    raw = next((b.text for b in response.content if b.type == "text"), "")
     # Extract JSON from response
     start = raw.find("{")
     end = raw.rfind("}") + 1
@@ -229,9 +243,9 @@ def summarize(
     text = transcript.formatted if transcript.segments else transcript.text
 
     if provider == "openai":
-        return summarize_with_openai(text, model=model or "gpt-4o-mini")
+        return summarize_with_openai(text, model=model or DEFAULT_OPENAI_MODEL)
     elif provider == "anthropic":
-        return summarize_with_anthropic(text, model=model or "claude-sonnet-4-20250514")
+        return summarize_with_anthropic(text, model=model or DEFAULT_ANTHROPIC_MODEL)
     elif provider == "ollama":
         return summarize_with_ollama(text, model=model or "llama3.2")
     else:

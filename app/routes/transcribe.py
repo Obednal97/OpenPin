@@ -557,7 +557,9 @@ def summarize_transcript():
             )
 
         extra_context = profile_context + tag_context
-        summary_text, title, provider, errors = summarize(full_text, config, extra_context)
+        summary_text, title, provider, errors = summarize(
+            full_text, config, extra_context, segments=t_data.get("segments")
+        )
 
         if summary_text is None:
             error_detail = " → ".join(errors) if errors else "Unknown error"
