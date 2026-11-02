@@ -196,11 +196,82 @@ def test_soundfile_loader_patch(monkeypatch):
     T._install_soundfile_audio_loader()
     T._install_soundfile_audio_loader()  # idempotent
     assert fake_ta.load("/x/a.wav") == (("tensor", "CHANNELS_FIRST"), 16000)
-    fake_sf.read.assert_called_once_with("/x/a.wav", dtype="float32", always_2d=True)
+    fake_sf.read.assert_called_once_with("/x/a.wav", start=0, frames=-1, dtype="float32", always_2d=True)
 
     fake_sf.read.side_effect = RuntimeError("unsupported format")
     with pytest.raises(RuntimeError, match="torchcodec"):
         fake_ta.load("/x/a.m4a")  # falls back to the original loader
+
+
+def _wave_backed_soundfile():
+    """A stand-in for soundfile.read (not installed in the test venv), with its
+    start/frames/dtype/always_2d semantics, so the loader runs end to end."""
+    import wave
+
+    import numpy as np
+
+    def read(file, start=0, frames=-1, dtype="float64", always_2d=False):
+        with wave.open(str(file), "rb") as w:
+            channels, rate = w.getnchannels(), w.getframerate()
+            w.setpos(start)
+            raw = w.readframes(w.getnframes() - start if frames < 0 else frames)
+        data = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(dtype) / 32768.0
+        return data, rate
+
+    mod = types.ModuleType("soundfile")
+    mod.read = read
+    return mod
+
+
+def test_soundfile_loader_honours_offset_frames_and_layout(monkeypatch, tmp_path):
+    """frame_offset/num_frames select the same frames torchaudio.load would."""
+    import wave
+
+    import numpy as np
+
+    torch = pytest.importorskip("torch")
+    try:
+        import soundfile  # noqa: F401 — the real reader when installed
+    except ImportError:
+        monkeypatch.setitem(sys.modules, "soundfile", _wave_backed_soundfile())
+
+    # 16 kHz stereo, 10 frames: left = 0..9, right = -(0..9), in int16 steps.
+    left = np.arange(10, dtype="<i2") * 1000
+    pcm = np.stack([left, -left], axis=1)
+    wav = tmp_path / "tone.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm.tobytes())
+    expected = pcm.astype("float32") / 32768.0  # (frames, channels)
+
+    def original_load(uri, *a, **k):
+        raise AssertionError("original loader must not be used")
+
+    fake_ta = types.ModuleType("torchaudio")
+    fake_ta.load = original_load
+    monkeypatch.setitem(sys.modules, "torchaudio", fake_ta)
+    T._install_soundfile_audio_loader()
+
+    full, sr = fake_ta.load(wav)
+    assert sr == 16000
+    assert full.dtype == torch.float32
+    assert tuple(full.shape) == (2, 10)  # channels first by default
+    np.testing.assert_allclose(full.numpy(), expected.T, atol=1e-6)
+
+    part, _ = fake_ta.load(str(wav), frame_offset=3, num_frames=4)
+    assert tuple(part.shape) == (2, 4)
+    np.testing.assert_allclose(part.numpy(), expected[3:7].T, atol=1e-6)
+
+    # Positional form, num_frames <= 0 means "to the end", channels last.
+    tail, _ = fake_ta.load(str(wav), 6, -1, True, False)
+    assert tuple(tail.shape) == (4, 2)
+    assert tail.dtype == torch.float32
+    np.testing.assert_allclose(tail.numpy(), expected[6:], atol=1e-6)
+
+    zero, _ = fake_ta.load(str(wav), num_frames=0)
+    assert tuple(zero.shape) == (2, 10)
 
 
 def test_transcribe_merges_speakers_or_says_why():
