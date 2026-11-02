@@ -476,7 +476,7 @@ async def scan_devices(scan_duration=6):
     from src.scanner import parse_manufacturer_data
 
     found = []
-    seen_addresses = set()
+    by_address = {}
 
     def callback(device, adv):
         name = device.name or adv.local_name or ""
@@ -484,13 +484,26 @@ async def scan_devices(scan_duration=6):
         mfr_info = parse_manufacturer_data(adv.manufacturer_data) if adv.manufacturer_data else None
 
         if is_plaud or mfr_info or (0x5D in (adv.manufacturer_data or {})):
-            if device.address not in seen_addresses:
-                seen_addresses.add(device.address)
+            info = by_address.get(device.address)
+            if info is None:
                 info = mfr_info or {}
                 info["name"] = name or "Plaud Device"
                 info["address"] = device.address
                 info["rssi"] = adv.rssi
+                by_address[device.address] = info
                 found.append(info)
+                return
+            # Seen before. macOS reports each advertising packet separately, so
+            # the first one can lack the manufacturer data (and the serial
+            # number): fill it in from a later packet instead of losing it.
+            if mfr_info and not info.get("serial_number"):
+                for k, v in mfr_info.items():
+                    info.setdefault(k, v)
+                info["serial_number"] = mfr_info.get("serial_number")
+            if name and info.get("name") == "Plaud Device":
+                info["name"] = name
+            if adv.rssi is not None:
+                info["rssi"] = adv.rssi
 
     scanner = BleakScanner(detection_callback=callback)
     await scanner.start()
@@ -498,6 +511,11 @@ async def scan_devices(scan_duration=6):
     await scanner.stop()
 
     found.sort(key=lambda d: d.get("rssi", -100), reverse=True)
+    summary = ", ".join(
+        f"{d.get('name')} ({d.get('rssi')} dBm, serial {'advertised' if d.get('serial_number') else 'not advertised'})"
+        for d in found
+    )
+    print(f"[BLE] Scan found {len(found)} Plaud device(s){': ' + summary if found else ''}")
     return found
 
 
@@ -521,6 +539,20 @@ async def scan_device():
         for d in devices:
             sn = d.get("serial_number", "")
             if sn and sn in known_sns:
+                print("[BLE] Paired device found by its advertised serial number")
+                return {
+                    "found": True,
+                    "name": d.get("name", "Plaud NotePin S"),
+                    "address": d["address"],
+                    "rssi": d.get("rssi", -60),
+                    "serial_number": sn,
+                }
+        # No serial matched (the advertising packets may not have carried it):
+        # recognise a paired device by the Bluetooth address it last had.
+        for d in devices:
+            sn = d.get("serial_number") or paired_serial_for_address(d["address"])
+            if sn and sn in known_sns:
+                print("[BLE] Paired device found by its last Bluetooth address (no serial advertised)")
                 return {
                     "found": True,
                     "name": d.get("name", "Plaud NotePin S"),
@@ -531,23 +563,37 @@ async def scan_device():
         # Paired device not found — fall through to return strongest
         if devices:
             d = devices[0]
-            return {
+            result = {
                 "found": True,
                 "name": d.get("name", "Plaud NotePin S"),
                 "address": d["address"],
                 "rssi": d.get("rssi", -60),
             }
+            if d.get("serial_number"):
+                result["serial_number"] = d["serial_number"]
+            elif len(known_sns) == 1 and len(devices) == 1:
+                # One paired device, one Plaud in range, and it didn't say
+                # which it is: assume it's ours. A wrong guess only makes the
+                # handshake fail, the same as having no serial.
+                result["serial_number"] = next(iter(known_sns))
+                print("[BLE] Only one Plaud in range and one paired device: assuming it's the paired one")
+            elif not result.get("serial_number"):
+                print("[BLE] Paired device not recognised; using the strongest device, serial unknown")
+            return result
     else:
         # No paired devices — standard scan with retry
         devices = await scan_devices_with_retry(attempts=2, scan_duration=6)
         if devices:
             d = devices[0]
-            return {
+            result = {
                 "found": True,
                 "name": d.get("name", "Plaud NotePin S"),
                 "address": d["address"],
                 "rssi": d.get("rssi", -60),
             }
+            if d.get("serial_number"):
+                result["serial_number"] = d["serial_number"]
+            return result
     return {"found": False}
 
 
@@ -567,7 +613,14 @@ async def connect_device(address=None):
             return {"connected": False, "error": "Device not found"}
         address = scan_result["address"]
         _device_state["device_name"] = scan_result["name"]
+        if scan_result.get("serial_number") and not _device_state.get("serial_number"):
+            _device_state["serial_number"] = scan_result["serial_number"]
     _device_state["device_address"] = address
+    if not _device_state.get("serial_number"):
+        sn = paired_serial_for_address(address)
+        if sn:
+            print("[BLE] No serial number given; using the paired device last seen at this address")
+            _device_state["serial_number"] = sn
 
     # Connect with disconnect callback
     from bleak import BleakClient as BC
@@ -615,6 +668,10 @@ async def connect_device(address=None):
                 scan_result = await scan_device()
                 if scan_result["found"]:
                     address = scan_result["address"]
+                    if not _device_state.get("serial_number"):
+                        _device_state["serial_number"] = scan_result.get("serial_number") or paired_serial_for_address(
+                            address
+                        )
                 else:
                     raise
             elif attempt == 2:
@@ -677,10 +734,10 @@ async def connect_device(address=None):
             except Exception as e:
                 logging.warning(f"Auto-fetch exception: {e}")
         if not sn_sig_b64:
-            try:
-                await cl.stop_notify(N)
-            except Exception:
-                pass
+            # Hang up: a NotePin stays connected (and stops advertising, so
+            # scans can't find it) until the Mac lets go of the link.
+            await _disconnect_quietly(cl)
+            _reset_state()
             # Specific error message depending on what's missing
             if not sn:
                 return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
@@ -717,10 +774,8 @@ async def connect_device(address=None):
                 await asyncio.sleep(0.02)
             await asyncio.wait_for(done.wait(), timeout=15)
         elif not done.is_set():
-            try:
-                await cl.stop_notify(N)
-            except Exception:
-                pass
+            await _disconnect_quietly(cl)
+            _reset_state()
             return {
                 "connected": False,
                 "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting.",
@@ -738,6 +793,7 @@ async def connect_device(address=None):
         except Exception:
             pass
     except Exception as e:
+        await _disconnect_quietly(cl)
         _reset_state()
         err_msg = str(e)
         # Translate raw BLE errors to user-friendly messages
@@ -2397,6 +2453,20 @@ def get_paired_serials():
     """Get serial numbers of devices we've successfully paired with."""
     config = load_config()
     return set(config.get("paired_devices", {}).keys())
+
+
+def paired_serial_for_address(address):
+    """Serial number of the paired device last connected at this Bluetooth address.
+
+    On macOS the address is a CoreBluetooth UUID that stays the same for a
+    device on this Mac, so it identifies a paired device whose advertising
+    packets didn't include its serial number. None if no paired device matches.
+    """
+    if not address:
+        return None
+    paired = load_config().get("paired_devices", {}) or {}
+    matches = [sn for sn, info in paired.items() if (info or {}).get("last_address") == address]
+    return matches[0] if len(matches) == 1 else None
 
 
 def set_serial_number(sn):
