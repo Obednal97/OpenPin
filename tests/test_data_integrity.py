@@ -634,3 +634,38 @@ def test_cloud_upload_skips_crop_backups(tmp_path, tmp_config):
     cfg = load_config()
     assert cfg["cloud_file_ids"] == {"1715000000": "cid"}
     assert cfg["uploaded_session_ids"] == ["1715000000"]
+
+
+# ---------------------------------------------------------------------------
+# Interrupted BLE downloads ({sid}_partial.bin, written by device.py)
+# ---------------------------------------------------------------------------
+
+
+def test_partial_bin_listed_as_incomplete_recording(env):
+    sid = "1715000100"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+    recs = env.client.get("/recordings").get_json()
+    rows = [r for r in recs if r["session_id"] == sid]
+    assert len(rows) == 1
+    assert rows[0]["partial"] is True
+    assert rows[0]["ogg_path"] is None
+
+
+def test_partial_bin_hidden_once_complete_ogg_exists(env):
+    sid = "1715000101"
+    (env.rec / f"{sid}.ogg").write_bytes(b"audio")
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+    recs = env.client.get("/recordings").get_json()
+    rows = [r for r in recs if r["session_id"] == sid]
+    assert len(rows) == 1
+    assert not rows[0].get("partial")
+
+
+def test_delete_trashes_partial_and_encrypted_leftovers(env):
+    sid = "1715000102"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"p")
+    (env.rec / f"{sid}_encrypted.bin").write_bytes(b"e")
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    assert r.status_code == 200
+    assert {p.name for p in env.system_trash} == {f"{sid}_partial.bin", f"{sid}_encrypted.bin"}
+    assert not (env.rec / f"{sid}_partial.bin").exists()

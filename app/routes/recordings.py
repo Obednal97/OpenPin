@@ -191,8 +191,9 @@ def list_recordings():
 
     # Include partial downloads (interrupted transfers) — shown with warning in UI
     for rec_dir in all_dirs:
-        for f in sorted(rec_dir.glob("*.ogg.partial"), reverse=True):
-            stem = f.name.replace(".ogg.partial", "")
+        partial_files = list(rec_dir.glob("*.ogg.partial")) + list(rec_dir.glob("*_partial.bin"))
+        for f in sorted(partial_files, key=lambda p: p.name, reverse=True):
+            stem = f.name.removesuffix(".ogg.partial").removesuffix("_partial.bin")
             if stem in complete_ids:
                 try:
                     f.unlink()
@@ -578,6 +579,12 @@ def delete_recordings():
         except Exception:
             pass
         paths = [rec_dir / f"{sid}.{ext}" for rec_dir in get_all_recordings_dirs() for ext in ("ogg", "mp3", "raw")]
+        # Interrupted/undecryptable BLE downloads keep their raw data next to the .ogg
+        paths += [
+            rec_dir / f"{sid}{suffix}"
+            for rec_dir in get_all_recordings_dirs()
+            for suffix in ("_partial.bin", ".ogg.partial", "_encrypted.bin")
+        ]
         paths += [TRANSCRIPTS_DIR / f"{sid}.{ext}" for ext in ("json", "txt")]
         with get_transcript_lock(sid):
             t, loc, errs = _trash_files(paths)
@@ -630,7 +637,12 @@ def redownload_recording():
     for sid in session_ids:
         files = []
         for rec_dir in get_all_recordings_dirs():
-            files += [rec_dir / f"{sid}.ogg", rec_dir / f"{sid}.ogg.partial", rec_dir / f"{sid}_encrypted.bin"]
+            files += [
+                rec_dir / f"{sid}.ogg",
+                rec_dir / f"{sid}.ogg.partial",
+                rec_dir / f"{sid}_partial.bin",
+                rec_dir / f"{sid}_encrypted.bin",
+            ]
             # The .deleted marker is only a flag — removing it is safe.
             (rec_dir / f"{sid}.deleted").unlink(missing_ok=True)
         try:
