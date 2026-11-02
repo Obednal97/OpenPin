@@ -172,7 +172,7 @@ def parent(tmp_path, monkeypatch):
     monkeypatch.setattr(dev, "load_config", lambda: {})
     monkeypatch.setattr(dev, "_reset_state", lambda: None)
     monkeypatch.setattr(dev, "WIFI_BUDGET_MARGIN_S", 0)
-    monkeypatch.setitem(dev._device_state, "serial_number", "8820A0000000XXXX")
+    monkeypatch.setitem(dev._device_state, "serial_number", "8810A00012345678")
     monkeypatch.setitem(dev._device_state, "session_keys", (b"k", b"n", b"a"))
     monkeypatch.setitem(dev._device_state, "client", None)
     monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: "token")
@@ -287,7 +287,7 @@ def test_parent_error_after_spawn_still_stops_worker(parent, monkeypatch):
 
 @pytest.fixture
 def startup_mac(tmp_path, monkeypatch):
-    fake = FakeMac(preferred=["PlaudXXXX"], ip="192.168.84.2", current_ssid="PlaudXXXX")
+    fake = FakeMac(preferred=["Plaud5678"], ip="192.168.84.2", current_ssid="Plaud5678")
     monkeypatch.setattr(subprocess, "run", fake.run)
     monkeypatch.setattr(worker, "_wifi_iface_cache", "en1")
     monkeypatch.setattr(worker, "_restore_via_corewlan", lambda n: False)
@@ -308,7 +308,7 @@ def test_startup_recovery_uses_the_record(startup_mac, tmp_path):
     worker.write_restore_record(
         tmp_path,
         {
-            "hotspot_ssid": "PlaudXXXX",
+            "hotspot_ssid": "Plaud5678",
             "hotspot_ip": "192.168.84.2",
             "isolated": True,
             "saved_networks": SAVED,
@@ -324,7 +324,7 @@ def test_startup_recovery_uses_the_record(startup_mac, tmp_path):
 def test_startup_recovery_keeps_record_if_restore_fails(startup_mac, tmp_path):
     from app import api_server
 
-    worker.write_restore_record(tmp_path, {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED})
+    worker.write_restore_record(tmp_path, {"hotspot_ssid": "Plaud5678", "isolated": True, "saved_networks": SAVED})
     startup_mac.fail_add = {"Office"}
     api_server._recover_wifi()
     assert worker.read_restore_record(tmp_path)["saved_networks"] == SAVED
@@ -333,7 +333,7 @@ def test_startup_recovery_keeps_record_if_restore_fails(startup_mac, tmp_path):
 def test_startup_recovery_leaves_a_running_worker_alone(startup_mac, tmp_path):
     from app import api_server
 
-    worker.write_restore_record(tmp_path, {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED})
+    worker.write_restore_record(tmp_path, {"hotspot_ssid": "Plaud5678", "isolated": True, "saved_networks": SAVED})
     lock = worker.WorkerLock(tmp_path)
     assert lock.acquire()
     try:
@@ -358,7 +358,7 @@ def test_startup_without_record_falls_back_to_hotspot_check(startup_mac):
 def test_startup_recovery_gives_up_after_repeated_failures(startup_mac, tmp_path):
     from app import api_server
 
-    worker.write_restore_record(tmp_path, {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED})
+    worker.write_restore_record(tmp_path, {"hotspot_ssid": "Plaud5678", "isolated": True, "saved_networks": SAVED})
     startup_mac.fail_add = {"Office"}
     for _ in range(worker.MAX_RESTORE_ATTEMPTS - 1):
         api_server._recover_wifi()
@@ -442,7 +442,7 @@ def test_status_reports_restore_notice_until_acknowledged(parent, tmp_path):
     assert dev.get_wifi_sync_status()["restore_notice"] is None
     worker.note_failed_restore(
         tmp_path,
-        {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED},
+        {"hotspot_ssid": "Plaud5678", "isolated": True, "saved_networks": SAVED},
         {"missing": ["Office"], "errors": {"Office": "Network not found"}},
     )
     notice = dev.get_wifi_sync_status()["restore_notice"]
