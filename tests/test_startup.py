@@ -217,5 +217,6 @@ class TestWifiRecovery:
         assert "_clean_partial_files" not in top_level_calls
         main = next(n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test))
         main_src = ast.unparse(main)
-        assert "_recover_wifi()" in main_src
+        assert "_start_wifi_recovery()" in main_src  # background thread, after bind
+        assert "_start_wifi_recovery" not in top_level_calls
         assert "_clean_partial_files()" in main_src
