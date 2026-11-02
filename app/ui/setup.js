@@ -10,6 +10,11 @@ function _setupEl() {
 }
 
 function _renderSetup(html) {
+  // Each step replaces the whole body. A sign-in link belongs to the
+  // "Waiting for Login" step only, which sets the handler again after rendering;
+  // once the user moves on (Cancel, token login, any other step) a late link goes
+  // to the Settings flow in renderer.js instead.
+  window._setupOAuthHandler = null;
   const body = _setupEl();
   if (body) body.innerHTML = html;
 }
@@ -90,10 +95,11 @@ function _showCloudLogin() {
         2. Open Developer Tools (Cmd+Option+I) → Application tab<br>
         3. In the left sidebar: Local Storage → plaud.ai<br>
         4. Find <strong>tokenstr</strong> and copy its value<br>
-        5. Paste it below (works with or without the "Bearer" prefix)
+        5. Paste it below (works with or without the "Bearer" prefix)<br>
+        A <strong>plaud://login</strong> sign-in link from the browser works here too.
       </div>
       <div class="token-input-row" style="margin-top:var(--sp-2);">
-        <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste bearer token...">
+        <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste the sign-in link, code or token…">
       </div>
       <button class="action-btn subtle" id="setup-cloud-token-btn" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Login with Token</button>
     </div>
@@ -111,10 +117,11 @@ function _showCloudLogin() {
         _renderSetup(`
           <div class="setup-spinner"></div>
           <h2>Waiting for Login</h2>
-          <p>Sign into your Plaud account in the browser. You'll be redirected back automatically.</p>
+          <p>Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.</p>
           <div style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg-input);border-radius:var(--radius-sm);text-align:left;">
-            <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Redirected to the official Plaud app instead?</div>
+            <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Didn't come back to Plaud V2?</div>
             <div style="font-size:var(--text-xs);color:var(--text-tertiary);line-height:1.5;">
+              Paste the <strong>plaud://login</strong> link the browser tried to open, or a token:<br>
               1. Open <strong>web.plaud.ai</strong> in your browser and sign in<br>
               2. Open Developer Tools (Cmd+Option+I) → Application tab<br>
               3. In the left sidebar: Local Storage → plaud.ai<br>
@@ -122,7 +129,7 @@ function _showCloudLogin() {
               5. Paste it below (works with or without the "Bearer" prefix)
             </div>
             <div class="token-input-row" style="margin-top:var(--sp-2);">
-              <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste bearer token...">
+              <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste the sign-in link, code or token…">
             </div>
             <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Login with Token</button>
           </div>
@@ -132,8 +139,7 @@ function _showCloudLogin() {
         $('#setup-cloud-token-btn-waiting').addEventListener('click', () => _handleTokenLogin($('#setup-cloud-token-waiting').value));
         $('#setup-cancel-cloud').addEventListener('click', _showCloudLogin);
 
-        // Listen for OAuth callback
-        const origCallback = window._setupOAuthHandler;
+        // Plaud sign-in link (routed here by renderer.js while this step is shown)
         window._setupOAuthHandler = async (authCode) => {
           if (!authCode) return;
           try {
@@ -141,6 +147,7 @@ function _showCloudLogin() {
             if (res.logged_in) {
               app.cloudState = { logged_in: true, user: res.user };
               toast('Plaud account connected!', 'success');
+              renderCloudAccount();
               _showPermissions();
             } else {
               toast(res.error || 'Login failed', 'error');
@@ -163,18 +170,16 @@ function _showCloudLogin() {
   $('#setup-skip-cloud').addEventListener('click', _showPermissions);
 }
 
-async function _handleTokenLogin(token) {
-  token = (token || '').trim();
-  // Strip "Bearer " or "bearer " prefix if pasted from local storage
-  if (token.toLowerCase().startsWith('bearer ')) {
-    token = token.slice(7).trim();
-  }
-  if (!token) { toast('Please paste a token', 'error'); return; }
+// Pasted sign-in link, auth code or bearer token (see parsePlaudSignInInput in utils.js)
+async function _handleTokenLogin(input) {
   try {
-    const res = await window.plaud.cloudLoginToken(token, 'eu');
+    const res = await submitPlaudSignInInput(input);
+    if (!res) return;
     if (res.logged_in) {
       app.cloudState = { logged_in: true, user: res.user };
+      app.pendingDesktopUuid = null;
       toast('Plaud account connected!', 'success');
+      renderCloudAccount();
       _showPermissions();
     } else {
       toast(res.error || 'Token invalid', 'error');
@@ -498,6 +503,7 @@ async function completeSetup() {
 }
 
 function _closeSetup() {
+  window._setupOAuthHandler = null;
   if (!_setupOverlay) return;
   _setupOverlay.classList.remove('visible');
   _setupOverlay.addEventListener('transitionend', function handler() {

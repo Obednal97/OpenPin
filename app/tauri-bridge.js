@@ -265,6 +265,52 @@ listen('system-theme-changed', () => {
   }
 });
 
+// --- Plaud sign-in links (plaud://login?auth_code=…; src-tauri/src/deep_link.rs) ---
+// Rust keeps the code until the page takes it and emits 'plaud-sign-in-link'
+// (no payload). The link may have launched the app, so check once after every
+// script has loaded too. Wait for the backend (the exchange needs it), then take
+// the code (handed out once) and give it to the 'oauth-callback' listeners.
+let _bridgeSignInDraining = false;
+let _bridgeSignInRecheck = false;
+
+async function _bridgeDrainSignInLink() {
+  if (_bridgeSignInDraining) {
+    _bridgeSignInRecheck = true;
+    return;
+  }
+  _bridgeSignInDraining = true;
+  try {
+    do {
+      _bridgeSignInRecheck = false;
+      while (await invoke('has_pending_sign_in_code')) {
+        let info = null;
+        try {
+          info = await _bridgeRefreshApiInfo();
+        } catch {
+          info = null;
+        }
+        if (info && info.status === 'ready') {
+          const code = await invoke('take_pending_sign_in_code');
+          if (code) for (const cb of _eventCallbacks['oauth-callback']) cb(code);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } while (_bridgeSignInRecheck);
+  } catch (err) {
+    console.error('[sign-in link]', err && err.message ? err.message : err);
+  } finally {
+    _bridgeSignInDraining = false;
+  }
+}
+
+listen('plaud-sign-in-link', () => _bridgeDrainSignInLink());
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => _bridgeDrainSignInLink(), { once: true });
+} else {
+  setTimeout(_bridgeDrainSignInLink, 0);
+}
+
 function addListener(eventName, callback) {
   if (_eventCallbacks[eventName]) {
     _eventCallbacks[eventName].push(callback);
