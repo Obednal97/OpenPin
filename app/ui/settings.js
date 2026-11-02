@@ -49,6 +49,10 @@ function renderSettings() {
   if (wifiToggle) wifiToggle.checked = app.settings.auto_prefer_wifi || false;
   updateAutoPipelineState();
 
+  // Crash reports default to on; Rust reads the same config key before sending.
+  const crashToggle = $('#crash-reports-toggle');
+  if (crashToggle) crashToggle.checked = app.settings.crash_reports_enabled !== false;
+
   // Processing sections (replaces old model selector + AI key groups)
   renderProcessingSections();
 
@@ -1027,6 +1031,18 @@ function initSettingsEvents() {
   $('#show-dock-toggle').addEventListener('change', async (e) => {
     await window.plaud.setDockVisible(e.target.checked);
     toast(e.target.checked ? 'Dock icon visible' : 'Dock icon hidden', 'success');
+  });
+
+  $('#crash-reports-toggle')?.addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    try {
+      await window.plaud.saveSettings({ crash_reports_enabled: enabled });
+      app.settings.crash_reports_enabled = enabled;
+      toast(enabled ? 'Crash reports on' : 'Crash reports off', 'success');
+    } catch (err) {
+      e.target.checked = !enabled;
+      toast(`Couldn't save: ${err.message || err}`, 'error');
+    }
   });
 
   $('#language-select').addEventListener('change', async (e) => {
