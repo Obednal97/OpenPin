@@ -222,6 +222,11 @@ if __name__ == "__main__":
     # serve_forever opens the listening socket, and skips re-running these
     # side effects if api_server.py is ever imported from a test/REPL.
     recordings.init_recordings()
+    # Saved Plaud cloud token (+ background validation). Not done at import so
+    # tests and tooling that import the app make no network calls.
+    from app.state import cloud as _cloud_state
+
+    _cloud_state.init()
     from app.utils import notion_queue as _notion_queue
     _notion_queue.start_worker()
 

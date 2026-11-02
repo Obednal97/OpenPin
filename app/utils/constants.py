@@ -6,16 +6,30 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # User data directory — outside the app bundle so it persists across updates.
-# In packaged app: ~/Library/Application Support/Plaud V2/
-# In dev mode: project root (so recordings/transcripts stay where they are)
+# 1. PLAUD_DATA_DIR env var, if set (tests/conftest.py points it at a temp dir
+#    so the suite never touches real recordings, config or tokens; dev runs can
+#    use it too)
+# 2. Packaged app: ~/Library/Application Support/Plaud V2/
+# 3. Dev mode (running from a git checkout): the project root
+DATA_DIR_ENV = "PLAUD_DATA_DIR"
 _is_packaged = not (PROJECT_ROOT / ".git").exists()
-if _is_packaged:
+_env_data_dir = os.environ.get(DATA_DIR_ENV, "").strip()
+if _env_data_dir:
+    _data_dir = Path(_env_data_dir).expanduser().resolve()
+    _data_dir.mkdir(parents=True, exist_ok=True)
+elif _is_packaged:
     _data_dir = Path(os.path.expanduser("~/Library/Application Support/Plaud V2"))
     _data_dir.mkdir(parents=True, exist_ok=True)
 else:
     _data_dir = PROJECT_ROOT
 
 DATA_DIR = _data_dir
+
+# Python dependency lockfiles (see scripts/lock-python-deps.sh). The Rust shell
+# writes the copies embedded in the app binary to Application Support and passes
+# that folder in PLAUD_REQUIREMENTS_DIR; otherwise use the repo/bundle copy.
+REQUIREMENTS_DIR_ENV = "PLAUD_REQUIREMENTS_DIR"
+BUNDLED_REQUIREMENTS_DIR = PROJECT_ROOT / "app" / "requirements"
 
 # BLE UUIDs
 BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
@@ -70,6 +84,8 @@ def get_all_recordings_dirs():
             dirs.add(p)
 
     return list(dirs)
+
+
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"

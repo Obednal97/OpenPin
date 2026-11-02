@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -106,8 +105,11 @@ def transcribe_with_whisper(
     try:
         import whisper
     except ImportError:
-        print("Installing openai-whisper...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "openai-whisper"])
+        # Pinned openai-whisper + torch into the app's venv (raises with pip's
+        # error if the install fails).
+        from app.utils.system import ensure_installed
+
+        ensure_installed("whisper", "openai-whisper", required=True, extra="whisper")
         import whisper
 
     print(f"Loading Whisper model '{model}'...")
@@ -199,15 +201,12 @@ def setup_diarization() -> bool:
         print("  pyannote.audio already installed")
     except ImportError:
         print("  Installing pyannote.audio (this may take a minute)...")
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--break-system-packages", "pyannote.audio"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        from app.utils.system import ensure_installed
+
+        if ensure_installed("pyannote.audio", "pyannote.audio"):
             print("  Installed!")
-        except subprocess.CalledProcessError:
-            print("  Installation failed. Try manually: pip install pyannote.audio")
+        else:
+            print("  Installation failed (pip's error is in the log).")
             return False
 
     print("\n  Diarization is ready! Use --diarize to identify speakers.")
@@ -221,7 +220,16 @@ def diarize_audio_fast(audio_path: str, hf_token: str = "") -> list[dict]:
     Returns list of {start, end, speaker} with friendly speaker names.
     The hf_token parameter is accepted for API compatibility but not used.
     """
-    from diarize import diarize as _diarize
+    try:
+        from diarize import diarize as _diarize
+    except ImportError:
+        # Pinned 'diarize' extra (onnxruntime-based, CPU) into the app's venv.
+        # On failure re-raise ImportError so diarize_audio() tries the next tier.
+        from app.utils.system import ensure_installed
+
+        if not ensure_installed("diarize", extra="diarize"):
+            raise
+        from diarize import diarize as _diarize
 
     print("  Running fast diarization (diarize library, CPU)...")
     start = time.time()
