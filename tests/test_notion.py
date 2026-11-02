@@ -174,3 +174,77 @@ def test_push_does_not_clobber_config_written_during_network_call(env):
     assert cfg["notion_page_urls"] == {SID: PAGE_URL}
     assert cfg["notion_pushed_titles"] == {SID: "My Title"}
     assert cfg["recording_names"] == {SID: "My Title"}
+
+
+# ---------------------------------------------------------------------------
+# Notion URL → id extraction
+# ---------------------------------------------------------------------------
+
+DB_HEX = "2e80f387aa1b4c3d9e8f0123456789ab"
+DB_UUID = "2e80f387-aa1b-4c3d-9e8f-0123456789ab"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # workspace/slug-<32hex>; "Recorded-" ends in hex letters ("ded")
+        f"https://www.notion.so/myteam/Meeting-Recorded-{DB_HEX}",
+        f"https://www.notion.so/myteam/Meeting-Recorded-{DB_HEX}?pvs=4",
+        f"https://www.notion.so/myteam/Cafe-Bead-Notes-{DB_HEX}#abc123",
+        f"https://www.notion.so/myteam/Meeting-Recorded-{DB_HEX}/",
+        # bare 32-hex with a view id in the query
+        f"https://www.notion.so/{DB_HEX}?v=0123456789abcdef0123456789abcdef",
+        f"https://notion.so/myteam/{DB_HEX}?v=ffffffffffffffffffffffffffffffff&pvs=4",
+        # dashed UUID forms
+        f"https://www.notion.so/{DB_UUID}",
+        f"https://www.notion.so/myteam/Meeting-Recorded-{DB_UUID}",
+        f"https://myteam.notion.site/Feed-{DB_HEX}",
+        DB_HEX,
+        DB_UUID,
+        DB_HEX.upper(),
+        f"  {DB_HEX}  ",
+    ],
+)
+def test_extract_notion_id(url):
+    from app.routes.notion import _extract_notion_id, _extract_page_id
+
+    assert _extract_notion_id(url) == DB_UUID
+    assert _extract_page_id(url) == DB_UUID
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["", None, "https://www.notion.so/", "https://www.notion.so/myteam/Just-A-Slug", "abc123", 42],
+)
+def test_extract_notion_id_none(url):
+    from app.routes.notion import _extract_notion_id
+
+    assert _extract_notion_id(url) is None
+
+
+def test_extract_notion_id_ignores_view_id_and_earlier_segments():
+    from app.routes.notion import _extract_notion_id
+
+    other = "ffffffffffffffffffffffffffffffff"
+    assert _extract_notion_id(f"https://www.notion.so/{other}/Child-{DB_HEX}?v={other}") == DB_UUID
+
+
+def test_set_database_url_fetches_by_id(env):
+    url = f"https://www.notion.so/myteam/Meeting-Recorded-{DB_HEX}?v=0123456789abcdef0123456789abcdef"
+    fetched = {"content": [{"type": "text", "text": "Meetings\nmore"}]}
+    with (
+        patch("app.state.notion.mcp_call", return_value=fetched) as mcp,
+        patch("app.state.notion.set_database") as set_db,
+    ):
+        r = env.client.post("/notion/set-database-url", json={"url": url})
+    assert r.status_code == 200, r.get_json()
+    mcp.assert_called_once_with("notion-fetch", {"id": DB_UUID})
+    set_db.assert_called_once_with(DB_UUID, "Meetings")
+    assert r.get_json() == {"saved": True, "database_id": DB_UUID, "database_name": "Meetings"}
+
+
+def test_set_database_url_without_id_is_400(env):
+    with patch("app.state.notion.mcp_call") as mcp:
+        r = env.client.post("/notion/set-database-url", json={"url": "https://www.notion.so/myteam/No-Id"})
+    assert r.status_code == 400
+    mcp.assert_not_called()

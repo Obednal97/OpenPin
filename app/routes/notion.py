@@ -28,6 +28,32 @@ def _error_json(base, exc):
 bp = Blueprint("notion", __name__, url_prefix="/notion")
 
 
+# A Notion id is 32 hex chars, optionally dashed 8-4-4-4-12. In URLs it is the
+# tail of the last path segment, after a title slug ("Meeting-Notes-<id>").
+_HEX32_AT_RUN_END = re.compile(r"[0-9a-fA-F]{32}(?![0-9a-fA-F])")
+
+
+def _extract_notion_id(url_or_id):
+    """Return the dashed, lower-case Notion id from a URL or bare id, or None.
+
+    Handles ``https://www.notion.so/<workspace>/<Slug-Words>-<32hex>``,
+    ``https://notion.so/<32hex>?v=<view id>``, ``.../<dashed uuid>#frag`` and
+    bare ids. Only the final path segment is considered (the ``?v=`` view id
+    and fragments are ignored), and the *last* 32 hex chars are taken: slug
+    words made of hex letters ("Recorded-", "Cafe-") directly precede the id
+    once dashes are removed, so taking the first 32-hex run would pull them in.
+    """
+    if not url_or_id or not isinstance(url_or_id, str):
+        return None
+    s = re.split(r"[?#]", url_or_id.strip(), maxsplit=1)[0].rstrip("/")
+    segment = s.rsplit("/", 1)[-1].replace("-", "")
+    matches = _HEX32_AT_RUN_END.findall(segment)
+    if not matches:
+        return None
+    h = matches[-1].lower()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
 def _invalid_session_id():
     return jsonify({"error": "Invalid session_id"}), 400
 
@@ -192,15 +218,17 @@ def set_database_url():
     if not notion.is_connected():
         return jsonify({"error": "Not connected to Notion"}), 401
 
+    db_id = _extract_notion_id(url)
+    if not db_id:
+        return jsonify({"error": "Could not extract database ID from URL"}), 400
+
     try:
-        result = notion.mcp_call("notion-fetch", {"url": url})
+        # The Notion MCP notion-fetch tool takes {"id": ...}; it has no "url" argument.
+        result = notion.mcp_call("notion-fetch", {"id": db_id})
         content = result.get("content", [])
         text = ""
         for item in content:
             text += item.get("text", "") if isinstance(item, dict) else str(item)
-
-        id_match = re.search(r"([a-f0-9]{32})", url.replace("-", ""))
-        db_id = id_match.group(1) if id_match else ""
 
         title = "Notion Database"
         try:
@@ -208,18 +236,10 @@ def set_database_url():
             title = parsed.get("title", parsed.get("name", title))
             if isinstance(title, list) and title:
                 title = title[0].get("plain_text", title[0].get("text", {}).get("content", str(title[0])))
-            if not db_id:
-                db_id = parsed.get("id", db_id)
-        except (json.JSONDecodeError, TypeError, IndexError):
+        except (json.JSONDecodeError, TypeError, IndexError, AttributeError):
             first_line = text.split("\n")[0][:80]
             if first_line:
                 title = first_line
-
-        if not db_id:
-            return jsonify({"error": "Could not extract database ID from URL"}), 400
-
-        if len(db_id) == 32 and "-" not in db_id:
-            db_id = f"{db_id[:8]}-{db_id[8:12]}-{db_id[12:16]}-{db_id[16:20]}-{db_id[20:]}"
 
         notion.set_database(db_id, title)
 
@@ -397,14 +417,7 @@ def _build_notion_properties(title, tags=None):
 
 def _extract_page_id(url_or_id):
     """Extract a dashed UUID page_id from a Notion URL or bare id."""
-    if not url_or_id:
-        return None
-    stripped = url_or_id.replace("-", "")
-    m = re.search(r"([a-f0-9]{32})", stripped)
-    if not m:
-        return None
-    h = m.group(1)
-    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+    return _extract_notion_id(url_or_id)
 
 
 # Session-cached view of the Tags column schema. Populated on first push that
