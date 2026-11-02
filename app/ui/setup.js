@@ -451,7 +451,7 @@ async function completeSetup() {
       showProgress('Syncing recordings...', 20);
       const syncGen = _claimSync('ble');
       try {
-        const result = await window.plaud.sync();
+        const result = await window.plaud.sync({ background: true });
         if (!result.error && !isDeviceBusyResponse(result)) {
           toastPartialSync(result);
           const newFiles = (result.files || []).filter((f) => f.status === 'new');
