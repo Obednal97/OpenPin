@@ -17,7 +17,7 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from app.utils import ble_proto
+from app.utils import ble_proto, pairing_store
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
     HANDSHAKE_REJECTED,
@@ -989,6 +989,7 @@ async def depair_device():
 
     depair_ok = False
     depair_verified = False
+    depair_sn = _device_state.get("serial_number")
 
     try:
         r = await send_cmd(bytes([1, 5, 0]), timeout=5)
@@ -1048,12 +1049,19 @@ async def depair_device():
             except Exception:
                 pass
 
+    forgotten = {depair_sn} if depair_sn else set()
+
     def _forget_devices(config):
+        forgotten.update((config.get("paired_devices") or {}).keys())
         config["paired_devices"] = {}
         config.pop("known_devices_by_sn", None)
         config.pop("known_devices", None)
 
     _update_config(_forget_devices)
+    # The device is unpaired so it can pair elsewhere: drop the Keychain backup
+    # too, or the next launch would restore the pairing. (The credentials stay
+    # in the config, as before; only paired devices are backed up.)
+    pairing_store.forget_async(forgotten)
 
     sk_path = PROJECT_ROOT / "session_keys.json"
     if sk_path.exists():
@@ -2447,6 +2455,7 @@ def save_known_device(address, name=None, serial_number=None):
         config["paired_devices"] = paired
 
     _update_config(_remember)
+    pairing_store.backup_serial_async(sn, name)
 
 
 def get_paired_serials():

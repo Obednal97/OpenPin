@@ -14,6 +14,9 @@ from unittest.mock import patch
 # set for dev runs.
 TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="plaud-test-data-")).resolve()
 os.environ["PLAUD_DATA_DIR"] = str(TEST_DATA_DIR)
+# Never read or write the developer's login Keychain (app/utils/pairing_store.py).
+# tests/test_pairing_backup.py switches it back on with `security` faked.
+os.environ["PLAUD_KEYCHAIN_BACKUP"] = "0"
 
 import pytest  # noqa: E402
 

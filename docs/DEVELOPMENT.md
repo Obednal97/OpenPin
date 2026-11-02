@@ -142,6 +142,10 @@ Settings are in `pyproject.toml` (Python 3.12 target, line length 120).
   `tests/test_tauri_parity.py` checks that every `src/` module the backend imports is bundled.
 - **Device protocol:** the BLE handshake uses the per-device **BIND_TOKEN**, not the static APP_KEY
   that appears in old notes.
+- **Pairing backup** (`app/utils/pairing_store.py`): the device credentials are also kept in the
+  login Keychain, service "Plaud V2 pairing" for the installed app's data folder and "Plaud V2 (Dev)
+  pairing" for any other (debug builds, `PLAUD_DATA_DIR`). `PLAUD_KEYCHAIN_BACKUP=0` turns it off;
+  `tests/conftest.py` sets that, and `tests/test_pairing_backup.py` fakes `security`.
 
 ## Python dependencies
 
