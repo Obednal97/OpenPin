@@ -127,8 +127,11 @@ async function apiCall(method, endpoint, body = null) {
     'cancellederror',
     'disconnected',
     'went out of range',
+    'already in progress',
+    'powered off',
   ];
-  const isTransient = TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
+  // 409 / busy = "a sync is already running" — expected, never a bug.
+  const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok) && !isTransient) {
     const snTag = data.device_sn ? ` [SN: ${data.device_sn}]` : '';
     const reportMsg = data.raw_error || data.error || `HTTP ${res.status}`;
