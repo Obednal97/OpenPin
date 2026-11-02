@@ -26,8 +26,16 @@ BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
 
 def status(msg, pct):
-    """Send progress update to parent via stderr."""
-    print(json.dumps({"status": msg, "percent": pct}), file=sys.stderr, flush=True)
+    """Send progress update to parent via stderr.
+
+    Never raises: if the parent app died (closed pipe), a BrokenPipeError here
+    would abort the worker's `finally` before restore_internet() runs and leave
+    the Mac on the Plaud hotspot with its preferred networks removed.
+    """
+    try:
+        print(json.dumps({"status": msg, "percent": pct}), file=sys.stderr, flush=True)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
 
 
 def build_wifi_packet(cmd_id, json_data, protocol_version=2):
@@ -56,9 +64,73 @@ def parse_wifi_packet(data):
     return cmd_id, json_data
 
 
-def get_en0_ip():
+DEFAULT_WIFI_INTERFACE = "en0"
+_wifi_iface_cache = None
+
+
+def parse_wifi_device(hardware_ports_output):
+    """Find the Wi-Fi device (e.g. en1) in `networksetup -listallhardwareports` output.
+
+    Blocks look like:
+        Hardware Port: Wi-Fi
+        Device: en1
+        Ethernet Address: ...
+    Older macOS names the port "AirPort". Returns None if not found.
+    """
+    port = None
+    for line in hardware_ports_output.splitlines():
+        line = line.strip()
+        if line.startswith("Hardware Port:"):
+            port = line.split(":", 1)[1].strip()
+        elif line.startswith("Device:") and port is not None:
+            device = line.split(":", 1)[1].strip()
+            if port.lower() in ("wi-fi", "wifi", "airport") and device:
+                return device
+            port = None
+    return None
+
+
+def _corewlan_interface_name():
     try:
-        r = subprocess.run(["ipconfig", "getifaddr", "en0"], capture_output=True, text=True, timeout=3)
+        from CoreWLAN import CWWiFiClient
+
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+        name = iface.interfaceName() if iface else None
+        return str(name) if name else None
+    except Exception:
+        return None
+
+
+def _networksetup_wifi_device():
+    """Read-only lookup: lists hardware ports, changes nothing."""
+    try:
+        r = subprocess.run(
+            ["networksetup", "-listallhardwareports"], capture_output=True, text=True, timeout=5
+        )
+        return parse_wifi_device(r.stdout or "")
+    except Exception:
+        return None
+
+
+def get_wifi_interface():
+    """The Mac's Wi-Fi interface name, detected once per worker run.
+
+    en0 on MacBooks, but en1 on Mac mini / Mac Studio / iMac (en0 is Ethernet).
+    CoreWLAN first, then `networksetup -listallhardwareports`, then en0.
+    """
+    global _wifi_iface_cache
+    if _wifi_iface_cache is None:
+        _wifi_iface_cache = (
+            _corewlan_interface_name() or _networksetup_wifi_device() or DEFAULT_WIFI_INTERFACE
+        )
+    return _wifi_iface_cache
+
+
+def get_wifi_ip():
+    try:
+        r = subprocess.run(
+            ["ipconfig", "getifaddr", get_wifi_interface()], capture_output=True, text=True, timeout=3
+        )
         return r.stdout.strip() or ""
     except Exception:
         return ""
@@ -81,13 +153,13 @@ def remove_preferred_networks():
     saved = []
     try:
         r = subprocess.run(
-            ["networksetup", "-listpreferredwirelessnetworks", "en0"],
+            ["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()],
             capture_output=True, text=True, timeout=5,
         )
         saved = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
         if saved:
             subprocess.run(
-                ["networksetup", "-removeallpreferredwirelessnetworks", "en0"],
+                ["networksetup", "-removeallpreferredwirelessnetworks", get_wifi_interface()],
                 capture_output=True, timeout=5,
             )
             status(f"Cleared {len(saved)} preferred networks", 15)
@@ -103,7 +175,7 @@ def restore_preferred_networks(saved):
     try:
         for net_ssid in saved:
             subprocess.run(
-                ["networksetup", "-addpreferredwirelessnetworkatindex", "en0", net_ssid, "0", "WPA2"],
+                ["networksetup", "-addpreferredwirelessnetworkatindex", get_wifi_interface(), net_ssid, "0", "WPA2"],
                 capture_output=True, timeout=5,
             )
         status(f"Restored {len(saved)} preferred networks", 15)
@@ -128,7 +200,7 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
     iface.disassociate()
     for _ in range(10):
         time.sleep(0.5)
-        if not get_en0_ip():
+        if not get_wifi_ip():
             break
 
     deadline = time.time() + timeout
@@ -139,7 +211,7 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
 
         try:
             r = subprocess.run(
-                ["networksetup", "-setairportnetwork", "en0", ssid, password],
+                ["networksetup", "-setairportnetwork", get_wifi_interface(), ssid, password],
                 capture_output=True, text=True, timeout=20,
             )
         except subprocess.TimeoutExpired:
@@ -150,13 +222,13 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
             # Reject IPs from other networks (e.g. 172.20.10.x = iPhone hotspot)
             for wait in range(15):
                 time.sleep(1)
-                ip = get_en0_ip()
+                ip = get_wifi_ip()
                 if ip and ip != original_ip and ip.startswith("192.168."):
                     status(f"Connected to {ssid} ({ip})", 20)
                     return ip
                 if ip and ip != original_ip:
                     status(f"Got IP {ip} but not on hotspot subnet, waiting...", 15)
-            status(f"No hotspot IP after 15s, retrying...", 15)
+            status("No hotspot IP after 15s, retrying...", 15)
             iface.disassociate()
             time.sleep(1)
         else:
@@ -168,7 +240,7 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
 
 def get_preferred_networks(exclude):
     try:
-        r = subprocess.run(["networksetup", "-listpreferredwirelessnetworks", "en0"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()], capture_output=True, text=True, timeout=5)
         return [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip() and n.strip() != exclude]
     except Exception:
         return []
@@ -183,7 +255,7 @@ async def _on_target_network(original_ssid, hotspot_ip, timeout_s=12):
     """
     deadline = asyncio.get_event_loop().time() + timeout_s
     while asyncio.get_event_loop().time() < deadline:
-        ip = get_en0_ip()
+        ip = get_wifi_ip()
         current_ssid = _get_current_ssid()
         if ip and ip != hotspot_ip:
             # If we know the target SSID, require it to match. Otherwise any
@@ -204,7 +276,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     4. If all fail, open WiFi settings for manual reconnection
     """
     # Step 0: Remove Plaud hotspot from preferred networks
-    subprocess.run(["networksetup", "-removepreferredwirelessnetwork", "en0", ssid], capture_output=True)
+    subprocess.run(["networksetup", "-removepreferredwirelessnetwork", get_wifi_interface(), ssid], capture_output=True)
 
     try:
         from CoreWLAN import CWWiFiClient
@@ -219,7 +291,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     if original_ssid:
         status(f"Reconnecting to {original_ssid}...", 92)
         subprocess.run(
-            ["networksetup", "-setairportnetwork", "en0", original_ssid],
+            ["networksetup", "-setairportnetwork", get_wifi_interface(), original_ssid],
             capture_output=True, timeout=15,
         )
         ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=12)
@@ -232,16 +304,16 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
         off_time = 10 if cycle == 0 else 5
         settle_time = 5 if cycle == 0 else 8
         status(f"Power-cycling WiFi (attempt {cycle + 1}/2)...", 93 + cycle * 2)
-        subprocess.run(["networksetup", "-setairportpower", "en0", "off"], capture_output=True, timeout=5)
+        subprocess.run(["networksetup", "-setairportpower", get_wifi_interface(), "off"], capture_output=True, timeout=5)
         await asyncio.sleep(off_time)
-        subprocess.run(["networksetup", "-setairportpower", "en0", "on"], capture_output=True, timeout=5)
+        subprocess.run(["networksetup", "-setairportpower", get_wifi_interface(), "on"], capture_output=True, timeout=5)
         await asyncio.sleep(settle_time)
 
         # Try networksetup rejoin (uses keychain)
         if original_ssid:
             status(f"Rejoining {original_ssid}...", 94 + cycle * 2)
             subprocess.run(
-                ["networksetup", "-setairportnetwork", "en0", original_ssid],
+                ["networksetup", "-setairportnetwork", get_wifi_interface(), original_ssid],
                 capture_output=True, timeout=15,
             )
             ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=10)
@@ -277,7 +349,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
         # Check if macOS auto-joined on its own — accept ANY non-hotspot network
         # since the user is back online. DHCP often hands out a different IP
         # than before, so ip == original_ip was producing false negatives.
-        ip = get_en0_ip()
+        ip = get_wifi_ip()
         if ip and ip != hotspot_ip:
             current = _get_current_ssid()
             status(f"Restored to {current or 'network'} ({ip})", 98)
@@ -286,7 +358,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     # Final check before giving up — we may have reconnected during the last
     # iteration's settle but missed the window. Don't open WiFi settings if
     # we're already back online.
-    ip = get_en0_ip()
+    ip = get_wifi_ip()
     if ip and ip != hotspot_ip:
         current = _get_current_ssid()
         status(f"Restored to {current or 'network'} ({ip})", 98)
@@ -298,6 +370,65 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     msg = f"Please reconnect to {original_ssid}" if original_ssid else "Please reconnect to your WiFi"
     status(msg, 97)
     return {"restored": False, "need_manual": True, "ssid": original_ssid, "message": msg}
+
+
+def _atomic_write(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
+    """Persist one WiFi-downloaded file and return its result entry.
+
+    - Size != expected → raw kept as {sid}_partial.bin, status "partial" (never
+      an .ogg, so the next sync retries it).
+    - Decrypt failure → raw kept as {sid}_encrypted.bin, status "decrypt_failed".
+    - Otherwise the .ogg is written atomically (status "new"); the encrypted
+      original is written first and only dropped for short files, matching BLE.
+    """
+    from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
+
+    recordings_dir.mkdir(exist_ok=True)
+    raw_size = len(raw)
+    partial_path = recordings_dir / f"{sid}_partial.bin"
+    if expected_size <= 0 or raw_size != expected_size:
+        status(f"Partial download for {sid}: got {raw_size}/{expected_size} bytes — will retry next sync", 40)
+        if raw:
+            try:
+                if not partial_path.exists() or partial_path.stat().st_size <= raw_size:
+                    _atomic_write(partial_path, raw)
+            except OSError:
+                pass
+        return {
+            "session_id": sid,
+            "ogg_path": None,
+            "duration": 0,
+            "status": "partial",
+            "received": raw_size,
+            "expected": expected_size,
+            "reason": f"size mismatch ({raw_size} of {expected_size} bytes)",
+        }
+
+    enc_path = recordings_dir / f"{sid}_encrypted.bin"
+    try:
+        _atomic_write(enc_path, raw)
+    except OSError as e:
+        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
+    partial_path.unlink(missing_ok=True)
+    try:
+        frames = decrypt_ble_file(raw, app_rsa_key)
+    except BleDecryptError as e:
+        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed", "error": str(e)}
+    final_path = recordings_dir / f"{sid}.ogg"
+    try:
+        _atomic_write(final_path, wrap_opus_ogg(frames))
+    except OSError as e:
+        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
+    if raw_size <= 500_000:
+        enc_path.unlink(missing_ok=True)
+    duration = len(frames) // 80 * 0.02
+    return {"session_id": sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"}
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
@@ -473,10 +604,14 @@ async def main():
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
     app_rsa_key = load_pem_private_key(app_key_path.read_bytes(), password=None)
+    # The app's own modules (decrypt, ogg wrapping) are imported lazily from the
+    # project root.
+    sys.path.insert(0, str(app_key_path.parent.parent))
+    status(f"WiFi interface: {get_wifi_interface()}", 3)
 
     wifi_ssid = f"Plaud{sn[-4:]}"
     wifi_pass = sn[-8:]
-    original_ip = get_en0_ip()
+    original_ip = get_wifi_ip()
 
     # Save current SSID before transfer (requires Location permission)
     original_ssid = ""
@@ -535,7 +670,7 @@ async def main():
                     else:
                         new_files.append({"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"})
                         continue
-                # Also remove stale .partial files so we start fresh
+                # Remove legacy decrypted .ogg.partial files from older versions
                 if partial_path.exists():
                     partial_path.unlink()
                 current_sid = sid
@@ -599,45 +734,16 @@ async def main():
                         download_buf.extend(chunk)
                     is_last = json_data.get("last", 0) if isinstance(json_data, dict) else 0
                     if is_last:
-                        # Decrypt and save
-                        raw = bytes(download_buf)
-                        recordings_dir.mkdir(exist_ok=True)
-
-                        # Check if we got the full file — device may send is_last
-                        # on a partial stream if the connection is dropping
-                        raw_size = len(raw)
-                        is_partial = current_expected_size > 0 and raw_size < current_expected_size * 0.9
-                        if is_partial:
-                            status(f"Partial download for {current_sid}: got {raw_size}/{current_expected_size} bytes ({raw_size*100//current_expected_size}%)", 40)
-
-                        # Import decrypt from project
-                        sys.path.insert(0, str(app_key_path.parent.parent))
-                        from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
-
-                        frames = decrypt_ble_file(raw, app_rsa_key)
-                        if frames:
-                            ogg = wrap_opus_ogg(frames)
-                            if is_partial:
-                                # Save as .partial — won't show in recordings, re-downloaded next sync
-                                partial_path = recordings_dir / f"{current_sid}.ogg.partial"
-                                partial_path.write_bytes(ogg)
-                                new_files.append({"session_id": current_sid, "ogg_path": None, "duration": 0, "status": "partial"})
-                                status(f"Saved partial {current_sid} ({raw_size*100//current_expected_size}%) — will retry next sync", 40)
-                            else:
-                                final_path = recordings_dir / f"{current_sid}.ogg"
-                                tmp_path = recordings_dir / f"{current_sid}.ogg.partial"
-                                tmp_path.write_bytes(ogg)
-                                tmp_path.rename(final_path)
-                                duration = len(frames) // 80 * 0.02
-                                new_files.append({"session_id": current_sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"})
-                            done = sum(1 for f in new_files if f["status"] == "new")
-                            total = len(wifi_files)
-                            pct = 35 + int(55 * done / max(total, 1))
-                            status(f"Downloaded {done}/{total}", pct)
-                        else:
-                            raw_path = recordings_dir / f"{current_sid}_encrypted.bin"
-                            raw_path.write_bytes(raw)
-                            new_files.append({"session_id": current_sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed"})
+                        # Exact size required (like BLE): the device may send
+                        # is_last on a truncated stream if the link is dropping.
+                        entry = save_wifi_download(
+                            recordings_dir, current_sid, bytes(download_buf), current_expected_size, app_rsa_key
+                        )
+                        new_files.append(entry)
+                        done = sum(1 for f in new_files if f["status"] == "new")
+                        total = len(wifi_files)
+                        pct = 35 + int(55 * done / max(total, 1))
+                        status(f"Downloaded {done}/{total}", pct)
                         await download_next()
 
                 elif cmd_id == 3:
