@@ -13,10 +13,14 @@ from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("core", __name__)
 
-try:
-    _APP_VERSION = _pkg_version("plaud-v2")
-except PackageNotFoundError:
-    _APP_VERSION = "unknown"
+# The Rust shell passes its own version (the source of truth for the bundle);
+# fall back to installed package metadata in dev, then "unknown".
+_APP_VERSION = os.environ.get("PLAUD_APP_VERSION", "").strip()
+if not _APP_VERSION:
+    try:
+        _APP_VERSION = _pkg_version("plaud-v2")
+    except PackageNotFoundError:
+        _APP_VERSION = "unknown"
 
 # Cache transcoded M4A files so we only convert once per recording
 _M4A_CACHE_DIR = None
