@@ -40,23 +40,44 @@ def _opus_packet_samples(packet):
     # Configs 24-27: CELT-only SWB (2.5/5/10/20ms)
     # Configs 28-31: CELT-only FB (2.5/5/10/20ms)
     _frame_samples = {
-        0: 480, 1: 960, 2: 1920, 3: 2880,      # SILK NB
-        4: 480, 5: 960, 6: 1920, 7: 2880,      # SILK MB
-        8: 480, 9: 960, 10: 1920, 11: 2880,    # SILK WB
-        12: 480, 13: 960,                        # Hybrid SWB
-        14: 480, 15: 960,                        # Hybrid FB
-        16: 120, 17: 240, 18: 480, 19: 960,    # CELT NB
-        20: 120, 21: 240, 22: 480, 23: 960,    # CELT WB
-        24: 120, 25: 240, 26: 480, 27: 960,    # CELT SWB
-        28: 120, 29: 240, 30: 480, 31: 960,    # CELT FB
+        0: 480,
+        1: 960,
+        2: 1920,
+        3: 2880,  # SILK NB
+        4: 480,
+        5: 960,
+        6: 1920,
+        7: 2880,  # SILK MB
+        8: 480,
+        9: 960,
+        10: 1920,
+        11: 2880,  # SILK WB
+        12: 480,
+        13: 960,  # Hybrid SWB
+        14: 480,
+        15: 960,  # Hybrid FB
+        16: 120,
+        17: 240,
+        18: 480,
+        19: 960,  # CELT NB
+        20: 120,
+        21: 240,
+        22: 480,
+        23: 960,  # CELT WB
+        24: 120,
+        25: 240,
+        26: 480,
+        27: 960,  # CELT SWB
+        28: 120,
+        29: 240,
+        30: 480,
+        31: 960,  # CELT FB
     }
     samples_per_frame = _frame_samples.get(config, 960)
 
     if code == 0:
         return samples_per_frame
-    elif code == 1:
-        return samples_per_frame * 2
-    elif code == 2:
+    elif code == 1 or code == 2:
         return samples_per_frame * 2
     elif code == 3:
         if len(packet) < 2:
@@ -134,9 +155,7 @@ def _looks_like_opus(frames, check_far_frame=True):
     toc = frames[0]
     if toc != frames[80] or (toc >> 3) & 0x1F not in range(16, 32):
         return False
-    if check_far_frame and len(frames) >= 800 and frames[640] != toc:
-        return False
-    return True
+    return not (check_far_frame and len(frames) >= 800 and frames[640] != toc)
 
 
 def decrypt_ble_file(data, app_key):
@@ -177,7 +196,7 @@ def decrypt_ble_file(data, app_key):
     # Repeating keystream failed — try continuous keystream
     cipher2 = Cipher(algorithms.ChaCha20(file_key, full_nonce), mode=None)
     full_keystream = cipher2.decryptor().update(b"\x00" * len(audio))
-    decrypted_continuous = bytes(a ^ b for a, b in zip(audio, full_keystream))
+    decrypted_continuous = bytes(a ^ b for a, b in zip(audio, full_keystream, strict=False))
 
     if _looks_like_opus(decrypted_continuous, check_far_frame=False):
         return decrypted_continuous

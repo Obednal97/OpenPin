@@ -18,6 +18,7 @@ def _error_json(base, exc):
     base["traceback"] = traceback.format_exc()
     return base
 
+
 bp = Blueprint("device", __name__, url_prefix="/device")
 
 
@@ -69,7 +70,9 @@ def connect():
         # Translate raw BLE errors to friendly messages for the UI
         raw = str(e).lower()
         if "service discovery" in raw:
-            err["error"] = "Couldn't establish a stable connection. Try moving the device closer and restarting Bluetooth."
+            err["error"] = (
+                "Couldn't establish a stable connection. Try moving the device closer and restarting Bluetooth."
+            )
             err["raw_error"] = str(e)
         elif "not found" in raw:
             err["error"] = "Device went out of range before connecting. Try moving it closer and scanning again."
@@ -175,9 +178,7 @@ def status():
             # lock_timeout: closes the is_syncing()→run_async race window. If
             # sync acquired _ble_lock between our is_syncing() check and now,
             # bail rather than stall the status poll for the full sync (≤30 min).
-            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(
-                _poll_device(), lock_timeout=0.5
-            )
+            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(_poll_device(), lock_timeout=0.5)
             if live_battery is not None:
                 battery = live_battery
             # If all commands failed and no RSSI, device is gone — mark disconnected
@@ -291,8 +292,7 @@ def check_new():
         new_files = [
             f
             for f in files
-            if str(f["session_id"]) not in dismissed
-            and not dev.is_already_synced(f["session_id"], rec_dirs, cloud_ids)
+            if str(f["session_id"]) not in dismissed and not dev.is_already_synced(f["session_id"], rec_dirs, cloud_ids)
         ]
         total_size = sum(f.get("size", 0) for f in new_files)
         return jsonify({"new_files": len(new_files), "total_size": total_size, "files": new_files})

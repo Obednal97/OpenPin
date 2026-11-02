@@ -301,9 +301,7 @@ def test_auto_delete_without_reply_is_not_reported_deleted(env, app_key):
     assert result["delete_failed"] == [601]
 
 
-@pytest.mark.parametrize(
-    ("mode", "expected"), [("ok", True), ("none", False), ("fail", False), ("wrong_sid", False)]
-)
+@pytest.mark.parametrize(("mode", "expected"), [("ok", True), ("none", False), ("fail", False), ("wrong_sid", False)])
 def test_delete_device_file_requires_ok_reply(env, mode, expected):
     device = FakeDevice({}, delete_mode=mode)
 

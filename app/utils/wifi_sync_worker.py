@@ -104,9 +104,7 @@ def _corewlan_interface_name():
 def _networksetup_wifi_device():
     """Read-only lookup: lists hardware ports, changes nothing."""
     try:
-        r = subprocess.run(
-            ["networksetup", "-listallhardwareports"], capture_output=True, text=True, timeout=5
-        )
+        r = subprocess.run(["networksetup", "-listallhardwareports"], capture_output=True, text=True, timeout=5)
         return parse_wifi_device(r.stdout or "")
     except Exception:
         return None
@@ -120,17 +118,13 @@ def get_wifi_interface():
     """
     global _wifi_iface_cache
     if _wifi_iface_cache is None:
-        _wifi_iface_cache = (
-            _corewlan_interface_name() or _networksetup_wifi_device() or DEFAULT_WIFI_INTERFACE
-        )
+        _wifi_iface_cache = _corewlan_interface_name() or _networksetup_wifi_device() or DEFAULT_WIFI_INTERFACE
     return _wifi_iface_cache
 
 
 def get_wifi_ip():
     try:
-        r = subprocess.run(
-            ["ipconfig", "getifaddr", get_wifi_interface()], capture_output=True, text=True, timeout=3
-        )
+        r = subprocess.run(["ipconfig", "getifaddr", get_wifi_interface()], capture_output=True, text=True, timeout=3)
         return r.stdout.strip() or ""
     except Exception:
         return ""
@@ -140,6 +134,7 @@ def _get_current_ssid():
     """Get the SSID we're actually connected to."""
     try:
         from CoreWLAN import CWWiFiClient
+
         iface = CWWiFiClient.sharedWiFiClient().interface()
         if iface and iface.ssid():
             return str(iface.ssid())
@@ -154,13 +149,16 @@ def remove_preferred_networks():
     try:
         r = subprocess.run(
             ["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         saved = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
         if saved:
             subprocess.run(
                 ["networksetup", "-removeallpreferredwirelessnetworks", get_wifi_interface()],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
             status(f"Cleared {len(saved)} preferred networks", 15)
     except Exception as e:
@@ -176,7 +174,8 @@ def restore_preferred_networks(saved):
         for net_ssid in saved:
             subprocess.run(
                 ["networksetup", "-addpreferredwirelessnetworkatindex", get_wifi_interface(), net_ssid, "0", "WPA2"],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
         status(f"Restored {len(saved)} preferred networks", 15)
     except Exception:
@@ -191,6 +190,7 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
     The Plaud hotspot gives IPs on 192.168.84.x — we verify this subnet.
     """
     from CoreWLAN import CWWiFiClient
+
     iface = CWWiFiClient.sharedWiFiClient().interface()
     if not iface:
         status("No WiFi interface found", 15)
@@ -212,7 +212,9 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
         try:
             r = subprocess.run(
                 ["networksetup", "-setairportnetwork", get_wifi_interface(), ssid, password],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True,
+                text=True,
+                timeout=20,
             )
         except subprocess.TimeoutExpired:
             continue
@@ -240,7 +242,12 @@ def connect_to_hotspot(ssid, password, original_ip, timeout=45):
 
 def get_preferred_networks(exclude):
     try:
-        r = subprocess.run(["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(
+            ["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
         return [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip() and n.strip() != exclude]
     except Exception:
         return []
@@ -280,6 +287,7 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
 
     try:
         from CoreWLAN import CWWiFiClient
+
         iface = CWWiFiClient.sharedWiFiClient().interface()
     except Exception:
         iface = None
@@ -292,7 +300,8 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
         status(f"Reconnecting to {original_ssid}...", 92)
         subprocess.run(
             ["networksetup", "-setairportnetwork", get_wifi_interface(), original_ssid],
-            capture_output=True, timeout=15,
+            capture_output=True,
+            timeout=15,
         )
         ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=12)
         if ip:
@@ -304,7 +313,9 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
         off_time = 10 if cycle == 0 else 5
         settle_time = 5 if cycle == 0 else 8
         status(f"Power-cycling WiFi (attempt {cycle + 1}/2)...", 93 + cycle * 2)
-        subprocess.run(["networksetup", "-setairportpower", get_wifi_interface(), "off"], capture_output=True, timeout=5)
+        subprocess.run(
+            ["networksetup", "-setairportpower", get_wifi_interface(), "off"], capture_output=True, timeout=5
+        )
         await asyncio.sleep(off_time)
         subprocess.run(["networksetup", "-setairportpower", get_wifi_interface(), "on"], capture_output=True, timeout=5)
         await asyncio.sleep(settle_time)
@@ -314,7 +325,8 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
             status(f"Rejoining {original_ssid}...", 94 + cycle * 2)
             subprocess.run(
                 ["networksetup", "-setairportnetwork", get_wifi_interface(), original_ssid],
-                capture_output=True, timeout=15,
+                capture_output=True,
+                timeout=15,
             )
             ip, current_ssid = await _on_target_network(original_ssid, hotspot_ip, timeout_s=10)
             if ip:
@@ -477,6 +489,7 @@ async def ble_connect_and_setup():
                 rsa[idx] = d[4:]
             if len(rsa) >= d[2]:
                 done.set()
+
     try:
         await cl.start_notify(N, h)
         status("BLE notifications started", 3)
@@ -488,7 +501,9 @@ async def ble_connect_and_setup():
     status(f"Sending SN_SIG ({len(sig)} bytes, {tc} chunks)...", 3)
     for _ in range(2):
         for i in range(tc):
-            await cl.write_gatt_char(W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i*100:(i+1)*100], response=False)
+            await cl.write_gatt_char(
+                W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
+            )
             await asyncio.sleep(0.02)
     for _ in range(50):
         await asyncio.sleep(0.1)
@@ -500,7 +515,9 @@ async def ble_connect_and_setup():
         pc = (len(pem) + 99) // 100
         status(f"Sending public key ({len(pem)} bytes, {pc} chunks)...", 3)
         for i in range(pc):
-            await cl.write_gatt_char(W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i*100:(i+1)*100], response=True)
+            await cl.write_gatt_char(
+                W, struct.pack("<H", 65042) + bytes([pc, i]) + pem[i * 100 : (i + 1) * 100], response=True
+            )
             await asyncio.sleep(0.02)
         await asyncio.wait_for(done.wait(), timeout=15)
     elif not done.is_set():
@@ -541,6 +558,7 @@ async def ble_connect_and_setup():
         if len(dd) >= 1 and dd[0] == 1:
             cmd_resp[0] = dd
             cmd_evt.set()
+
     await cl.start_notify(N, handler)
 
     async def cmd(name, pt):
@@ -617,6 +635,7 @@ async def main():
     original_ssid = ""
     try:
         from CoreWLAN import CWWiFiClient
+
         _iface = CWWiFiClient.sharedWiFiClient().interface()
         if _iface and _iface.ssid():
             original_ssid = str(_iface.ssid())
@@ -668,7 +687,9 @@ async def main():
                         status(f"Re-downloading {sid} (existing {existing_size} bytes, expected ~{expected})", 35)
                         ogg_path.unlink()
                     else:
-                        new_files.append({"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"})
+                        new_files.append(
+                            {"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"}
+                        )
                         continue
                 # Remove legacy decrypted .ogg.partial files from older versions
                 if partial_path.exists():
@@ -710,7 +731,7 @@ async def main():
                     s = json_data.get("status", -1) if isinstance(json_data, dict) else -1
                     if s == 0 and count > 0:
                         json_len_val = struct.unpack_from("<H", decrypted, 6)[0]
-                        bin_data = decrypted[8 + json_len_val:]
+                        bin_data = decrypted[8 + json_len_val :]
                         for i in range(0, len(bin_data) - 9, 10):
                             sid = struct.unpack_from("<I", bin_data, i)[0]
                             fsize = struct.unpack_from("<I", bin_data, i + 4)[0]
@@ -729,7 +750,7 @@ async def main():
 
                 elif cmd_id == 13:
                     json_len_c = struct.unpack_from("<H", decrypted, 6)[0]
-                    chunk = decrypted[8 + json_len_c:]
+                    chunk = decrypted[8 + json_len_c :]
                     if chunk:
                         download_buf.extend(chunk)
                     is_last = json_data.get("last", 0) if isinstance(json_data, dict) else 0
@@ -776,9 +797,7 @@ async def main():
                 last_bind_err = _e
                 status(f"Port {_port} in use, trying next...", 5)
         if server is None:
-            raise OSError(
-                f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use"
-            ) from last_bind_err
+            raise OSError(f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use") from last_bind_err
 
         status("Opening device hotspot...", 10)
         await ble_cmd("WiFi_Open", bytes([1, 10, 0]))

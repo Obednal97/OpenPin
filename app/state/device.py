@@ -285,9 +285,7 @@ class _keep_awake:
         try:
             from Foundation import NSProcessInfo
 
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
-                self._OPTIONS, self._reason
-            )
+            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
         except Exception as e:
             logging.debug(f"App Nap suppression unavailable: {e}")
             self._token = None
@@ -505,7 +503,10 @@ async def connect_device(address=None):
             except Exception:
                 pass
         sn = _device_state.get("serial_number", "unknown")
-        return {"connected": False, "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting."}
+        return {
+            "connected": False,
+            "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting.",
+        }
 
     _device_state["client"] = cl
 
@@ -537,6 +538,7 @@ async def connect_device(address=None):
             get_device_sn_signature,
             is_logged_in,
         )
+
         sn = _device_state.get("serial_number", "")
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
         if not sn_sig_b64 and sn and is_logged_in():
@@ -557,8 +559,14 @@ async def connect_device(address=None):
             if not sn:
                 return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
             if not is_logged_in():
-                return {"connected": False, "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again."}
-            return {"connected": False, "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again."}
+                return {
+                    "connected": False,
+                    "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again.",
+                }
+            return {
+                "connected": False,
+                "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again.",
+            }
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
         # Send SN_SIG 3 times for reliability on weak connections
@@ -587,7 +595,10 @@ async def connect_device(address=None):
                 await cl.stop_notify(N)
             except Exception:
                 pass
-            return {"connected": False, "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting.",
+            }
 
         blob = bytearray()
         for i in sorted(rsa.keys()):
@@ -605,11 +616,17 @@ async def connect_device(address=None):
         err_msg = str(e)
         # Translate raw BLE errors to user-friendly messages
         if "service discovery" in err_msg.lower():
-            return {"connected": False, "error": "Connection was lost during setup. Try moving the device closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Connection was lost during setup. Try moving the device closer and reconnecting.",
+            }
         if "disconnected" in err_msg.lower() or "not connected" in err_msg.lower():
             return {"connected": False, "error": "Device disconnected during setup. Try reconnecting."}
         if "timeout" in err_msg.lower():
-            return {"connected": False, "error": "Device took too long to respond. Try moving it closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Device took too long to respond. Try moving it closer and reconnecting.",
+            }
         return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
 
     # Save session (atomic write — prevents corruption on mid-write crash)
@@ -665,6 +682,7 @@ async def connect_device(address=None):
     from app.state.cloud import bind_device as cloud_bind_device
     from app.state.cloud import get_device_bind_token
     from app.state.cloud import is_logged_in as cloud_logged_in
+
     device_token = get_device_bind_token(sn)
     if not device_token and sn and cloud_logged_in():
         # BIND_TOKEN missing — try creating it now (handles first-time pairing)
@@ -729,9 +747,7 @@ async def send_cmd(pt, timeout=5):
     # (button-press record events, late/duplicate replies); without this the first
     # such packet would be returned here and its bytes misread (e.g. a sessionId
     # byte parsed as battery %). The SDK matches responses to requests the same way.
-    _device_state["expected_cmd_id"] = (
-        struct.unpack_from("<H", pt, 1)[0] if len(pt) >= 3 else None
-    )
+    _device_state["expected_cmd_id"] = struct.unpack_from("<H", pt, 1)[0] if len(pt) >= 3 else None
     ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + pt, aad)
     cmd_evt.clear()
     cmd_resp[0] = None
@@ -797,6 +813,7 @@ async def depair_device():
 
         await cl.start_notify(N, verify_handler)
         from app.state.cloud import get_device_sn_signature
+
         sn_for_verify = _device_state.get("serial_number", "")
         sn_sig_verify = get_device_sn_signature(sn_for_verify)
         if not sn_sig_verify:
@@ -860,6 +877,7 @@ async def list_device_files():
     We collect multiple packets until we have all `total` files.
     """
     import sys
+
     files = []
     expected_total = None
 
@@ -944,7 +962,11 @@ async def list_device_files():
             deduped.append(rec)
     files = deduped
 
-    print(f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})", file=sys.stderr, flush=True)
+    print(
+        f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})",
+        file=sys.stderr,
+        flush=True,
+    )
     return files
 
 
@@ -988,7 +1010,9 @@ async def get_device_info():
         r = await send_cmd(bytes([1, 3, 0]), timeout=3)
         if r and len(r) >= 8:
             state_val = struct.unpack_from("<I", r, 3)[0] if len(r) >= 7 else 0
-            info["recording_state"] = state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
+            info["recording_state"] = (
+                state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
+            )
             # Recording is determined by the active session id, not `state`:
             # measured idle -> session 0, scene 0; recording -> session != 0, scene 1.
             # (The `state` field is a bitfield, not a 0-3 enum, so the old
@@ -1333,6 +1357,7 @@ def do_wifi_sync_blocking():
 
     # Log WiFi sync to file for production debugging
     _wifi_log = DATA_DIR / "wifi_sync.log" if DATA_DIR else None
+
     def _wlog(msg):
         print(f"[WiFi] {msg}")
         if _wifi_log:
@@ -1373,6 +1398,7 @@ def do_wifi_sync_blocking():
             get_device_sn_signature,
             is_logged_in,
         )
+
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
@@ -1396,18 +1422,21 @@ def do_wifi_sync_blocking():
             if not is_logged_in():
                 return {"error": "Log into Plaud Cloud in Settings first, then try again."}
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
-        worker_args = json.dumps({
-            "sn": sn,
-            "recordings_dir": str(get_recordings_dir()),
-            "app_key_path": str(APP_KEY_PATH),
-            "dismissed": list(load_config().get("deleted_ids", [])),
-            "bind_token": device_token,
-            "sn_sig": device_sig,
-        })
+        worker_args = json.dumps(
+            {
+                "sn": sn,
+                "recordings_dir": str(get_recordings_dir()),
+                "app_key_path": str(APP_KEY_PATH),
+                "dismissed": list(load_config().get("deleted_ids", [])),
+                "bind_token": device_token,
+                "sn_sig": device_sig,
+            }
+        )
 
         # Find the worker script
         import importlib.util
         from pathlib import Path as _Path
+
         worker_path = _Path(importlib.util.find_spec("app.utils.wifi_sync_worker").origin)
         python_bin = sys.executable
         _wlog(f"Spawning worker: {python_bin} {worker_path}")
@@ -1416,6 +1445,7 @@ def do_wifi_sync_blocking():
         # Run worker as subprocess — it has its own clean asyncio.run().
         # Credentials go in via stdin, not argv, so `ps aux` can't see them.
         import subprocess as sp
+
         proc = sp.Popen(
             [python_bin, str(worker_path)],
             stdin=sp.PIPE,
@@ -1478,7 +1508,11 @@ def do_wifi_sync_blocking():
             _on_status("WiFi transfer failed", 0)
             stderr_tail = "\n".join(_worker_stderr[-15:])
             _wlog(f"Worker FAILED: code={proc.returncode} stderr={stderr_tail[:300]}")
-            return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200], "traceback": stderr_tail}
+            return {
+                "error": f"WiFi worker exited with code {proc.returncode}",
+                "output": stdout_str[:200],
+                "traceback": stderr_tail,
+            }
 
         if stdout_str:
             result = json.loads(stdout_str)
@@ -1494,6 +1528,7 @@ def do_wifi_sync_blocking():
     except Exception as e:
         _wlog(f"EXCEPTION: {e}")
         import traceback
+
         traceback.print_exc()
         _on_status(f"WiFi transfer failed: {e}", 0)
         return {"error": str(e)}
