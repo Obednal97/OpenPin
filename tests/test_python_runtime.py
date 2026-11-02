@@ -311,9 +311,11 @@ class TestTranscribeInstallsThroughEnsureInstalled:
 
         calls = []
         monkeypatch.setitem(sys.modules, "diarize", None)
+        monkeypatch.setattr(tr, "_diarize_install_failed_at", None)
+        monkeypatch.setattr(tr, "get_hf_token", lambda: None)
         monkeypatch.setattr(system, "ensure_installed", lambda *a, **k: calls.append((a, k)) or False)
-        with pytest.raises(ImportError):
-            tr.diarize_audio_fast("x.wav")
+        with pytest.raises(tr.DiarizationError):
+            tr.diarize_audio("x.wav")
         assert calls == [(("diarize",), {"extra": "diarize"})]
 
     def test_no_ad_hoc_pip_left(self):
