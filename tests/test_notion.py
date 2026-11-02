@@ -704,6 +704,7 @@ def test_400_surfaces_server_error_without_resending(scripted_http):
 
 def test_mcp_init_401_refreshes_then_retries(scripted_http):
     h = scripted_http
+    h.ns._notion_state["resource_used"] = True
     h.script["initialize"] = [_Resp(401, text="unauthorized"), _Resp(200, INIT_OK, headers={"mcp-session-id": "S9"})]
     h.script["token"] = [_Resp(200, {"access_token": "tok-2", "refresh_token": "ref-2", "expires_in": 28800})]
     assert h.ns.mcp_init() == "S9"
@@ -775,7 +776,72 @@ def test_authorize_and_code_exchange_send_resource(scripted_http):
     assert token_call["data"]["grant_type"] == "authorization_code"
     assert token_call["data"]["resource"] == "https://mcp.notion.com/mcp"
     assert h.ns._notion_state["access_token"] == "tok-3"
+    assert h.ns._notion_state["resource_used"] is True
     resume.assert_called_once()
+
+
+# RFC 8707 on refresh: only send ``resource`` if the grant was made with it.
+
+REFRESH_OK = {"access_token": "tok-2", "refresh_token": "ref-2", "expires_in": 3600}
+
+
+def test_refresh_of_pre_resource_login_omits_resource(scripted_http):
+    """v2.3.0 logins were authorised without ``resource``; their saved token
+    file has no ``resource_used`` key."""
+    h = scripted_http
+    h.ns._notion_state.pop("resource_used", None)
+    h.script["token"] = [_Resp(200, REFRESH_OK)]
+    assert h.ns.refresh_token() is True
+    (call,) = _token_posts(h.calls)
+    assert "resource" not in call["data"]
+    assert h.ns._notion_state["access_token"] == "tok-2"
+
+
+def test_refresh_sends_resource_when_grant_used_it(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["resource_used"] = True
+    h.script["token"] = [_Resp(200, REFRESH_OK)]
+    assert h.ns.refresh_token() is True
+    assert _token_posts(h.calls)[0]["data"]["resource"] == "https://mcp.notion.com/mcp"
+
+
+def test_refresh_invalid_target_retries_once_without_resource(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["resource_used"] = True
+    h.script["token"] = [_Resp(400, {"error": "invalid_target"}), _Resp(200, REFRESH_OK)]
+    assert h.ns.refresh_token() is True
+    first, second = _token_posts(h.calls)
+    assert "resource" in first["data"] and "resource" not in second["data"]
+    assert h.ns._notion_state["refresh_dead"] is False
+    assert h.ns._notion_state["resource_used"] is False  # later refreshes skip it
+    assert h.ns.needs_reconnect() is False
+
+
+def test_refresh_invalid_target_twice_is_dead(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["resource_used"] = True
+    h.script["token"] = [_Resp(400, {"error": "invalid_target"})]
+    assert h.ns.refresh_token() is False
+    assert len(_token_posts(h.calls)) == 2
+    assert h.ns._notion_state["refresh_dead"] is True
+    assert h.ns.needs_reconnect() is True
+
+
+def test_refresh_invalid_target_without_resource_is_dead_at_once(scripted_http):
+    h = scripted_http
+    h.script["token"] = [_Resp(400, {"error": "invalid_target"})]
+    assert h.ns.refresh_token() is False
+    assert len(_token_posts(h.calls)) == 1
+    assert h.ns._notion_state["refresh_dead"] is True
+
+
+def test_refresh_5xx_after_invalid_target_is_not_dead(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["resource_used"] = True
+    h.script["token"] = [_Resp(400, {"error": "invalid_target"}), _Resp(503, {"error": "unavailable"})]
+    assert h.ns.refresh_token() is False
+    assert h.ns._notion_state["refresh_dead"] is False
+    assert h.ns._notion_state["resource_used"] is True
 
 
 # ---------------------------------------------------------------------------

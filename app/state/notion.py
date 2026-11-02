@@ -28,8 +28,13 @@ _notion_state = {
     "database_id": None,
     "database_name": None,
     # RFC 8707 resource indicator (the MCP server's canonical URI), sent on
-    # every authorize/token request. From the protected-resource metadata.
+    # authorize/token requests. From the protected-resource metadata.
     "resource": None,
+    # True if the stored tokens came from an authorization that sent
+    # ``resource``. Logins from v2.3.0 didn't, and a refresh that adds a
+    # resource the grant never had may be refused with ``invalid_target``, so
+    # refreshes send it only when the grant did. Missing (old files) = False.
+    "resource_used": False,
     # True once the authorization server rejected our refresh token: retrying
     # cannot help, the user has to reconnect. Persisted so a restart doesn't
     # hammer the token endpoint again.
@@ -196,8 +201,33 @@ def _refresh_rejected(response):
             err = (response.json() or {}).get("error", "")
         except ValueError:
             err = ""
-        return err in ("invalid_grant", "invalid_client", "unauthorized_client")
+        return err in ("invalid_grant", "invalid_client", "unauthorized_client", "invalid_target")
     return False
+
+
+def _oauth_error_code(response):
+    """The OAuth ``error`` code of a token-endpoint response, or ""."""
+    if response is None:
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    err = body.get("error") if isinstance(body, dict) else None
+    return err if isinstance(err, str) else ""
+
+
+def _post_refresh(with_resource):
+    payload = {
+        "grant_type": "refresh_token",
+        "refresh_token": _notion_state["refresh_token"],
+        "client_id": _notion_state["client_id"],
+    }
+    if with_resource:
+        payload["resource"] = _resource()
+    if _notion_state.get("client_secret"):
+        payload["client_secret"] = _notion_state["client_secret"]
+    return http_requests.post(_notion_state["token_endpoint"], data=payload, timeout=15)
 
 
 def refresh_token(stale_access_token=None):
@@ -218,15 +248,16 @@ def refresh_token(stale_access_token=None):
             return False
         r = None
         try:
-            payload = {
-                "grant_type": "refresh_token",
-                "refresh_token": _notion_state["refresh_token"],
-                "client_id": _notion_state["client_id"],
-                "resource": _resource(),
-            }
-            if _notion_state.get("client_secret"):
-                payload["client_secret"] = _notion_state["client_secret"]
-            r = http_requests.post(_notion_state["token_endpoint"], data=payload, timeout=15)
+            # Send ``resource`` only if the grant was made with one. If the
+            # server still answers invalid_target, retry once without it before
+            # treating the login as dead (like invalid_grant).
+            with_resource = bool(_notion_state.get("resource_used"))
+            r = _post_refresh(with_resource)
+            if with_resource and r.status_code == 400 and _oauth_error_code(r) == "invalid_target":
+                logging.info("Notion refresh rejected the resource indicator; retrying without it")
+                r = _post_refresh(False)
+                if r.status_code < 400:
+                    _notion_state["resource_used"] = False
             r.raise_for_status()
             tokens = r.json()
             _notion_state["access_token"] = tokens["access_token"]
@@ -543,6 +574,7 @@ def _exchange_code(code):
         _notion_state["refresh_token"] = tokens.get("refresh_token", "")
         _notion_state["connected"] = True
         _notion_state["refresh_dead"] = False
+        _notion_state["resource_used"] = "resource" in payload
         _notion_state["code_verifier"] = None
         _notion_state["state"] = None
         _token_expires_at = time.time() + tokens.get("expires_in", 3600)
@@ -648,6 +680,7 @@ def disconnect():
         _notion_state["database_id"] = None
         _notion_state["database_name"] = None
         _notion_state["refresh_dead"] = False
+        _notion_state["resource_used"] = False
         _reset_session(_notion_session_id)
     if NOTION_CONFIG_PATH.exists():
         NOTION_CONFIG_PATH.unlink()
