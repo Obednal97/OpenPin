@@ -245,7 +245,7 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 // a secret, so it can be rotated without an app release.
 
 mod report_scrub;
-mod sha256;
+pub(crate) mod sha256;
 
 /// Base URL of the update / bug-report Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://plaud-v2-updates.leave-hacker-feedback.workers.dev";
