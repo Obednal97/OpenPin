@@ -137,8 +137,9 @@ Settings are in `pyproject.toml` (Python 3.12 target, line length 120).
   `SUPPORTED_ARCH` in `python.rs`, and the lockfiles). Change them together;
   `tests/test_tauri_parity.py` checks they agree.
 - **New backend files** under `app/routes`, `state`, `providers` or `utils` are bundled
-  automatically; anything elsewhere needs adding to `bundle.resources` in `tauri.conf.json` and to
-  `scripts/prepare-frontend.sh`.
+  automatically; anything elsewhere (including a new `src/` module, which are listed one by one)
+  needs adding to `bundle.resources` in `tauri.conf.json` and to `scripts/prepare-frontend.sh`.
+  `tests/test_tauri_parity.py` checks that every `src/` module the backend imports is bundled.
 - **Device protocol:** the BLE handshake uses the per-device **BIND_TOKEN**, not the static APP_KEY
   that appears in old notes.
 

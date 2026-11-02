@@ -982,6 +982,28 @@ class TestSidecarManagement:
         assert release and dev and release.group(1) != dev.group(1)
         assert f'Path("~/Library/Application Support/{release.group(1)}")' in constants
 
+    def test_bundle_ships_every_src_module_the_app_imports(self):
+        """tauri.conf.json lists src/ modules one by one; every module the
+        backend (or a bundled src/ module) imports must be among them."""
+        conf = json.loads((PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text())
+        bundled = {
+            Path(dest).stem
+            for dest in conf["bundle"]["resources"].values()
+            if dest.startswith("src/") and dest.endswith(".py")
+        }
+        assert "__init__" in bundled
+        pattern = re.compile(r"^\s*(?:from\s+src\.(\w+)\s+import|import\s+src\.(\w+))", re.M)
+
+        def imported(files):
+            return {a or b for f in files for a, b in pattern.findall(f.read_text())}
+
+        needed = imported((PROJECT_ROOT / "app").rglob("*.py"))
+        needed |= imported(PROJECT_ROOT / "src" / f"{m}.py" for m in needed)
+        assert needed, "no src imports found; pattern broken?"
+        assert needed <= bundled, f"not bundled: {sorted(needed - bundled)}"
+        for m in bundled:
+            assert (PROJECT_ROOT / "src" / f"{m}.py").is_file(), m
+
     def test_tauri_rust_has_sidecar_or_command(self):
         """Tauri config or Rust code must reference Python sidecar."""
         tauri_conf = PROJECT_ROOT / "src-tauri" / "tauri.conf.json"
