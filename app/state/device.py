@@ -1018,9 +1018,9 @@ async def list_device_files():
     (10 bytes on the NotePin S: sid u32, size u32, two unknown bytes).
     ble_proto.FileListAssembler checks the start index (as the SDK does),
     skips retransmissions and duplicate session ids, holds out-of-order
-    notifications, and drops a notification whose entry bytes don't fit the
-    entry width instead of misreading it. A list that stays short only means
-    the missing files wait for the next sync.
+    notifications, and ignores trailing bytes that don't make a whole entry
+    (a notification without one whole entry is dropped). A list that stays
+    short only means the missing files wait for the next sync.
     """
     lst = FileListAssembler(_device_state.get("port_version"))
 

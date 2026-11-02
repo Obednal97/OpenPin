@@ -88,9 +88,9 @@ answer them. Log lines to look for are in quotes.
    "size mismatch accepted". If it never happens, the `size_mismatch` path is dead weight; if it
    always happens, the size means something else.
 6. **File list entries (cmd 26).** What do entry bytes 8–9 and header bytes 3–6 mean? What selects
-   the 8-, 9- or 10-byte entry width? The app checks the start index and drops a notification
-   whose entry bytes aren't a multiple of the width: check "file list: … not a multiple of the
-   entry width" and "file list incomplete" never appear.
+   the 8-, 9- or 10-byte entry width? The app checks the start index and ignores entry bytes left
+   over after the last whole entry: check "file list: … is not a multiple of 10; ignoring the
+   last …" and "file list incomplete" never appear.
 7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app logs both
    replies ("Handshake replies: HS1=… HS2=…") and treats a non-zero status (byte 3) as a rejection
    only when the device then answers neither cmd 4 nor cmd 3. Record the status a working device

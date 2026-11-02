@@ -280,8 +280,9 @@ bytes 8–9, skips entries with session ID 0 or size outside 1 byte–500 MB, an
 Like the SDK, it uses a notification only when its start index at 9 continues the entries it
 already has: a retransmitted one is skipped, one that arrives early is held until the gap fills
 (**Implemented**). If a notification's entry bytes aren't a multiple of 10 but are a multiple of
-the width its port version suggests, that width is used; if they fit neither, the notification is
-dropped and logged rather than misread (the SDK silently ignores the remainder).
+the width its port version suggests, that width is used; if they fit neither, every whole entry is
+parsed and the trailing bytes are ignored with a warning, as the SDK (which ignores the remainder
+silently) and v2.4.0 do. Only a notification without one whole entry is dropped.
 
 Size is the number of bytes the download should deliver, 512-byte header included (assumed; see
 the open questions in the [README](README.md#open-questions)).
