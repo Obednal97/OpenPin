@@ -25,14 +25,16 @@ class FakeNotePin:
       before      cmd id -> plaintext packets sent just before its reply (e.g.
                   an unsolicited record event, a late reply to another command)
       replies     cmd id -> reply body override (bytes after [1, cid lo, cid hi])
+      reply_as    cmd id -> the cmd id the reply carries (e.g. 10 -> 13)
     """
 
-    def __init__(self, hs_status=0, port_version=9, silent=(), before=None, replies=None):
+    def __init__(self, hs_status=0, port_version=9, silent=(), before=None, replies=None, reply_as=None):
         self.hs_status = hs_status
         self.port_version = port_version
         self.silent = set(silent)
         self.before = before or {}
         self.replies = replies or {}
+        self.reply_as = reply_as or {}
         self.key, self.nonce, self.aad = os.urandom(32), os.urandom(12), os.urandom(12)
         self.cipher = ChaCha20Poly1305(self.key)
         self.handler = None
@@ -103,7 +105,11 @@ class FakeNotePin:
         if cid == 1 and self.hs_status is None or cid in self.silent:
             return
         body = self.replies.get(cid)
-        loop.call_soon(self.reply, cid, body if body is not None else self._default_body(cid))
+        body = body if body is not None else self._default_body(cid)
+        # The real reply comes a little after any `before` packets, so a waiter
+        # that takes the first type-1 packet would get the wrong one.
+        delay = 0.02 if cid in self.before else 0
+        loop.call_later(delay, self.reply, self.reply_as.get(cid, cid), body)
 
 
 class FakeBleakClient:
