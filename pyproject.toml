@@ -1,6 +1,6 @@
 [project]
 name = "plaud-v2"
-version = "2.2.3"
+version = "2.3.0"
 requires-python = ">=3.10"
 
 [tool.ruff]
