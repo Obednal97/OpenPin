@@ -70,7 +70,7 @@ const REPORT_ENDPOINTS = new Set([
 const NO_TIMEOUT_ENDPOINTS = new Set([
   '/device/connect', // BLE pairing — service discovery can take 30-45s on slow links
   '/device/sync', '/device/wifi-sync',
-  '/transcribe', '/summarize',
+  '/transcribe', '/summarize', '/notion/push', // Notion creates of long transcripts can exceed 30s
   '/cloud/sync',
   '/gdrive/sync', '/gdrive/upload',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
