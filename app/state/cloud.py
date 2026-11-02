@@ -809,7 +809,6 @@ def get_device_sn_signature(sn):
     return config.get("device_sn_signatures", {}).get(sn)
 
 
-
 def init():
     """Load the saved cloud token into _cloud_state.
 

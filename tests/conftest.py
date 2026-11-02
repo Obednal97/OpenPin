@@ -35,6 +35,7 @@ def pytest_configure(config):
 def pytest_unconfigure(config):
     shutil.rmtree(TEST_DATA_DIR, ignore_errors=True)
 
+
 # Token the flask_client fixture sets as PLAUD_API_TOKEN and sends by default.
 TEST_API_TOKEN = "test-token-0123456789abcdef"
 

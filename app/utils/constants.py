@@ -84,6 +84,8 @@ def get_all_recordings_dirs():
             dirs.add(p)
 
     return list(dirs)
+
+
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
