@@ -152,7 +152,9 @@ the macOS Trash.
 - Update checks go to the update server (`plaud-v2-updates`, a Cloudflare Worker). It sees your
   IP address and app version.
 - First-launch and on-demand downloads come from GitHub (Python), PyPI (packages), evermeet.cx
-  (FFmpeg) and Hugging Face / OpenAI (models).
+  (FFmpeg) and Hugging Face / OpenAI (models). The first time local speaker labelling runs, the
+  `diarize` library downloads its 25 MB WeSpeaker voice model from WeSpeaker's own server (hosted
+  in mainland China, on Tencent Cloud). Only the model is downloaded; no audio is sent.
 
 **Crash reports** are on by default and can be turned off in **Settings › General › System ›
 Send anonymous crash reports**. Before a report is sent, the app removes your user name and home
