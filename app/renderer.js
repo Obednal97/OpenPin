@@ -351,14 +351,8 @@ $('#select-toggle').addEventListener('click', () => {
   app.selectMode ? exitSelectMode() : enterSelectMode();
 });
 
-$('#select-all-btn').addEventListener('click', () => {
-  if (app.selectedIds.size === app.recordings.length) {
-    app.selectedIds.clear();
-  } else {
-    app.recordings.forEach((r) => app.selectedIds.add(r.session_id));
-  }
-  renderRecordingsList();
-});
+// Select-all acts only on the recordings visible under the current search/tag filter
+$('#select-all-btn').addEventListener('click', toggleSelectAllVisible);
 
 $('#delete-selected-btn').addEventListener('click', deleteSelected);
 $('#move-selected-btn').addEventListener('click', moveSelected);
