@@ -189,6 +189,14 @@ def list_recordings():
                 }
             )
 
+    # Recordings with a re-download backup (see the backup loop below). Deleted
+    # ids are left out: their backup belongs in the Trash, not the list.
+    deleted_ids = set(config.get("deleted_ids", []))
+    try:
+        pending_backups = {sid for sid in redownload_backup.list_redownload_backups() if sid not in deleted_ids}
+    except Exception:
+        pending_backups = set()
+
     # Include partial downloads (interrupted transfers) — shown with warning in UI
     for rec_dir in all_dirs:
         partial_files = list(rec_dir.glob("*.ogg.partial")) + list(rec_dir.glob("*_partial.bin"))
@@ -205,27 +213,31 @@ def list_recordings():
             rec_date = extract_recording_date(stem)
             if rec_date is None:
                 rec_date = datetime.fromtimestamp(f.stat().st_mtime)
-            recordings.append(
-                {
-                    "session_id": stem,
-                    "ogg_path": None,
-                    "duration": 0,
-                    "size": size,
-                    "date": rec_date.isoformat(),
-                    "has_transcript": False,
-                    "title": custom_names.get(stem, ""),
-                    "tags": [],
-                    "cloud_synced": False,
-                    "cloud_id": "",
-                    "partial": True,
-                }
-            )
+            entry = {
+                "session_id": stem,
+                "ogg_path": None,
+                "duration": 0,
+                "size": size,
+                "date": rec_date.isoformat(),
+                "has_transcript": False,
+                "title": custom_names.get(stem, ""),
+                "tags": [],
+                "cloud_synced": False,
+                "cloud_id": "",
+                "partial": True,
+            }
+            # A re-download that was interrupted: the previous copy is still in
+            # .redownload_backup/, so the UI must offer "Restore previous copy"
+            # (the backup loop below skips this sid as it is already listed).
+            if stem in pending_backups:
+                entry["redownload_pending"] = True
+            recordings.append(entry)
 
     # Recordings whose local copy was moved aside by /recordings/redownload and
     # not yet re-downloaded. Shown so they never silently vanish; the UI can
     # offer POST /recordings/restore-redownload.
     try:
-        for sid in redownload_backup.list_redownload_backups():
+        for sid in sorted(pending_backups):
             if sid in complete_ids:
                 continue
             complete_ids.add(sid)
@@ -524,6 +536,10 @@ def crop_recording():
         return jsonify({"error": "Crop timed out"}), 500
 
 
+# Files an interrupted BLE / Wi-Fi transfer leaves next to the recording.
+_PARTIAL_SUFFIXES = ("_partial.bin", ".ogg.partial")
+
+
 def _trash_files(paths):
     """Move each existing path to the Trash.
 
@@ -586,8 +602,13 @@ def delete_recordings():
             for suffix in ("_partial.bin", ".ogg.partial", "_encrypted.bin")
         ]
         paths += [TRANSCRIPTS_DIR / f"{sid}.{ext}" for ext in ("json", "txt")]
+        # A copy set aside by "Re-download" belongs to this recording too: trash
+        # it as well, or the card would come back as "Waiting for re-download".
+        paths += redownload_backup.backup_files(sid)
         with get_transcript_lock(sid):
             t, loc, errs = _trash_files(paths)
+            if not errs:
+                redownload_backup.remove_backup_dir(sid)
         deleted += t
         locations |= loc
         errors += [{"session_id": sid, **e} for e in errs]
@@ -691,6 +712,17 @@ def restore_redownload():
 
     restored, errors = {}, []
     for sid in session_ids:
+        # An interrupted re-download leaves {sid}_partial.bin / {sid}.ogg.partial
+        # behind. Once the backup .ogg is back, /recordings would delete that
+        # partial outright, so move it to the Trash first (recoverable).
+        if redownload_backup.backup_ogg_path(sid) is not None:
+            partials = [
+                rec_dir / f"{sid}{suffix}" for rec_dir in get_all_recordings_dirs() for suffix in _PARTIAL_SUFFIXES
+            ]
+            _t, _loc, errs = _trash_files(partials)
+            if errs:
+                errors += [{"session_id": sid, **e} for e in errs]
+                continue
         try:
             paths = redownload_backup.restore_redownload_backup(sid)
         except OSError as e:

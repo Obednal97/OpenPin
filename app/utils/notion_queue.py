@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -207,9 +208,25 @@ def _is_permanent_error(msg: str) -> bool:
     return any(marker in lower for marker in _PERMANENT_ERROR_MARKERS)
 
 
-def _is_auth_error(msg: str) -> bool:
-    lower = (msg or "").lower()
-    return "401" in lower or "unauthorized" in lower or "session expired" in lower
+# "401" as a standalone status code, not a digit run inside a UUID, page id,
+# timestamp or date that an MCP error message happens to quote (hyphens count
+# as part of the token, so "…-401-…" in an id doesn't match either).
+_STATUS_401_RE = re.compile(r"(?<![\w-])401(?![\w-])")
+_AUTH_ERROR_MARKERS = ("unauthorized", "invalid_token", "session expired")
+
+
+def _is_auth_error(err) -> bool:
+    """True if ``err`` (an exception or message) means the Notion token is no good.
+
+    Used to pause the whole queue, so it must not fire on unrelated errors.
+    """
+    response = getattr(err, "response", None)
+    if getattr(response, "status_code", None) == 401:
+        return True
+    lower = str(err or "").lower()
+    if any(marker in lower for marker in _AUTH_ERROR_MARKERS):
+        return True
+    return bool(_STATUS_401_RE.search(lower))
 
 
 def _process_one(entry: dict) -> None:
@@ -229,7 +246,7 @@ def _process_one(entry: dict) -> None:
         result = push_to_notion(sid)
     except Exception as e:
         msg = str(e)
-        if _is_auth_error(msg):
+        if _is_auth_error(e):
             _state.pause(f"Notion auth expired: {msg}")
             _state.record_failure(entry, msg, permanent=False)
             return

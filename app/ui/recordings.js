@@ -138,7 +138,7 @@ function renderRecordingsList() {
         ${
           rec.partial
             ? `
-          <div class="recording-partial-icon" title="Incomplete transfer — sync again to complete">
+          <div class="recording-partial-icon" title="${rec.redownload_pending ? 'Re-download interrupted — sync again, or right-click to restore the previous copy' : 'Incomplete transfer — sync again to complete'}">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 10.5a.75.75 0 110-1.5.75.75 0 010 1.5zM8.75 4v4.5h-1.5V4h1.5z"/>
             </svg>
@@ -162,7 +162,7 @@ function renderRecordingsList() {
         <div class="recording-info">
           ${rec.title ? `<div class="recording-title">${rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(rec.title)}</div>` : ''}
           <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(date)}</div>
-          <div class="recording-duration">${rec.partial ? 'Sync again to complete transfer' : dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
+          <div class="recording-duration">${rec.partial ? (rec.redownload_pending ? 'Sync again to finish, or right-click to restore the previous copy' : 'Sync again to complete transfer') : dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
           ${preview ? `<div class="recording-preview">${escapeHtml(preview)}</div>` : ''}
         </div>
         <div class="recording-right">
@@ -683,6 +683,8 @@ function _showContextMenu(x, y, sessionId) {
     showMoveDialog([sessionId], () => { loadRecordings(); });
   }});
   const ctxRec = app.recordings.find((r) => r.session_id === sessionId);
+  // Any card whose old copy is still set aside — including an interrupted
+  // re-download that now shows as "Incomplete" — offers the restore.
   if (ctxRec && ctxRec.redownload_pending) {
     items.push({ label: 'Restore previous copy', icon: 'refresh', action: () => {
       restoreRedownload(sessionId);

@@ -93,6 +93,16 @@ GOOD_IDS = [
     "fake_id_999",
     "a",
     "x" * 128,
+    # Ids older builds produced from free-text cloud names (only / and :
+    # were replaced) must stay deletable / taggable / renamable.
+    "cloud_2026-03-27_1234_Plan.",
+    "cloud_2026-03-27_1234_Wait...",
+    "cloud_2026-03-27_1234_a\\b",
+    "cloud_2026-03-27_1234_Q&A_(draft)",
+    "cloud_2026-03-27_1234_tab\there",
+    "a\\b",
+    "a\nb",
+    "a..b",
 ]
 
 BAD_IDS = [
@@ -103,10 +113,10 @@ BAD_IDS = [
     "../../etc/passwd",
     "/etc/passwd",
     "a/b",
-    "a\\b",
+    "a/../b",
     ".hidden",
+    "..\\x",
     "a\x00b",
-    "a\nb",
     "a:b",
     "x" * 129,
     None,
@@ -669,3 +679,201 @@ def test_delete_trashes_partial_and_encrypted_leftovers(env):
     assert r.status_code == 200
     assert {p.name for p in env.system_trash} == {f"{sid}_partial.bin", f"{sid}_encrypted.bin"}
     assert not (env.rec / f"{sid}_partial.bin").exists()
+
+
+# ---------------------------------------------------------------------------
+# Interrupted re-download: the previous copy must stay reachable
+# ---------------------------------------------------------------------------
+
+
+def _start_redownload(env, sid, content=b"OggS-original"):
+    (env.rec / f"{sid}.ogg").write_bytes(content)
+    r = _post(env.client, "/recordings/redownload", {"session_ids": [sid]})
+    assert r.get_json()["cleared"] == [sid]
+
+
+def test_interrupted_redownload_partial_card_offers_restore(env):
+    sid = "1715000200"
+    _start_redownload(env, sid)
+    # The next sync is interrupted and leaves a partial transfer behind
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+
+    rows = [r for r in env.client.get("/recordings").get_json() if r["session_id"] == sid]
+    assert len(rows) == 1
+    assert rows[0]["partial"] is True
+    assert rows[0]["redownload_pending"] is True
+
+
+def test_plain_partial_is_not_redownload_pending(env):
+    sid = "1715000201"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+    rows = [r for r in env.client.get("/recordings").get_json() if r["session_id"] == sid]
+    assert rows[0]["partial"] is True
+    assert "redownload_pending" not in rows[0]
+
+
+@pytest.mark.parametrize("suffix", ["_partial.bin", ".ogg.partial"])
+def test_restore_with_partial_present_trashes_partial(env, suffix):
+    sid = "1715000202"
+    _start_redownload(env, sid)
+    (env.rec / f"{sid}{suffix}").write_bytes(b"half")
+
+    r = _post(env.client, "/recordings/restore-redownload", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["count"] == 1, body
+    assert body["errors"] == []
+    assert (env.rec / f"{sid}.ogg").read_bytes() == b"OggS-original"
+    assert not (env.backup / sid).exists()
+    # The partial went to the Trash (recoverable), not unlinked
+    assert not (env.rec / f"{sid}{suffix}").exists()
+    trashed = {p.name: p for p in env.system_trash}
+    assert trashed[f"{sid}{suffix}"].read_bytes() == b"half"
+
+    rows = [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+    assert len(rows) == 1
+    assert not rows[0].get("partial")
+    assert not rows[0].get("redownload_pending")
+
+
+def test_restore_without_backup_ogg_leaves_partial_alone(env):
+    sid = "1715000203"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"half")
+    r = _post(env.client, "/recordings/restore-redownload", {"session_ids": [sid]})
+    assert r.get_json()["count"] == 0
+    assert (env.rec / f"{sid}_partial.bin").exists()
+    assert env.system_trash == []
+
+
+# ---------------------------------------------------------------------------
+# Deleting a "Waiting for re-download" recording also trashes its backup
+# ---------------------------------------------------------------------------
+
+
+def test_delete_waiting_for_redownload_trashes_backup(env):
+    from app.utils import redownload_backup
+
+    sid = "1715000300"
+    (env.rec / f"{sid}_encrypted.bin").write_bytes(b"enc")
+    _start_redownload(env, sid)
+    assert redownload_backup.list_redownload_backups() == [sid]
+
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["count"] == 1
+    assert body["trashed"] is True
+    trashed = {p.name: p for p in env.system_trash}
+    assert trashed[f"{sid}.ogg"].read_bytes() == b"OggS-original"
+    assert f"{sid}_encrypted.bin" in trashed
+    assert not (env.backup / sid).exists()
+    assert redownload_backup.list_redownload_backups() == []
+    assert sid in _cfg()["deleted_ids"]
+    # The card does not come back on reload
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+def test_delete_interrupted_redownload_trashes_partial_and_backup(env):
+    sid = "1715000301"
+    _start_redownload(env, sid)
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"half")
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    assert r.get_json()["count"] == 1
+    assert {p.name for p in env.system_trash} == {f"{sid}.ogg", f"{sid}_partial.bin"}
+    assert not (env.backup / sid).exists()
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+def test_delete_keeps_backup_dir_when_trash_fails(env):
+    sid = "1715000302"
+    _start_redownload(env, sid)
+    with (
+        patch("app.utils.trash._system_trash", return_value=False),
+        patch("app.utils.trash._app_trash", side_effect=OSError("disk full")),
+    ):
+        r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["trashed"] is False
+    assert body["count"] == 0
+    assert (env.backup / sid / f"{sid}.ogg").read_bytes() == b"OggS-original"
+
+
+def test_listing_hides_backups_of_deleted_ids(env):
+    from app.utils.config import save_config
+
+    sid = "1715000303"
+    _start_redownload(env, sid)
+    # e.g. an older build deleted the recording but left the backup behind
+    save_config({"deleted_ids": [sid]})
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+# ---------------------------------------------------------------------------
+# Cloud session ids built from free-text names
+# ---------------------------------------------------------------------------
+
+ODD_CLOUD_NAMES = ["Plan.", "Wait...", "a\\b", "Q&A (draft)"]
+
+
+@pytest.mark.parametrize("name", ODD_CLOUD_NAMES)
+def test_legacy_odd_cloud_ids_can_be_tagged_renamed_deleted(env, name):
+    from app.state.cloud import legacy_cloud_session_id
+
+    sid = legacy_cloud_session_id("2026-03-27_1234", name)
+    (env.rec / f"{sid}.ogg").write_bytes(b"audio")
+
+    listing = env.client.get("/recordings").get_json()
+    assert [x["session_id"] for x in listing] == [sid]
+
+    assert _post(env.client, "/recordings/tag", {"session_id": sid, "tags": ["X"]}).status_code == 200
+    assert _post(env.client, "/recordings/rename", {"session_id": sid, "title": "T"}).status_code == 200
+    cfg = _cfg()
+    assert cfg["recording_tags"][sid] == ["X"]
+    assert cfg["recording_names"][sid] == "T"
+
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    assert r.status_code == 200
+    assert r.get_json()["count"] == 1
+    assert [p.name for p in env.system_trash] == [f"{sid}.ogg"]
+    # Nothing outside the recordings dir was touched
+    assert sorted(p.name for p in env.rec.iterdir()) == [f"{sid}.deleted"]
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("Plan.", "cloud_D_Plan"),
+        ("Wait...", "cloud_D_Wait"),
+        ("a\\b", "cloud_D_a-b"),
+        ("Q&A (draft)", "cloud_D_Q&A_(draft)"),
+        ("Team sync: 1/2", "cloud_D_Team_sync-_1-2"),
+        ("...hidden", "cloud_D_hidden"),
+        ("tab\there\nline\x00nul\x7f", "cloud_D_tab-here-line-nul-"),
+        ("  padded  ", "cloud_D_padded"),
+        ("...", "cloud_D_recording"),
+        ("x" * 39 + ". tail", "cloud_D_" + "x" * 39),
+    ],
+)
+def test_new_cloud_session_ids_are_sanitised(name, expected):
+    from app.state.cloud import cloud_session_id
+
+    sid = cloud_session_id("D", name)
+    assert sid == expected
+    assert validate_session_id(sid) == sid
+    assert ".." not in sid and not sid.endswith((".", " "))
+
+
+def test_cloud_id_keeps_legacy_name_for_known_recordings(tmp_path):
+    from app.state.cloud import _resolve_cloud_session_id
+
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    # Unknown recording: new, sanitised id
+    assert _resolve_cloud_session_id("D", "Plan.", rec, set(), {}) == "cloud_D_Plan"
+    # Already downloaded by an older build: keep its id (no duplicate download)
+    (rec / "cloud_D_Plan..ogg").write_bytes(b"x")
+    assert _resolve_cloud_session_id("D", "Plan.", rec, set(), {}) == "cloud_D_Plan."
+    # Deleted under its legacy id: stays deleted
+    assert _resolve_cloud_session_id("D", "Wait...", rec, {"cloud_D_Wait..."}, {}) == "cloud_D_Wait..."
+    # Known via cloud_file_ids (e.g. moved to another folder)
+    assert _resolve_cloud_session_id("D", "a\\b", rec, set(), {"cloud_D_a\\b": "fid"}) == "cloud_D_a\\b"
+    # Names that never differed are unaffected
+    assert _resolve_cloud_session_id("D", "Q&A (draft)", rec, set(), {}) == "cloud_D_Q&A_(draft)"
