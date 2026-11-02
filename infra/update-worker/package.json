@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/",
-    "deploy": "npx --yes wrangler@3 deploy",
-    "tail": "npx --yes wrangler@3 tail"
+    "deploy": "npx --yes wrangler@4 deploy",
+    "tail": "npx --yes wrangler@4 tail"
   }
 }

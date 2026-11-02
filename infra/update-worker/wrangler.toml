@@ -7,3 +7,13 @@ workers_dev = true
 
 [observability]
 enabled = true
+
+# Report rate limits + daily create/comment caps (see README "Limits").
+# SQLite-backed, so it runs on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "ReportLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReportLimiter"]
