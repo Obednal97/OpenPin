@@ -179,7 +179,8 @@ recordings folder; old folders stay listed.
 
 ## Device sync
 
-The protocol is documented in [reverse-engineering/](reverse-engineering/). In short:
+The protocol is documented in [reverse-engineering/PROTOCOL.md](reverse-engineering/PROTOCOL.md) and
+[reverse-engineering/COMMANDS.md](reverse-engineering/COMMANDS.md). In short:
 
 ### Bluetooth (`app/state/device.py`)
 
