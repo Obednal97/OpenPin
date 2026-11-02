@@ -24,6 +24,7 @@ from app.utils.ble_proto import (
     HANDSHAKE_REJECTED_ERROR,
     SN_SIG_REPLY_WAIT_S,
     SN_SIG_SEND_REPEATS,
+    FileListAssembler,
     bind_handshake,
 )
 from app.utils.config import load_config, update_config
@@ -949,109 +950,49 @@ async def depair_device():
 
 
 async def list_device_files():
-    """List files on the connected device.
+    """List files on the connected device (cmd 26).
 
-    The file list can span multiple BLE notification packets. Each packet has:
-    - Offset 0-2: cmd type + cmd_id (3 bytes)
-    - Offset 3-6: unknown (4 bytes, maybe timestamp)
-    - Offset 7-8: total file count (uint16)
-    - Offset 9-10: index offset of this packet (uint16) — how many files before this
-    - Offset 11+: file entries (10 bytes each: sid, size, byte, byte)
-
-    We collect multiple packets until we have all `total` files.
+    The reply can span several notifications. Each one has the total file
+    count (u16 at 7), the index of its first entry (u16 at 9), then entries
+    (10 bytes on the NotePin S: sid u32, size u32, two unknown bytes).
+    ble_proto.FileListAssembler checks the start index (as the SDK does),
+    skips retransmissions and duplicate session ids, holds out-of-order
+    notifications, and drops a notification whose entry bytes don't fit the
+    entry width instead of misreading it. A list that stays short only means
+    the missing files wait for the next sync.
     """
-    import sys
+    lst = FileListAssembler(_device_state.get("port_version"))
 
-    files = []
-    expected_total = None
-
-    # Clear previous multi-packet buffer
+    # The notify handler appends every cmd-26 notification to file_list_packets,
+    # including the one send_cmd returns as its reply, so only that list is read
+    # (reading `r` as well would count the first packet twice).
     _device_state["file_list_packets"] = []
-
-    # Send the request
     r = await send_cmd(bytes([1, 26, 0]), timeout=10)
     if r:
-        print(f"[BLE] list_files first response: {len(r)} bytes: {r.hex()[:200]}", file=sys.stderr, flush=True)
+        logging.debug(f"[BLE] list_files first response: {len(r)} bytes: {r.hex()[:200]}")
 
-    def _parse_packet_records(pkt):
-        """Extract file records from a single BLE notification packet."""
-        records = []
-        if len(pkt) < 11:
-            return records
-        total = struct.unpack_from("<H", pkt, 7)[0]
-        pkt_start = struct.unpack_from("<H", pkt, 9)[0]
-        print(f"[BLE] packet: total={total} start_idx={pkt_start} bytes={len(pkt)}", file=sys.stderr, flush=True)
-        offset = 11
-        while offset + 10 <= len(pkt):
-            sid = struct.unpack_from("<I", pkt, offset)[0]
-            fsize = struct.unpack_from("<I", pkt, offset + 4)[0]
-            if 0 < fsize < 500_000_000 and sid > 0:
-                duration_est = (fsize - 512) / 80 * 0.02 if fsize > 512 else 0
-                records.append(
-                    {
-                        "session_id": sid,
-                        "size": fsize,
-                        "duration_est": round(duration_est, 1),
-                    }
-                )
-            offset += 10
-        return records
+    consumed = 0
 
-    def _total_from_packet(pkt):
-        """Read the expected total file count from a packet header."""
-        if len(pkt) < 9:
-            return None
-        return struct.unpack_from("<H", pkt, 7)[0]
+    def _consume():
+        nonlocal consumed
+        packets = list(_device_state.get("file_list_packets") or [])
+        for pkt in packets[consumed:]:
+            lst.add(pkt)
+        consumed = len(packets)
 
-    # The BLE notification handler fires during the `send_cmd` await and appends
-    # the first response packet to `file_list_packets` — the same object that
-    # `send_cmd` returns as `r`.  Processing `r` directly AND then iterating
-    # `file_list_packets` would double-process that first packet, temporarily
-    # inflating `len(files)` and risking premature termination of the poll loop.
-    #
-    # Fix (F-py-019): take a snapshot of `file_list_packets` after send_cmd
-    # returns; process every packet from the snapshot (which includes r exactly
-    # once).  Do NOT process `r` separately.
-    initial_packets = list(_device_state.get("file_list_packets", []))
-    prev_consumed = len(initial_packets)
-    for pkt in initial_packets:
-        if expected_total is None:
-            expected_total = _total_from_packet(pkt)
-        files.extend(_parse_packet_records(pkt))
-
-    # Wait for additional packets if we expected more files
-    if expected_total is not None and len(files) < expected_total:
-        print(f"[BLE] Waiting for more packets ({len(files)}/{expected_total})", file=sys.stderr, flush=True)
-        # Wait up to 3 seconds for more packets to arrive
-        for _ in range(30):
+    _consume()
+    if r is not None and not lst.complete:
+        logging.info(f"[BLE] file list: waiting for more packets ({lst.count}/{lst.total})")
+        for _ in range(30):  # up to 3 s
             await asyncio.sleep(0.1)
-            new_packets = list(_device_state.get("file_list_packets", []))
-            if len(new_packets) > prev_consumed:
-                # Process only the newly arrived packets (slice from prev_consumed onward)
-                for pkt in new_packets[prev_consumed:]:
-                    if expected_total is None:
-                        expected_total = _total_from_packet(pkt)
-                    files.extend(_parse_packet_records(pkt))
-                prev_consumed = len(new_packets)
-            if expected_total is not None and len(files) >= expected_total:
+            _consume()
+            if lst.complete:
                 break
-
-    # Dedup by session_id — BLE retransmits can cause the same record to appear
-    # in multiple packets. Preserve insertion order; first occurrence wins.
-    seen_sids: set = set()
-    deduped: list = []
-    for rec in files:
-        if rec["session_id"] not in seen_sids:
-            seen_sids.add(rec["session_id"])
-            deduped.append(rec)
-    files = deduped
-
-    print(
-        f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})",
-        file=sys.stderr,
-        flush=True,
-    )
-    return files
+    if lst.total is not None and not lst.complete:
+        problems = f" ({'; '.join(lst.problems)})" if lst.problems else ""
+        logging.warning(f"[BLE] file list incomplete: {lst.count} of {lst.total} entries{problems}")
+    logging.info(f"[BLE] list_device_files: {len(lst.records)} files (device total {lst.total})")
+    return lst.records
 
 
 async def get_device_info():

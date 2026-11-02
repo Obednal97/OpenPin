@@ -207,3 +207,107 @@ def describe_status_reply(reply):
     cid = cmd_id_of(reply)
     st = reply[3] if len(reply) >= 4 else None
     return f"cmd {cid} status {st} ({bytes(reply).hex()})"
+
+
+# -- cmd 26: file list ---------------------------------------------------------------
+
+FILE_LIST_HEADER = 11  # [1,26,0] + 4 unknown + total u16 + start index u16
+FILE_LIST_MAX_SIZE = 500_000_000
+
+
+def file_list_entry_width(port_version):
+    """Entry width the SDK would use for this mode (COMMANDS.md cmd 26).
+
+    The SDK picks it from an integer it's given, probably the port version
+    (unverified): 1 -> 8 bytes, 2-6 -> 9, 7 and up -> 10. 10 is confirmed for
+    the NotePin S.
+    """
+    if port_version == 1:
+        return 8
+    if port_version is not None and 2 <= port_version <= 6:
+        return 9
+    return 10
+
+
+class FileListAssembler:
+    """Collects the cmd 26 reply, which can span several notifications.
+
+    Each notification carries the total file count (u16 at 7) and the index of
+    its first entry (u16 at 9). Like the SDK, a notification is only used when
+    its start index continues the entries already collected; a retransmitted
+    one is skipped, and one that leaves a gap is held until the gap is filled.
+
+    Entry width: 10 bytes (confirmed for the NotePin S). If a notification's
+    entry area isn't a multiple of 10 but is a multiple of the width the port
+    version suggests, that width is used. Otherwise the notification is
+    dropped and logged: misreading entries would produce bogus session ids,
+    while a missing entry only means that file waits for the next sync.
+    """
+
+    def __init__(self, port_version=None):
+        self.widths = [10]
+        alt = file_list_entry_width(port_version)
+        if alt not in self.widths:
+            self.widths.append(alt)
+        self.width = None  # fixed by the first notification that has entries
+        self.total = None
+        self.count = 0  # entries consumed in order, including skipped ones
+        self.records = []
+        self.problems = []
+        self._pending = {}  # start index -> entry bytes, waiting for a gap to fill
+        self._seen = set()
+
+    @property
+    def complete(self):
+        return self.total is not None and self.count >= self.total
+
+    def _problem(self, msg, pkt):
+        self.problems.append(msg)
+        logging.warning(f"[BLE] file list: {msg} — packet ignored ({bytes(pkt[:64]).hex()})")
+
+    def add(self, pkt):
+        """Feed one decrypted cmd 26 notification. Returns True if it was used."""
+        if len(pkt) < FILE_LIST_HEADER:
+            self._problem(f"short packet ({len(pkt)} bytes)", pkt)
+            return False
+        total = struct.unpack_from("<H", pkt, 7)[0]
+        start = struct.unpack_from("<H", pkt, 9)[0]
+        body = bytes(pkt[FILE_LIST_HEADER:])
+        if self.total is None:
+            self.total = total
+        elif total != self.total:
+            self._problem(f"total changed from {self.total} to {total}", pkt)
+            return False
+        if body:
+            width = self.width or next((w for w in self.widths if len(body) % w == 0), None)
+            if width is None or len(body) % width:
+                self._problem(f"{len(body)} entry bytes is not a multiple of the entry width", pkt)
+                return False
+            if self.width is None:
+                if width != 10:
+                    logging.warning(f"[BLE] file list: using {width}-byte entries (not the usual 10)")
+                self.width = width
+        if start > self.count:
+            logging.info(f"[BLE] file list: entries from index {start} arrived before index {self.count}; held")
+            self._pending[start] = body
+            return True
+        self._take(start, body)
+        while self.count in self._pending:
+            self._take(self.count, self._pending.pop(self.count))
+        return True
+
+    def _take(self, start, body):
+        width = self.width or 10
+        n = len(body) // width
+        skip = self.count - start  # entries already collected (retransmission)
+        if skip >= n and n:
+            logging.debug(f"[BLE] file list: duplicate packet from index {start} skipped")
+        for i in range(max(skip, 0), n):
+            entry = body[i * width : (i + 1) * width]
+            sid, fsize = struct.unpack_from("<II", entry, 0)
+            self.count += 1
+            if not (0 < fsize < FILE_LIST_MAX_SIZE and sid > 0) or sid in self._seen:
+                continue
+            self._seen.add(sid)
+            duration_est = (fsize - 512) / 80 * 0.02 if fsize > 512 else 0
+            self.records.append({"session_id": sid, "size": fsize, "duration_est": round(duration_est, 1)})

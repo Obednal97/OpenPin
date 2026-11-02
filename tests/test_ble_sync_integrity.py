@@ -54,12 +54,13 @@ class FakeDevice:
       late data packet, end marker or tail from another session).
     """
 
-    def __init__(self, files, behaviours=None, delete_mode="ok", start_status=None, inject=None):
+    def __init__(self, files, behaviours=None, delete_mode="ok", start_status=None, inject=None, scripted=None):
         self.files = files  # sid -> bytes
         self.behaviours = behaviours or {}
         self.start_status = start_status or {}
         self.delete_mode = delete_mode
         self.inject = inject or {}
+        self.scripted = scripted or {}  # cmd id -> plaintext notifications sent in reply
         self.key, self.nonce, self.aad = os.urandom(32), os.urandom(12), os.urandom(12)
         self.cipher = ChaCha20Poly1305(self.key)
         self.sent = []  # cmd ids written by the app
@@ -111,7 +112,10 @@ class FakeDevice:
         cid = struct.unpack_from("<H", pt, 1)[0]
         self.sent.append(cid)
         loop = asyncio.get_running_loop()
-        if cid == 28:
+        if cid in self.scripted:
+            for pkt in self.scripted[cid]:
+                loop.call_soon(self.notify, pkt)
+        elif cid == 28:
             sid = struct.unpack_from("<I", pt, 3)[0]
             self._tasks.append(loop.create_task(self.stream(sid, self.behaviours.get(sid, "complete"))))
         elif cid == 30:
