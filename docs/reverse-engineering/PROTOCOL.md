@@ -139,8 +139,8 @@ Before encryption starts, packets on `2BB1`/`2BB0` use this framing:
 6. Decrypt the check ciphertext with that key, nonce and AAD. It must be `PLAUD.AI`.
 7. Swap the notify handler for the encrypted one (section 6).
 8. Send cmd 1 twice with the `BIND_TOKEN` (flag 0, then flag 1). See
-   [COMMANDS.md cmd 1](COMMANDS.md#cmd-1--handshake). The static SDK `APP_KEY` in
-   `src/constants.py` is **not** sent; sending it makes the device ignore later commands.
+   [COMMANDS.md cmd 1](COMMANDS.md#cmd-1--handshake). The static SDK `APP_KEY` (in the
+   deleted `src/constants.py`) is **not** sent; sending it makes the device ignore later commands.
 9. `device.py` then sends cmd 4 (time), cmd 3 (state), cmd 6 (storage) and cmd 9 (battery). The
    worker sends only cmd 4.
 

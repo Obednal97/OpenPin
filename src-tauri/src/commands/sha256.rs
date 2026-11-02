@@ -2,8 +2,10 @@
 //!
 //! The `sha2` crate is only a transitive dependency here, so it can't be
 //! imported without editing Cargo.toml. This is small, has no unsafe code and
-//! is checked against the NIST test vectors below. Used to verify downloaded
-//! update DMGs and to hash identifiers in bug reports.
+//! is checked against the NIST test vectors below. The only SHA-256 in the
+//! shell: verifies downloaded update DMGs and the managed Python tarball,
+//! stamps the venv with the lockfile's hash (`python.rs`) and hashes
+//! identifiers in bug reports.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -138,6 +140,13 @@ mod tests {
         assert_eq!(
             hex_digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // Exactly one block of input: the padding needs a whole extra block.
+        assert_eq!(hex_digest(&[b'a'; 64]), "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+        // One-shot, as python.rs uses it.
+        assert_eq!(
+            hex_digest(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
     }
 
