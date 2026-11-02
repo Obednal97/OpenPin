@@ -23,9 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "slow: network/minutes-long test, skipped unless PLAUD_SLOW_TESTS=1"
-    )
+    # (The `slow` marker is registered in pyproject.toml.)
     # Something imported app.utils.constants before this conftest ran, so its
     # DATA_DIR may point at real data. Stop rather than risk it.
     constants = sys.modules.get("app.utils.constants")
