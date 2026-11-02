@@ -8,20 +8,48 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
-from app.utils.config import load_config, save_config
-from app.utils.constants import RECORDINGS_DIR, TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
+from app.utils import redownload_backup
+from app.utils.config import _config_lock, load_config, save_config, update_config
+from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
+from app.utils.paths import (
+    InvalidSessionIdError,
+    PathOutsideError,
+    is_auxiliary_stem,
+    resolve_inside,
+    validate_session_id,
+    validate_session_ids,
+)
 from app.utils.recording_utils import extract_recording_date
 from app.utils.system import ensure_ffmpeg
 from app.utils.transcript_locks import get_transcript_lock
+from app.utils.trash import APP_TRASH_DIR, move_to_trash
 
 bp = Blueprint("recordings", __name__)
 
 
+def _invalid(e):
+    """400 response for a rejected session id / path."""
+    return jsonify({"error": str(e) or "Invalid session_id"}), 400
+
+
 def _find_recording(session_id, ext="ogg"):
-    """Find a recording file across all known directories."""
-    for d in get_all_recordings_dirs():
+    """Find a recording file across all known directories.
+
+    Returns None for an invalid session id or a file that resolves (via
+    symlink) outside the recordings directories.
+    """
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError:
+        return None
+    dirs = get_all_recordings_dirs()
+    for d in dirs:
         p = d / f"{session_id}.{ext}"
         if p.exists():
+            try:
+                resolve_inside(dirs, p, must_exist=True)
+            except (PathOutsideError, FileNotFoundError):
+                continue
             return p
     return None
 
@@ -35,6 +63,11 @@ def recover_metadata_from_transcripts():
     if not TRANSCRIPTS_DIR.exists():
         return
 
+    with _config_lock:
+        _recover_metadata_locked()
+
+
+def _recover_metadata_locked():
     config = load_config()
     rec_tags = config.get("recording_tags", {})
     rec_names = config.get("recording_names", {})
@@ -54,6 +87,7 @@ def recover_metadata_from_transcripts():
                 recovered += 1
                 # Discover custom tags not in defaults
                 from app.utils.constants import DEFAULT_TAGS
+
                 for t in tags:
                     if t not in DEFAULT_TAGS:
                         custom_tags.add(t)
@@ -121,6 +155,8 @@ def list_recordings():
     for rec_dir in all_dirs:
         rec_dir.mkdir(exist_ok=True)
         for f in sorted(rec_dir.glob("*.ogg"), reverse=True):
+            if is_auxiliary_stem(f.stem):
+                continue  # crop backup / temp file, not a recording
             if f.stem in complete_ids:
                 continue  # Already seen from another directory
             complete_ids.add(f.stem)
@@ -184,9 +220,41 @@ def list_recordings():
                 }
             )
 
+    # Recordings whose local copy was moved aside by /recordings/redownload and
+    # not yet re-downloaded. Shown so they never silently vanish; the UI can
+    # offer POST /recordings/restore-redownload.
+    try:
+        for sid in redownload_backup.list_redownload_backups():
+            if sid in complete_ids:
+                continue
+            complete_ids.add(sid)
+            bak = redownload_backup.backup_ogg_path(sid)
+            size = bak.stat().st_size if bak else 0
+            rec_date = extract_recording_date(sid)
+            if rec_date is None:
+                rec_date = datetime.fromtimestamp(bak.stat().st_mtime) if bak else datetime.now()
+            recordings.append(
+                {
+                    "session_id": sid,
+                    "ogg_path": None,
+                    "duration": round(max(size - 2000, 0) / 80 * 0.02, 1),
+                    "size": size,
+                    "date": rec_date.isoformat(),
+                    "has_transcript": (TRANSCRIPTS_DIR / f"{sid}.json").exists(),
+                    "title": custom_names.get(sid, ""),
+                    "tags": rec_tags.get(sid, []),
+                    "cloud_synced": False,
+                    "cloud_id": "",
+                    "redownload_pending": True,
+                }
+            )
+    except Exception:
+        pass
+
     # Include cloud-only recordings (uploaded to Drive but no local file)
     try:
         from app.state.gdrive import get_cloud_only_recordings
+
         for cr in get_cloud_only_recordings():
             sid = cr["session_id"]
             if sid in complete_ids:
@@ -223,18 +291,21 @@ def tag_recording():
     tags = data.get("tags", [])
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
-    config = load_config()
-    rec_tags = config.get("recording_tags", {})
-    rec_tags[session_id] = tags
-    config["recording_tags"] = rec_tags
-    save_config(config)
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        return jsonify({"error": "tags must be a list of strings"}), 400
+
+    update_config(lambda c: c.setdefault("recording_tags", {}).__setitem__(session_id, tags))
 
     # Also persist tags in the transcript JSON for recovery after config resets
-    from app.utils.constants import TRANSCRIPTS_DIR
     transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
     if transcript_path.exists():
         try:
             import json as _json
+
             with get_transcript_lock(session_id):
                 t_data = _json.loads(transcript_path.read_text())
                 t_data["tags"] = tags
@@ -250,11 +321,13 @@ def tag_recording():
         from app.routes.notion import _get_notion_page_url
         from app.state import notion as _notion
         from app.utils import notion_queue
+
         if _notion.is_connected() and _get_notion_page_url(session_id):
             notion_queue.enqueue(session_id)
             notion_queued = True
     except Exception as e:
         import logging as _logging
+
         _logging.warning(f"Notion tag enqueue failed: {e}")
 
     return jsonify({"saved": True, "notion_queued": notion_queued})
@@ -268,20 +341,26 @@ def rename_recording():
     title = data.get("title", "").strip()
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
-    config = load_config()
-    names = config.get("recording_names", {})
-    if title:
-        names[session_id] = title
-    elif session_id in names:
-        del names[session_id]
-    config["recording_names"] = names
-    save_config(config)
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+
+    def _apply(cfg):
+        names = cfg.setdefault("recording_names", {})
+        if title:
+            names[session_id] = title
+        else:
+            names.pop(session_id, None)
+
+    update_config(_apply)
 
     # Also persist name in the transcript JSON for recovery after config resets
     transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
     if transcript_path.exists():
         try:
             import json as _json
+
             with get_transcript_lock(session_id):
                 t_data = _json.loads(transcript_path.read_text())
                 if title:
@@ -302,6 +381,10 @@ def export_recording():
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
     ogg_path = _find_recording(session_id)
     if not ogg_path:
@@ -357,6 +440,12 @@ def crop_recording():
 
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    if not _is_number(start) or not _is_number(end):
+        return jsonify({"error": "Invalid time range"}), 400
     if end <= start:
         return jsonify({"error": "Invalid time range"}), 400
 
@@ -380,11 +469,16 @@ def crop_recording():
     try:
         result = subprocess.run(
             [
-                ffmpeg or "ffmpeg", "-y",
-                "-i", str(ogg_path),
-                "-ss", str(start),
-                "-to", str(end),
-                "-c", "copy",
+                ffmpeg or "ffmpeg",
+                "-y",
+                "-i",
+                str(ogg_path),
+                "-ss",
+                str(start),
+                "-to",
+                str(end),
+                "-c",
+                "copy",
                 str(out_path),
             ],
             capture_output=True,
@@ -397,26 +491,31 @@ def crop_recording():
 
         if mode == "new":
             # Save a title for the new recording
-            config = load_config()
-            original_name = config.get("recording_names", {}).get(session_id, session_id)
-            config.setdefault("recording_names", {})[new_id] = f"{original_name} (cropped)"
-            save_config(config)
-            return jsonify({
-                "cropped": True,
-                "session_id": new_id,
-                "duration": round(end - start, 2),
-            })
+            def _name_crop(cfg):
+                names = cfg.setdefault("recording_names", {})
+                names[new_id] = f"{names.get(session_id, session_id)} (cropped)"
+
+            update_config(_name_crop)
+            return jsonify(
+                {
+                    "cropped": True,
+                    "session_id": new_id,
+                    "duration": round(end - start, 2),
+                }
+            )
         else:
             out_path.replace(ogg_path)
-            # Delete existing transcript — it no longer matches the audio
-            for ext in (".json", ".txt"):
-                t_path = TRANSCRIPTS_DIR / f"{session_id}{ext}"
-                t_path.unlink(missing_ok=True)
-            return jsonify({
-                "cropped": True,
-                "session_id": session_id,
-                "duration": round(end - start, 2),
-            })
+            # The transcript no longer matches the audio — move it to the
+            # Trash (not unlink) so a summary/notes can still be recovered.
+            with get_transcript_lock(session_id):
+                _trash_files([TRANSCRIPTS_DIR / f"{session_id}{ext}" for ext in (".json", ".txt")])
+            return jsonify(
+                {
+                    "cropped": True,
+                    "session_id": session_id,
+                    "duration": round(end - start, 2),
+                }
+            )
     except FileNotFoundError:
         return jsonify({"error": "ffmpeg not found — install ffmpeg to crop audio"}), 500
     except subprocess.TimeoutExpired:
@@ -424,86 +523,170 @@ def crop_recording():
         return jsonify({"error": "Crop timed out"}), 500
 
 
+def _trash_files(paths):
+    """Move each existing path to the Trash.
+
+    Returns (trashed_paths, locations, errors). ``locations`` is the set of
+    "system"/"app" values from move_to_trash.
+    """
+    trashed, locations, errors = [], set(), []
+    for p in paths:
+        if not (p.exists() or p.is_symlink()):
+            continue
+        try:
+            locations.add(move_to_trash(p))
+            trashed.append(str(p))
+        except OSError as e:
+            errors.append({"path": str(p), "error": str(e)})
+    return trashed, locations, errors
+
+
+def _trash_location(locations):
+    if not locations:
+        return None
+    if locations == {"system"}:
+        return "system"
+    if locations == {"app"}:
+        return "app"
+    return "mixed"
+
+
 @bp.route("/recordings/delete", methods=["POST"])
 def delete_recordings():
-    """Delete one or more recordings and their transcripts."""
+    """Move one or more recordings and their transcripts to the Trash.
+
+    Response: {"deleted": [paths], "count": n, "trashed": bool,
+    "trash_location": "system"|"app"|"mixed"|null, "errors": [...]}.
+    ``trashed`` is true when every file found was moved to the macOS Trash
+    (or, as a fallback, DATA_DIR/.trash) — nothing is unlinked.
+    """
     data = request.get_json(silent=True) or {}
     session_ids = data.get("session_ids", [])
     if not session_ids:
         return jsonify({"error": "No session_ids provided"}), 400
+    try:
+        session_ids = validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
-
-    deleted = []
+    deleted, locations, errors = [], set(), []
+    gone = []  # session ids whose files are all out of the way
     for sid in session_ids:
-        dismissed.add(sid)
         # Write .deleted marker in active dir so config reset doesn't re-sync
-        active_dir = get_recordings_dir()
-        marker = active_dir / f"{sid}.deleted"
         try:
-            marker.write_text("")
+            (get_recordings_dir() / f"{sid}.deleted").write_text("")
         except Exception:
             pass
-        # Remove files from all known directories
-        for rec_dir in get_all_recordings_dirs():
-            for ext in ["ogg", "mp3", "raw"]:
-                p = rec_dir / f"{sid}.{ext}"
-                if p.exists():
-                    p.unlink()
-                    deleted.append(str(p))
-        for ext in ["json", "txt"]:
-            p = TRANSCRIPTS_DIR / f"{sid}.{ext}"
-            if p.exists():
-                p.unlink()
-                deleted.append(str(p))
-        for key in ("recording_names", "recording_tags"):
-            if sid in config.get(key, {}):
-                del config[key][sid]
+        paths = [rec_dir / f"{sid}.{ext}" for rec_dir in get_all_recordings_dirs() for ext in ("ogg", "mp3", "raw")]
+        paths += [TRANSCRIPTS_DIR / f"{sid}.{ext}" for ext in ("json", "txt")]
+        with get_transcript_lock(sid):
+            t, loc, errs = _trash_files(paths)
+        deleted += t
+        locations |= loc
+        errors += [{"session_id": sid, **e} for e in errs]
+        if not errs:
+            gone.append(sid)
 
-    config["deleted_ids"] = list(dismissed)
-    save_config(config)
-    return jsonify({"deleted": deleted, "count": len(session_ids)})
+    def _apply(cfg):
+        dismissed = set(cfg.get("deleted_ids", []))
+        for sid in gone:
+            dismissed.add(sid)
+            for key in ("recording_names", "recording_tags"):
+                cfg.get(key, {}).pop(sid, None)
+        cfg["deleted_ids"] = list(dismissed)
+
+    update_config(_apply)
+    return jsonify(
+        {
+            "deleted": deleted,
+            "count": len(gone),
+            "trashed": not errors,
+            "trash_location": _trash_location(locations),
+            "errors": errors,
+        }
+    )
 
 
 @bp.route("/recordings/redownload", methods=["POST"])
 def redownload_recording():
-    """Mark a recording for re-download by removing local files and clearing dismiss markers."""
+    """Mark a recording for re-download.
+
+    The local .ogg / _encrypted.bin / .ogg.partial are MOVED to
+    DATA_DIR/.redownload_backup/<sid>/ (not deleted), so the recording is not
+    lost if the device no longer has it. The next sync that writes a fresh
+    {sid}.ogg should call redownload_backup.finalize_redownload_backup(sid);
+    POST /recordings/restore-redownload puts the backup back.
+    """
     data = request.get_json(silent=True) or {}
     session_ids = data.get("session_ids", [])
     if not session_ids:
         return jsonify({"error": "No session_ids provided"}), 400
+    try:
+        session_ids = validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
-    config = load_config()
-    dismissed = set(config.get("deleted_ids", []))
-    cleared = []
-
+    cleared, backed_up, errors = [], {}, []
     for sid in session_ids:
-        # Remove the .ogg, cached M4A, and any .deleted marker
+        files = []
         for rec_dir in get_all_recordings_dirs():
-            for pattern in [f"{sid}.ogg", f"{sid}.ogg.partial", f"{sid}.deleted", f"{sid}_encrypted.bin"]:
-                p = rec_dir / pattern
-                if p.exists():
-                    p.unlink(missing_ok=True)
+            files += [rec_dir / f"{sid}.ogg", rec_dir / f"{sid}.ogg.partial", rec_dir / f"{sid}_encrypted.bin"]
+            # The .deleted marker is only a flag — removing it is safe.
+            (rec_dir / f"{sid}.deleted").unlink(missing_ok=True)
+        try:
+            backed_up[sid] = redownload_backup.backup_for_redownload(sid, files)
+        except OSError as e:
+            errors.append({"session_id": sid, "error": str(e)})
+            continue
 
-        # Clear M4A cache
-        import os
-        m4a_cache = os.path.join(
-            os.path.expanduser("~"),
-            "Library", "Application Support", "com.plaud.v2", "cache", "m4a",
-            f"{sid}.m4a",
-        )
-        if os.path.exists(m4a_cache):
-            os.unlink(m4a_cache)
-
-        # Remove from deleted_ids so sync will pick it up again
-        dismissed.discard(sid)
+        # Clear M4A cache (derived from the .ogg; regenerated on demand)
+        m4a_cache = Path.home() / "Library" / "Application Support" / "com.plaud.v2" / "cache" / "m4a" / f"{sid}.m4a"
+        m4a_cache.unlink(missing_ok=True)
         cleared.append(sid)
 
-    config["deleted_ids"] = list(dismissed)
-    save_config(config)
+    # Remove from deleted_ids so sync will pick it up again
+    def _apply(cfg):
+        cfg["deleted_ids"] = [s for s in cfg.get("deleted_ids", []) if s not in cleared]
 
-    return jsonify({"cleared": cleared, "count": len(cleared), "message": "Connect device and sync to re-download"})
+    update_config(_apply)
+
+    return jsonify(
+        {
+            "cleared": cleared,
+            "count": len(cleared),
+            "backed_up": backed_up,
+            "errors": errors,
+            "message": "Connect device and sync to re-download",
+        }
+    )
+
+
+@bp.route("/recordings/restore-redownload", methods=["POST"])
+def restore_redownload():
+    """Put back the local copy that /recordings/redownload moved aside.
+
+    Body: {"session_ids": [...]}. Response: {"restored": {sid: [paths]}, "count": n, "errors": [...]}.
+    A backup is never restored over an existing (freshly downloaded) file.
+    """
+    data = request.get_json(silent=True) or {}
+    session_ids = data.get("session_ids", [])
+    if not session_ids:
+        return jsonify({"error": "No session_ids provided"}), 400
+    try:
+        session_ids = validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+
+    restored, errors = {}, []
+    for sid in session_ids:
+        try:
+            paths = redownload_backup.restore_redownload_backup(sid)
+        except OSError as e:
+            errors.append({"session_id": sid, "error": str(e)})
+            continue
+        if paths:
+            restored[sid] = paths
+    return jsonify({"restored": restored, "count": len(restored), "errors": errors})
 
 
 @bp.route("/recordings/move", methods=["POST"])
@@ -511,28 +694,48 @@ def move_recordings():
     """Move recordings to a different directory."""
     data = request.get_json(silent=True) or {}
     session_ids = data.get("session_ids", [])
-    destination = data.get("destination", "").strip()
+    destination = data.get("destination", "")
+    destination = destination.strip() if isinstance(destination, str) else ""
 
     if not session_ids:
         return jsonify({"error": "No session_ids provided"}), 400
     if not destination:
         return jsonify({"error": "No destination provided"}), 400
+    try:
+        session_ids = validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
+    if "\x00" in destination:
+        return jsonify({"error": "Invalid destination"}), 400
     dest = Path(destination)
     if not dest.is_absolute():
         return jsonify({"error": "Destination must be an absolute path"}), 400
+    if ".." in dest.parts:
+        return jsonify({"error": "Destination must not contain '..'"}), 400
+    if dest.exists() and not dest.is_dir():
+        return jsonify({"error": "Destination is not a directory"}), 400
+    # Never move recordings into the app's own bookkeeping folders.
+    try:
+        resolved_dest = dest.resolve()
+        for internal in (TRANSCRIPTS_DIR, redownload_backup.REDOWNLOAD_BACKUP_DIR, APP_TRASH_DIR):
+            internal = internal.resolve()
+            if resolved_dest == internal or resolved_dest.is_relative_to(internal):
+                return jsonify({"error": "Destination is an internal app folder"}), 400
+    except (OSError, RuntimeError):
+        return jsonify({"error": "Invalid destination"}), 400
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return jsonify({"error": f"Cannot create destination: {e}"}), 400
 
     # Track destination in historical directories
-    config = load_config()
-    historical = config.get("historical_directories", [])
-    if destination not in historical:
-        historical.append(destination)
-        config["historical_directories"] = historical
-        save_config(config)
+    def _track(cfg):
+        historical = cfg.setdefault("historical_directories", [])
+        if destination not in historical:
+            historical.append(destination)
+
+    update_config(_track)
 
     moved = []
     errors = []
@@ -590,6 +793,7 @@ def list_transcripts():
                     "speakers": speakers,
                     "segments": data.get("segments", []),
                     "summary": data.get("summary", ""),
+                    "summary_stale": bool(data.get("summary_stale", False)),
                     "auto_title": data.get("auto_title", ""),
                     "path": str(f),
                 }
@@ -638,6 +842,10 @@ def update_transcript():
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
     json_path = TRANSCRIPTS_DIR / f"{session_id}.json"
     txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
@@ -660,26 +868,39 @@ def update_transcript():
 
         if "summary" in data:
             transcript["summary"] = data["summary"]
+            # A summary the user saved by hand is current by definition.
+            transcript.pop("summary_stale", None)
 
         json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
-    txt_path.write_text(transcript.get("text", ""))
+        txt_path.write_text(transcript.get("text", ""))
 
     return jsonify({"saved": True})
 
 
 @bp.route("/transcripts/delete", methods=["POST"])
 def delete_transcript():
-    """Delete just the transcript for a recording (keeps the audio)."""
+    """Move just the transcript for a recording to the Trash (keeps the audio).
+
+    Response: {"deleted": [paths], "trashed": bool, "trash_location": ..., "errors": [...]}.
+    """
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
 
-    deleted = []
-    for ext in ["json", "txt"]:
-        p = TRANSCRIPTS_DIR / f"{session_id}.{ext}"
-        if p.exists():
-            p.unlink()
-            deleted.append(str(p))
+    paths = [TRANSCRIPTS_DIR / f"{session_id}.{ext}" for ext in ("json", "txt")]
+    with get_transcript_lock(session_id):
+        deleted, locations, errors = _trash_files(paths)
 
-    return jsonify({"deleted": deleted})
+    return jsonify(
+        {
+            "deleted": deleted,
+            "trashed": not errors,
+            "trash_location": _trash_location(locations),
+            "errors": errors,
+        }
+    )
