@@ -50,6 +50,29 @@ def list_redownload_backups() -> list:
     return out
 
 
+def backup_files(sid) -> list:
+    """Paths of the backed-up files for ``sid`` (manifest excluded)."""
+    d = backup_dir_for(sid)
+    if not d.is_dir():
+        return []
+    return [p for p in sorted(d.iterdir()) if p.name != _MANIFEST]
+
+
+def remove_backup_dir(sid) -> bool:
+    """Remove the backup folder once its files have been moved elsewhere.
+
+    Refuses (returns False) while it still holds a recording file, so a
+    failed move can never turn into a deletion.
+    """
+    d = backup_dir_for(sid)
+    if not d.is_dir():
+        return False
+    if any(p.name != _MANIFEST for p in d.iterdir()):
+        return False
+    shutil.rmtree(d, ignore_errors=True)
+    return True
+
+
 def backup_ogg_path(sid):
     """Path of the backed-up .ogg, or None."""
     p = backup_dir_for(sid) / f"{validate_session_id(str(sid))}.ogg"

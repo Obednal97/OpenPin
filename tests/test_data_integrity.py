@@ -669,3 +669,128 @@ def test_delete_trashes_partial_and_encrypted_leftovers(env):
     assert r.status_code == 200
     assert {p.name for p in env.system_trash} == {f"{sid}_partial.bin", f"{sid}_encrypted.bin"}
     assert not (env.rec / f"{sid}_partial.bin").exists()
+
+
+# ---------------------------------------------------------------------------
+# Interrupted re-download: the previous copy must stay reachable
+# ---------------------------------------------------------------------------
+
+
+def _start_redownload(env, sid, content=b"OggS-original"):
+    (env.rec / f"{sid}.ogg").write_bytes(content)
+    r = _post(env.client, "/recordings/redownload", {"session_ids": [sid]})
+    assert r.get_json()["cleared"] == [sid]
+
+
+def test_interrupted_redownload_partial_card_offers_restore(env):
+    sid = "1715000200"
+    _start_redownload(env, sid)
+    # The next sync is interrupted and leaves a partial transfer behind
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+
+    rows = [r for r in env.client.get("/recordings").get_json() if r["session_id"] == sid]
+    assert len(rows) == 1
+    assert rows[0]["partial"] is True
+    assert rows[0]["redownload_pending"] is True
+
+
+def test_plain_partial_is_not_redownload_pending(env):
+    sid = "1715000201"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"\x00" * 64)
+    rows = [r for r in env.client.get("/recordings").get_json() if r["session_id"] == sid]
+    assert rows[0]["partial"] is True
+    assert "redownload_pending" not in rows[0]
+
+
+@pytest.mark.parametrize("suffix", ["_partial.bin", ".ogg.partial"])
+def test_restore_with_partial_present_trashes_partial(env, suffix):
+    sid = "1715000202"
+    _start_redownload(env, sid)
+    (env.rec / f"{sid}{suffix}").write_bytes(b"half")
+
+    r = _post(env.client, "/recordings/restore-redownload", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["count"] == 1, body
+    assert body["errors"] == []
+    assert (env.rec / f"{sid}.ogg").read_bytes() == b"OggS-original"
+    assert not (env.backup / sid).exists()
+    # The partial went to the Trash (recoverable), not unlinked
+    assert not (env.rec / f"{sid}{suffix}").exists()
+    trashed = {p.name: p for p in env.system_trash}
+    assert trashed[f"{sid}{suffix}"].read_bytes() == b"half"
+
+    rows = [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+    assert len(rows) == 1
+    assert not rows[0].get("partial")
+    assert not rows[0].get("redownload_pending")
+
+
+def test_restore_without_backup_ogg_leaves_partial_alone(env):
+    sid = "1715000203"
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"half")
+    r = _post(env.client, "/recordings/restore-redownload", {"session_ids": [sid]})
+    assert r.get_json()["count"] == 0
+    assert (env.rec / f"{sid}_partial.bin").exists()
+    assert env.system_trash == []
+
+
+# ---------------------------------------------------------------------------
+# Deleting a "Waiting for re-download" recording also trashes its backup
+# ---------------------------------------------------------------------------
+
+
+def test_delete_waiting_for_redownload_trashes_backup(env):
+    from app.utils import redownload_backup
+
+    sid = "1715000300"
+    (env.rec / f"{sid}_encrypted.bin").write_bytes(b"enc")
+    _start_redownload(env, sid)
+    assert redownload_backup.list_redownload_backups() == [sid]
+
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["count"] == 1
+    assert body["trashed"] is True
+    trashed = {p.name: p for p in env.system_trash}
+    assert trashed[f"{sid}.ogg"].read_bytes() == b"OggS-original"
+    assert f"{sid}_encrypted.bin" in trashed
+    assert not (env.backup / sid).exists()
+    assert redownload_backup.list_redownload_backups() == []
+    assert sid in _cfg()["deleted_ids"]
+    # The card does not come back on reload
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+def test_delete_interrupted_redownload_trashes_partial_and_backup(env):
+    sid = "1715000301"
+    _start_redownload(env, sid)
+    (env.rec / f"{sid}_partial.bin").write_bytes(b"half")
+    r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    assert r.get_json()["count"] == 1
+    assert {p.name for p in env.system_trash} == {f"{sid}.ogg", f"{sid}_partial.bin"}
+    assert not (env.backup / sid).exists()
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
+
+
+def test_delete_keeps_backup_dir_when_trash_fails(env):
+    sid = "1715000302"
+    _start_redownload(env, sid)
+    with (
+        patch("app.utils.trash._system_trash", return_value=False),
+        patch("app.utils.trash._app_trash", side_effect=OSError("disk full")),
+    ):
+        r = _post(env.client, "/recordings/delete", {"session_ids": [sid]})
+    body = r.get_json()
+    assert body["trashed"] is False
+    assert body["count"] == 0
+    assert (env.backup / sid / f"{sid}.ogg").read_bytes() == b"OggS-original"
+
+
+def test_listing_hides_backups_of_deleted_ids(env):
+    from app.utils.config import save_config
+
+    sid = "1715000303"
+    _start_redownload(env, sid)
+    # e.g. an older build deleted the recording but left the backup behind
+    save_config({"deleted_ids": [sid]})
+    assert not [x for x in env.client.get("/recordings").get_json() if x["session_id"] == sid]
