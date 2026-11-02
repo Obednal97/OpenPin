@@ -438,3 +438,29 @@ class TestDeviceCredentials:
 
     def test_network_error_is_returned_not_raised(self, signed_in):
         assert "no route" in cloud.bind_device("SN_ABC")["error"]
+
+
+def test_exchange_uses_saved_login_id_after_restart(monkeypatch):
+    """The plaud:// link can arrive after a restart wiped the in-memory id."""
+    import app.state.cloud as cloud_mod
+
+    saved = {}
+    monkeypatch.setattr(cloud_mod, "update_config", lambda fn: fn(saved))
+    monkeypatch.setattr(cloud_mod, "load_config", lambda: dict(saved))
+    _url, uuid = cloud_mod.get_login_url("eu")
+    monkeypatch.setitem(cloud_mod._cloud_state, "desktop_uuid", None)  # "restart"
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"status": -1, "msg": "x", "access_token": ""}
+
+    def fake_post(url, json=None, **kw):
+        sent.update(json)
+        return R()
+
+    monkeypatch.setattr(cloud_mod.http_requests, "post", fake_post)
+    cloud_mod.exchange_token("abc::YXdzOmV1LWNlbnRyYWwtMQ")
+    assert sent["desktop_uuid"] == uuid
