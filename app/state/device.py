@@ -17,6 +17,15 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
+from app.utils.ble_proto import (
+    HANDSHAKE_NO_REPLY,
+    HANDSHAKE_NO_REPLY_ERROR,
+    HANDSHAKE_REJECTED,
+    HANDSHAKE_REJECTED_ERROR,
+    SN_SIG_REPLY_WAIT_S,
+    SN_SIG_SEND_REPEATS,
+    bind_handshake,
+)
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
     APP_KEY_PATH,
@@ -67,6 +76,7 @@ _RECV_POLL_S = 2  # how often the receive loop checks abort / disconnect / stall
 _STALL_TIMEOUT_S = 60  # no new bytes for this long = stalled transfer
 _TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail (CRC)
 _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
+_HANDSHAKE_REPLY_TIMEOUT_S = 5  # cmd 1 / cmd 4 / cmd 3 replies during connect
 # cmd-28 reply with a non-zero status and still no data after this long = the
 # device refused the download; fail fast instead of waiting out the stall window.
 _REFUSED_GRACE_S = 5
@@ -98,6 +108,8 @@ def _finalize_redownload_backup(sid):
 def _reset_state():
     """Reset all connection state to disconnected defaults."""
     _device_state["connected"] = False
+    _device_state["handshaking"] = False
+    _device_state["port_version"] = None
     _device_state["client"] = None
     _device_state["session_keys"] = None
     _device_state["cipher"] = None
@@ -621,15 +633,15 @@ async def connect_device(address=None):
             }
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
-        # Send SN_SIG 3 times for reliability on weak connections
-        for _ in range(3):
+        # Send SN_SIG several times for reliability on weak connections
+        for _ in range(SN_SIG_SEND_REPEATS):
             for i in range(tc):
                 await cl.write_gatt_char(
                     W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
                 )
                 await asyncio.sleep(0.02)
-        # Wait up to 10 seconds for device response (was 5s — too tight for weak signals)
-        for _ in range(100):
+        # Wait for the device's ACK or session blob (same limits as the WiFi worker)
+        for _ in range(int(SN_SIG_REPLY_WAIT_S * 10)):
             await asyncio.sleep(0.1)
             if ack.is_set() or done.is_set():
                 break
@@ -724,7 +736,9 @@ async def connect_device(address=None):
     _device_state["file_data"] = file_data
     _device_state["file_done"] = file_done
     _device_state["file_meta"] = file_meta
-    _device_state["connected"] = True
+    # send_cmd() works from here, but the device only counts as connected once
+    # it has accepted the BIND_TOKEN below.
+    _device_state["handshaking"] = True
 
     # Send BIND_TOKEN handshake (cmd_id=1) — required for device to accept commands.
     # Format matches the official Android app (nh/a0.java) and the WiFi sync worker:
@@ -745,22 +759,40 @@ async def connect_device(address=None):
             logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
         except Exception as e:
             logging.warning(f"[BLE] Cloud bind failed: {e}")
-    if not device_token:
-        raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
-    if len(device_token) > 32:
-        logging.warning(
-            "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
-            "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
-            len(device_token),
-        )
     try:
-        token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
-    except UnicodeEncodeError as e:
-        raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
-    r1 = await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
-    r2 = await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
-    logging.info(f"[BLE] Handshake responses: HS1={r1 is not None}, HS2={r2 is not None}")
-    await send_cmd(bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
+        if not device_token:
+            raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
+        if len(device_token) > 32:
+            logging.warning(
+                "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
+                "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
+                len(device_token),
+            )
+        try:
+            token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
+        except UnicodeEncodeError as e:
+            raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
+    except ValueError:
+        await _disconnect_quietly(cl)
+        _reset_state()
+        raise
+    # cmd 1 twice, then cmd 4 (time sync with this Mac's time zone); the replies
+    # say whether the device accepted the token (ble_proto.handshake_verdict).
+    verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
+    if verdict in (HANDSHAKE_REJECTED, HANDSHAKE_NO_REPLY):
+        logging.warning(f"[BLE] Handshake {verdict}: replies {[h and h['raw'] for h in hs_info['hs']]}")
+        await _disconnect_quietly(cl)
+        _reset_state()
+        if verdict == HANDSHAKE_REJECTED:
+            return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
+        return {"connected": False, "error": HANDSHAKE_NO_REPLY_ERROR}
+    _device_state["port_version"] = hs_info["port_version"]
+    if hs_info["port_version"] is not None and hs_info["port_version"] < 7:
+        # BLE data packets and the file list use an older layout below port
+        # version 7 (PROTOCOL.md 7.2); only the >= 7 layout is implemented.
+        logging.warning(f"[BLE] Device port version {hs_info['port_version']} (< 7): file transfer layout untested")
+    _device_state["handshaking"] = False
+    _device_state["connected"] = True
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
@@ -781,7 +813,7 @@ async def connect_device(address=None):
 async def send_cmd(pt, timeout=5):
     """Send an encrypted command and wait for response."""
     cl = _device_state["client"]
-    if not cl or not _device_state["connected"]:
+    if not cl or not (_device_state["connected"] or _device_state.get("handshaking")):
         return None
     cipher = _device_state["cipher"]
     key, nonce, aad = _device_state["session_keys"]

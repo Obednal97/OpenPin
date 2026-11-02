@@ -2,13 +2,134 @@
 
 import asyncio
 import os
+import struct
 import threading
 import types
 
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 TOC = 0xB8  # CELT 20 ms — what the NotePin S records
+
+
+class FakeNotePin:
+    """The NotePin's side of a whole BLE connection: SN-signature handshake,
+    session blob, then the encrypted command channel. No hardware, no radio.
+
+    Patch `FakeNotePin.session_plaintext` in as the RSA decrypt (the blob's
+    bytes are filler) and `fake.client_factory` over bleak.BleakClient.
+
+      hs_status   status byte of the cmd 1 replies (None = never replies)
+      silent      cmd ids the device doesn't answer (e.g. after a rejected token)
+      before      cmd id -> plaintext packets sent just before its reply (e.g.
+                  an unsolicited record event, a late reply to another command)
+      replies     cmd id -> reply body override (bytes after [1, cid lo, cid hi])
+    """
+
+    def __init__(self, hs_status=0, port_version=9, silent=(), before=None, replies=None):
+        self.hs_status = hs_status
+        self.port_version = port_version
+        self.silent = set(silent)
+        self.before = before or {}
+        self.replies = replies or {}
+        self.key, self.nonce, self.aad = os.urandom(32), os.urandom(12), os.urandom(12)
+        self.cipher = ChaCha20Poly1305(self.key)
+        self.handler = None
+        self.received = []  # decrypted command plaintexts, in order
+        self.sig_writes = 0
+        self.notify_log = []  # (event, handler) for start/stop_notify
+        self._seq = 0
+        self._blob_sent = False
+        self.encrypted = False
+        self.client = None
+
+    # -- what the app's RSA decrypt returns for the session blob
+    def session_plaintext(self, *_):
+        check = self.cipher.encrypt(self.nonce, b"PLAUD.AI", self.aad)
+        return self.key + self.nonce + self.aad + check
+
+    def client_factory(self, *a, **kw):
+        self.client = FakeBleakClient(self, kw.get("disconnected_callback"))
+        return self.client
+
+    def sent_cmds(self):
+        return [struct.unpack_from("<H", pt, 1)[0] for pt in self.received]
+
+    def notify(self, payload):
+        self._seq += 1
+        self.handler(None, self.cipher.encrypt(self.nonce, struct.pack("<I", self._seq) + payload, self.aad))
+
+    def reply(self, cid, body):
+        self.notify(bytes([1]) + struct.pack("<H", cid) + body)
+
+    def _default_body(self, cid):
+        if cid == 1:
+            # status, port version, tz h/m, audio channel, wifi, 2 flags, "V" + u24 version
+            return (
+                bytes([self.hs_status])
+                + struct.pack("<H", self.port_version)
+                + bytes([0, 0, 0, 1, 0, 0])
+                + b"V"
+                + (65546).to_bytes(3, "little")
+            )
+        if cid == 4:
+            pt = self.received[-1]
+            return pt[3:8] + bytes([1])  # echoes the time and time zone hours
+        if cid == 3:
+            return struct.pack("<I", 1) + bytes(12)
+        if cid == 6:
+            return struct.pack("<QQ", 1 << 30, 1 << 32)
+        if cid == 9:
+            return bytes([0, 77])
+        return bytes([0])
+
+    def on_write(self, data, response):
+        data = bytes(data)
+        if not self.encrypted:
+            assert data[:2] == b"\x10\xfe", f"unexpected pre-encryption write {data[:4].hex()}"
+            self.sig_writes += 1
+            if not self._blob_sent and data[3] == data[2] - 1:  # a full signature set: send the blob
+                self._blob_sent = True
+                for i in range(3):
+                    self.handler(None, b"\x12\xfe" + bytes([3, i]) + bytes(100))
+            return
+        pt = self.cipher.decrypt(self.nonce, data, self.aad)[4:]
+        self.received.append(pt)
+        cid = struct.unpack_from("<H", pt, 1)[0]
+        loop = asyncio.get_running_loop()
+        for extra in self.before.get(cid, []):
+            loop.call_soon(self.notify, extra)
+        if cid == 1 and self.hs_status is None or cid in self.silent:
+            return
+        body = self.replies.get(cid)
+        loop.call_soon(self.reply, cid, body if body is not None else self._default_body(cid))
+
+
+class FakeBleakClient:
+    def __init__(self, device, disconnected_callback=None):
+        self.device = device
+        self.disconnected_callback = disconnected_callback
+        self.is_connected = False
+        self.services = [object()]
+
+    async def connect(self):
+        self.is_connected = True
+
+    async def disconnect(self):
+        self.is_connected = False
+
+    async def start_notify(self, uuid, cb):
+        self.device.handler = cb
+        # Notifications restarted after the session blob = the encrypted channel.
+        self.device.encrypted = self.device._blob_sent
+        self.device.notify_log.append(("start", cb))
+
+    async def stop_notify(self, uuid):
+        self.device.notify_log.append(("stop", None))
+
+    async def write_gatt_char(self, uuid, data, response=False):
+        self.device.on_write(data, response)
 
 
 def make_plaud_file(app_key, frames=300, decryptable=True):
