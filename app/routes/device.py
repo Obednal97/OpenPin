@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 
 from app.state import device as dev
 from app.utils.config import load_config
-from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
+from app.utils.constants import get_all_recordings_dirs
 
 
 def _error_json(base, exc):
@@ -18,7 +18,35 @@ def _error_json(base, exc):
     base["traceback"] = traceback.format_exc()
     return base
 
+
 bp = Blueprint("device", __name__, url_prefix="/device")
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _background_flag(default):
+    """The caller's `background` flag: JSON body {"background": true} or ?background=1.
+
+    Automatic syncs (45 s poll, wake, after pairing) are "background"; an
+    explicit user Sync is not. Background requests skip sessions that hit the
+    retry cap (dev.RETRY_CAP consecutive failed downloads).
+    """
+    body = request.get_json(silent=True)
+    if isinstance(body, dict) and "background" in body:
+        return _truthy(body["background"])
+    if "background" in request.args:
+        return _truthy(request.args["background"])
+    return default
+
+
+def _busy_response():
+    """409 returned while a BLE sync owns the link (it holds _ble_lock for its
+    whole run, so other BLE calls would just queue behind it)."""
+    return jsonify({"error": dev.SYNC_BUSY_ERROR, "busy": True}), 409
 
 
 @bp.route("/scan", methods=["POST"])
@@ -63,7 +91,9 @@ def connect():
         # Translate raw BLE errors to friendly messages for the UI
         raw = str(e).lower()
         if "service discovery" in raw:
-            err["error"] = "Couldn't establish a stable connection. Try moving the device closer and restarting Bluetooth."
+            err["error"] = (
+                "Couldn't establish a stable connection. Try moving the device closer and restarting Bluetooth."
+            )
             err["raw_error"] = str(e)
         elif "not found" in raw:
             err["error"] = "Device went out of range before connecting. Try moving it closer and scanning again."
@@ -88,15 +118,25 @@ def verify():
     """Probe the live BLE link (used after system wake). Unlike /status this does
     NOT trust the cached connected flag — it sends a real command. If the link is
     dead (or the lock is wedged by a hung op), state is reset so the caller can
-    reconnect."""
+    reconnect.
+
+    During a sync the link is demonstrably alive (the sync holds _ble_lock for
+    its whole run), so we answer {connected: true, busy: true} instead of
+    probing — the probe's lock timeout used to trigger force_reset() and wipe
+    the state mid-transfer."""
     if not dev.is_connected():
         return jsonify({"connected": False})
+    if dev.is_syncing():
+        return jsonify({"connected": True, "busy": True})
     try:
         ok = dev.run_async(dev.verify_connection(), timeout=10, lock_timeout=5)
         return jsonify({"connected": bool(ok)})
     except Exception:
+        # A sync may have started between the check above and the lock wait.
+        if dev.is_syncing():
+            return jsonify({"connected": True, "busy": True})
         # Couldn't acquire the lock in time (wedged) or the probe errored —
-        # treat the link as dead and clear the stale state.
+        # treat the link as dead, clear the stale state and drop the old client.
         dev.force_reset()
         return jsonify({"connected": False})
 
@@ -159,9 +199,7 @@ def status():
             # lock_timeout: closes the is_syncing()→run_async race window. If
             # sync acquired _ble_lock between our is_syncing() check and now,
             # bail rather than stall the status poll for the full sync (≤30 min).
-            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(
-                _poll_device(), lock_timeout=0.5
-            )
+            is_recording, live_battery, charging, rssi, cmd_ok = dev.run_async(_poll_device(), lock_timeout=0.5)
             if live_battery is not None:
                 battery = live_battery
             # If all commands failed and no RSSI, device is gone — mark disconnected
@@ -221,6 +259,8 @@ def info():
     """Get comprehensive device information (storage, firmware, state, accelerometer)."""
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
+    if dev.is_syncing():
+        return _busy_response()
     try:
         data = dev.run_async(dev.get_device_info())
         return jsonify(data)
@@ -255,19 +295,45 @@ def scan_known():
 
 @bp.route("/check-new")
 def check_new():
-    """Check if device has files not yet synced locally."""
+    """Check if device has files not yet synced locally.
+
+    Background by default (every automatic caller uses this count to decide
+    whether to start a sync): sessions that failed dev.RETRY_CAP times in a row
+    are left out of new_files / total_size / files and listed under
+    retry_capped instead, so the poll stops re-triggering syncs for them.
+    ?background=0 counts them too.
+    """
+    background = _background_flag(default=True)
     if not dev.is_connected():
         return jsonify({"new_files": 0})
+    if dev.is_syncing():
+        return _busy_response()
     try:
         files = dev.run_async(dev.list_device_files())
-        existing = set()
-        for rec_dir in get_all_recordings_dirs():
+        rec_dirs = list(get_all_recordings_dirs())
+        for rec_dir in rec_dirs:
             rec_dir.mkdir(exist_ok=True)
-            existing.update(f.stem for f in rec_dir.glob("*.ogg"))
         dismissed = set(load_config().get("deleted_ids", []))
-        new_files = [f for f in files if str(f["session_id"]) not in existing and str(f["session_id"]) not in dismissed]
+        # Same "already synced" rule as the sync itself: a complete .ogg in any
+        # recordings dir, or (cloud storage mode) uploaded to Google Drive.
+        # Partial downloads count as new so they get retried.
+        cloud_ids = dev.gdrive_cloud_synced_ids()
+        unsynced = [
+            f
+            for f in files
+            if str(f["session_id"]) not in dismissed and not dev.is_already_synced(f["session_id"], rec_dirs, cloud_ids)
+        ]
+        new_files, retry_capped = [], []
+        for f in unsynced:
+            if background and dev.is_retry_capped(f["session_id"]):
+                retry_capped.append({**f, "attempts": dev.download_failures(f["session_id"])})
+            else:
+                new_files.append(f)
         total_size = sum(f.get("size", 0) for f in new_files)
-        return jsonify({"new_files": len(new_files), "total_size": total_size, "files": new_files})
+        body = {"new_files": len(new_files), "total_size": total_size, "files": new_files}
+        if retry_capped:
+            body["retry_capped"] = retry_capped
+        return jsonify(body)
     except Exception:
         return jsonify({"new_files": 0})
 
@@ -276,6 +342,8 @@ def check_new():
 def files():
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
+    if dev.is_syncing():
+        return _busy_response()
     try:
         result = dev.run_async(dev.list_device_files())
         return jsonify(result)
@@ -308,10 +376,18 @@ def record():
 
 @bp.route("/sync", methods=["POST"])
 def sync():
+    """BLE sync. Body {"background": true} for automatic syncs: sessions at the
+    retry cap are skipped (status "skipped"). Without it (the Sync button) every
+    unsynced session is retried."""
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
+    background = _background_flag(default=False)
     try:
-        result = dev.run_async(dev.sync_files(), timeout=1800)  # 30 min for large multi-file syncs
+        # Claims the sync slot before queueing for the BLE lock: a concurrent
+        # /sync gets 409 at once instead of running a second full sync later.
+        result = dev.run_sync_blocking(timeout=1800, background=background)  # 30 min for large multi-file syncs
+        if result is None:
+            return _busy_response()
         return jsonify(result)
     except Exception as e:
         return jsonify(_error_json({}, e)), 500
@@ -319,9 +395,9 @@ def sync():
 
 @bp.route("/abort-sync", methods=["POST"])
 def abort_sync():
-    """Abort current BLE sync (e.g. to switch to WiFi)."""
-    dev.abort_sync()
-    return jsonify({"aborted": True})
+    """Abort current BLE sync (e.g. to switch to WiFi). aborted is False when no
+    sync was running (nothing to abort, and no flag is left behind)."""
+    return jsonify({"aborted": dev.abort_sync()})
 
 
 @bp.route("/wifi-sync", methods=["POST"])

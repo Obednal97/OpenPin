@@ -452,6 +452,13 @@
   font-family: inherit;
 }
 .crop-save-option:hover { background: var(--bg-hover); }
+.crop-save-option-hint {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+  white-space: normal;
+}
 
 /* === MODULE: Transcript Segments === */
 .transcript-segments { display: flex; flex-direction: column; gap: 1px; }
@@ -554,3 +561,38 @@
   justify-content: flex-end;
   margin-top: var(--sp-2);
 }
+
+/* Recording waiting for "Re-download from device" (ui/transcript.js) */
+.redownload-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--yellow-subtle);
+  color: var(--yellow);
+  font-size: var(--text-sm);
+}
+.redownload-notice span { flex: 1; }
+
+/* No local audio yet (ui/transcript.js _txSetAudioControlsEnabled) */
+.audio-player .play-btn:disabled,
+.audio-player .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.audio-player.audio-unavailable .player-track { opacity: 0.4; pointer-events: none; }
+
+/* Summary older than the transcript (summary_stale) */
+.summary-stale-hint {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--sp-3);
+}
+.summary-stale-action {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.summary-stale-action:hover { text-decoration: underline; }

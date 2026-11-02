@@ -159,55 +159,82 @@ dom.scanBtn.addEventListener('click', async () => {
   }
 });
 
+// While a sync runs the Sync button just reads "Syncing…" (clicking it says
+// "Already syncing"). During a Bluetooth sync a separate, secondary
+// "Switch to WiFi" button appears; it always goes through the WiFi
+// confirmation modal (WiFi transfer disconnects the Mac from the internet).
 function setSyncButtonMode(mode) {
   const btn = dom.syncBtn;
-  if (!btn) return;
-  const label = btn.querySelector('span');
-  const svg = btn.querySelector('svg');
-  if (mode === 'switch-wifi') {
-    if (label) label.textContent = 'Switch to WiFi';
-    if (svg) {
-      svg.innerHTML = '<path d="M5 12a7 7 0 0 1 14 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><path d="M8.5 12a3.5 3.5 0 0 1 7 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/>';
-      svg.setAttribute('viewBox', '0 0 24 24');
-    }
-  } else {
-    if (label) label.textContent = 'Sync Recordings';
-    if (svg) {
-      svg.innerHTML = '<path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
-      svg.setAttribute('viewBox', '0 0 18 18');
-    }
+  const switchBtn = $('#switch-wifi-btn');
+  const syncing = mode === 'syncing';
+  if (btn) {
+    const label = btn.querySelector('span');
+    if (label) label.textContent = syncing ? 'Syncing…' : 'Sync Recordings';
+    btn.classList.toggle('is-syncing', syncing);
+    btn.title = syncing ? 'A sync is in progress' : '';
+  }
+  if (switchBtn) {
+    const showSwitch = syncing && app.syncKind === 'ble' && btn && !btn.classList.contains('hidden');
+    switchBtn.classList.toggle('hidden', !showSwitch);
   }
 }
 
-// Unified sync entry point — called from the header sync button AND
-// Settings > Device sync button. Handles switching to WiFi mid-sync,
-// WiFi size check, BLE transfer, transcription, auto-summarise, cloud sync.
+// Sync ownership. Every sync flow (button, tray, background poll, wake, setup,
+// WiFi) claims a generation; only the current owner may clear app.syncing and
+// reset the sync UI when it finishes. This stops an aborted Bluetooth sync from
+// clearing the "syncing" state of the WiFi transfer that replaced it.
+function _claimSync(kind) {
+  app.syncGen = (app.syncGen || 0) + 1;
+  app.syncing = true;
+  app.syncKind = kind;
+  setSyncButtonMode('syncing');
+  return app.syncGen;
+}
+
+function _releaseSync(gen) {
+  if (app.syncGen !== gen) return false;
+  app.syncing = false;
+  app.syncKind = null;
+  setSyncButtonMode('sync');
+  return true;
+}
+
+// Unified sync entry point — header Sync button, tray "Sync Device" and
+// Settings > Device sync. WiFi size check, BLE transfer, transcription,
+// auto-summarise, cloud sync. Never starts a WiFi transfer without the
+// confirmation modal (auto-confirmed only when "Prefer WiFi" is on).
 async function performSync(triggerBtn) {
-  // If already syncing over BLE, act as "Switch to WiFi"
   if (app.syncing) {
-    try {
-      toast('Switching to WiFi sync...', 'info');
-      await window.plaud.abortSync();
-      await new Promise(r => setTimeout(r, 500));
-      app.syncing = false;
-      setSyncButtonMode('sync');
-      executeWifiSync();
-    } catch (err) {
-      toast(`Failed to switch: ${err.message}`, 'error');
-    }
+    toast('Already syncing', 'info');
     return;
   }
 
   const btn = triggerBtn || dom.syncBtn;
   setLoading(btn, true);
 
+  // A sync this window didn't start may already be running server-side
+  // (background poll, setup, a reload mid-sync). Don't start a second one.
+  try {
+    const s = await window.plaud.syncStatus();
+    if (s && s.active) {
+      setLoading(btn, false);
+      toast('Already syncing', 'info');
+      return;
+    }
+  } catch {}
+
   // Check file sizes first — offer WiFi for large transfers
   try {
     const check = await window.plaud.checkNew();
+    if (isDeviceBusyResponse(check)) {
+      setLoading(btn, false);
+      toast('Already syncing', 'info');
+      return;
+    }
     if (check.new_files > 0 && check.total_size > WIFI_SIZE_THRESHOLD) {
       setLoading(btn, false);
       if (app.settings.auto_prefer_wifi) {
-        executeWifiSync();
+        startWifiSync({ auto: true });
       } else {
         offerWifiSync(check.total_size, check.new_files, false);
       }
@@ -215,11 +242,17 @@ async function performSync(triggerBtn) {
     }
   } catch {}
 
+  if (app.syncing) {
+    // Something else claimed the device while we were checking
+    setLoading(btn, false);
+    toast('Already syncing', 'info');
+    return;
+  }
+
+  const gen = _claimSync('ble');
   showProgress('Syncing recordings...', 20);
   toast('Syncing recordings from device...', 'info');
-  app.syncing = true;
   setLoading(btn, false);
-  setSyncButtonMode('switch-wifi');
 
   // Poll BLE sync progress so the UI updates per-file instead of sitting frozen
   // on one blocking call. setTimeout is OS-throttled while the window is in the
@@ -231,7 +264,7 @@ async function performSync(triggerBtn) {
     while (_syncPollActive) {
       try {
         const s = await window.plaud.syncStatus();
-        if (_syncPollActive && s && s.active && s.message) {
+        if (_syncPollActive && app.syncGen === gen && s && s.active && s.message) {
           showProgress(s.message, 20 + (s.percent || 0) * 0.4);
         }
       } catch {}
@@ -245,7 +278,7 @@ async function performSync(triggerBtn) {
     // "Not connected" even though the device is in range. Verify the link
     // (which resets a stale-dead connection), reconnect if needed, and retry
     // once before surfacing an error to the user.
-    if (result.error && /not connected/i.test(result.error)) {
+    if (result.error && !isDeviceBusyResponse(result) && /not connected/i.test(result.error)) {
       try {
         const live = await window.plaud.verifyConnection();
         if (!live.connected) {
@@ -256,12 +289,16 @@ async function performSync(triggerBtn) {
       } catch {}
     }
     _syncPollActive = false;
-    if (result.error) {
-      toast(`Sync failed: ${result.error}`, 'error');
+    const superseded = app.syncGen !== gen; // user switched to WiFi mid-transfer
+    if (isDeviceBusyResponse(result)) {
+      toast('Already syncing', 'info');
+    } else if (result.error) {
+      if (!superseded) toast(`Sync failed: ${result.error}`, 'error');
     } else {
       const newFiles = (result.files || []).filter((f) => f.status === 'new');
       const total = (result.files || []).length;
       toast(`Sync complete: ${newFiles.length} new, ${total} total`, 'success');
+      toastPartialSync(result);
 
       if (newFiles.length > 0) {
         showProgress('Transcribing new recordings...', 60);
@@ -316,23 +353,28 @@ async function performSync(triggerBtn) {
       }
     }
   } catch (err) {
-    toast(`Sync error: ${err.message}`, 'error');
+    if (app.syncGen === gen) toast(`Sync error: ${err.message}`, 'error');
   } finally {
     _syncPollActive = false;
-    app.syncing = false;
     setLoading(btn, false);
     setLoading(dom.syncBtn, false);
-    setSyncButtonMode('sync');
-    hideProgress();
-    await updateDeviceStatus();
+    if (_releaseSync(gen)) {
+      hideProgress();
+      await updateDeviceStatus();
+    }
   }
 }
 
 dom.syncBtn.addEventListener('click', () => performSync(dom.syncBtn));
 
+// Explicit, secondary "Switch to WiFi" (only visible during a Bluetooth sync).
+// Opens the WiFi confirmation; the BLE transfer is only aborted on Start.
+$('#switch-wifi-btn').addEventListener('click', () => startWifiSync());
+
 // Tray "Sync Device" menu item routes here so it behaves identically to the
 // in-app Sync button (progress UI, transcription, reload) instead of poking the
-// backend directly. Rust shows the window before emitting this event.
+// backend directly. Rust shows the window before emitting this event. During a
+// sync it just toasts "Already syncing".
 window.plaud.onTraySync(() => performSync(dom.syncBtn));
 
 dom.disconnectBtn.addEventListener('click', async () => {
@@ -351,14 +393,8 @@ $('#select-toggle').addEventListener('click', () => {
   app.selectMode ? exitSelectMode() : enterSelectMode();
 });
 
-$('#select-all-btn').addEventListener('click', () => {
-  if (app.selectedIds.size === app.recordings.length) {
-    app.selectedIds.clear();
-  } else {
-    app.recordings.forEach((r) => app.selectedIds.add(r.session_id));
-  }
-  renderRecordingsList();
-});
+// Select-all acts only on the recordings visible under the current search/tag filter
+$('#select-all-btn').addEventListener('click', toggleSelectAllVisible);
 
 $('#delete-selected-btn').addEventListener('click', deleteSelected);
 $('#move-selected-btn').addEventListener('click', moveSelected);
@@ -500,13 +536,80 @@ function offerWifiSync(totalSize, fileCount, isBackground) {
   }, 15000);
 }
 
-async function startWifiSync() {
-  // Confirm with user — WiFi interrupts internet
+function _showWifiOverlay() {
   const overlay = $('#wifi-confirm-overlay');
-  if (!overlay) return;
+  if (!overlay) return null;
   overlay.classList.remove('hidden');
   overlay.offsetHeight;
   overlay.classList.add('visible');
+  return overlay;
+}
+
+// Progress renders into its own container so the confirmation view (header,
+// explanation, Cancel/Start) survives and can be shown again next time.
+function _wifiProgressHost() {
+  const panel = $('#wifi-confirm-overlay .modal-panel');
+  if (!panel) return null;
+  let host = panel.querySelector('.wifi-progress-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'wifi-progress-host hidden';
+    panel.appendChild(host);
+  }
+  return host;
+}
+
+function _setWifiConfirmPartsVisible(visible) {
+  const panel = $('#wifi-confirm-overlay .modal-panel');
+  if (!panel) return;
+  [...panel.children]
+    .filter((el) => el.matches('.modal-header, .modal-body, .modal-footer'))
+    .forEach((el) => el.classList.toggle('hidden', !visible));
+}
+
+function _resetWifiConfirmView() {
+  const host = _wifiProgressHost();
+  if (host) {
+    host.innerHTML = '';
+    host.classList.add('hidden');
+  }
+  _setWifiConfirmPartsVisible(true);
+}
+
+// Every way into a WiFi transfer goes through here. Shows the confirmation
+// (WiFi transfer disconnects the Mac from the internet); with { auto: true }
+// — only used when the user turned on "Prefer WiFi" — it confirms itself but
+// still shows the progress view.
+function startWifiSync(opts = {}) {
+  if (app.syncing && app.syncKind === 'wifi') {
+    _showWifiOverlay();
+    toast('Already syncing over WiFi', 'info');
+    return;
+  }
+  if (!$('#wifi-confirm-overlay')) return;
+  _resetWifiConfirmView();
+  _showWifiOverlay();
+  if (opts.auto && app.settings.auto_prefer_wifi) {
+    _beginWifiTransfer();
+  }
+}
+
+// Start (or auto-start) a confirmed WiFi transfer. If a Bluetooth sync is
+// running, it's aborted first; the WiFi flow claims the sync up front so the
+// aborted BLE flow can't clear app.syncing underneath it.
+async function _beginWifiTransfer() {
+  if (app.syncing && app.syncKind === 'wifi') return;
+  const wasBle = app.syncing && app.syncKind === 'ble';
+  const gen = _claimSync('wifi');
+  if (wasBle) {
+    _renderWifiProgress('preparing', 'Stopping Bluetooth transfer...', '', 1);
+    try {
+      await window.plaud.abortSync();
+    } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+    if (app.syncGen !== gen) return;
+  }
+  return executeWifiSync(gen);
 }
 
 // WiFi sync stage icons (SVG paths)
@@ -534,13 +637,14 @@ function _wifiSyncStageFromMessage(msg, pct) {
 }
 
 function _renderWifiProgress(icon, title, detail, pct, state = 'syncing') {
-  const overlay = $('#wifi-confirm-overlay');
-  if (!overlay) return;
-  const panel = overlay.querySelector('.modal-panel');
+  const host = _wifiProgressHost();
+  if (!host) return;
+  _setWifiConfirmPartsVisible(false);
+  host.classList.remove('hidden');
   const iconClass = state === 'success' ? 'success' : state === 'error' ? 'error' : 'syncing';
   const barClass = state === 'success' ? 'success' : state === 'error' ? 'error' : '';
 
-  panel.innerHTML = `
+  host.innerHTML = `
     <div class="wifi-sync-progress">
       <div class="wifi-sync-stage-icon ${iconClass}">${_wifiIcons[icon] || _wifiIcons.preparing}</div>
       <h3 class="wifi-sync-stage-title">${escapeHtml(title)}</h3>
@@ -561,11 +665,12 @@ function _closeWifiModal() {
   });
 }
 
-async function executeWifiSync() {
+// Only call via startWifiSync()/_beginWifiTransfer() so the user has confirmed.
+async function executeWifiSync(claimedGen) {
+  const gen = claimedGen && claimedGen === app.syncGen ? claimedGen : _claimSync('wifi');
   // Keep the modal open — transform into progress view
+  _showWifiOverlay();
   _renderWifiProgress('preparing', 'Preparing...', '', 2);
-
-  app.syncing = true;
 
   // Poll for progress updates while sync runs
   let pollActive = true;
@@ -603,6 +708,15 @@ async function executeWifiSync() {
     const result = await window.plaud.wifiSync();
     pollActive = false;
 
+    if (isDeviceBusyResponse(result)) {
+      _renderWifiProgress('preparing', 'Already syncing', 'A sync with the device is already running. Try again when it finishes.', 0);
+      const panel = $('#wifi-confirm-overlay .modal-panel');
+      panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
+        '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
+      panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
+      return;
+    }
+
     if (result.error) {
       _renderWifiProgress('error', 'Transfer failed', result.error, 0, 'error');
       window.plaud.reportError(`WiFi sync failed: ${result.error}`, '', 'wifi-sync-error');
@@ -627,6 +741,7 @@ async function executeWifiSync() {
     }
 
     const newFiles = (result.files || []).filter((f) => f.status === 'new');
+    toastPartialSync(result);
 
     if (newFiles.length > 0) {
       // Auto-transcribe if enabled
@@ -683,10 +798,10 @@ async function executeWifiSync() {
     panel.querySelector('#wifi-done-btn').addEventListener('click', _closeWifiModal);
   } finally {
     pollActive = false;
-    app.syncing = false;
     hideProgress();
 
-    // Reconnect BLE (worker disconnected it to do its own BLE session)
+    // Reconnect BLE (worker disconnected it to do its own BLE session).
+    // Still "syncing" until this finishes so the background poll stays out.
     try {
       const scan = await window.plaud.scanKnown();
       if (scan.found) {
@@ -696,7 +811,7 @@ async function executeWifiSync() {
         }
       }
     } catch {}
-    await updateDeviceStatus();
+    if (_releaseSync(gen)) await updateDeviceStatus();
   }
 }
 
@@ -712,7 +827,7 @@ function dismissWifiConfirm() {
 // WiFi confirmation modal event listeners
 $('#wifi-confirm-close').addEventListener('click', dismissWifiConfirm);
 $('#wifi-confirm-cancel').addEventListener('click', dismissWifiConfirm);
-$('#wifi-confirm-start').addEventListener('click', executeWifiSync);
+$('#wifi-confirm-start').addEventListener('click', () => _beginWifiTransfer());
 $('#wifi-confirm-overlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) dismissWifiConfirm();
 });
@@ -789,16 +904,22 @@ window.plaud.onSystemWake(async () => {
           toast(`Reconnected to ${scan.name}`, 'success');
           await updateDeviceStatus();
 
-          // Auto-sync if enabled
-          if (app.settings.auto_sync !== false) {
+          // Auto-sync if enabled (and nothing else is syncing)
+          if (app.settings.auto_sync !== false && !app.syncing) {
             const check = await window.plaud.checkNew();
-            if (check.new_files > 0) {
+            if (!isDeviceBusyResponse(check) && check.new_files > 0 && !app.syncing) {
               toast(`${check.new_files} new recording(s), syncing...`, 'info');
+              const gen = _claimSync('ble');
               try {
-                await window.plaud.sync();
-                await loadRecordings();
-                toast('Sync complete', 'success');
-              } catch {}
+                const r = await window.plaud.sync({ background: true });
+                if (!isDeviceBusyResponse(r) && !r.error) {
+                  await loadRecordings();
+                  toast('Sync complete', 'success');
+                  toastPartialSync(r);
+                }
+              } catch {} finally {
+                if (_releaseSync(gen)) await updateDeviceStatus();
+              }
             }
           }
         }
@@ -1046,7 +1167,10 @@ function _startBgPoll() {
   app.resetPollingState = () => {
     _bgBusy = false;
     _bgGen++;          // invalidate any in-flight poll; new invocation gets fresh gen
+    app.syncGen = (app.syncGen || 0) + 1; // in-flight sync flows no longer own the UI
     app.syncing = false;
+    app.syncKind = null;
+    setSyncButtonMode('sync');
   };
   async function bgDevicePoll() {
     if (_bgBusy || app.syncing) return;
@@ -1094,29 +1218,32 @@ function _startBgPoll() {
 
       const check = await window.plaud.checkNew();
       if (_bgGen !== myGen) return; // stale — resetPollingState fired during checkNew
+      if (isDeviceBusyResponse(check) || app.syncing) return; // a sync is already running
       if (check.new_files > 0) {
-        // WiFi for large files — auto-execute or offer depending on setting
+        // WiFi for large files — auto-start (with progress UI) only if the user
+        // turned on "Prefer WiFi"; otherwise offer it.
         if (check.total_size > WIFI_SIZE_THRESHOLD) {
           if (app.settings.auto_prefer_wifi) {
-            executeWifiSync();
+            startWifiSync({ auto: true });
             return;
           }
           const isBackground = !document.hasFocus();
           offerWifiSync(check.total_size, check.new_files, isBackground);
           // Intentional fall-through: start BLE sync immediately as the
           // default + show the WiFi toast as an optional upgrade. If the user
-          // clicks "Use WiFi" the modal's Start handler aborts BLE first via
-          // performSync's switch-to-WiFi path. Don't add a `return` here —
-          // it makes BLE never run when files > WIFI_SIZE_THRESHOLD.
+          // clicks "Use WiFi" and confirms, _beginWifiTransfer() aborts the
+          // BLE sync first. Don't add a `return` here — it makes BLE never
+          // run when files > WIFI_SIZE_THRESHOLD.
         }
 
         toast(`${check.new_files} new recording(s) found, syncing via Bluetooth...`, 'info');
         dom.progressBar.classList.remove('hidden');
         dom.progressBar.classList.add('indeterminate');
-        app.syncing = true;
+        const syncGen = _claimSync('ble');
         try {
-          const result = await window.plaud.sync();
-          if (!result.error) {
+          const result = await window.plaud.sync({ background: true });
+          if (!result.error && !isDeviceBusyResponse(result)) {
+            toastPartialSync(result);
             const newFiles = (result.files || []).filter((f) => f.status === 'new');
             if (newFiles.length > 0) {
               toast(`Synced ${newFiles.length} recording(s)`, 'success');
@@ -1165,10 +1292,11 @@ function _startBgPoll() {
             }
           }
         } finally {
-          app.syncing = false;
           dom.progressBar.classList.remove('indeterminate');
-          hideProgress();
-          await updateDeviceStatus();
+          if (_releaseSync(syncGen)) {
+            hideProgress();
+            await updateDeviceStatus();
+          }
         }
       }
     } catch {}

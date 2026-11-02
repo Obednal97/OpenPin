@@ -43,18 +43,22 @@ def test_ogg_crc_consistency():
 
 def test_decrypt_ble_file_bad_magic():
     """decrypt_ble_file rejects files without PLAUD.AI magic."""
-    from app.utils.audio import decrypt_ble_file
+    import pytest
 
-    result = decrypt_ble_file(b"NOT_PLAUD" + b"\x00" * 0x300, None)
-    assert result is None
+    from app.utils.audio import BleDecryptError, decrypt_ble_file
+
+    with pytest.raises(BleDecryptError):
+        decrypt_ble_file(b"NOT_PLAUD" + b"\x00" * 0x300, None)
 
 
 def test_decrypt_ble_file_too_small():
     """decrypt_ble_file rejects files smaller than 0x300."""
-    from app.utils.audio import decrypt_ble_file
+    import pytest
 
-    result = decrypt_ble_file(b"PLAUD.AI" + b"\x00" * 10, None)
-    assert result is None
+    from app.utils.audio import BleDecryptError, decrypt_ble_file
+
+    with pytest.raises(BleDecryptError):
+        decrypt_ble_file(b"PLAUD.AI" + b"\x00" * 10, None)
 
 
 def test_wrap_ogg_empty():

@@ -14,24 +14,48 @@ const { listen } = window.__TAURI__.event;
 
 // --- BLE disconnect on page reload (Cmd+R) to prevent stale connections ---
 window.addEventListener('beforeunload', () => {
-  if (_apiUrl) {
-    // Use sendBeacon (reliable in beforeunload, not deprecated like sync XHR)
-    const url = `${_apiUrl}/device/disconnect`;
-    const sent = navigator.sendBeacon(url, new Blob(['{}'], { type: 'application/json' }));
-    if (!sent) {
-      // Fallback: fire-and-forget fetch (may not complete before unload)
-      fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true }).catch(() => {});
-    }
+  if (!_apiUrl) return;
+  const url = `${_apiUrl}/device/disconnect`;
+  // sendBeacon with a text/plain body is a CORS "simple request": no preflight,
+  // which WKWebView may drop while the page unloads. A beacon can't set the
+  // X-Plaud-Token header, so the token goes in ?token= (the backend accepts the
+  // query form only for GET /audio and POST /device/disconnect).
+  const beaconUrl = _bridgeApiToken ? `${url}?token=${encodeURIComponent(_bridgeApiToken)}` : url;
+  let sent = false;
+  try {
+    if (navigator.sendBeacon) sent = navigator.sendBeacon(beaconUrl, new Blob(['{}'], { type: 'text/plain' }));
+  } catch {
+    sent = false;
   }
+  if (sent) return;
+  // Fallback: keepalive fetch with the header (needs a preflight).
+  fetch(url, {
+    method: 'POST',
+    headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
+    body: '{}',
+    keepalive: true,
+  }).catch(() => {});
 });
 
-// --- Dynamic API URL (resolved from Rust backend) ---
+// --- Dynamic API URL + per-launch API token (resolved from Rust backend) ---
+// The Python backend rejects any request without the token Rust generated at
+// launch (header X-Plaud-Token; GET /audio also accepts ?token=). It is the
+// same for the whole app session, including backend crash restarts.
 
+const _BRIDGE_TOKEN_HEADER = 'X-Plaud-Token';
 let _apiUrl = null;
+let _bridgeApiToken = '';
 let _apiInfoReady = invoke('get_api_info').then((info) => {
   _apiUrl = info.url;
+  _bridgeApiToken = info.token || '';
   return info;
 });
+
+function _bridgeHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  if (_bridgeApiToken) headers[_BRIDGE_TOKEN_HEADER] = _bridgeApiToken;
+  return headers;
+}
 
 // --- HTTP proxy (same logic as preload.js apiCall) ---
 
@@ -65,10 +89,10 @@ async function _fetchWithTimeout(url, opts, endpoint) {
 }
 
 async function apiCall(method, endpoint, body = null) {
-  if (!_apiUrl) await _apiInfoReady;
+  if (!_apiUrl || !_bridgeApiToken) await _apiInfoReady;
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
   };
   if (body) {
     opts.body = JSON.stringify(body);
@@ -80,6 +104,10 @@ async function apiCall(method, endpoint, body = null) {
     // Connection failed — re-resolve the API URL in case the port changed (server restart)
     try {
       const info = await invoke('get_api_info');
+      if (info.token) {
+        _bridgeApiToken = info.token;
+        opts.headers = _bridgeHeaders({ 'Content-Type': 'application/json' });
+      }
       if (info.url && info.url !== _apiUrl) {
         _apiUrl = info.url;
         // Retry once with the new URL
@@ -109,8 +137,11 @@ async function apiCall(method, endpoint, body = null) {
     'cancellederror',
     'disconnected',
     'went out of range',
+    'already in progress',
+    'powered off',
   ];
-  const isTransient = TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
+  // 409 / busy = "a sync is already running" — expected, never a bug.
+  const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
   if (REPORT_ENDPOINTS.has(endpoint) && (data.error || !res.ok) && !isTransient) {
     const snTag = data.device_sn ? ` [SN: ${data.device_sn}]` : '';
     const reportMsg = data.raw_error || data.error || `HTTP ${res.status}`;
@@ -175,7 +206,8 @@ window.plaud = {
   setFindMy: (enabled) => apiCall('POST', '/device/find-my', { enabled }),
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
-  sync: () => apiCall('POST', '/device/sync'),
+  // opts e.g. { background: true } for automatic syncs; no args = no body, as before.
+  sync: (opts) => apiCall('POST', '/device/sync', opts || null),
   syncStatus: () => apiCall('GET', '/device/sync-status'),
   abortSync: () => apiCall('POST', '/device/abort-sync'),
   wifiSync: () => apiCall('POST', '/device/wifi-sync'),
@@ -191,6 +223,7 @@ window.plaud = {
   deleteRecordings: (session_ids) => apiCall('POST', '/recordings/delete', { session_ids }),
   moveRecordings: (session_ids, destination) => apiCall('POST', '/recordings/move', { session_ids, destination }),
   redownloadRecordings: (session_ids) => apiCall('POST', '/recordings/redownload', { session_ids }),
+  restoreRedownload: (sessionIds) => apiCall('POST', '/recordings/restore-redownload', { session_ids: sessionIds }),
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
   deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
   tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),
@@ -220,9 +253,12 @@ window.plaud = {
   cloudBindDevice: (sn, name, model) => apiCall('POST', '/cloud/bind-device', { sn, name, model }),
   cloudSnSign: (sn) => apiCall('POST', '/cloud/sn-sign', { sn }),
 
-  // Audio URL builder — request M4A format since WebKit can't play OGG
+  // Audio URL builder — request M4A format since WebKit can't play OGG.
+  // <audio src> can't send headers, so the API token rides in the query.
+  // The URL always has a query string already: append extra params with '&'.
   audioUrl: (filename) =>
-    `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}?format=m4a`,
+    `${_apiUrl || 'http://127.0.0.1:5123'}/audio/${encodeURIComponent(filename)}` +
+    `?format=m4a&token=${encodeURIComponent(_bridgeApiToken)}`,
 
   // Health check
   health: () => apiCall('GET', '/health'),

@@ -24,6 +24,11 @@ pub struct PythonServer {
     pub python_path: String,
     pub python_version: String,
     pub startup_error: Option<StartupError>,
+    /// Per-launch secret the Python backend requires in the `X-Plaud-Token`
+    /// header (passed to it as `PLAUD_API_TOKEN`). Generated once per app
+    /// launch and reused across crash restarts so the webview's cached copy
+    /// stays valid. Never log it.
+    pub api_token: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -46,8 +51,39 @@ pub fn get_server() -> &'static Mutex<PythonServer> {
             python_path: String::new(),
             python_version: String::new(),
             startup_error: None,
+            api_token: generate_api_token(),
         })
     })
+}
+
+/// HTTP header the Python backend checks the per-launch token in.
+pub const API_TOKEN_HEADER: &str = "X-Plaud-Token";
+
+/// 32 random bytes from the OS CSPRNG, hex-encoded (64 chars).
+fn generate_api_token() -> String {
+    let mut bytes = [0u8; 32];
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !filled {
+        // /dev/urandom always exists on macOS/Linux; this is belt and braces.
+        // std's RandomState keys are seeded from the OS RNG, so hashing with
+        // fresh instances still yields unpredictable bytes.
+        log::warn!("[Security] /dev/urandom unavailable, using RandomState fallback for API token");
+        use std::hash::{BuildHasher, Hasher};
+        for chunk in bytes.chunks_mut(8) {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            let v = h.finish().to_le_bytes();
+            chunk.copy_from_slice(&v[..chunk.len()]);
+        }
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn find_free_port(start: u16) -> Result<u16, String> {
@@ -365,6 +401,7 @@ fn parse_port_bound(line: &str) -> Option<u16> {
 pub fn send_ble_disconnect() {
     let server = get_server().lock().unwrap();
     let port = server.port;
+    let token = server.api_token.clone();
     drop(server);
     if let Ok(mut s) = std::net::TcpStream::connect_timeout(
         &format!("127.0.0.1:{port}")
@@ -374,7 +411,7 @@ pub fn send_ble_disconnect() {
     ) {
         let _ = write!(
             s,
-            "POST /device/disconnect HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n"
+            "POST /device/disconnect HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{API_TOKEN_HEADER}: {token}\r\nContent-Length: 0\r\n\r\n"
         );
     }
 }
@@ -544,11 +581,12 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     emit_startup_status(app, &format!("Found {python_version}"));
 
     // Store Python info
-    {
+    let api_token = {
         let mut server = get_server().lock().unwrap();
         server.python_path = python_path.clone();
         server.python_version = python_version.clone();
-    }
+        server.api_token.clone()
+    };
 
     // Install missing deps
     emit_startup_status(app, "Checking dependencies...");
@@ -592,6 +630,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         .env("PATH", &full_path)
         .env("PYTHONUNBUFFERED", "1")
         .env("PLAUD_API_PORT", port.to_string())
+        .env("PLAUD_API_TOKEN", &api_token)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -826,6 +865,8 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
     let server = get_server().lock().unwrap();
     let python_path = server.python_path.clone();
     let port = server.port;
+    // Same token as the first launch: the webview cached it from get_api_info.
+    let api_token = server.api_token.clone();
     drop(server);
 
     if python_path.is_empty() {
@@ -842,6 +883,7 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
         .env("PATH", &full_path)
         .env("PYTHONUNBUFFERED", "1")
         .env("PLAUD_API_PORT", port.to_string())
+        .env("PLAUD_API_TOKEN", &api_token)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

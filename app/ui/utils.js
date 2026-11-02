@@ -37,6 +37,8 @@ const app = {
   searchQuery: '',
   activeTagFilters: new Set(),
   syncing: false,
+  syncKind: null, // 'ble' | 'wifi' while app.syncing
+  syncGen: 0, // bumped by each sync flow; see _claimSync() in renderer.js
   processingIds: new Map(),
   cloudState: { logged_in: false, user: null },
   notionState: { connected: false, database_id: null, database_name: null },
@@ -163,10 +165,134 @@ function setLoading(btn, loading) {
   }
 }
 
+// Escapes for BOTH element content and quoted attribute values ("..." or '...').
+// Callers interpolating into attributes must still quote the attribute.
+const _ESCAPE_HTML_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  if (text === null || text === undefined) return '';
+  return String(text).replace(/[&<>"']/g, (c) => _ESCAPE_HTML_MAP[c]);
+}
+
+/**
+ * Modal confirmation dialog. Resolves with the chosen action's `id`, or null
+ * when cancelled (Cancel button, Escape, or clicking the backdrop).
+ *
+ *   showConfirmDialog({
+ *     title: 'Delete 2 recordings?',
+ *     message: 'Plain text, never HTML.',
+ *     items: ['Standup', 'Budget'],          // optional bullet list (plain text)
+ *     note: 'Optional warning line',          // optional, shown highlighted
+ *     actions: [{ id: 'trash', label: 'Move to Trash', destructive: true }],
+ *     cancelLabel: 'Cancel',
+ *   })
+ *
+ * Cancel is the default (focused, prominent) button; destructive actions are
+ * styled as secondary so Enter/Return never confirms a destructive action.
+ */
+function showConfirmDialog(opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'delete-dialog-overlay confirm-dialog-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    const box = document.createElement('div');
+    box.className = 'delete-dialog confirm-dialog';
+
+    const h = document.createElement('h3');
+    h.textContent = o.title || 'Are you sure?';
+    box.appendChild(h);
+
+    if (o.message) {
+      const p = document.createElement('p');
+      p.className = 'settings-desc';
+      p.textContent = o.message;
+      box.appendChild(p);
+    }
+    if (Array.isArray(o.items) && o.items.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'confirm-dialog-items';
+      o.items.forEach((it) => {
+        const li = document.createElement('li');
+        li.textContent = it;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+    if (o.note) {
+      const n = document.createElement('p');
+      n.className = 'confirm-dialog-note';
+      n.textContent = o.note;
+      box.appendChild(n);
+    }
+
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'delete-dialog-actions';
+    (o.actions || []).forEach((a) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `action-btn subtle${a.destructive ? ' confirm-dialog-destructive' : ''}`;
+      b.dataset.action = a.id;
+      b.textContent = a.label;
+      b.addEventListener('click', () => finish(a.id));
+      actionsEl.appendChild(b);
+    });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'action-btn primary confirm-dialog-cancel';
+    cancelBtn.dataset.action = 'cancel';
+    cancelBtn.textContent = o.cancelLabel || 'Cancel';
+    cancelBtn.addEventListener('click', () => finish(null));
+    actionsEl.appendChild(cancelBtn);
+    box.appendChild(actionsEl);
+    overlay.appendChild(box);
+
+    let done = false;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+    };
+    function finish(result) {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      overlay.classList.remove('visible');
+      setTimeout(() => overlay.remove(), 300);
+      resolve(result);
+    }
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+    document.addEventListener('keydown', onKey, true);
+
+    document.body.appendChild(overlay);
+    overlay.offsetHeight;
+    overlay.classList.add('visible');
+    try { cancelBtn.focus(); } catch {}
+  });
+}
+
+// Backend answers 409 {"busy": true} (or {connected:true, busy:true} from
+// /device/verify) while a device sync holds the BLE link. That's not an error:
+// callers should treat it as "already syncing" and stay quiet.
+function isDeviceBusyResponse(res) {
+  return !!(res && typeof res === 'object' && res.busy === true);
+}
+
+// Sync results may list files that only partly transferred. They're kept and
+// resumed on the next sync, so tell the user without alarming them.
+function toastPartialSync(result) {
+  if (!result || typeof result !== 'object') return 0;
+  let n = 0;
+  if (Array.isArray(result.partial)) n = result.partial.length;
+  else if (Array.isArray(result.files)) n = result.files.filter((f) => f && (f.status === 'partial' || f.partial === true)).length;
+  if (n > 0) {
+    toast(
+      n === 1
+        ? "1 recording didn't finish transferring — it will retry next sync"
+        : `${n} recordings didn't finish transferring — they will retry next sync`,
+      'info',
+    );
+  }
+  return n;
 }
 
 function renderMarkdown(md) {
