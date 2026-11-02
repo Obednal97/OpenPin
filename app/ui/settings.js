@@ -141,7 +141,9 @@ function renderModelSelector() {
   const modelSelector = $('#model-selector');
   if (!modelSelector) return;
   const models = app.settings.models || {};
+  // Smallest download first (the API's JSON keys arrive alphabetically)
   modelSelector.innerHTML = Object.entries(models)
+    .sort((a, b) => (a[1].download_mb || 0) - (b[1].download_mb || 0))
     .map(([name, info]) => {
       const selected = name === (app.settings.model || 'small');
       const disabled = !info.fits;
