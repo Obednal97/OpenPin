@@ -17,9 +17,12 @@ Design:
   succeeded (or failed permanently), so a crash mid-push leaves it queued and
   it runs again on the next launch. Pushes are idempotent (upsert by Session
   ID), so running one twice is safe.
-- Single worker thread with exponential backoff on transient failures.
-- Permanent failures are kept in a ``failed`` list (shown in Settings with a
-  Retry button) instead of disappearing silently.
+- Single worker thread with exponential backoff on transient failures, and
+  at most ``_MAX_FAILURES`` counted failures per job before it is given up.
+- Permanent failures (and jobs over the cap) are kept in a ``failed`` list
+  (shown in Settings with a Retry button) instead of disappearing silently.
+- A properties-only job whose Notion page was deleted or archived is turned
+  into a full push once, which recreates the page.
 - Global pause when Notion auth fails. While paused we probe with backoff,
   and stop probing entirely once the refresh token is known to be dead (the
   user must reconnect, which resumes the queue).
@@ -53,12 +56,19 @@ _PAUSE_PROBE_MAX = 1800.0
 # Keep at most this many permanently-failed jobs.
 _FAILED_CAP = 50
 
+# Give a job up (move it to ``failed``) after this many failed attempts.
+# Waiting for auth/connection or for an async create to finish doesn't count.
+# With _BACKOFF_SCHEDULE that is roughly 4 hours of retrying.
+_MAX_FAILURES = 10
+
 KIND_PROPERTIES = "properties"
 KIND_FULL = "full"
 _KIND_RANK = {KIND_PROPERTIES: 0, KIND_FULL: 1}
 
 # Errors that indicate "don't retry — the request was bad". Everything else
 # is treated as transient (network blip, 5xx, rate limit) and retried.
+# Notion's codes/messages: https://developers.notion.com/reference/status-codes
+# (object_not_found: "Could not find database with ID: …"; restricted_resource).
 _PERMANENT_ERROR_MARKERS = (
     "not connected",
     "no database selected",
@@ -66,6 +76,12 @@ _PERMANENT_ERROR_MARKERS = (
     "could not parse",
     "invalid session_id",
     "transcript not found",
+    "object_not_found",
+    "could not find",
+    "restricted_resource",
+    "that is archived",
+    "is archived",
+    "rejected the tag options",
 )
 
 
@@ -200,7 +216,14 @@ class _State:
                 self._save_locked()
         self._wake.set()
 
-    def record_failure(self, entry: dict, error: str, permanent: bool) -> None:
+    def record_failure(self, entry: dict, error: str, permanent: bool, counts: bool = True) -> None:
+        """Record a failed attempt: give up if ``permanent`` (or the job is
+        over ``_MAX_FAILURES``), otherwise back off and retry.
+
+        ``counts=False`` for waits that aren't the job's fault (Notion not
+        connected, auth paused, async create still running): they back off
+        but don't use up the job's failure budget.
+        """
         sid = entry.get("session_id")
         if not sid:
             return
@@ -210,8 +233,12 @@ class _State:
                 # A newer enqueue landed while we were working — it supersedes
                 # this attempt and will run with a fresh backoff.
                 return
+            failures = int(entry.get("failures", 0)) + (1 if counts else 0)
+            if not permanent and failures >= _MAX_FAILURES:
+                permanent = True
+                error = f"Gave up after {failures} failed attempts: {error}"
             if permanent:
-                log.warning(f"[notion-queue] giving up on {sid} — permanent error: {error}")
+                log.warning(f"[notion-queue] giving up on {sid} — {error}")
                 del self.entries[sid]
                 self.failed = [f for f in self.failed if f.get("session_id") != sid]
                 self.failed.append(
@@ -229,9 +256,36 @@ class _State:
             delay = _BACKOFF_SCHEDULE[min(attempts - 1, len(_BACKOFF_SCHEDULE) - 1)]
             current = self.entries[sid]
             current["attempts"] = attempts
+            current["failures"] = failures
             current["next_retry_at"] = time.time() + delay
             current["last_error"] = error
             self._save_locked()
+
+    def convert_to_full(self, entry: dict, error: str) -> bool:
+        """Turn a claimed properties-only job into a full push, once.
+
+        Used when the recording's Notion page is gone (deleted/archived): only
+        a full push can recreate it. Returns False if the job was already
+        converted or is already full (the caller then records a failure).
+        """
+        sid = entry.get("session_id")
+        with self._lock:
+            if not self._is_current_locked(entry):
+                self._in_flight.discard(sid)
+                return True  # superseded by a newer job; nothing to do
+            current = self.entries[sid]
+            if current.get("kind") == KIND_FULL or current.get("converted_from"):
+                return False
+            self._in_flight.discard(sid)
+            log.info(f"[notion-queue] Notion page for {sid} is gone; switching to a full push ({error})")
+            current["kind"] = KIND_FULL
+            current["converted_from"] = KIND_PROPERTIES
+            current["gen"] = uuid.uuid4().hex
+            current["next_retry_at"] = time.time()
+            current["last_error"] = error
+            self._save_locked()
+        self._wake.set()
+        return True
 
     def retry_failed(self) -> int:
         """Re-queue every permanently-failed job. Returns how many."""
@@ -358,7 +412,7 @@ def _process_one(entry: dict) -> None:
     # If Notion isn't configured at all, keep the entry for later (with
     # backoff) so it's picked up once connected.
     if not notion.is_connected() or not notion.get_database_id():
-        _state.record_failure(entry, "Notion not connected", permanent=False)
+        _state.record_failure(entry, "Notion not connected", permanent=False, counts=False)
         return
 
     try:
@@ -367,7 +421,7 @@ def _process_one(entry: dict) -> None:
         msg = str(e)
         if _is_auth_error(e):
             _state.pause(f"Notion auth expired: {msg}")
-            _state.record_failure(entry, msg, permanent=False)
+            _state.record_failure(entry, msg, permanent=False, counts=False)
             return
         _state.record_failure(entry, msg, permanent=_is_permanent_error(msg))
         return
@@ -377,14 +431,24 @@ def _process_one(entry: dict) -> None:
     if err:
         if _is_auth_error(err):
             _state.pause(f"Notion auth expired: {err}")
-            _state.record_failure(entry, err, permanent=False)
+            _state.record_failure(entry, err, permanent=False, counts=False)
+            return
+        if result.get("page_gone") and _state.convert_to_full(entry, err):
+            # The page was deleted/archived in Notion: a properties-only job
+            # can't recreate it, a full push can (once).
+            return
+        if result.get("busy"):
+            # Another push for this recording (e.g. a click) holds the lock.
+            _state.record_failure(entry, err, permanent=False, counts=False)
             return
         _state.record_failure(entry, err, permanent=_is_permanent_error(err))
         return
     if result.get("pending"):
         # Notion accepted an async create that hasn't finished: poll it again
         # later (the task id is persisted, so no second page is created).
-        _state.record_failure(entry, result.get("message") or "Notion is still creating the page", permanent=False)
+        _state.record_failure(
+            entry, result.get("message") or "Notion is still creating the page", permanent=False, counts=False
+        )
         return
     _state.complete(entry)
 
