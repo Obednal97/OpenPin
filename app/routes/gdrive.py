@@ -3,6 +3,7 @@
 from flask import Blueprint, jsonify, request
 
 from app.state import gdrive
+from app.utils.paths import InvalidSessionIdError, validate_session_id
 
 bp = Blueprint("gdrive", __name__, url_prefix="/gdrive")
 
@@ -73,6 +74,10 @@ def upload():
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return jsonify({"error": str(e)}), 400
 
     from app.routes.recordings import _find_recording
 
