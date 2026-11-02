@@ -122,10 +122,9 @@ def test_summarize_no_session(flask_client):
 
 
 def test_cors_headers(flask_client):
-    """All responses have CORS headers (restricted to localhost)."""
-    r = flask_client.get("/health")
-    origin = r.headers.get("Access-Control-Allow-Origin", "")
-    assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin
+    """Responses to the Tauri webview origin carry CORS headers for exactly that origin."""
+    r = flask_client.get("/health", headers={"Origin": "tauri://localhost"})
+    assert r.headers.get("Access-Control-Allow-Origin") == "tauri://localhost"
 
 
 def test_tag_recording_no_session(flask_client):

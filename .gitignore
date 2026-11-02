@@ -6,6 +6,10 @@
 .hf_token
 session_keys.json
 scripts/rsa_session.json
+/rsa_session.json
+.gdrive_config.json
+.notion_queue.json
+*.json.bak
 keys/
 
 # Runtime data
@@ -15,6 +19,10 @@ cloud_recordings_decoded/
 transcripts/
 sessions/
 ble_capture/
+wifi_sync.log
+*.log
+.redownload_backup/
+.trash/
 
 # Bundled binaries (downloaded by scripts/download-ffmpeg.sh)
 bin/
@@ -27,6 +35,11 @@ node_modules/
 dist/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
+.playwright-mcp/
+
+# Claude Code worktrees and local settings
+.claude/
 
 # Rust / Tauri build artifacts
 src-tauri/target/

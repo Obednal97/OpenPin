@@ -1,67 +1,125 @@
-"""Config load/save with atomic writes and backup."""
+"""Config load/save with crash-safe atomic writes, a backup, and locked updates.
+
+Rules for callers:
+
+- Never hold a config dict across a network/AI/BLE call and then save it —
+  anything written meanwhile (deleted_ids, tags, tokens, API keys…) is lost.
+- For every read-modify-write use :func:`update_config`, which loads a fresh
+  copy, applies the mutation and saves, all under ``_config_lock``.
+"""
 
 import json
+import logging
 import os
+import shutil
 import tempfile
 import threading
 
 from app.utils.constants import CONFIG_PATH
 
-# Thread lock to prevent concurrent read-modify-write races
+# Re-entrant so update_config's mutator may call load_config/save_config.
 _config_lock = threading.RLock()
+
+_FILE_MODE = 0o600
+
+
+def _backup_path():
+    return CONFIG_PATH.with_suffix(".json.bak")
+
+
+def _read_json(path):
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("config root is not an object")
+    return data
 
 
 def load_config():
-    """Load the app config from disk (thread-safe)."""
+    """Load the app config from disk (thread-safe).
+
+    Falls back to the ``.bak`` copy when the live file is missing or corrupt
+    (e.g. a crash mid-save), and restores the live file from it.
+    """
     with _config_lock:
-        if CONFIG_PATH.exists():
+        live = CONFIG_PATH
+        if live.exists():
             try:
-                return json.loads(CONFIG_PATH.read_text())
-            except (json.JSONDecodeError, ValueError):
-                # Config is corrupted — try the backup
-                backup = CONFIG_PATH.with_suffix(".json.bak")
-                if backup.exists():
-                    try:
-                        data = json.loads(backup.read_text())
-                        # Restore from backup
-                        save_config(data)
-                        return data
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                return _read_json(live)
+            except Exception as e:
+                logging.warning("[Config] Live config unreadable (%s); trying backup", e)
+        backup = _backup_path()
+        if backup.exists():
+            try:
+                data = _read_json(backup)
+            except Exception as e:
+                logging.warning("[Config] Backup config unreadable too: %s", e)
+                return {}
+            logging.warning("[Config] Restored config from %s", backup.name)
+            try:
+                _write_live(data, make_backup=False)
+            except OSError as e:
+                logging.warning("[Config] Could not restore live config: %s", e)
+            return data
         return {}
 
 
-def save_config(config):
-    """Save the app config to disk atomically (thread-safe).
+def _write_live(config, *, make_backup=True):
+    """Write ``config`` to CONFIG_PATH: temp → fsync → backup → os.replace."""
+    data = json.dumps(config, indent=2)
+    live = CONFIG_PATH
+    live.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(live.parent), prefix=".config_", suffix=".tmp")
+    try:
+        try:
+            os.fchmod(fd, _FILE_MODE)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        # Keep the previous good config as .bak. Copy (not rename) so the live
+        # file exists at every instant — a crash here leaves both intact.
+        if make_backup and live.exists():
+            backup = _backup_path()
+            try:
+                # Only back up a file that actually parses, so a corrupt live
+                # file never overwrites a good backup.
+                _read_json(live)
+                shutil.copy2(str(live), str(backup))
+                os.chmod(str(backup), _FILE_MODE)
+            except Exception as e:
+                logging.warning("[Config] Skipped backup: %s", e)
+        os.replace(tmp_path, str(live))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
-    Writes to a temp file first, then renames — prevents corruption
-    if the process crashes or disk fills up mid-write.
+
+def save_config(config):
+    """Save the app config to disk atomically (thread-safe, mode 0600).
+
+    Prefer :func:`update_config` for read-modify-write sequences.
     """
     with _config_lock:
-        data = json.dumps(config, indent=2)
+        _write_live(config)
 
-        # Keep a backup of the previous good config
-        if CONFIG_PATH.exists():
-            backup = CONFIG_PATH.with_suffix(".json.bak")
-            try:
-                os.replace(str(CONFIG_PATH), str(backup))
-            except OSError:
-                pass
 
-        # Atomic write: write to temp file in the same directory, then rename
-        try:
-            fd, tmp_path = tempfile.mkstemp(
-                dir=str(CONFIG_PATH.parent),
-                prefix=".config_",
-                suffix=".tmp",
-            )
-            with os.fdopen(fd, "w") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, str(CONFIG_PATH))
-        except OSError:
-            # Fallback to direct write if atomic fails (e.g., cross-device)
-            CONFIG_PATH.write_text(data)
+def update_config(fn):
+    """Atomically read-modify-write the config.
+
+    Under ``_config_lock``: loads a fresh copy, calls ``fn(cfg)`` which must
+    mutate ``cfg`` in place, saves it and returns it. Whatever ``fn`` returns
+    is ignored on purpose: one-liners such as ``lambda c: c.pop("x", None)`` or
+    ``lambda c: c.setdefault("k", {})`` return a value, and treating that as
+    the new config would silently replace the whole file. ``fn`` must be quick
+    and must not do network I/O.
+    """
+    with _config_lock:
+        cfg = load_config()
+        fn(cfg)
+        save_config(cfg)
+        return cfg

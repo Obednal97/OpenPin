@@ -94,6 +94,7 @@ class TestTauriBridgeAPISurface:
         "/transcripts",
         "/recordings",
         "/recordings/delete",
+        "/recordings/restore-redownload",
         "/recordings/tag",
         "/recordings/rename",
         "/recordings/export",
@@ -171,6 +172,7 @@ class TestTauriBridgeAPISurface:
         "transcripts",
         "recordings",
         "deleteRecordings",
+        "restoreRedownload",
         "tagRecording",
         "renameRecording",
         "exportRecording",
@@ -264,14 +266,31 @@ class TestEndpointJSONShapes:
     def test_settings_get_shape(self, flask_client):
         data = flask_client.get("/settings").get_json()
         required = {
-            "model", "diarize", "language", "english_variant", "models",
-            "ram_total_gb", "ram_used_gb", "ram_headroom_gb",
-            "available_tags", "profile", "custom_vocabulary", "webhooks",
-            "cloud_sync_direction", "cloud_sync_interval",
-            "auto_delete_after_sync", "auto_sync", "auto_transcribe",
-            "auto_summarise", "notion_auto_push", "auto_prefer_wifi",
-            "transcription_provider", "diarization_provider",
-            "summarization_provider", "has_paired_devices", "setup_dismissed",
+            "model",
+            "diarize",
+            "language",
+            "english_variant",
+            "models",
+            "ram_total_gb",
+            "ram_used_gb",
+            "ram_headroom_gb",
+            "available_tags",
+            "profile",
+            "custom_vocabulary",
+            "webhooks",
+            "cloud_sync_direction",
+            "cloud_sync_interval",
+            "auto_delete_after_sync",
+            "auto_sync",
+            "auto_transcribe",
+            "auto_summarise",
+            "notion_auto_push",
+            "auto_prefer_wifi",
+            "transcription_provider",
+            "diarization_provider",
+            "summarization_provider",
+            "has_paired_devices",
+            "setup_dismissed",
         }
         for field in required:
             assert field in data, f"GET /settings missing field: {field}"
@@ -280,8 +299,11 @@ class TestEndpointJSONShapes:
         """API key flags should be booleans, not the actual key values."""
         data = flask_client.get("/settings").get_json()
         for key_flag in [
-            "anthropic_key_set", "openai_key_set", "openrouter_key_set",
-            "deepgram_key_set", "groq_key_set",
+            "anthropic_key_set",
+            "openai_key_set",
+            "openrouter_key_set",
+            "deepgram_key_set",
+            "groq_key_set",
         ]:
             assert key_flag in data, f"Missing key flag: {key_flag}"
             assert isinstance(data[key_flag], bool), f"{key_flag} should be bool"
@@ -464,15 +486,11 @@ class TestSettingsRoundTrip:
 
     def test_api_key_save_and_remove(self, flask_client):
         """Save an API key, verify flag is True, remove it, verify False."""
-        flask_client.post(
-            "/settings", json={"deepgram_api_key": "dg-test-key-12345"}, content_type="application/json"
-        )
+        flask_client.post("/settings", json={"deepgram_api_key": "dg-test-key-12345"}, content_type="application/json")
         data = flask_client.get("/settings").get_json()
         assert data["deepgram_key_set"] is True
 
-        flask_client.post(
-            "/settings", json={"remove_deepgram_key": True}, content_type="application/json"
-        )
+        flask_client.post("/settings", json={"remove_deepgram_key": True}, content_type="application/json")
         data = flask_client.get("/settings").get_json()
         assert data["deepgram_key_set"] is False
 
@@ -704,8 +722,8 @@ class TestAutoTaggingCaseInsensitivity:
 
     def test_apply_spoken_tags_dedup_case_insensitive(self, tmp_config):
         """_apply_spoken_tags does not duplicate tags that differ only in case."""
-        from app.utils.config import load_config, save_config
         from app.routes.transcribe import _apply_spoken_tags
+        from app.utils.config import load_config, save_config
 
         # Pre-seed config with an existing tag
         config = load_config()
@@ -715,7 +733,7 @@ class TestAutoTaggingCaseInsensitivity:
 
         # Apply a spoken tag that matches case-insensitively
         with patch("app.routes.transcribe._extract_spoken_tags", return_value=["meeting"]):
-            applied = _apply_spoken_tags("sess_1", "Tag: meeting")
+            _apply_spoken_tags("sess_1", "Tag: meeting")
 
         config = load_config()
         session_tags = config["recording_tags"]["sess_1"]
@@ -726,8 +744,8 @@ class TestAutoTaggingCaseInsensitivity:
 
     def test_apply_spoken_tags_adds_to_custom_tags(self, tmp_config):
         """New spoken tags are added to the custom_tags list."""
-        from app.utils.config import load_config, save_config
         from app.routes.transcribe import _apply_spoken_tags
+        from app.utils.config import load_config, save_config
 
         config = load_config()
         config["recording_tags"] = {}
@@ -745,8 +763,8 @@ class TestAutoTaggingCaseInsensitivity:
 
     def test_apply_spoken_tags_custom_tags_case_insensitive(self, tmp_config):
         """Custom tags list does not get case-insensitive duplicates."""
-        from app.utils.config import load_config, save_config
         from app.routes.transcribe import _apply_spoken_tags
+        from app.utils.config import load_config, save_config
 
         config = load_config()
         config["recording_tags"] = {}
@@ -902,24 +920,24 @@ class TestSidecarManagement:
 
 
 class TestCORS:
-    """Every response must have permissive CORS headers."""
+    """Every response to the Tauri webview origin must carry CORS headers for it."""
 
     ENDPOINTS = ["/health", "/settings", "/recordings", "/transcripts"]
 
     def test_cors_on_get_endpoints(self, flask_client):
         for ep in self.ENDPOINTS:
-            r = flask_client.get(ep)
+            r = flask_client.get(ep, headers={"Origin": "tauri://localhost"})
             origin = r.headers.get("Access-Control-Allow-Origin", "")
-            assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin, (
-                f"Missing CORS header on {ep}: got '{origin}'"
-            )
+            assert origin == "tauri://localhost", f"Missing CORS header on {ep}: got '{origin}'"
 
     def test_cors_on_post_endpoints(self, flask_client):
         r = flask_client.post(
-            "/settings", json={"language": "en"}, content_type="application/json"
+            "/settings",
+            json={"language": "en"},
+            content_type="application/json",
+            headers={"Origin": "tauri://localhost"},
         )
-        origin = r.headers.get("Access-Control-Allow-Origin", "")
-        assert "127.0.0.1" in origin or "localhost" in origin or "tauri" in origin
+        assert r.headers.get("Access-Control-Allow-Origin") == "tauri://localhost"
 
 
 # ---------------------------------------------------------------------------

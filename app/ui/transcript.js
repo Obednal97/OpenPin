@@ -36,6 +36,8 @@ function openTranscript(sessionId, autoPlay = false) {
   titleEl.setAttribute('data-placeholder', rec.title ? 'Add a title...' : formatDate(rec.date));
 
   titleEl.onblur = async () => {
+    // Only ever rename the recording this title element is showing.
+    if (titleEl.dataset.sid !== sessionId || app.currentSessionId !== sessionId) return;
     const newTitle = titleEl.textContent.trim();
     if (newTitle !== (rec.title || '')) {
       try {
@@ -141,11 +143,21 @@ function openTranscript(sessionId, autoPlay = false) {
   dom.playIcon.classList.remove('hidden');
   dom.pauseIcon.classList.add('hidden');
 
-  const filename = `${sessionId}.ogg`;
-  dom.audioEl.src = window.plaud.audioUrl(filename);
-  dom.audioEl.load();
-  if (autoPlay) {
-    dom.audioEl.play().catch(() => {});
+  // No local .ogg (waiting for re-download, or an incomplete transfer): the
+  // audio would only fail with a media error, so disable play/crop/download
+  // and explain why in the notice above the actions. Cloud-only recordings
+  // still stream from Google Drive.
+  const noLocalAudio = _txHasNoAudio(rec);
+  _txSetAudioControlsEnabled(!noLocalAudio);
+  if (noLocalAudio) {
+    dom.audioEl.removeAttribute('src');
+    dom.audioEl.load();
+  } else {
+    dom.audioEl.src = window.plaud.audioUrl(`${sessionId}.ogg`);
+    dom.audioEl.load();
+    if (autoPlay) {
+      dom.audioEl.play().catch(() => {});
+    }
   }
 
   // Pre-warm the m4a cache for neighbouring recordings so flipping through
@@ -154,7 +166,7 @@ function openTranscript(sessionId, autoPlay = false) {
     const idx = app.recordings.findIndex((r) => r.session_id === sessionId);
     if (idx >= 0) {
       [app.recordings[idx - 1], app.recordings[idx + 1]]
-        .filter(Boolean)
+        .filter((n) => n && !_txHasNoAudio(n))
         .forEach((n) => {
           fetch(window.plaud.audioUrl(`${n.session_id}.ogg`))
             .then((r) => r.blob())
@@ -166,13 +178,25 @@ function openTranscript(sessionId, autoPlay = false) {
   // Actions bar
   const actionsBar = $('#transcript-actions');
   const hasSummary = t && t.summary;
+  const hasTranscriptText = !!(t && (t.text || (t.segments && t.segments.length > 0)));
+  const isTranscribing = app.processingIds.get(sessionId) === 'transcribing';
+  const awaitingRedownload = !!rec.redownload_pending;
+  const transcribeLabel = hasTranscriptText ? 'Re-transcribe' : 'Transcribe';
+  const noAudioNotice = awaitingRedownload
+    ? 'Waiting for re-download — connect your device and sync.'
+    : 'Incomplete transfer — connect your device and sync again to finish it.';
   actionsBar.innerHTML = `
-    <button class="action-btn accent" id="retranscribe-btn" title="Re-run transcription from scratch">
+    ${noLocalAudio ? `
+    <div class="redownload-notice" id="redownload-notice">
+      <span>${noAudioNotice}</span>
+      ${awaitingRedownload ? '<button class="action-btn subtle" id="restore-redownload-btn">Restore</button>' : ''}
+    </div>` : ''}
+    <button class="action-btn subtle" id="retranscribe-btn" title="${!rec.ogg_path ? 'No local audio to transcribe' : hasTranscriptText ? 'Replace the transcript with a new transcription' : 'Transcribe this recording'}" ${isTranscribing || awaitingRedownload || !rec.ogg_path ? 'disabled' : ''}>
       <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
         <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span>Re-transcribe</span>
+      <span>${isTranscribing ? 'Transcribing…' : transcribeLabel}</span>
     </button>
     ${
       t && t.text
@@ -222,16 +246,48 @@ function openTranscript(sessionId, autoPlay = false) {
     </button>
   `;
 
-  // Re-transcribe
-  $('#retranscribe-btn').addEventListener('click', async () => {
-    if (t) {
-      try {
-        await window.plaud.deleteTranscript(sessionId);
-      } catch (err) {
-        if (err.name !== 'AbortError') console.warn('[transcript] deleteTranscript failed:', err);
-      }
+  // (Re-)transcribe. The backend merges a re-transcription into the existing
+  // transcript file and keeps the summary, so nothing is deleted up front.
+  const restoreBtn = $('#restore-redownload-btn');
+  if (restoreBtn) {
+    restoreBtn.addEventListener('click', async () => {
+      restoreBtn.disabled = true;
+      const ok = await restoreRedownload(sessionId);
+      if (!ok && restoreBtn.isConnected) restoreBtn.disabled = false;
+    });
+  }
+
+  const retxBtn = $('#retranscribe-btn');
+  retxBtn.addEventListener('click', async () => {
+    if (!rec.ogg_path) {
+      toast('No local audio yet — sync to re-download it first', 'info');
+      return;
     }
-    await transcribeRecording(rec.ogg_path, sessionId);
+    if (app.processingIds.get(sessionId) === 'transcribing') {
+      toast('Already transcribing this recording', 'info');
+      return;
+    }
+    if (hasTranscriptText) {
+      const choice = await showConfirmDialog({
+        title: 'Replace the transcript?',
+        message: 'Your edits to segments will be lost; the summary is kept.',
+        actions: [{ id: 'retranscribe', label: 'Re-transcribe', destructive: true }],
+      });
+      if (choice !== 'retranscribe') return;
+      // Another click may have started a job while the dialog was open
+      if (app.processingIds.get(sessionId) === 'transcribing') return;
+    }
+    retxBtn.disabled = true;
+    const label = retxBtn.querySelector('span');
+    if (label) label.textContent = 'Transcribing…';
+    try {
+      await transcribeRecording(rec.ogg_path, sessionId);
+    } finally {
+      // openTranscript() may have re-rendered the bar meanwhile (on success,
+      // or by navigating away and back), detaching retxBtn: update whichever
+      // button is on screen now.
+      _txRefreshRetranscribeBtn(sessionId);
+    }
   });
 
   // Copy
@@ -420,11 +476,16 @@ function openTranscript(sessionId, autoPlay = false) {
           if (t) {
             t.summary = result.summary;
             t.auto_title = result.title;
+            t.summary_stale = false;
           }
           if (result.title && !rec.title) {
             rec.title = result.title;
-            titleEl.textContent = result.title;
-            titleEl.setAttribute('data-placeholder', 'Add a title...');
+            // The user may have opened another recording while this ran —
+            // never write this title into (and later rename) that one.
+            if (app.currentView === 'transcript' && app.currentSessionId === sessionId && titleEl.dataset.sid === sessionId) {
+              titleEl.textContent = result.title;
+              titleEl.setAttribute('data-placeholder', 'Add a title...');
+            }
           }
           await loadRecordings();
           // Only switch tab if user is still viewing this transcript
@@ -554,53 +615,13 @@ function openTranscript(sessionId, autoPlay = false) {
     }
   };
 
-  // Delete recording
+  // Delete recording — same confirmation as every other delete path
   const deleteBtn = $('#delete-recording-btn');
   if (deleteBtn) {
     deleteBtn.addEventListener('click', () => {
-      if (rec.cloud_synced) {
-        // Cloud recording — show choice dialog, then navigate back
-        showDeleteDialog([sessionId], 1, () => {
-          closeTranscript();
-        });
-      } else {
-        // Local only — confirm and delete
-        const overlay = document.createElement('div');
-        overlay.className = 'delete-dialog-overlay';
-        overlay.innerHTML = `
-          <div class="delete-dialog">
-            <h3>Delete recording?</h3>
-            <p class="settings-desc">This will delete the audio and transcript permanently.</p>
-            <div class="delete-dialog-actions">
-              <button class="action-btn delete" id="confirm-delete-btn">Delete</button>
-            </div>
-            <button class="action-btn subtle" id="cancel-delete-btn" style="width:100%;margin-top:8px;justify-content:center;">Cancel</button>
-          </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.offsetHeight;
-        overlay.classList.add('visible');
-
-        const cleanup = () => {
-          overlay.classList.remove('visible');
-          setTimeout(() => overlay.remove(), 300);
-        };
-
-        document.getElementById('cancel-delete-btn').addEventListener('click', cleanup);
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
-
-        document.getElementById('confirm-delete-btn').addEventListener('click', async () => {
-          cleanup();
-          try {
-            await window.plaud.deleteRecordings([sessionId]);
-            toast('Recording deleted', 'success');
-            closeTranscript();
-            await loadRecordings();
-          } catch (err) {
-            toast(`Delete failed: ${err.message}`, 'error');
-          }
-        });
-      }
+      showDeleteDialog([sessionId], 1, () => {
+        if (app.currentSessionId === sessionId) closeTranscript();
+      });
     });
   }
 
@@ -652,7 +673,7 @@ function renderTranscriptSegments(container, t, sessionId) {
     container.innerHTML = t.segments
       .map(
         (seg, i) => `
-      <div class="segment" data-index="${i}" data-start="${seg.start}">
+      <div class="segment" data-index="${i}" data-start="${escapeHtml(seg.start)}">
         <span class="segment-time">${formatTime(seg.start)}</span>
         ${seg.speaker ? `<span class="segment-speaker">${escapeHtml(seg.speaker)}</span>` : ''}
         <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
@@ -713,7 +734,7 @@ function renderTranscriptSegments(container, t, sessionId) {
   } else {
     container.innerHTML = `
       <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
-        <p>No transcript yet. Click <strong>Re-transcribe</strong> above to generate one.</p>
+        <p>No transcript yet. Click <strong>Transcribe</strong> above to generate one.</p>
       </div>
     `;
   }
@@ -761,6 +782,23 @@ function renderEditableSummary(container, t, sessionId, rec) {
     editHint.textContent = 'Edit';
     editHint.addEventListener('click', () => startEditing());
     container.prepend(editHint);
+    if (t.summary_stale) {
+      // Transcript changed (e.g. re-transcribed) after this summary was made
+      const stale = document.createElement('div');
+      stale.className = 'summary-stale-hint';
+      const msg = document.createElement('span');
+      msg.textContent = 'Summary may be out of date — ';
+      const link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'summary-stale-action';
+      link.textContent = 'Re-summarize';
+      link.addEventListener('click', () => {
+        const sb = document.getElementById('summarize-btn');
+        if (sb && !sb.disabled && app.currentSessionId === sessionId) sb.click();
+      });
+      stale.append(msg, link);
+      container.prepend(stale);
+    }
   };
 
   const startEditing = () => {
@@ -865,6 +903,10 @@ async function transcribeRecording(oggPath, sessionId) {
       app.settings.language || 'auto',
     );
 
+    // The job is over: clear the flag before anything re-renders, or
+    // openTranscript() below would draw a disabled "Transcribing…" button.
+    app.processingIds.delete(sessionId);
+
     const elapsed = (Date.now() - startTime) / 1000;
     if (audioDuration > 0 && elapsed > 0) {
       app.transcribeSpeed = audioDuration / elapsed;
@@ -927,7 +969,48 @@ async function transcribeRecording(oggPath, sessionId) {
     dom.progressFill.style.transition = '';
     hideProgress();
     renderRecordingsList();
+    _txRefreshRetranscribeBtn(sessionId);
   }
+}
+
+// Bring the open transcript's (Re-)transcribe button in line with the current
+// state. No-op unless that recording's transcript is on screen.
+function _txRefreshRetranscribeBtn(sessionId) {
+  if (app.currentView !== 'transcript' || app.currentSessionId !== sessionId) return;
+  const btn = $('#retranscribe-btn');
+  if (!btn) return;
+  const rec = app.recordings.find((r) => r.session_id === sessionId);
+  const t = app.transcripts[sessionId];
+  const hasText = !!(t && (t.text || (t.segments && t.segments.length > 0)));
+  const busy = app.processingIds.get(sessionId) === 'transcribing';
+  btn.disabled = busy || !rec || !rec.ogg_path || !!rec.redownload_pending;
+  const label = btn.querySelector('span');
+  if (label) label.textContent = busy ? 'Transcribing…' : hasText ? 'Re-transcribe' : 'Transcribe';
+}
+
+// True when a recording has no audio the player can load: no local .ogg
+// (re-download pending, incomplete transfer) and not streamable from Drive.
+function _txHasNoAudio(rec) {
+  if (!rec) return true;
+  if (rec.partial || rec.redownload_pending) return true;
+  return !rec.ogg_path && !rec.cloud_only;
+}
+
+const _TX_AUDIO_CONTROL_TITLES = {
+  'play-btn': 'Play',
+  'crop-audio-btn': 'Crop audio',
+  'download-audio-btn': 'Download audio',
+};
+
+function _txSetAudioControlsEnabled(enabled) {
+  for (const [id, title] of Object.entries(_TX_AUDIO_CONTROL_TITLES)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.disabled = !enabled;
+    el.title = enabled ? title : 'No local audio — sync to download it first';
+  }
+  const player = document.getElementById('audio-player');
+  if (player) player.classList.toggle('audio-unavailable', !enabled);
 }
 
 function closeTranscript() {
@@ -1059,6 +1142,12 @@ function initAudioPlayer() {
    ============================================================ */
 
 let cropState = null;
+
+// Append a cache-busting param to a URL that may already have a query string.
+function withCacheBust(url, stamp = Date.now()) {
+  const u = String(url);
+  return `${u}${u.includes('?') ? '&' : '?'}t=${stamp}`;
+}
 
 function initCropEditor(sessionId) {
   const cropBtn = $('#crop-audio-btn');
@@ -1220,12 +1309,18 @@ async function openCropEditor(sessionId) {
         toast(mode === 'new' ? 'Saved as new recording' : 'Audio cropped successfully', 'success');
         closeCropEditor();
         await loadRecordings();
-        // Reload audio for the active recording
         const targetId = result.session_id || sessionId;
-        audio.src = window.plaud.audioUrl(`${targetId}.ogg`) + '?t=' + Date.now();
-        audio.load();
         if (result.session_id && result.session_id !== sessionId) {
           openTranscript(result.session_id);
+        } else if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
+          // Overwrite removed the transcript — re-render so the view matches
+          openTranscript(sessionId);
+        }
+        // Reload audio, bypassing WebKit's cache. audioUrl() already carries
+        // query params (?format=m4a, &token=…), so append rather than add '?'.
+        if (app.currentSessionId === targetId) {
+          audio.src = withCacheBust(window.plaud.audioUrl(`${targetId}.ogg`));
+          audio.load();
         }
       }
     } catch (err) {

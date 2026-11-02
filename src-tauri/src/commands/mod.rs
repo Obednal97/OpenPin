@@ -11,6 +11,9 @@ pub struct ApiInfo {
     url: String,
     error: Option<python::StartupError>,
     status: String,
+    /// Per-launch API token; the frontend sends it as `X-Plaud-Token`
+    /// (or `?token=` on GET /audio). See `python::PythonServer::api_token`.
+    token: String,
 }
 
 #[tauri::command]
@@ -34,6 +37,7 @@ pub fn get_api_info() -> ApiInfo {
         url: server.url.clone(),
         error: server.startup_error.clone(),
         status: status.to_string(),
+        token: server.api_token.clone(),
     }
 }
 

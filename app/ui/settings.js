@@ -147,12 +147,12 @@ function renderModelSelector() {
       const disabled = !info.fits;
       return `
       <div class="model-option ${selected ? 'selected' : ''} ${disabled ? 'disabled' : ''}"
-           data-model="${name}" ${disabled ? 'title="Not enough RAM"' : ''}>
+           data-model="${escapeHtml(name)}" ${disabled ? 'title="Not enough RAM"' : ''}>
         <div>
-          <div class="model-name">${name}</div>
-          <div class="model-detail">${info.speed} \u00B7 ${info.accuracy}</div>
+          <div class="model-name">${escapeHtml(name)}</div>
+          <div class="model-detail">${escapeHtml(info.speed)} \u00B7 ${escapeHtml(info.accuracy)}</div>
         </div>
-        <div class="model-size">${info.size} \u00B7 ~${info.ram_gb} GB RAM</div>
+        <div class="model-size">${escapeHtml(info.size)} \u00B7 ~${escapeHtml(info.ram_gb)} GB RAM</div>
       </div>
     `;
     })
@@ -686,7 +686,7 @@ function renderDeviceManager() {
     if (dmRssi && app.deviceStateCache.rssi != null) {
       dmRssi.innerHTML =
         renderSignalBars(app.deviceStateCache.rssi) +
-        ` <span class="dm-rssi-value">${app.deviceStateCache.rssi} dBm</span>`;
+        ` <span class="dm-rssi-value">${escapeHtml(app.deviceStateCache.rssi)} dBm</span>`;
     }
     // Fetch full device info (async, populates panel when ready)
     fetchDeviceInfo();
@@ -733,8 +733,8 @@ function renderDeviceInfoPanel(panel, info) {
     const remaining = info.storage_remaining_hours || 0;
     items.push(`<div class="dm-info-item full-width">
       <div class="dm-info-label">Storage</div>
-      <div class="dm-info-value">${used} / ${total} <span class="dm-info-secondary">(${remaining}h remaining)</span></div>
-      <div class="dm-info-bar"><div class="dm-info-bar-fill" style="width:${pct}%"></div></div>
+      <div class="dm-info-value">${used} / ${total} <span class="dm-info-secondary">(${escapeHtml(remaining)}h remaining)</span></div>
+      <div class="dm-info-bar"><div class="dm-info-bar-fill" style="width:${Number(pct) || 0}%"></div></div>
     </div>`);
   }
 
@@ -751,7 +751,7 @@ function renderDeviceInfoPanel(panel, info) {
     const charging = info.charging ? ' (Charging)' : '';
     items.push(`<div class="dm-info-item">
       <div class="dm-info-label">Battery</div>
-      <div class="dm-info-value">${info.battery_level}%${charging}</div>
+      <div class="dm-info-value">${escapeHtml(info.battery_level)}%${charging}</div>
     </div>`);
   }
 
@@ -778,7 +778,7 @@ function renderDeviceInfoPanel(panel, info) {
   if (info.active_session_id && info.active_session_id > 0) {
     items.push(`<div class="dm-info-item">
       <div class="dm-info-label">Active Session</div>
-      <div class="dm-info-value">${info.active_session_id}</div>
+      <div class="dm-info-value">${escapeHtml(info.active_session_id)}</div>
     </div>`);
   }
 
@@ -787,7 +787,7 @@ function renderDeviceInfoPanel(panel, info) {
     const a = info.accelerometer;
     items.push(`<div class="dm-info-item full-width">
       <div class="dm-info-label">Orientation</div>
-      <div class="dm-info-value">Pitch ${a.pitch}\u00B0 \u00B7 Roll ${a.roll}\u00B0 \u00B7 Yaw ${a.yaw}\u00B0</div>
+      <div class="dm-info-value">Pitch ${escapeHtml(a.pitch)}\u00B0 \u00B7 Roll ${escapeHtml(a.roll)}\u00B0 \u00B7 Yaw ${escapeHtml(a.yaw)}\u00B0</div>
     </div>`);
   }
 
@@ -836,7 +836,7 @@ function rssiToLabel(rssi) {
 function renderSignalBars(rssi) {
   const level = rssiToSignalLevel(rssi);
   const heights = [4, 7, 10, 13];
-  return `<div class="dm-signal" title="Signal: ${rssi} dBm (${rssiToLabel(rssi)})">
+  return `<div class="dm-signal" title="Signal: ${escapeHtml(rssi)} dBm (${rssiToLabel(rssi)})">
     ${heights
       .map((h, i) => `<div class="dm-signal-bar ${i < level ? 'active' : ''}" style="height:${h}px;"></div>`)
       .join('')}
@@ -1281,7 +1281,7 @@ function initSettingsEvents() {
           .map((db, i) => {
             const title = String(db.title || `Result ${i + 1}`).substring(0, 80);
             const type =
-              db.type && db.type !== 'raw' ? `<span style="opacity:0.5;margin-left:4px;">${db.type}</span>` : '';
+              db.type && db.type !== 'raw' ? `<span style="opacity:0.5;margin-left:4px;">${escapeHtml(db.type)}</span>` : '';
             return `<div class="dm-device-row" data-index="${i}">
             <div class="dm-device-row-info">
               <div class="dm-device-row-name">${escapeHtml(title)}${type}</div>
@@ -1542,7 +1542,7 @@ function initSettingsEvents() {
             const model = d.model || '';
             const detail = [model, sn, `${d.rssi} dBm`].filter(Boolean).join(' · ');
             return `
-            <div class="dm-device-row" data-address="${d.address}" data-name="${escapeHtml(d.name || 'Plaud')}" data-sn="${escapeHtml(d.serial_number || '')}">
+            <div class="dm-device-row" data-address="${escapeHtml(d.address)}" data-name="${escapeHtml(d.name || 'Plaud')}" data-sn="${escapeHtml(d.serial_number || '')}">
               <div class="dm-device-row-icon">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="5" y="1" width="6" height="14" rx="2"/></svg>
               </div>
@@ -1579,7 +1579,7 @@ function initSettingsEvents() {
               } else {
                 toast(`Connection failed: ${conn.error || 'Unknown error'}`, 'error');
                 results.innerHTML = `<p class="settings-desc" style="text-align:center;color:var(--primary);">
-                  Connection failed. ${conn.error || 'Try again.'}
+                  Connection failed. ${escapeHtml(conn.error || 'Try again.')}
                 </p>`;
               }
             } catch (err) {

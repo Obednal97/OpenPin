@@ -259,7 +259,7 @@
             <div class="crop-save-group">
               <button id="crop-save-btn" class="action-btn accent">Save crop</button>
               <div id="crop-save-menu" class="crop-save-menu hidden">
-                <button id="crop-save-overwrite" class="crop-save-option">Overwrite original</button>
+                <button id="crop-save-overwrite" class="crop-save-option">Overwrite original<span class="crop-save-option-hint">Replaces the original audio and removes its transcript</span></button>
                 <button id="crop-save-new" class="crop-save-option">Save as new recording</button>
               </div>
             </div>
@@ -298,6 +298,9 @@
           <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         <span>Sync Recordings</span>
+      </button>
+      <button id="switch-wifi-btn" class="action-btn subtle hidden" title="Stop the Bluetooth transfer and continue over WiFi (asks first; temporarily disconnects internet)">
+        <span>Switch to WiFi</span>
       </button>
       <button id="disconnect-btn" class="action-btn subtle hidden">
         <span>Disconnect</span>
