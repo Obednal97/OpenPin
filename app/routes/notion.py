@@ -9,6 +9,7 @@ import threading
 import time as _time
 import traceback
 
+import requests
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
@@ -79,6 +80,21 @@ def _update_transcript_json(session_id, updates):
     back atomically (temp file + os.replace). Does nothing if the transcript
     does not exist. Returns True if the file was written.
     """
+
+    def _merge(data):
+        data.update(updates)
+        return True
+
+    return _mutate_transcript_json(session_id, _merge)
+
+
+def _mutate_transcript_json(session_id, mutate):
+    """Apply ``mutate(data)`` to the transcript JSON under its lock.
+
+    ``mutate`` changes the dict in place and returns True if it changed
+    anything; the file is then written back atomically. Returns True if the
+    file was written.
+    """
     validate_session_id(session_id)
     path = TRANSCRIPTS_DIR / f"{session_id}.json"
     with get_transcript_lock(session_id):
@@ -87,7 +103,8 @@ def _update_transcript_json(session_id, updates):
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             return False
-        data.update(updates)
+        if not mutate(data):
+            return False
         fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".notion_", suffix=".json.tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -541,6 +558,66 @@ def _get_notion_page_url(session_id):
     return url
 
 
+def _forget_notion_page_url(session_id, gone_url):
+    """Drop a saved page URL (config and transcript) that points at ``gone_url``.
+
+    Only removes entries for the same page, so a URL saved meanwhile (e.g. by
+    a concurrent create) survives.
+    """
+    validate_session_id(session_id)
+    gone_id = _extract_notion_id(gone_url)
+
+    def _same(url):
+        return bool(url) and (url == gone_url or (gone_id and _extract_notion_id(url) == gone_id))
+
+    def _drop_from_config(c):
+        urls = c.get("notion_page_urls")
+        if isinstance(urls, dict) and _same(urls.get(session_id)):
+            del urls[session_id]
+
+    update_config(_drop_from_config)
+
+    def _drop_from_transcript(data):
+        if _same(data.get("notion_page_url")):
+            del data["notion_page_url"]
+            return True
+        return False
+
+    try:
+        _mutate_transcript_json(session_id, _drop_from_transcript)
+    except Exception as e:
+        logging.warning(f"Could not clear the Notion page URL in transcript {session_id}: {e}")
+
+
+# A recording's saved page no longer exists, or is archived/in the trash.
+# Notion: 404 object_not_found "Could not find page with ID: …"
+# (https://developers.notion.com/reference/status-codes); editing a trashed
+# page is a 400 validation_error "Can't edit block that is archived. You must
+# unarchive the block before editing."
+_PAGE_GONE_MARKERS = (
+    "object_not_found",
+    "could not find page",
+    "could not find block",
+    "that is archived",
+    "is archived",
+    "is in trash",
+    "in_trash",
+)
+
+
+def _is_page_gone_error(err):
+    """True if ``err`` (exception or message) says the page was deleted/archived.
+
+    Checks the message (MCP ``isError`` text) and, for HTTP errors, the body.
+    """
+    text = str(err or "")
+    response = getattr(err, "response", None)
+    if response is not None:
+        text += " " + str(getattr(response, "text", "") or "")
+    lower = text.lower()
+    return any(marker in lower for marker in _PAGE_GONE_MARKERS)
+
+
 @bp.route("/page-url/<session_id>")
 def page_url(session_id):
     """Get the Notion page URL for a recording."""
@@ -632,25 +709,124 @@ def _fetch_db_schema(db_id):
         state = json.loads(m.group(1))
     except json.JSONDecodeError:
         return None
+    if not isinstance(state, dict):
+        return None
     schema = state.get("schema") if isinstance(state.get("schema"), dict) else {}
 
     ds = re.search(r"collection://([0-9a-fA-F-]{32,36})", text)
     tags = schema.get(TAGS_PROP)
     sess = schema.get(SESSION_ID_PROP)
-    options = {}
-    if isinstance(tags, dict):
-        for opt in tags.get("options", []) or []:
-            if isinstance(opt, dict) and isinstance(opt.get("name"), str):
-                options[opt["name"]] = opt.get("color") if isinstance(opt.get("color"), str) else "default"
+    tags_exists = isinstance(tags, dict) and tags.get("type") == "multi_select"
+    options, options_known = {}, True
+    if tags_exists:
+        options, options_known = _parse_tag_options(tags)
+        if options_known and not options and _text_suggests_tag_options(text[: m.start()] + text[m.end() :]):
+            options_known = False
+        if not options_known:
+            logging.warning(
+                "Couldn't read the Tags options from the Notion database schema; treating them as unknown "
+                "(no option changes this time)"
+            )
     return {
         "db_id": db_id,
         "data_source_id": ds.group(1) if ds else None,
-        "tags_exists": isinstance(tags, dict) and tags.get("type") == "multi_select",
+        "tags_exists": tags_exists,
         "tags_conflict": isinstance(tags, dict) and tags.get("type") != "multi_select",
         "tag_options": options,
+        # False: the Tags column exists but its option list couldn't be read
+        # (missing, malformed, or contradicted by the rest of the response).
+        # Then "SET MULTI_SELECT(...)" must not be sent: it replaces the list.
+        "tag_options_known": options_known,
         "session_prop": isinstance(sess, dict) and sess.get("type") in ("text", "rich_text"),
         "session_conflict": isinstance(sess, dict) and sess.get("type") not in ("text", "rich_text"),
     }
+
+
+def _parse_tag_options(prop):
+    """``({name: color}, known)`` for a multi-select property's options.
+
+    ``known`` is False when the list is missing or any entry is unreadable:
+    a partial list must never be written back.
+    """
+    raw = prop.get("options")
+    if raw is None and isinstance(prop.get("multi_select"), dict):
+        raw = prop["multi_select"].get("options")  # REST-API shape
+    if not isinstance(raw, list):
+        return {}, False
+    options = {}
+    for opt in raw:
+        if not (isinstance(opt, dict) and isinstance(opt.get("name"), str)):
+            return options, False
+        options[opt["name"]] = opt.get("color") if isinstance(opt.get("color"), str) else "default"
+    return options, True
+
+
+_TAGS_Q = re.escape(TAGS_PROP)
+# Signs, outside the parsed schema JSON, that the Tags column has options:
+# a JSON property object with a non-empty "options" list, or DDL listing them.
+_TAG_OPTION_HINTS = (
+    re.compile(r'"' + _TAGS_Q + r'"\s*:\s*\{[^{}]*?(?:\{[^{}]*?)?"options"\s*:\s*\[\s*[^\]\s]'),
+    re.compile(r"[\"']" + _TAGS_Q + r"[\"']\s+MULTI_SELECT\s*\(\s*'", re.I),
+)
+_TAG_OPTION_LINE_HINT = re.compile(r"\boptions?\b\W{0,5}[\[({]?\s*[\"'{]", re.I)
+
+
+def _text_suggests_tag_options(text):
+    if any(rx.search(text) for rx in _TAG_OPTION_HINTS):
+        return True
+    for line in text.splitlines():
+        if (f'"{TAGS_PROP}"' in line or f"'{TAGS_PROP}'" in line) and _TAG_OPTION_LINE_HINT.search(line):
+            return True
+    return False
+
+
+# Notion option names: "Commas are not allowed" (property object reference,
+# Select options; page property values: "Option names cannot contain
+# commas"). Longer names fail validation with "name.length should be ≤ 100".
+_TAG_MAX_LEN = 100
+
+
+def _sanitize_tags(tags):
+    """Tag names Notion accepts as multi-select options, in order.
+
+    Commas become spaces, whitespace is collapsed, names are cut to 100
+    characters, and empty or case-insensitive duplicates (Notion matches
+    option names without regard to case) are dropped.
+    """
+    out, seen = [], set()
+    for tag in tags or []:
+        if not isinstance(tag, str):
+            continue
+        name = re.sub(r"\s+", " ", tag.replace(",", " ")).strip()
+        if len(name) > _TAG_MAX_LEN:
+            name = name[:_TAG_MAX_LEN].rstrip()
+        if name != tag.strip():
+            logging.warning(f"Tag {tag!r} isn't a valid Notion option name; sending it as {name!r}")
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _writable_tags(tags, schema):
+    """Tags safe to write to a page, or None to leave the page's Tags alone.
+
+    With an unknown option list, only tags known to exist (read from the
+    partial list) are sent. If none are known the property is left untouched:
+    an empty list would clear the page's tags.
+    """
+    if not tags or not schema or not schema.get("tags_exists") or schema.get("tag_options_known", True):
+        return tags
+    existing = {n.casefold() for n in schema["tag_options"]}
+    known = [t for t in tags if t.casefold() in existing]
+    if len(known) < len(tags):
+        logging.warning(
+            f"Not writing tags {sorted(set(tags) - set(known))} to Notion: the database's Tags options couldn't "
+            "be read, so they can't safely be added"
+        )
+    return known or None
 
 
 def _options_sql(options):
@@ -667,7 +843,44 @@ def _schema_satisfies(schema, needed_tags):
         return False
     if not needed_tags or schema["tags_conflict"]:
         return True
-    return schema["tags_exists"] and needed_tags <= set(schema["tag_options"])
+    if not schema.get("tag_options_known", True):
+        return False  # re-read next time; maybe the list parses then
+    existing = {name.casefold() for name in schema["tag_options"]}
+    return schema["tags_exists"] and all(t.casefold() in existing for t in needed_tags)
+
+
+# Failures worth retrying as-is: rate limits, timeouts, Notion/gateway
+# outages, conflicts (status-codes reference: rate_limited 429,
+# conflict_error 409, internal_server_error 500, bad_gateway 502,
+# service_unavailable 503, gateway_timeout 504, service_overload 529).
+_TRANSIENT_MARKERS = (
+    "rate limit",
+    "rate_limited",
+    "conflict",
+    "timeout",
+    "timed out",
+    "try again",
+    "unavailable",
+    "overloaded",
+    "bad gateway",
+    "internal_server_error",
+    "unexpected error",
+    "connection",
+    # Auth trouble isn't the options' fault (the queue pauses on these).
+    "session expired",
+    "unauthorized",
+    "not connected",
+)
+
+
+def _is_transient_error(err):
+    if isinstance(err, (requests.ConnectionError, requests.Timeout)):
+        return True
+    status = getattr(getattr(err, "response", None), "status_code", None)
+    if isinstance(status, int) and (status in (408, 409, 429) or status >= 500):
+        return True
+    lower = str(err).lower()
+    return any(marker in lower for marker in _TRANSIENT_MARKERS)
 
 
 def _ensure_schema(tags):
@@ -681,7 +894,11 @@ def _ensure_schema(tags):
       DDL ``SET MULTI_SELECT(...)`` replaces the whole option list, so we send
       the union of the freshly-fetched options (keeping their colours) and the
       new ones — never a list built from a cache.
+    - If the fresh option list can't be read (missing/malformed, or empty
+      while the response mentions options), it is unknown and never SET.
     - No Tags column is created for a recording without tags.
+    - A transient failure to add options raises a retryable error; Notion
+      rejecting the options themselves raises a permanent one.
 
     Returns the schema dict (as after the changes), or None if the database
     layout couldn't be read (then no change is attempted).
@@ -690,7 +907,7 @@ def _ensure_schema(tags):
     db_id = notion.get_database_id()
     if not db_id:
         return None
-    needed = {t for t in (tags or []) if isinstance(t, str) and t}
+    needed = set(_sanitize_tags(tags))
     with _schema_lock:
         cache = _schema_cache if _schema_cache and _schema_cache.get("db_id") == db_id else None
         if cache and _schema_satisfies(cache, needed):
@@ -713,11 +930,10 @@ def _ensure_schema(tags):
                 notion.mcp_call("notion-update-data-source", {"data_source_id": target, "statements": statement})
                 return None
             except Exception as e:
-                err = str(e)
-                if any(w in err.lower() for w in ("already exists", "duplicate")):
+                if any(w in str(e).lower() for w in ("already exists", "duplicate")):
                     return None
                 logging.warning(f"Notion schema change failed ({statement[:60]}…): {e}")
-                return err
+                return e
 
         if needed and not fresh["tags_conflict"]:
             if not fresh["tags_exists"]:
@@ -726,8 +942,13 @@ def _ensure_schema(tags):
                 if option_error is None:
                     fresh["tags_exists"] = True
                     fresh["tag_options"] = new_opts
+            elif not fresh.get("tag_options_known", True):
+                # Never SET the list from a view we couldn't read: it would
+                # replace the user's options. The page gets known tags only.
+                logging.warning("Not adding Notion tag options: the current option list couldn't be read")
             else:
-                missing = needed - set(fresh["tag_options"])
+                existing = {name.casefold() for name in fresh["tag_options"]}
+                missing = {t for t in needed if t.casefold() not in existing}
                 if missing:
                     union = dict(fresh["tag_options"])
                     union.update(dict.fromkeys(missing, "default"))
@@ -741,8 +962,12 @@ def _ensure_schema(tags):
 
         _schema_cache = fresh
         if option_error is not None:
-            # Writing tags Notion doesn't know would fail validation; retry later.
-            raise ValueError(f"Could not add tag options to the Notion database: {option_error}")
+            if _is_transient_error(option_error):
+                # Writing tags Notion doesn't know would fail validation; retry later.
+                raise ValueError(f"Could not add tag options to the Notion database: {option_error}")
+            # Notion refused the options themselves: retrying the same names
+            # fails the same way, so the queue gives this job up.
+            raise ValueError(f"Notion rejected the tag options for this recording: {option_error}")
         return fresh
 
 
@@ -750,8 +975,8 @@ def _page_properties(title, tags, session_id, schema):
     """Properties for a page write. ``title`` None leaves the title alone.
 
     Notion MCP takes multi-select values as a JSON-array string. Tags are only
-    sent when the column exists (an empty list clears them); with an unknown
-    schema, only non-empty tags are sent.
+    sent when the column exists (an empty list clears them, None leaves them
+    alone); with an unknown schema, only non-empty tags are sent.
     """
     props = {}
     if title is not None:
@@ -760,8 +985,8 @@ def _page_properties(title, tags, session_id, schema):
         if tags:
             props[TAGS_PROP] = json.dumps(tags)
         return props
-    if schema["tags_exists"]:
-        props[TAGS_PROP] = json.dumps(tags or [])
+    if schema["tags_exists"] and tags is not None:
+        props[TAGS_PROP] = json.dumps(tags)
     if schema["session_prop"]:
         props[SESSION_ID_PROP] = session_id
     return props
@@ -1106,29 +1331,51 @@ def _push_locked(session_id, t_data, config, mode, poll_budget):
 
     custom_title = config.get("recording_names", {}).get(session_id, "")
     app_title = custom_title or t_data.get("auto_title", "") or session_id
-    tags = config.get("recording_tags", {}).get(session_id, [])
+    tags = _sanitize_tags(config.get("recording_tags", {}).get(session_id, []))
 
     schema = _ensure_schema(tags)
+    tags = _writable_tags(tags, schema)
 
     page_url = _get_notion_page_url(session_id)
-    if not page_url:
-        page_url, pending = _resume_pending_create(session_id, poll_budget)
-        if pending:
-            return {"pending": True, "message": "Notion is still creating the page"}
-    if not page_url:
-        page_url = _find_page_by_session_id(session_id, schema)
-        if page_url:
-            logging.info(f"Found existing Notion page for {session_id} by Session ID; updating it")
-            _save_notion_page_url(session_id, page_url)
-    if not page_url:
-        if mode == MODE_PROPERTIES:
-            return {"pushed": False, "skipped": True, "url": ""}
-        return _create_page(session_id, t_data, app_title, tags, schema, poll_budget)
+    gone_id = None
+    while True:
+        if not page_url:
+            page_url, pending = _resume_pending_create(session_id, poll_budget)
+            if pending:
+                return {"pending": True, "message": "Notion is still creating the page"}
+        if not page_url:
+            page_url = _find_page_by_session_id(session_id, schema)
+            if page_url and gone_id and _extract_page_id(page_url) == gone_id:
+                page_url = None  # the search index still lists the page we just found gone
+            if page_url:
+                logging.info(f"Found existing Notion page for {session_id} by Session ID; updating it")
+                _save_notion_page_url(session_id, page_url)
+        if not page_url:
+            if mode == MODE_PROPERTIES:
+                return {"pushed": False, "skipped": True, "url": ""}
+            return _create_page(session_id, t_data, app_title, tags, schema, poll_budget)
 
-    page_id = _extract_page_id(page_url)
-    if not page_id:
-        return {"error": "Could not parse page ID from saved Notion URL"}
+        page_id = _extract_page_id(page_url)
+        if not page_id:
+            return {"error": "Could not parse page ID from saved Notion URL"}
 
+        try:
+            return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode)
+        except Exception as e:
+            if gone_id is not None or not _is_page_gone_error(e):
+                raise
+            if mode == MODE_PROPERTIES:
+                # Recreating the page needs its body: the queue turns this
+                # job into a full push (once).
+                return {"error": f"The Notion page for this recording is gone: {e}", "page_gone": True}
+            logging.warning(f"Notion page for {session_id} was deleted or archived ({e}); recreating it")
+            _forget_notion_page_url(session_id, page_url)
+            gone_id = page_id
+            page_url = None
+
+
+def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode):
+    """Update an existing page: properties, then (full mode) the app section."""
     resolved_title = _resolve_title_for_update(session_id, app_title, page_url)
     properties = _page_properties(resolved_title, tags, session_id, schema)
     if properties:

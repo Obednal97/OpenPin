@@ -548,7 +548,7 @@ def test_queue_not_paused_by_uuid_containing_401(env, mcp_http, queue_state):
     from app.utils import notion_queue
 
     _setup_existing_page(env)
-    mcp_http(_FakeResp(_tool_error("Could not find page 2e80f387-401a-4c3d-9e8f-0123456789ab")))
+    mcp_http(_FakeResp(_tool_error("Conflict occurred while saving block 2e80f387-401a-4c3d-9e8f-0123456789ab")))
     notion_queue.enqueue(SID)
     _run_queue_once(queue_state)
     assert queue_state.paused is False
@@ -1404,6 +1404,7 @@ def test_queue_pending_async_create_is_retried(env, queue_state):
         _run_queue_once(queue_state)
     p.assert_called_once_with(SID, mode="full")
     assert queue_state.entries[SID]["attempts"] == 1
+    assert queue_state.entries[SID]["failures"] == 0  # waiting doesn't use up the cap
     assert queue_state.failed == []
 
 
@@ -1505,3 +1506,408 @@ def test_rename_sync_keeps_title_user_changed_in_notion(env, fake, queue_state):
     _run_queue_once(queue_state)
     props = fake.of("notion-update-page")[0]["properties"]
     assert "title" not in props
+
+
+# ---------------------------------------------------------------------------
+# Review 2 / 1c: attempt cap — no job retries hourly forever
+# ---------------------------------------------------------------------------
+
+
+def _fail_once(queue_state, error="rate limited", **kw):
+    for e in queue_state.entries.values():
+        e["next_retry_at"] = 0
+    entry = queue_state.pop_due()
+    assert entry is not None
+    queue_state.record_failure(entry, error, permanent=False, **kw)
+
+
+def test_queue_gives_up_after_max_failures(queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID, "full")
+    for _ in range(notion_queue._MAX_FAILURES - 1):
+        _fail_once(queue_state)
+    assert queue_state.entries[SID]["failures"] == notion_queue._MAX_FAILURES - 1
+    assert queue_state.failed == []
+
+    _fail_once(queue_state)
+    assert queue_state.entries == {}
+    (failed,) = queue_state.failed
+    assert failed["session_id"] == SID and failed["kind"] == "full"
+    assert failed["error"].startswith(f"Gave up after {notion_queue._MAX_FAILURES} failed attempts: rate limited")
+    on_disk = json.loads(queue_state.path.read_text())
+    assert on_disk["entries"] == {} and on_disk["failed"][0]["session_id"] == SID
+
+    # "Retry" gives it a fresh budget.
+    assert queue_state.retry_failed() == 1
+    assert queue_state.entries[SID].get("failures", 0) == 0
+
+
+def test_queue_failure_count_survives_restart(queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID)
+    _fail_once(queue_state)
+    _fail_once(queue_state)
+    reloaded = notion_queue._State(queue_state.path)
+    assert reloaded.entries[SID]["failures"] == 2
+
+
+def test_queue_waits_do_not_count_towards_cap(queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID)
+    for _ in range(notion_queue._MAX_FAILURES * 2):
+        _fail_once(queue_state, "Notion not connected", counts=False)
+    assert queue_state.entries[SID]["failures"] == 0
+    assert queue_state.failed == []
+
+
+def test_queue_auth_pause_does_not_count(env, mcp_http, queue_state):
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(_tool_error("unauthorized: invalid_token")))
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID)
+    _run_queue_once(queue_state)
+    assert queue_state.paused is True
+    assert queue_state.entries[SID]["failures"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Review 2 / 1a: the saved page was deleted or archived in Notion
+# ---------------------------------------------------------------------------
+
+NEW_PAGE_URL = "https://www.notion.so/myteam/Recreated-abcdefabcdefabcdefabcdefabcdef12"
+NOT_FOUND = (
+    "object_not_found: Could not find page with ID: 2e80f387-aa1b-4c3d-9e8f-0123456789ab. "
+    "Make sure the relevant pages and databases are shared with your integration."
+)
+ARCHIVED = "validation_error: Can't edit block that is archived. You must unarchive the block before editing."
+
+
+def _setup_page_in_transcript(env, **cfg):
+    from app.utils.config import save_config
+
+    save_config({"notion_page_urls": {SID: PAGE_URL}, "recording_tags": {SID: ["A"]}, **cfg})
+    _write_transcript(env.trn, SID, {"text": "hello", "auto_title": "Standup", "notion_page_url": PAGE_URL})
+
+
+def _transcript(env):
+    return json.loads((env.trn / f"{SID}.json").read_text())
+
+
+@pytest.mark.parametrize("error", [NOT_FOUND, ARCHIVED])
+def test_full_push_recreates_deleted_or_archived_page(env, fake, error):
+    from app.routes import notion as rn
+
+    _setup_page_in_transcript(env)
+    fake.handlers["notion-update-page"] = _raise(error)
+    fake.handlers["notion-create-pages"] = _text_result({"pages": [{"url": NEW_PAGE_URL}]})
+    seen = []
+
+    def lookup(sid, schema):
+        # By now the stale URL is gone from both config and transcript.
+        seen.append((_cfg().get("notion_page_urls", {}).get(sid), _transcript(env).get("notion_page_url")))
+        return None
+
+    with patch.object(rn, "_find_page_by_session_id", side_effect=lookup):
+        out = rn.push_to_notion(SID, mode="full")
+    assert out == {"pushed": True, "updated": False, "url": NEW_PAGE_URL}
+    assert seen == [(None, None)]
+    assert len(fake.of("notion-update-page")) == 1  # tried once, then recreated
+    assert len(fake.of("notion-create-pages")) == 1
+    assert _cfg()["notion_page_urls"][SID] == NEW_PAGE_URL
+    assert _transcript(env)["notion_page_url"] == NEW_PAGE_URL
+
+
+def test_full_push_ignores_lookup_hit_on_the_gone_page(env, fake):
+    from app.routes import notion as rn
+
+    _setup_page_in_transcript(env)
+    fake.handlers["notion-update-page"] = _raise(NOT_FOUND)
+    fake.handlers["notion-create-pages"] = _text_result({"pages": [{"url": NEW_PAGE_URL}]})
+    with patch.object(rn, "_find_page_by_session_id", return_value=PAGE_URL):
+        out = rn.push_to_notion(SID, mode="full")
+    assert out["url"] == NEW_PAGE_URL
+    assert len(fake.of("notion-create-pages")) == 1
+
+
+def test_full_push_uses_other_existing_page_found_by_session_id(env, fake):
+    from app.routes import notion as rn
+
+    _setup_page_in_transcript(env)
+    calls = {"n": 0}
+
+    def update(params):
+        calls["n"] += 1
+        if params["page_id"] == rn._extract_page_id(PAGE_URL):
+            raise ValueError(NOT_FOUND)
+        return _text_result({"ok": True})
+
+    fake.handlers["notion-update-page"] = update
+    fake.handlers["notion-fetch"] = _page_fetch("Standup", "")
+    with patch.object(rn, "_find_page_by_session_id", return_value=OTHER_URL):
+        out = rn.push_to_notion(SID, mode="full")
+    assert out["url"] == OTHER_URL and out["updated"] is True
+    assert fake.of("notion-create-pages") == []
+    assert _cfg()["notion_page_urls"][SID] == OTHER_URL
+
+
+def test_forget_page_url_keeps_a_url_saved_meanwhile(env):
+    from app.routes import notion as rn
+    from app.utils.config import save_config
+
+    save_config({"notion_page_urls": {SID: NEW_PAGE_URL}})
+    _write_transcript(env.trn, SID, {"text": "x", "notion_page_url": NEW_PAGE_URL})
+    rn._forget_notion_page_url(SID, PAGE_URL)
+    assert _cfg()["notion_page_urls"][SID] == NEW_PAGE_URL
+    assert _transcript(env)["notion_page_url"] == NEW_PAGE_URL
+
+
+def test_properties_job_on_gone_page_becomes_full_push_once(env, fake, queue_state):
+    from app.utils import notion_queue
+
+    _setup_page_in_transcript(env)
+    fake.handlers["notion-update-page"] = _raise(NOT_FOUND)
+    fake.handlers["notion-create-pages"] = _text_result({"pages": [{"url": NEW_PAGE_URL}]})
+
+    notion_queue.enqueue(SID, "properties")
+    _run_queue_once(queue_state)
+    entry = queue_state.entries[SID]
+    assert entry["kind"] == "full" and entry["converted_from"] == "properties"
+    assert entry["attempts"] == 0 and entry["next_retry_at"] <= time.time()
+    assert fake.of("notion-create-pages") == []  # properties mode never creates
+    assert _cfg()["notion_page_urls"][SID] == PAGE_URL  # untouched until the full push
+
+    _run_queue_once(queue_state)  # the full push recreates the page
+    assert queue_state.entries == {} and queue_state.failed == []
+    assert _cfg()["notion_page_urls"][SID] == NEW_PAGE_URL
+
+
+def test_converted_job_is_not_converted_again(queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue(SID, "properties")
+    entry = queue_state.pop_due()
+    assert queue_state.convert_to_full(entry, "gone") is True
+    entry = queue_state.pop_due()
+    assert queue_state.convert_to_full(entry, "gone") is False  # already full
+
+
+def test_full_push_gives_up_when_database_is_gone(env, fake, queue_state):
+    from app.utils import notion_queue
+
+    _setup_page_in_transcript(env)
+    fake.handlers["notion-update-page"] = _raise(NOT_FOUND)
+    fake.handlers["notion-create-pages"] = _raise(
+        "object_not_found: Could not find database with ID: be907abe-510e-4116-a3d1-7ea71018c06f."
+    )
+    notion_queue.enqueue(SID, "full")
+    _run_queue_once(queue_state)
+    assert queue_state.entries == {}
+    assert "Could not find database" in queue_state.failed[0]["error"]
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        NOT_FOUND,
+        ARCHIVED,
+        "Notion MCP rejected the request (400): Could not find block with ID: x",
+        '{"object":"error","status":404,"code":"object_not_found","message":"Could not find page with ID: x"}',
+    ],
+)
+def test_page_gone_detection(msg):
+    from app.routes import notion as rn
+
+    assert rn._is_page_gone_error(ValueError(msg))
+
+
+def test_page_gone_detection_reads_http_error_body():
+    import requests
+
+    from app.routes import notion as rn
+
+    resp = types.SimpleNamespace(status_code=404, text='{"code":"object_not_found"}')
+    assert rn._is_page_gone_error(requests.HTTPError("Notion MCP HTTP 404: x", response=resp))
+
+
+@pytest.mark.parametrize("msg", ["rate limited", "Notion MCP HTTP 404: Session not found", "Gateway Timeout"])
+def test_page_gone_detection_ignores_other_errors(msg):
+    from app.routes import notion as rn
+
+    assert not rn._is_page_gone_error(ValueError(msg))
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "object_not_found: Could not find database with ID: x",
+        "restricted_resource: API token does not have access to this resource.",
+        ARCHIVED,
+    ],
+)
+def test_not_found_and_archived_errors_are_permanent(msg):
+    from app.utils import notion_queue
+
+    assert notion_queue._is_permanent_error(msg)
+
+
+# ---------------------------------------------------------------------------
+# Review 2 / 1b: tag names Notion rejects
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_tags():
+    from app.routes import notion as rn
+
+    tags = ["Smith, John", "x" * 150, "Work", "work", "  ", ",", 7, "ok"]
+    assert rn._sanitize_tags(tags) == ["Smith John", "x" * 100, "Work", "ok"]
+
+
+def test_push_sends_sanitized_tags(env, fake):
+    from app.routes import notion as rn
+    from app.utils.config import save_config
+
+    save_config({"notion_page_urls": {SID: PAGE_URL}, "recording_tags": {SID: ["Q1,Q2", "B"]}})
+    _write_transcript(env.trn, SID, {"text": "x"})
+    with patch.object(rn, "_ensure_schema", return_value=_schema()) as ens:
+        rn.push_to_notion(SID, mode="properties")
+    ens.assert_called_once_with(["Q1 Q2", "B"])
+    assert json.loads(fake.of("notion-update-page")[0]["properties"]["Tags"]) == ["Q1 Q2", "B"]
+
+
+def test_schema_sanitises_option_names_in_ddl(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    rn._ensure_schema(["a, b"])
+    assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('A':blue, 'B':red, 'a b':default)"]
+
+
+def test_schema_matches_existing_options_case_insensitively(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    rn._ensure_schema(["a", "b"])
+    assert _ddl(schema_fake) == []
+
+
+def test_schema_rejection_is_permanent(schema_fake):
+    from app.routes import notion as rn
+    from app.utils import notion_queue
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    schema_fake.handlers["notion-update-data-source"] = _raise(
+        "Notion MCP rejected the request (400): Invalid select option, commas not allowed"
+    )
+    with pytest.raises(ValueError, match="rejected the tag options") as exc:
+        rn._ensure_schema(["C"])
+    assert notion_queue._is_permanent_error(str(exc.value))
+
+
+def test_schema_transient_failure_is_retryable(schema_fake):
+    from app.routes import notion as rn
+    from app.utils import notion_queue
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    schema_fake.handlers["notion-update-data-source"] = _raise("service_unavailable: Notion is unavailable")
+    with pytest.raises(ValueError, match="Could not add tag options") as exc:
+        rn._ensure_schema(["C"])
+    assert not notion_queue._is_permanent_error(str(exc.value))
+
+
+# ---------------------------------------------------------------------------
+# Review 2 / 2: never SET the option list from an unreadable view
+# ---------------------------------------------------------------------------
+
+
+def _db_fetch_with_extra(schema_props, extra):
+    state = json.dumps({"schema": schema_props})
+    text = (
+        f'<database url="https://www.notion.so/{DB_HEX}"><data-source url="collection://{DS_UUID}">'
+        f"<data-source-state>{state}</data-source-state>\n{extra}\n</data-source></database>"
+    )
+    return _text_result({"metadata": {"type": "database"}, "title": "Meetings", "url": "x", "text": text})
+
+
+@pytest.mark.parametrize(
+    "tags_prop",
+    [
+        {"type": "multi_select"},  # no options key
+        {"type": "multi_select", "options": None},
+        {"type": "multi_select", "options": "A, B"},
+        {"type": "multi_select", "options": [{"name": "A", "color": "blue"}, "B"]},  # one unreadable entry
+        {"type": "multi_select", "options": [{"label": "A"}]},
+    ],
+)
+def test_schema_unparseable_options_are_unknown_and_not_altered(schema_fake, tags_prop):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": tags_prop, "Session ID": {"type": "text"}})
+    s = rn._ensure_schema(["A", "C"])
+    assert _ddl(schema_fake) == []
+    assert s["tags_exists"] is True and s["tag_options_known"] is False
+    # Not cached as good enough: the next push re-reads the schema.
+    assert rn._schema_satisfies(s, {"A"}) is False
+
+
+def test_unknown_options_page_gets_only_known_tags(schema_fake):
+    from app.routes import notion as rn
+
+    tags_prop = {"type": "multi_select", "options": [{"name": "A", "color": "blue"}, 42]}
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": tags_prop, "Session ID": {"type": "text"}})
+    s = rn._ensure_schema(["A", "C"])
+    assert rn._writable_tags(["A", "C"], s) == ["A"]
+    props = rn._page_properties("T", rn._writable_tags(["A", "C"], s), SID, s)
+    assert json.loads(props["Tags"]) == ["A"]
+    # None known: leave the page's tags alone rather than clearing them.
+    assert rn._writable_tags(["C"], s) is None
+    assert "Tags" not in rn._page_properties("T", None, SID, s)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '<sqlite-table>CREATE TABLE t ("Tags" TEXT -- multi_select, options: "A", "B")</sqlite-table>',
+        '{"Tags": {"type": "multi_select", "options": [{"name": "A", "color": "blue"}]}}',
+        "ALTER: \"Tags\" MULTI_SELECT('A':blue)",
+    ],
+)
+def test_schema_empty_options_contradicted_by_text_not_altered(schema_fake, extra):
+    from app.routes import notion as rn
+
+    props = {"Tags": {"type": "multi_select", "options": []}, "Session ID": {"type": "text"}}
+    schema_fake.handlers["notion-fetch"] = _db_fetch_with_extra(props, extra)
+    s = rn._ensure_schema(["C"])
+    assert _ddl(schema_fake) == []
+    assert s["tag_options_known"] is False
+
+
+def test_schema_genuinely_empty_options_are_added(schema_fake):
+    from app.routes import notion as rn
+
+    # Other columns' options in the state block mustn't count as Tags options.
+    props = {
+        "Tags": {"type": "multi_select", "options": []},
+        "Status": {"type": "select", "options": [{"name": "Done", "color": "green"}]},
+        "Session ID": {"type": "text"},
+    }
+    schema_fake.handlers["notion-fetch"] = _db_fetch(props)
+    s = rn._ensure_schema(["C"])
+    assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('C':default)"]
+    assert s["tag_options_known"] is True
+
+
+def test_push_with_unknown_options_still_pushes_page(env, fake):
+    from app.routes import notion as rn
+
+    _setup_existing_page(env)  # recording tagged ["A"]
+    fake.handlers["notion-fetch"] = _db_fetch({"Tags": {"type": "multi_select"}, "Session ID": {"type": "text"}})
+    with patch.object(rn, "_ensure_schema", env.real.ensure_schema), patch.object(rn, "_schema_cache", None):
+        out = rn.push_to_notion(SID, mode="properties")
+    assert out["pushed"] is True
+    assert fake.of("notion-update-data-source") == []
+    props = fake.of("notion-update-page")[0]["properties"]
+    assert "Tags" not in props and props["Session ID"] == SID
