@@ -104,8 +104,19 @@ Reply (APK):
 | len−4 | 1 | Version type, ASCII |
 | len−3 | 3 | Version (u24) |
 
-The app does not read the reply. It only logs whether each one arrived. A rejected token is
-therefore not detected here; later commands just get no reply.
+The app (`ble_proto.parse_handshake_reply()`, `handshake_verdict()`, both `device.py` and the
+worker) logs both replies' raw bytes and reads the status and port version. The status byte's
+meaning is **Unverified**, and the docs only say a rejected token makes later commands go
+unanswered, so (**Implemented**):
+
+| Status in the replies | Device answers cmd 4 (or a cmd 3 probe) | Result |
+|---|---|---|
+| any | yes | connected (a non-zero status is logged as a warning) |
+| non-zero in either | no | rejected: "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device" |
+| no reply to either | no | fails: "didn't answer the pairing handshake" |
+| 0 | no | connected, as before (weak link) |
+
+A failed handshake disconnects and never marks the device connected.
 
 ### cmd 2 — Get SSN
 
@@ -157,8 +168,11 @@ Request:
 | 7 | 1 | Time zone hours (signed) |
 | 8 | 1 | Time zone minutes (signed) |
 
-The app always sends time zone 0, 0 (UTC). Whether the device uses the time zone for anything is
-**Unverified**.
+The app sends the Mac's UTC offset at that moment, DST included (the format has no separate DST
+field): hours and minutes, both with the offset's sign, so UTC+5:30 is `05 1E`, UTC−5 is `FB 00`
+and UTC−3:30 is `FD E2` (`ble_proto.time_sync_request()`, used by `device.py` and the worker;
+**Implemented**). Before this it always sent 0, 0. The sign convention for the minutes and whether
+the device uses the time zone for anything are **Unverified**.
 
 Reply (APK): Unix time at 3 (u32), time zone at 7 (signed byte), `hasStatistics` at 8 (== 1,
 optional).
@@ -207,11 +221,12 @@ This is the battery source. Do not use GATT `0x2A19` (see [PROTOCOL.md](PROTOCOL
 ### cmd 10 — Open WiFi
 
 **Confirmed** for opening: `[1,10,0]` makes the device start its hotspot. Reply (APK): status at 3.
-The app doesn't read the reply.
+The worker logs the reply ("Hotspot open reply: …").
 
 The app closes the hotspot with `[1,10,0,0]` (`_close_hotspot()`). Whether that closes it is
-**Unverified**: the SDK has a separate CloseWiFi reply (cmd 13), and the worker never sees the reply
-to its close request.
+**Unverified**: the SDK has a separate CloseWiFi reply (cmd 13). The worker accepts either a cmd 10
+or a cmd 13 reply to its close request and logs it ("Hotspot close reply: …"), waiting at most
+3 s.
 
 ### cmd 13 — Close WiFi
 
@@ -260,9 +275,13 @@ Entry width depends on an integer the SDK is given, probably the port version (*
 | 2–6 | 9 bytes | + one byte |
 | 7 and up | 10 bytes | + byte 8, byte 9 (meaning unknown; the WiFi list reads them as a u16 "codec") |
 
-The app always parses 10-byte entries (right for the NotePin S), ignores bytes 8–9, skips entries
-with session ID 0 or size outside 1 byte–500 MB, and removes duplicates. Unlike the SDK, it doesn't
-check the start index at 9 against the entries it already has.
+The app (`ble_proto.FileListAssembler`) parses 10-byte entries (right for the NotePin S), ignores
+bytes 8–9, skips entries with session ID 0 or size outside 1 byte–500 MB, and removes duplicates.
+Like the SDK, it uses a notification only when its start index at 9 continues the entries it
+already has: a retransmitted one is skipped, one that arrives early is held until the gap fills
+(**Implemented**). If a notification's entry bytes aren't a multiple of 10 but are a multiple of
+the width its port version suggests, that width is used; if they fit neither, the notification is
+dropped and logged rather than misread (the SDK silently ignores the remainder).
 
 Size is the number of bytes the download should deliver, 512-byte header included (assumed; see
 the open questions in the [README](README.md#open-questions)).

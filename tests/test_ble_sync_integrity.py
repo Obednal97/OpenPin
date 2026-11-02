@@ -46,15 +46,21 @@ class FakeDevice:
       drop          40 % of the bytes, then the link drops
       slow          40 % of the bytes, then silence (used for mid-file abort)
       refuse        cmd-28 reply only (status from start_status, default 1), no data
+      duplicate     like complete, but every data packet is sent twice (retransmits)
+      gap           like complete, but the third data packet never arrives
     start_status[sid]: byte 7 of the cmd-28 reply (default 0).
     delete_mode: ok | none (no reply) | fail (status 1) | wrong_sid
+    inject[sid]: plaintext packets sent mid-stream while `sid` downloads (e.g. a
+      late data packet, end marker or tail from another session).
     """
 
-    def __init__(self, files, behaviours=None, delete_mode="ok", start_status=None):
+    def __init__(self, files, behaviours=None, delete_mode="ok", start_status=None, inject=None, scripted=None):
         self.files = files  # sid -> bytes
         self.behaviours = behaviours or {}
         self.start_status = start_status or {}
         self.delete_mode = delete_mode
+        self.inject = inject or {}
+        self.scripted = scripted or {}  # cmd id -> plaintext notifications sent in reply
         self.key, self.nonce, self.aad = os.urandom(32), os.urandom(12), os.urandom(12)
         self.cipher = ChaCha20Poly1305(self.key)
         self.sent = []  # cmd ids written by the app
@@ -72,14 +78,24 @@ class FakeDevice:
 
     async def stream(self, sid, mode):
         data = self.files[sid]
-        cut = len(data) if mode in ("complete", "end_only", "error_end") else int(len(data) * 0.4)
+        full = ("complete", "end_only", "error_end", "duplicate", "gap", "other_sid", "index_offsets")
+        cut = len(data) if mode in full else int(len(data) * 0.4)
         if mode == "refuse":
             self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 1)]))
             return
         self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 0)]))
-        for off in range(0, cut, CHUNK):
+        psid = sid + 1000 if mode == "other_sid" else sid  # a device that tags data with another id
+        for n, off in enumerate(range(0, cut, CHUNK)):
             chunk = data[off : min(off + CHUNK, cut)]
-            self.notify(bytes([2]) + struct.pack("<II", sid, off) + bytes([len(chunk)]) + chunk)
+            poff = n if mode == "index_offsets" else off  # offsets counted in packets, not bytes
+            pkt = bytes([2]) + struct.pack("<II", psid, poff) + bytes([len(chunk)]) + chunk
+            if not (mode == "gap" and n == 2):
+                self.notify(pkt)
+            if mode == "duplicate" and n >= 1:
+                self.notify(pkt)
+            if n == 1:
+                for extra in self.inject.get(sid, []):
+                    self.notify(extra)
             await asyncio.sleep(0)
         if mode in ("stall", "slow"):
             return
@@ -88,17 +104,20 @@ class FakeDevice:
             dev._on_disconnect(self.client)  # what bleak's disconnected_callback does
             return
         err = 3 if mode == "error_end" else 0
-        self.notify(bytes([2]) + struct.pack("<II", sid, 0xFFFFFFFF) + bytes([err]))
-        if mode in ("complete", "error_end"):
+        self.notify(bytes([2]) + struct.pack("<II", psid, 0xFFFFFFFF) + bytes([err]))
+        if mode in ("complete", "error_end", "duplicate", "gap", "other_sid", "index_offsets"):
             crc = dev.crc16_variants(data)["XMODEM"]
-            self.reply(29, struct.pack("<IH", sid, crc))
+            self.reply(29, struct.pack("<IH", psid, crc))
 
     def on_write(self, ct):
         pt = self.cipher.decrypt(self.nonce, bytes(ct), self.aad)[4:]
         cid = struct.unpack_from("<H", pt, 1)[0]
         self.sent.append(cid)
         loop = asyncio.get_running_loop()
-        if cid == 28:
+        if cid in self.scripted:
+            for pkt in self.scripted[cid]:
+                loop.call_soon(self.notify, pkt)
+        elif cid == 28:
             sid = struct.unpack_from("<I", pt, 3)[0]
             self._tasks.append(loop.create_task(self.stream(sid, self.behaviours.get(sid, "complete"))))
         elif cid == 30:
@@ -287,6 +306,161 @@ def test_disconnect_stops_remaining_files(env, app_key):
     assert all(f["session_id"] != 402 for f in result["files"])
 
 
+def _data_pkt(sid, off, chunk):
+    return bytes([2]) + struct.pack("<II", sid, off) + bytes([len(chunk)]) + chunk
+
+
+def _end_pkt(sid, err=0):
+    return bytes([2]) + struct.pack("<II", sid, 0xFFFFFFFF) + bytes([err])
+
+
+def _tail_pkt(sid, crc=0):
+    return bytes([1]) + struct.pack("<H", 29) + struct.pack("<IH", sid, crc)
+
+
+def test_packets_from_another_session_are_ignored(env, app_key, caplog):
+    """A late data packet, end marker and tail from an earlier (stalled) file
+    arriving mid-download neither corrupt nor end the current file."""
+    data = make_plaud_file(app_key)
+    stale = [_data_pkt(999, CHUNK * 2, b"\xee" * CHUNK), _end_pkt(999), _tail_pkt(999)]
+    device = FakeDevice({1001: data}, inject={1001: stale})
+    with caplog.at_level("INFO"):
+        result = run_sync(device, [(1001, len(data))])
+    e = entry(result, 1001)
+    assert e["status"] == "new"
+    assert result["deleted_from_device"] == [1001]
+    assert "ignored 3 packet(s) for other sessions" in caplog.text
+
+
+def test_late_packets_from_a_stalled_file_do_not_reach_the_next(env, app_key):
+    a, b = make_plaud_file(app_key), make_plaud_file(app_key)
+    # File 1101 stalls; its last packets turn up while 1102 downloads.
+    late = [_data_pkt(1101, int(len(a) * 0.4), a[int(len(a) * 0.4) :][:CHUNK]), _end_pkt(1101)]
+    device = FakeDevice({1101: a, 1102: b}, {1101: "stall"}, inject={1102: late})
+    result = run_sync(device, [(1101, len(a)), (1102, len(b))])
+    assert entry(result, 1101)["status"] == "partial"
+    assert entry(result, 1102)["status"] == "new"
+    assert result["deleted_from_device"] == [1102]
+
+
+def test_end_marker_for_another_session_does_not_end_the_download(env, app_key):
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1201: data}, {1201: "stall"}, inject={1201: [_end_pkt(4242), _tail_pkt(4242)]})
+    result = run_sync(device, [(1201, len(data))])
+    e = entry(result, 1201)
+    assert e["status"] == "partial" and e["reason"] == "stalled"
+    assert 31 not in device.sent
+
+
+def test_duplicate_data_packets_are_dropped(env, app_key, caplog):
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1301: data}, {1301: "duplicate"})
+    with caplog.at_level("INFO"):
+        result = run_sync(device, [(1301, len(data))])
+    e = entry(result, 1301)
+    assert e["status"] == "new"
+    assert "size_mismatch" not in e
+    assert result["deleted_from_device"] == [1301]
+    assert "dropped" in caplog.text and "retransmitted" in caplog.text
+
+
+def test_gap_in_offsets_is_partial_not_concatenated(env, app_key):
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1401: data}, {1401: "gap"})
+    result = run_sync(device, [(1401, len(data))])
+    e = entry(result, 1401)
+    assert e["status"] == "partial"
+    assert e["reason"].startswith("data gap")
+    # Only the contiguous prefix is kept: the bytes after the gap never land
+    # next to the bytes before it.
+    assert (env["rec"] / "1401_partial.bin").read_bytes() == data[: 2 * CHUNK]
+    assert 30 in device.sent, "the download is stopped once a gap shows up"
+    assert 31 not in device.sent
+
+
+def test_device_with_other_session_ids_still_syncs(env, app_key, caplog):
+    """If the device's data packets don't carry the requested id, session
+    filtering falls back to the old behaviour for that download (with a warning)."""
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1501: data}, {1501: "other_sid"})
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(1501, len(data))])
+    e = entry(result, 1501)
+    assert e["status"] == "new" and "size_mismatch" not in e
+    assert "data packets carry session id 2501, requested 1501 — session filtering disabled" in caplog.text
+    assert caplog.text.count("session filtering disabled") == 1
+
+
+def test_index_style_offsets_still_sync(env, app_key, caplog):
+    """Offsets that count packets instead of bytes: offset checks fall back to
+    accepting every packet for that download (with a warning)."""
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1601: data}, {1601: "index_offsets"})
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(1601, len(data))])
+    e = entry(result, 1601)
+    assert e["status"] == "new" and "size_mismatch" not in e
+    assert result["deleted_from_device"] == [1601]
+    assert "offsets don't look like contiguous byte offsets (offset, bytes so far: [(0, 0), (1, 240)])" in caplog.text
+    assert caplog.text.count("offset checks disabled") == 1
+
+
+def test_auto_checks_are_decided_per_download(env, app_key, caplog):
+    """A fallback for one download doesn't carry over: the next one with byte
+    offsets is checked again (and its gap caught)."""
+    a, b = make_plaud_file(app_key), make_plaud_file(app_key)
+    device = FakeDevice({1701: a, 1702: b}, {1701: "index_offsets", 1702: "gap"})
+    result = run_sync(device, [(1701, len(a)), (1702, len(b))])
+    assert entry(result, 1701)["status"] == "new"
+    assert entry(result, 1702)["status"] == "partial"
+    assert entry(result, 1702)["reason"].startswith("data gap")
+
+
+def test_first_offset_not_zero_falls_back(caplog):
+    file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
+    with caplog.at_level("WARNING"):
+        dev._on_file_data(_data_pkt(7, 512, b"abc"), file_data, file_done, meta)
+        dev._on_file_data(_data_pkt(7, 900, b"def"), file_data, file_done, meta)
+    assert bytes(file_data) == b"abcdef" and meta["offset_check"] is False
+    assert not file_done.is_set() and "gap" not in meta
+    assert "(512, 0)" in caplog.text
+
+
+@pytest.mark.parametrize("forced", [True, False])
+def test_offset_and_session_checks_can_be_forced(monkeypatch, forced):
+    monkeypatch.setattr(dev, "ENFORCE_DATA_OFFSETS", forced)
+    monkeypatch.setattr(dev, "FILTER_DATA_SESSIONS", forced)
+    file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
+    dev._on_file_data(_data_pkt(8, 0, b"zz"), file_data, file_done, meta)  # other session first
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)  # retransmit
+    if forced:
+        assert bytes(file_data) == b"abc" and meta["stray"] == 1 and meta["duplicates"] == 1
+    else:
+        assert bytes(file_data) == b"zzabcabc"
+
+
+def test_handler_offset_rules(monkeypatch):
+    """Unit check of the enforced data-packet rules on the real handler."""
+    monkeypatch.setattr(dev, "ENFORCE_DATA_OFFSETS", True)
+    file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)  # retransmit
+    dev._on_file_data(_data_pkt(7, 1, b"bcde"), file_data, file_done, meta)  # overlap: keep "de"
+    dev._on_file_data(_data_pkt(8, 5, b"zz"), file_data, file_done, meta)  # other session
+    assert bytes(file_data) == b"abcde"
+    assert meta["duplicates"] == 2 and meta["stray"] == 1
+    assert not file_done.is_set()
+    dev._on_file_data(_data_pkt(7, 9, b"xy"), file_data, file_done, meta)  # gap
+    assert meta["gap"] == (9, 5) and file_done.is_set()
+    dev._on_file_data(_data_pkt(7, 5, b"fg"), file_data, file_done, meta)  # after a gap: ignored
+    assert bytes(file_data) == b"abcde"
+    # No download in progress: everything is stray.
+    idle = {"sid": None}
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), bytearray(), asyncio.Event(), idle)
+    assert idle["stray"] == 1
+
+
 def test_decrypt_failure_keeps_encrypted_no_ogg_no_delete(env, app_key):
     data = make_plaud_file(app_key, decryptable=False)
     device = FakeDevice({501: data})
@@ -404,6 +578,8 @@ def test_evaluate_download_rules():
     assert dev.evaluate_download(1, 3, b"abc", {"tail": True, "start_status": 2}) == (ok, None)
     assert dev.evaluate_download(1, 3, b"abc", meta_ok, interrupted="stalled") == (partial, "stalled")
     assert dev.evaluate_download(1, 4, b"abc", meta_ok, interrupted="stalled") == (partial, "stalled")
+    # A gap in the data offsets is never OK, even if the byte count happens to match.
+    assert dev.evaluate_download(1, 3, b"abc", {**meta_ok, "gap": (6, 3)})[0] == partial
 
 
 def test_crc_logged_not_enforced_by_default(monkeypatch, caplog):

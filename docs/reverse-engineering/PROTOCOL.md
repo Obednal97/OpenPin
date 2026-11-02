@@ -119,9 +119,10 @@ Before encryption starts, packets on `2BB1`/`2BB0` use this framing:
 `device.py` `connect_device()` (the WiFi worker repeats this in `ble_connect_and_setup()`):
 
 1. Enable notifications on `2BB0`.
-2. Send `SN_SIG` as 65040 chunks with Write Without Response. `device.py` sends the full set 3
-   times; the worker and the iOS app send it twice.
-3. Wait for either a 65041 ACK or the 65042 blob (`device.py` waits up to 10 s, the worker 5 s).
+2. Send `SN_SIG` as 65040 chunks with Write Without Response. The app and the worker send the full
+   set 3 times (`SN_SIG_SEND_REPEATS` in `ble_proto.py`); the iOS app sends it twice.
+3. Wait for either a 65041 ACK or the 65042 blob (up to 10 s, `SN_SIG_REPLY_WAIT_S`; the worker
+   waited 5 s before).
    - **ACK**: the device doesn't know this app's public key (first pairing, or after a depair).
      Send the PEM as 65042 chunks with Write (with response), then wait up to 15 s for the blob.
    - **Blob straight away**: the device already has the public key cached. No ACK is sent.
@@ -141,8 +142,10 @@ Before encryption starts, packets on `2BB1`/`2BB0` use this framing:
 8. Send cmd 1 twice with the `BIND_TOKEN` (flag 0, then flag 1). See
    [COMMANDS.md cmd 1](COMMANDS.md#cmd-1--handshake). The static SDK `APP_KEY` (in the
    deleted `src/constants.py`) is **not** sent; sending it makes the device ignore later commands.
-9. `device.py` then sends cmd 4 (time), cmd 3 (state), cmd 6 (storage) and cmd 9 (battery). The
-   worker sends only cmd 4.
+9. Send cmd 4 (time, with the Mac's time zone). Both steps are `ble_proto.bind_handshake()`, which
+   also decides whether the token was accepted (**Implemented**, see cmd 1). Only then does
+   `device.py` mark the device connected and send cmd 3 (state), cmd 6 (storage) and cmd 9
+   (battery). The worker sends nothing more.
 
 The device sends a fresh key, nonce and AAD on every connection. The session ends when the BLE
 link drops (**Confirmed**), so the WiFi worker can't reuse the app's connection and does its own
@@ -188,7 +191,8 @@ Code: `device.py` `list_device_files()`, `_sync_files_inner()`, `evaluate_downlo
 ### 7.1 Flow
 
 1. **List**: send cmd 26. The reply can span several notifications; the app collects them for up to
-   3 s until it has `total` entries, then removes duplicate session IDs.
+   3 s until it has `total` entries, checking each one's start index, and removes duplicate
+   session IDs (`ble_proto.FileListAssembler`).
 2. **Skip** files already present (`{sid}.ogg` in any recordings folder, or in Google Drive in cloud
    mode), files the user dismissed, and (background syncs only) files that failed 3 times in a row.
 3. **Request**: send cmd 28 with `sessionId`, start 0, end = size from the list. It is sent
@@ -218,9 +222,18 @@ Each data notification seen in captures is 190 bytes on the wire, which is 10 he
 For port version < 7 the SDK uses an older layout without `sessionId`: offset at 1–4, length at 5,
 data from 6 (**APK**).
 
-The app records, but does not act on, the first packet whose offset differs from the bytes received
-so far. It does not compare the packet's `sessionId`, the end packet's `sessionId` or the tail's
-`sessionId` with the file it asked for.
+The app keeps the session ID it asked for (`file_meta["sid"]`). Data packets, the end packet and
+the cmd 29 tail with any other `sessionId` are ignored and counted ("ignored N packet(s) for other
+sessions"), so a late packet from an earlier or stalled file can't be appended to, or end, the
+current one. Offsets must be contiguous: a packet at an offset already received is a
+retransmission and is dropped (any bytes past the end are kept); a packet past the end leaves a
+gap, which stops the download (cmd 30) and makes it `partial`.
+
+Both checks are **Implemented** but unconfirmed, and they adapt per download (`"auto"`, the
+default of `FILTER_DATA_SESSIONS` and `ENFORCE_DATA_OFFSETS`): session filtering applies only if
+the first data packet carries the requested ID, and offset checks only once the first two packets
+are at offset 0 and right after it. Otherwise the app logs a warning and accepts every packet for
+that download, as v2.2.x did. The cmd 28 reply is kept whatever its session ID.
 
 ### 7.3 Completeness rules (`evaluate_download()`)
 
@@ -229,7 +242,7 @@ kept and retried, never auto-deleted.
 
 | Condition | Verdict |
 |---|---|
-| Interrupted: aborted, disconnected, stalled (no data for 60 s), or refused | `partial` |
+| Interrupted: aborted, disconnected, stalled (no data for 60 s), refused, or a gap in the offsets | `partial` |
 | No end marker and no cmd 29 tail | `partial` |
 | End marker with a non-zero error byte | `partial` |
 | `CRC16_ENFORCED_VARIANT` is set and the cmd 29 CRC doesn't match | `partial` |
@@ -284,9 +297,9 @@ confirmed on hardware.
 7. Cleanup: restore the Mac's saved networks if they were paused, then send BLE `[1,10,0,0]` to
    close the hotspot, then rejoin the user's network and disconnect BLE.
 
-Closing with `[1,10,0,0]` is **Unverified**. The SDK has a separate CloseWiFi reply (cmd 13), and
-`_close_hotspot()` replaces the notify handler with a no-op before sending, so the worker never
-sees a reply.
+Closing with `[1,10,0,0]` is **Unverified**. The SDK has a separate CloseWiFi reply (cmd 13), whose
+request layout isn't decoded. `_close_hotspot()` re-arms notifications with the command handler,
+accepts a cmd 10 or cmd 13 reply and logs it ("Hotspot close reply: …"), and gives up after 6 s.
 
 The Mac-side safety net (restore record `wifi_restore.json` in the data folder, lock file, the
 "networks couldn't be restored" notice) is app behaviour, not protocol. See the module docstring of
@@ -321,7 +334,7 @@ WiFi command numbers are their own namespace. WiFi cmd 13 is not BLE cmd 13.
 | 5 | Device | 11 | `{"status": 0, "count": N, …}` then N × 10-byte entries: `sessionId` u32, size u32, codec u16 |
 | 6 | Mac | 12 | `{"session": sid, "scene": 0, "start": 0, "end": size}` |
 | 7 | Device | 13 | JSON (with `"last"`) then file bytes. Repeats; `"last": 1` ends the file |
-| 8 | | | Back to step 6 for the next file |
+| 8 | | | Back to step 6 for the next file. A further cmd 11 list message is merged into the queue; it doesn't restart the file in flight |
 | any | Device | 3 | Heartbeat ping. The Mac replies with WiFi cmd 16, `{}` |
 
 WiFi saves use the same rules as BLE (`save_wifi_download()`): exact size gives `{sid}.ogg`; a size

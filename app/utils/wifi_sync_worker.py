@@ -57,6 +57,28 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+# The parent starts this file as a script with the project root on PYTHONPATH;
+# make sure app.* imports even without it.
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.append(_PROJECT_ROOT)
+
+from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
+    HANDSHAKE_NO_REPLY,
+    HANDSHAKE_NO_REPLY_ERROR,
+    HANDSHAKE_REJECTED,
+    HANDSHAKE_REJECTED_ERROR,
+    SN_SIG_REPLY_WAIT_S,
+    SN_SIG_SEND_REPEATS,
+    WIFI_CLOSE_REPLY_IDS,
+    WIFI_CLOSE_REQUEST,
+    WIFI_OPEN_REQUEST,
+    bind_handshake,
+    cmd_id_of,
+    describe_status_reply,
+    reply_matches,
+)
+
 WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
@@ -1305,6 +1327,7 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
+HANDSHAKE_REPLY_TIMEOUT_S = 5  # cmd 1 / cmd 4 / cmd 3 replies during the BLE setup
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
@@ -1360,13 +1383,13 @@ async def ble_connect_and_setup():
     sig = base64.b64decode(SN_SIG)
     tc = (len(sig) + 99) // 100
     status(f"Sending SN_SIG ({len(sig)} bytes, {tc} chunks)...", 3)
-    for _ in range(2):
+    for _ in range(SN_SIG_SEND_REPEATS):
         for i in range(tc):
             await cl.write_gatt_char(
                 W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
             )
             await asyncio.sleep(0.02)
-    for _ in range(50):
+    for _ in range(int(SN_SIG_REPLY_WAIT_S * 10)):
         await asyncio.sleep(0.1)
         if ack.is_set() or done.is_set():
             break
@@ -1410,44 +1433,74 @@ async def ble_connect_and_setup():
 
     cmd_evt = asyncio.Event()
     cmd_resp = [None]
+    expected = [None]  # cmd_ids the command in flight accepts as its reply
 
     def handler(s, d):
         try:
             dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
         except Exception:
             return
-        if len(dd) >= 1 and dd[0] == 1:
+        if len(dd) < 1 or dd[0] != 1:
+            return
+        # Only the reply to the command in flight wakes cmd(): the device also
+        # sends unsolicited type-1 packets (record events, late replies), the
+        # class of bug device.py fixed in v2.2.0.
+        if expected[0] is not None and reply_matches(dd, expected[0]):
             cmd_resp[0] = dd
             cmd_evt.set()
+        else:
+            logging.debug(f"[BLE] ignored cmd {cmd_id_of(dd)} packet (waiting for {expected[0]})")
 
     await cl.start_notify(N, handler)
 
-    async def cmd(name, pt):
+    async def cmd(name, pt, timeout=5, expect=None):
+        """Send one command; return its matching reply, or None after `timeout`.
+
+        expect: cmd_ids accepted as the reply (default: the cmd_id sent).
+        """
+        expected[0] = tuple(expect) if expect is not None else (cmd_id_of(pt),)
         cmd_evt.clear()
         cmd_resp[0] = None
-        await cl.write_gatt_char(W, enc(pt), response=False)
         try:
-            await asyncio.wait_for(cmd_evt.wait(), timeout=5)
-        except Exception:
-            pass
-        return cmd_resp[0]
+            await cl.write_gatt_char(W, enc(pt), response=False)
+            try:
+                await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
+            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+                pass
+            return cmd_resp[0]
+        finally:
+            expected[0] = None
+
+    cmd.handler = handler  # _close_hotspot() re-arms notifications with it
 
     # BLE setup commands
-    if not BIND_TOKEN:
-        raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
-    if len(BIND_TOKEN) > 32:
-        logging.warning(
-            "BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
-            "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
-            len(BIND_TOKEN),
-        )
     try:
-        token32 = BIND_TOKEN[:32].encode("ascii").ljust(32, b"\x00")
-    except UnicodeEncodeError as e:
-        raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
-    await cmd("HS1", bytes([1, 1, 0, 2, 0, 0]) + token32)
-    await cmd("HS2", bytes([1, 1, 0, 2, 0, 1]) + token32)
-    await cmd("Sync", bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
+        if not BIND_TOKEN:
+            raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
+        if len(BIND_TOKEN) > 32:
+            logging.warning(
+                "BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
+                "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
+                len(BIND_TOKEN),
+            )
+        try:
+            token32 = BIND_TOKEN[:32].encode("ascii").ljust(32, b"\x00")
+        except UnicodeEncodeError as e:
+            raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
+        # cmd 1 twice, then cmd 4 with the local time zone — the same code as device.py.
+        verdict, _info = await bind_handshake(
+            lambda pt: cmd("handshake", pt, timeout=HANDSHAKE_REPLY_TIMEOUT_S), token32, log=lambda m: status(m, 3)
+        )
+        if verdict == HANDSHAKE_REJECTED:
+            raise ValueError(HANDSHAKE_REJECTED_ERROR)
+        if verdict == HANDSHAKE_NO_REPLY:
+            raise ValueError(HANDSHAKE_NO_REPLY_ERROR)
+    except ValueError:
+        try:
+            await asyncio.wait_for(cl.disconnect(), 10)
+        except BaseException:
+            pass
+        raise
     status("BLE ready", 4)
 
     return cl, key, nonce, aad, cipher, cmd
@@ -1551,14 +1604,15 @@ class WifiSession:
             return cipher.encrypt(nonce, struct.pack("<I", seq) + payload, aad)
 
         download_buf = bytearray()
-        current = {"sid": 0, "size": 0}
+        current = {"sid": 0, "size": 0, "active": False}
         queue = []
 
         async def download_next():
             download_buf.clear()
+            current["active"] = False
             f = next_wifi_download(queue, self.recordings_dir, self.dismissed, self.new_files)
             if f is not None:
-                current["sid"], current["size"] = f["session_id"], f["size"]
+                current["sid"], current["size"], current["active"] = f["session_id"], f["size"], True
                 req = build_wifi_packet(12, {"session": f["session_id"], "scene": 0, "start": 0, "end": f["size"]})
                 await websocket.send(encrypt(req))
                 status(f"Downloading session {f['session_id']}...", 40)
@@ -1599,10 +1653,17 @@ class WifiSession:
                             codec = struct.unpack_from("<H", bin_data, i + 8)[0]
                             entries.append({"session_id": sid, "size": fsize, "codec": codec})
                         self.merge_file_list(entries)
-                    queue[:] = self.pending_files()
                     self.file_list_received.set()
                     status(f"{len(self.wifi_files)} file(s) found", 35)
-                    await download_next()
+                    if current["active"]:
+                        # Another list message (paging, or the device re-sending
+                        # it) while a file is downloading: queue the new entries
+                        # without touching the download in flight.
+                        queued = {f["session_id"] for f in queue} | {current["sid"]}
+                        queue.extend(f for f in self.pending_files() if f["session_id"] not in queued)
+                    else:
+                        queue[:] = self.pending_files()
+                        await download_next()
 
                 elif cmd_id == 13:
                     json_len_c = struct.unpack_from("<H", decrypted, 6)[0]
@@ -1709,13 +1770,28 @@ def _emit_result(result):
         pass
 
 
-async def _close_hotspot(cl, ble_cmd, timeout=15):
-    """Tell the device to close its hotspot over BLE (bounded; failures ignored)."""
+CLOSE_HOTSPOT_REPLY_S = 3  # wait this long for the close reply
+CLOSE_HOTSPOT_TIMEOUT_S = 6  # whole close step, so cleanup isn't held up
+
+
+async def _close_hotspot(cl, ble_cmd, timeout=CLOSE_HOTSPOT_TIMEOUT_S):
+    """Tell the device to close its hotspot over BLE (bounded; failures ignored).
+
+    Notifications were stopped after the hotspot opened, so they're re-armed
+    with the command channel's own handler: the reply (cmd 10, or cmd 13
+    CloseWiFi) is logged, which is how hardware testing will settle whether
+    [1,10,0,0] closes the hotspot (README open question 8).
+    """
 
     async def go():
-        await cl.start_notify(N, lambda s, d: None)
-        await ble_cmd("WiFi_Close", bytes([1, 10, 0, 0]))
-        await cl.stop_notify(N)
+        await cl.start_notify(N, getattr(ble_cmd, "handler", None) or (lambda s, d: None))
+        try:
+            reply = await ble_cmd(
+                "WiFi_Close", WIFI_CLOSE_REQUEST, timeout=CLOSE_HOTSPOT_REPLY_S, expect=WIFI_CLOSE_REPLY_IDS
+            )
+            status(f"Hotspot close reply: {describe_status_reply(reply)}", None)
+        finally:
+            await cl.stop_notify(N)
 
     try:
         await asyncio.wait_for(go(), timeout)
@@ -1790,7 +1866,8 @@ async def transfer(args):
 
         status("Opening device hotspot...", 10)
         ctx["hotspot_opened"] = True
-        await ble_cmd("WiFi_Open", bytes([1, 10, 0]))
+        opened = await ble_cmd("WiFi_Open", WIFI_OPEN_REQUEST)
+        status(f"Hotspot open reply: {describe_status_reply(opened)}", None)
 
         # Stop BLE notifications — they conflict with WiFi
         try:
