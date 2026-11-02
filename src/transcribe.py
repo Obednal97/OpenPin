@@ -1,8 +1,11 @@
-"""Local transcription using OpenAI Whisper and optional speaker diarization.
+"""Local transcription (openai-whisper) and local speaker identification.
 
-Supports two backends:
-1. whisper (openai-whisper) - CPU/MPS, simple setup
-2. insanely-fast-whisper - faster on Apple Silicon, supports diarization
+Speaker identification ("diarization") tries, in order:
+1. the ``diarize`` package (Silero VAD + WeSpeaker ONNX, CPU). No account or
+   token needed; the pinned ``diarize`` extra is installed on first use.
+2. pyannote (``pyannote/speaker-diarization-3.1``), only when a Hugging Face
+   token is saved and pyannote.audio is already installed. The app never
+   installs pyannote itself (it isn't in the pinned lockfiles).
 
 Usage:
     python -m src.transcribe path/to/audio.mp3
@@ -12,12 +15,20 @@ Usage:
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,6 +45,10 @@ class Transcript:
     text: str = ""
     language: str = ""
     duration: float = 0.0
+    # Outcome of speaker identification when it was requested: see
+    # DiarizationResult.status. Empty when it wasn't requested.
+    diarization_status: str = ""
+    diarization_message: str = ""
 
     @property
     def formatted(self) -> str:
@@ -62,11 +77,14 @@ class Transcript:
                 for s in self.segments
             ],
         }
+        if self.diarization_status:
+            data["diarization_status"] = self.diarization_status
+            data["diarization_message"] = self.diarization_message
         with open(path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
     @staticmethod
-    def load(path: str) -> "Transcript":
+    def load(path: str) -> Transcript:
         """Load transcript from JSON."""
         with open(path) as f:
             data = json.load(f)
@@ -74,6 +92,8 @@ class Transcript:
             text=data.get("text", ""),
             language=data.get("language", ""),
             duration=data.get("duration", 0),
+            diarization_status=data.get("diarization_status", ""),
+            diarization_message=data.get("diarization_message", ""),
         )
         for seg in data.get("segments", []):
             t.segments.append(
@@ -144,112 +164,261 @@ def transcribe_with_whisper(
     return transcript
 
 
-# Use the canonical DATA_DIR for the HF token — same path the settings UI writes to
+# ---------------------------------------------------------------------------
+# Hugging Face token (optional; only the pyannote fallback uses it)
+# ---------------------------------------------------------------------------
+
 try:
-    from app.utils.constants import HF_TOKEN_PATH
+    from app.utils.constants import HF_TOKEN_PATH, PYANNOTE_GATED_MODELS, PYANNOTE_PIPELINE_MODEL
 except ImportError:
     # Fallback when running standalone (not as part of the Flask app)
     HF_TOKEN_PATH = Path(__file__).parent.parent / ".hf_token"
+    PYANNOTE_PIPELINE_MODEL = "pyannote/speaker-diarization-3.1"
+    PYANNOTE_GATED_MODELS = (PYANNOTE_PIPELINE_MODEL, "pyannote/segmentation-3.0")
 
 
-def _get_hf_token() -> str | None:
-    """Read cached HuggingFace token."""
-    if HF_TOKEN_PATH.exists():
+def get_hf_token() -> str | None:
+    """The saved Hugging Face token, or None."""
+    try:
         token = HF_TOKEN_PATH.read_text().strip()
-        if token:
-            return token
-    return None
+    except OSError:
+        return None
+    return token or None
 
 
-def _save_hf_token(token: str):
-    HF_TOKEN_PATH.write_text(token)
+def save_hf_token(token: str) -> None:
+    """Write the token readable by the owner only (0600).
+
+    Written in place (no temp file): in a dev checkout DATA_DIR is the repo
+    root, where only ``.hf_token`` itself is gitignored.
+    """
+    path = Path(HF_TOKEN_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # O_CREAT's mode doesn't apply to an existing file
+        os.write(fd, token.strip().encode())
+    finally:
+        os.close(fd)
+
+
+def delete_hf_token() -> None:
+    try:
+        Path(HF_TOKEN_PATH).unlink()
+    except FileNotFoundError:
+        pass
 
 
 def setup_diarization() -> bool:
-    """Interactive setup for speaker diarization. Returns True if ready."""
+    """Command-line setup for the optional pyannote fallback. Returns True if a token was saved."""
+    models = "\n".join(f"     - https://huggingface.co/{m}" for m in PYANNOTE_GATED_MODELS)
     print("\n" + "=" * 60)
-    print("  Speaker Diarization Setup")
+    print("  Speaker identification: optional pyannote fallback")
     print("=" * 60)
-    print("""
-  Speaker diarization identifies WHO is speaking (Speaker 1,
-  Speaker 2, etc.) throughout a recording. It uses pyannote.audio,
-  which requires a free HuggingFace account.
+    print(f"""
+  The built-in speaker model (the 'diarize' package) needs no account
+  or token. A Hugging Face token only enables the pyannote fallback,
+  which also needs pyannote.audio installed in this Python.
 
   Steps:
   1. Create a free account at https://huggingface.co/join
-  2. Accept the model licenses (one-time, instant):
-     - https://huggingface.co/pyannote/segmentation-3.0
-     - https://huggingface.co/pyannote/speaker-diarization-3.1
-     (Click "Agree and access repository" on each page)
-  3. Create an access token at:
-     https://huggingface.co/settings/tokens
-     (Click "New token", name it anything, select "Read")
-  4. Paste the token below.
+  2. Accept the model terms (one-time):
+{models}
+  3. Create a "Read" access token at https://huggingface.co/settings/tokens
+  4. Paste the token below. (In the app: Settings > Processing >
+     Speaker Identification.)
 """)
     token = input("  HuggingFace token (hf_...): ").strip()
     if not token or not token.startswith("hf_"):
         print("  Invalid token. Must start with 'hf_'.")
         return False
 
-    _save_hf_token(token)
+    save_hf_token(token)
     print(f"  Token saved to {HF_TOKEN_PATH}")
-
-    # Install pyannote if needed
-    try:
-        import pyannote.audio  # noqa: F401 — checking availability
-
-        print("  pyannote.audio already installed")
-    except ImportError:
-        print("  Installing pyannote.audio (this may take a minute)...")
-        from app.utils.system import ensure_installed
-
-        if ensure_installed("pyannote.audio", "pyannote.audio"):
-            print("  Installed!")
-        else:
-            print("  Installation failed (pip's error is in the log).")
-            return False
-
-    print("\n  Diarization is ready! Use --diarize to identify speakers.")
+    if not _pyannote_installed():
+        print("  pyannote.audio isn't installed here; install it with pip to use the fallback.")
     print("=" * 60)
     return True
 
 
-def diarize_audio_fast(audio_path: str, hf_token: str = "") -> list[dict]:
-    """Run diarization using the 'diarize' library (fast, no API key needed).
+# ---------------------------------------------------------------------------
+# Speaker identification
+# ---------------------------------------------------------------------------
 
-    Returns list of {start, end, speaker} with friendly speaker names.
-    The hf_token parameter is accepted for API compatibility but not used.
+
+class DiarizationError(RuntimeError):
+    """No speaker identification tier could run. The message is for the user."""
+
+
+@dataclass
+class DiarizationResult:
+    """Outcome of run_diarization().
+
+    status: "done" (speakers found), "none" (ran, found no speech/speakers)
+    or "failed" (couldn't run; ``message`` says why, for the user).
     """
+
+    status: str
+    segments: list[dict] = field(default_factory=list)
+    engine: str = ""
+    message: str = ""
+
+
+# A failed install of the 'diarize' extra isn't retried for this long, so a
+# batch of auto-transcriptions doesn't run pip (up to 30 min each) per file.
+_DIARIZE_INSTALL_RETRY_SECONDS = 30 * 60
+_diarize_install_failed_at: float | None = None
+
+# One diarization at a time: it saturates the CPU and loads models into RAM.
+_diarize_lock = threading.Lock()
+
+
+def _pyannote_installed() -> bool:
     try:
-        from diarize import diarize as _diarize
+        return importlib.util.find_spec("pyannote.audio") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _install_soundfile_audio_loader() -> None:
+    """Let torchaudio.load read audio through soundfile.
+
+    torchaudio >= 2.9 hands decoding to torchcodec, which isn't in the pinned
+    'diarize' extra (and needs FFmpeg's shared libraries, which the app
+    doesn't ship). Silero VAD and WeSpeaker both read audio with
+    torchaudio.load, so without this every run fails with "torchaudio ...
+    requires torchcodec". soundfile (libsndfile) reads WAV, FLAC, Ogg
+    Vorbis/Opus and MP3; anything else still goes to the original loader.
+    """
+    import torchaudio
+
+    if getattr(torchaudio.load, "_plaud_soundfile", False):
+        return
+    original = torchaudio.load
+
+    # torchaudio.load(uri, frame_offset=0, num_frames=-1, normalize=True,
+    # channels_first=True, ...): the leading positional parameters.
+    positional = ("frame_offset", "num_frames", "normalize", "channels_first")
+
+    def load(uri, *args, **kwargs):
+        opts = dict(zip(positional, args, strict=False))  # more positionals are fine
+        opts.update(kwargs)
+        try:
+            import soundfile as sf
+            import torch
+
+            start = max(0, int(opts.get("frame_offset") or 0))
+            num_frames = int(opts.get("num_frames", -1) or -1)
+            data, sample_rate = sf.read(
+                uri if hasattr(uri, "read") else str(uri),
+                start=start,
+                frames=num_frames if num_frames > 0 else -1,
+                dtype="float32",
+                always_2d=True,
+            )
+        except Exception:
+            return original(uri, *args, **kwargs)
+        # soundfile gives (frames, channels); torchaudio's default is
+        # (channels, frames). Always float32 in [-1, 1] (normalize=True).
+        if opts.get("channels_first", True):
+            data = data.T
+        return torch.from_numpy(data.copy()), sample_rate
+
+    load._plaud_soundfile = True
+    torchaudio.load = load
+
+
+def _load_diarize_lib():
+    """The ``diarize.diarize`` function, installing the pinned extra on first use.
+
+    Returns None when the package can't be imported or installed.
+    """
+    global _diarize_install_failed_at
+    try:
+        from diarize import diarize as diarize_fn
     except ImportError:
-        # Pinned 'diarize' extra (onnxruntime-based, CPU) into the app's venv.
-        # On failure re-raise ImportError so diarize_audio() tries the next tier.
-        from app.utils.system import ensure_installed
+        if (
+            _diarize_install_failed_at is not None
+            and time.monotonic() - _diarize_install_failed_at < _DIARIZE_INSTALL_RETRY_SECONDS
+        ):
+            return None
+        try:
+            from app.utils.system import ensure_installed
 
-        if not ensure_installed("diarize", extra="diarize"):
-            raise
-        from diarize import diarize as _diarize
+            ok = ensure_installed("diarize", extra="diarize")
+        except Exception as e:  # standalone run without app/, pip crash...
+            log.warning("Could not install the 'diarize' extra: %s", e)
+            ok = False
+        if not ok:
+            _diarize_install_failed_at = time.monotonic()
+            return None
+        _diarize_install_failed_at = None
+        try:
+            from diarize import diarize as diarize_fn
+        except ImportError:
+            return None
+    _install_soundfile_audio_loader()
+    return diarize_fn
 
-    print("  Running fast diarization (diarize library, CPU)...")
-    start = time.time()
-    result = _diarize(audio_path)
-    elapsed = time.time() - start
 
-    # Convert to list of dicts (already in {start, end, speaker} format)
-    segments = result.to_list()
-
-    # Rename speakers to friendly names (Speaker 1, Speaker 2, ...)
-    speaker_map = {}
-    counter = 1
+def _friendly_speaker_names(segments: list[dict]) -> list[dict]:
+    """Rename raw labels (SPEAKER_00...) to Speaker 1, Speaker 2... in order of appearance."""
+    speaker_map: dict[str, str] = {}
     for seg in segments:
         if seg["speaker"] not in speaker_map:
-            speaker_map[seg["speaker"]] = f"Speaker {counter}"
-            counter += 1
+            speaker_map[seg["speaker"]] = f"Speaker {len(speaker_map) + 1}"
         seg["speaker"] = speaker_map[seg["speaker"]]
+    return segments
 
+
+def _to_wav16k(audio_path: str) -> str | None:
+    """Convert to a temporary 16 kHz mono WAV with ffmpeg. None if ffmpeg is unavailable/fails."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            from app.utils.system import ensure_ffmpeg
+
+            ffmpeg = ensure_ffmpeg()
+        except Exception:
+            ffmpeg = None
+    if not ffmpeg:
+        return None
+    fd, wav = tempfile.mkstemp(prefix="plaud-diarize-", suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(
+            [ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", audio_path, "-ac", "1", "-ar", "16000", wav],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=600,
+        )
+        return wav
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("ffmpeg could not convert %s for diarization: %s", audio_path, e)
+        try:
+            os.unlink(wav)
+        except OSError:
+            pass
+        return None
+
+
+def _run_diarize_lib(diarize_fn, audio_path: str) -> list[dict]:
+    """Run the 'diarize' package. Returns [{start, end, speaker}] with friendly names."""
+    print("  Running speaker identification (diarize, CPU)...")
+    start = time.time()
+    wav = _to_wav16k(audio_path)
+    try:
+        result = diarize_fn(wav or audio_path)
+    finally:
+        if wav:
+            try:
+                os.unlink(wav)
+            except OSError:
+                pass
+    segments = _friendly_speaker_names([dict(s) for s in result.to_list()])
     speakers = {s["speaker"] for s in segments}
-    print(f"  Diarization: {len(speakers)} speaker(s) found in {elapsed:.1f}s (fast)")
+    print(f"  Diarization: {len(speakers)} speaker(s) found in {time.time() - start:.1f}s (diarize)")
     return segments
 
 
@@ -267,10 +436,7 @@ def _diarize_audio_pyannote(audio_path: str, hf_token: str) -> list[dict]:
         torch.set_num_threads(os.cpu_count() or 4)
         print(f"  Loading diarization model (CPU, {os.cpu_count()} threads)...")
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        token=hf_token,
-    )
+    pipeline = Pipeline.from_pretrained(PYANNOTE_PIPELINE_MODEL, token=hf_token)
     pipeline.to(device)
 
     print("  Identifying speakers...")
@@ -281,87 +447,100 @@ def _diarize_audio_pyannote(audio_path: str, hf_token: str) -> list[dict]:
     # pyannote 4.x returns DiarizeOutput; extract the Annotation
     annotation = getattr(result, "speaker_diarization", result)
 
-    segments = []
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        segments.append(
-            {
-                "start": turn.start,
-                "end": turn.end,
-                "speaker": speaker,
-            }
+    segments = [
+        {"start": turn.start, "end": turn.end, "speaker": speaker}
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
+    segments = _friendly_speaker_names(segments)
+    speakers = {s["speaker"] for s in segments}
+    print(f"  Diarization: {len(speakers)} speaker(s) found in {elapsed:.1f}s (pyannote)")
+    return segments
+
+
+def _short(err: Exception, limit: int = 160) -> str:
+    text = str(err).strip().splitlines()[0] if str(err).strip() else type(err).__name__
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _pyannote_error_message(err: Exception) -> str:
+    text = str(err)
+    if "401" in text or "403" in text or "gated" in text.lower() or "access" in text.lower():
+        models = " and ".join(PYANNOTE_GATED_MODELS)
+        return f"Hugging Face refused the pyannote models: accept the terms for {models} on huggingface.co"
+    return f"pyannote failed ({_short(err)})"
+
+
+def diarize_audio(audio_path: str, hf_token: str | None = None) -> tuple[list[dict], str]:
+    """Identify speakers. Returns ``(segments, engine)``; segments are {start, end, speaker}.
+
+    Tier 1, the 'diarize' package, needs no token. Tier 2, pyannote, runs only
+    if tier 1 couldn't, a Hugging Face token is given and pyannote.audio is
+    installed. Raises DiarizationError (message for the user) if no tier ran.
+    """
+    reasons = []
+    diarize_fn = _load_diarize_lib()
+    if diarize_fn is not None:
+        try:
+            return _run_diarize_lib(diarize_fn, audio_path), "diarize"
+        except Exception as e:
+            log.warning("diarize failed for %s: %s", audio_path, e, exc_info=True)
+            reasons.append(f"speaker detection failed ({_short(e)})")
+    else:
+        reasons.append(
+            "the speaker detection package couldn't be installed (check your internet connection, then try again)"
         )
 
-    speakers = {s["speaker"] for s in segments}
-    print(f"  Diarization: {len(speakers)} speaker(s) found in {elapsed:.1f}s")
-    return segments
+    if hf_token and _pyannote_installed():
+        try:
+            return _diarize_audio_pyannote(audio_path, hf_token), "pyannote"
+        except Exception as e:
+            log.warning("pyannote failed for %s: %s", audio_path, e, exc_info=True)
+            reasons.append(_pyannote_error_message(e))
+
+    raise DiarizationError("; ".join(reasons))
 
 
-def _diarize_audio_onnx(audio_path: str, hf_token: str) -> list[dict]:
-    """Run diarization using pyannote-onnx-extended (faster than PyTorch pyannote, no GPU needed)."""
-    from pyannote_onnx_extended import Pipeline as OnnxPipeline
+def known_unavailable_reason() -> str | None:
+    """Why diarization can't run right now, if that's already known without trying.
 
-    print("  Loading diarization model (ONNX Runtime)...")
-    pipeline = OnnxPipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        token=hf_token,
+    True only after a recent failed install of the 'diarize' extra with no
+    pyannote fallback available, so callers can skip a pointless background
+    job and tell the user straight away.
+    """
+    if _diarize_install_failed_at is None:
+        return None
+    if time.monotonic() - _diarize_install_failed_at >= _DIARIZE_INSTALL_RETRY_SECONDS:
+        return None
+    if importlib.util.find_spec("diarize") is not None:
+        return None
+    if get_hf_token() and _pyannote_installed():
+        return None
+    return (
+        "Speaker labels skipped: the speaker detection package couldn't be installed "
+        "(check your internet connection, then try again)"
     )
 
-    print("  Identifying speakers (ONNX)...")
-    start = time.time()
-    result = pipeline(audio_path)
-    elapsed = time.time() - start
 
-    annotation = getattr(result, "speaker_diarization", result)
-    segments = []
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        segments.append({"start": turn.start, "end": turn.end, "speaker": speaker})
-
-    # Rename to friendly names
-    speaker_map = {}
-    counter = 1
-    for seg in segments:
-        if seg["speaker"] not in speaker_map:
-            speaker_map[seg["speaker"]] = f"Speaker {counter}"
-            counter += 1
-        seg["speaker"] = speaker_map[seg["speaker"]]
-
-    speakers = {s["speaker"] for s in segments}
-    print(f"  Diarization: {len(speakers)} speaker(s) found in {elapsed:.1f}s (ONNX)")
-    return segments
-
-
-def diarize_audio(audio_path: str, hf_token: str) -> list[dict]:
-    """Run speaker diarization with 3-tier cascade:
-    1. 'diarize' library (7x faster, CPU, no API key)
-    2. pyannote-onnx-extended (faster than PyTorch, no GPU)
-    3. pyannote standard (PyTorch, MPS/CPU)
-
-    Returns list of {start, end, speaker}.
-    """
-    # Tier 1: Fast diarize library
-    try:
-        return diarize_audio_fast(audio_path, hf_token)
-    except ImportError:
-        print("  Fast diarize library not installed, trying next...")
-    except Exception as e:
-        print(f"  Fast diarize failed ({e}), trying next...")
-
-    # Tier 2: pyannote ONNX (faster than standard PyTorch)
-    try:
-        return _diarize_audio_onnx(audio_path, hf_token)
-    except ImportError:
-        print("  pyannote-onnx-extended not installed, trying standard pyannote...")
-    except Exception as e:
-        print(f"  ONNX diarization failed ({e}), trying standard pyannote...")
-
-    # Tier 3: Standard pyannote (PyTorch, MPS/CPU)
-    return _diarize_audio_pyannote(audio_path, hf_token)
+def run_diarization(audio_path: str) -> DiarizationResult:
+    """Identify speakers in *audio_path* and never raise: the result says what happened."""
+    with _diarize_lock:
+        try:
+            segments, engine = diarize_audio(audio_path, get_hf_token())
+        except DiarizationError as e:
+            print(f"  Speaker labels skipped: {e}")
+            return DiarizationResult("failed", message=f"Speaker labels skipped: {e}")
+        except Exception as e:  # defensive: diarize_audio wraps tier errors already
+            log.warning("Diarization crashed for %s", audio_path, exc_info=True)
+            return DiarizationResult("failed", message=f"Speaker labels skipped: {_short(e)}")
+    if not segments:
+        print("  No speakers detected (no speech found, or very short audio)")
+        return DiarizationResult("none", engine=engine, message="No speakers detected in this recording")
+    return DiarizationResult("done", segments=segments, engine=engine)
 
 
 def merge_transcript_with_diarization(transcript: Transcript, diarization: list[dict]) -> Transcript:
     """Assign speaker labels to transcript segments based on overlap."""
     for seg in transcript.segments:
-        (seg.start + seg.end) / 2
         best_speaker = ""
         best_overlap = 0
         for d in diarization:
@@ -492,48 +671,27 @@ def transcribe(
     language: str | None = None,
     initial_prompt: str | None = None,
 ) -> Transcript:
-    """Transcribe an audio file, optionally with speaker diarization.
+    """Transcribe an audio file, optionally with speaker identification.
 
     Args:
         audio_path: Path to audio file (mp3, wav, opus, ogg, etc.)
         model: Whisper model name (base/small/medium/turbo/large)
-        diarize: Enable speaker diarization (requires HuggingFace token)
+        diarize: Label speakers (no token needed; see diarize_audio). If it
+            can't run, the transcript is returned without speakers and
+            ``diarization_status``/``diarization_message`` say why. This
+            runs inline (it can wait on another diarization, a pip install
+            or a model download), so the app's /transcribe route passes
+            False and labels speakers in a background thread after saving.
         language: Force language (e.g., "en"); None auto-detects
     """
-    # Transcribe with Whisper
     transcript = transcribe_with_whisper(audio_path, model=model, language=language, initial_prompt=initial_prompt)
 
-    # Diarize if requested — graceful fallback at every stage
     if diarize and transcript.text:
-        hf_token = _get_hf_token()
-        if not hf_token:
-            print("  Speaker diarization skipped — no HuggingFace token configured.")
-            print("  To enable: python3 sync_and_transcribe.py --setup-diarize")
-        else:
-            try:
-                import pyannote.audio  # noqa: F401
-            except ImportError:
-                print("  Speaker diarization skipped — pyannote.audio not installed.")
-                print("  To install: pip install pyannote.audio")
-                hf_token = None
-
-            if hf_token:
-                try:
-                    diar_segments = diarize_audio(audio_path, hf_token)
-                    if diar_segments:
-                        transcript = merge_transcript_with_diarization(transcript, diar_segments)
-                    else:
-                        print("  No speakers detected (single speaker or very short audio)")
-                except Exception as e:
-                    err = str(e)
-                    if "401" in err or "403" in err or "access" in err.lower():
-                        print("  Speaker diarization failed — HuggingFace token rejected.")
-                        print("  Check that you accepted the model licenses:")
-                        print("    https://huggingface.co/pyannote/segmentation-3.0")
-                        print("    https://huggingface.co/pyannote/speaker-diarization-3.1")
-                    else:
-                        print(f"  Speaker diarization failed: {err}")
-                    print("  (Transcript saved without speaker labels)")
+        result = run_diarization(audio_path)
+        transcript.diarization_status = result.status
+        transcript.diarization_message = result.message
+        if result.status == "done":
+            transcript = merge_transcript_with_diarization(transcript, result.segments)
 
     return transcript
 
@@ -588,8 +746,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe audio files locally")
     parser.add_argument("path", nargs="?", help="Audio file or directory path")
     parser.add_argument("--model", default="small", help="Whisper model: base/small/medium/turbo/large (default: small)")
-    parser.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
-    parser.add_argument("--setup-diarize", action="store_true", help="Set up diarization (HuggingFace token)")
+    parser.add_argument("--diarize", action="store_true", help="Label speakers (Speaker 1, Speaker 2...)")
+    parser.add_argument(
+        "--setup-diarize", action="store_true", help="Save a Hugging Face token for the optional pyannote fallback"
+    )
     parser.add_argument("--language", default=None, help="Force language (e.g., en)")
     parser.add_argument("--all", action="store_true", help="Transcribe all files in directory")
     parser.add_argument("--output", default=None, help="Output directory for transcripts")

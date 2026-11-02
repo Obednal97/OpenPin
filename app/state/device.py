@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import struct
 import sys
 import threading
@@ -16,7 +17,17 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from app.utils import ble_proto
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
+from app.utils.ble_proto import (
+    HANDSHAKE_REJECTED,
+    HANDSHAKE_REJECTED_ERROR,
+    HANDSHAKE_REPLY_TIMEOUT_S,
+    SN_SIG_REPLY_WAIT_S,
+    SN_SIG_SEND_REPEATS,
+    FileListAssembler,
+    bind_handshake,
+)
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
     APP_KEY_PATH,
@@ -67,6 +78,7 @@ _RECV_POLL_S = 2  # how often the receive loop checks abort / disconnect / stall
 _STALL_TIMEOUT_S = 60  # no new bytes for this long = stalled transfer
 _TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail (CRC)
 _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
+_HANDSHAKE_REPLY_TIMEOUT_S = HANDSHAKE_REPLY_TIMEOUT_S  # cmd 1 / 4 / 3 replies during connect (<= 6 s total)
 # cmd-28 reply with a non-zero status and still no data after this long = the
 # device refused the download; fail fast instead of waiting out the stall window.
 _REFUSED_GRACE_S = 5
@@ -98,6 +110,8 @@ def _finalize_redownload_backup(sid):
 def _reset_state():
     """Reset all connection state to disconnected defaults."""
     _device_state["connected"] = False
+    _device_state["handshaking"] = False
+    _device_state["port_version"] = None
     _device_state["client"] = None
     _device_state["session_keys"] = None
     _device_state["cipher"] = None
@@ -141,11 +155,124 @@ async def _disconnect_quietly(cl, timeout=5):
         logging.debug(f"Disconnect of stale BLE client failed (ignored): {e}")
 
 
+_END_OFFSET = 0xFFFFFFFF
+
+# Both checks below are unconfirmed on hardware (README open questions 4 and 13),
+# and v2.2.x synced fine without them, so by default ("auto") each download
+# first checks that the device's packets fit the assumption and falls back to
+# the old accept-everything behaviour (with a warning) when they don't. True
+# forces a check on, False turns it off.
+#
+# Session filtering: data packets, end markers and cmd-29 tails for another
+# session are ignored. "auto": enforced for a download whose FIRST data packet
+# carries the requested session id; otherwise disabled for that download.
+FILTER_DATA_SESSIONS = "auto"
+# Offsets: byte offsets must be contiguous. A packet at an offset already
+# received is a retransmission and is dropped; one past the end leaves a gap,
+# which ends the download as partial. "auto": enforced once the first
+# _OFFSET_PROBE_PACKETS packets start at 0 and are contiguous; any other
+# pattern (first offset != 0, packet-index-like offsets) disables it for that
+# download.
+ENFORCE_DATA_OFFSETS = "auto"
+_OFFSET_PROBE_PACKETS = 2
+
+
+def _count_stray(file_meta, what):
+    file_meta["stray"] = file_meta.get("stray", 0) + 1
+    logging.debug(f"[BLE] ignored {what} (downloading {file_meta.get('sid')})")
+
+
+def _session_ok(psid, want, file_meta, first_data):
+    """Does a data packet / end marker / tail with session id `psid` count?
+
+    `first_data`: this is a (non-end-marker) data packet, which may decide the
+    "auto" mode for the download.
+    """
+    if FILTER_DATA_SESSIONS is False or psid == want and want is not None:
+        if first_data and "sid_filter" not in file_meta:
+            file_meta["sid_filter"] = True
+        return True
+    if want is None or FILTER_DATA_SESSIONS is True:
+        return False
+    state = file_meta.get("sid_filter")
+    if state is None and first_data:
+        file_meta["sid_filter"] = state = False
+        logging.warning(
+            f"[BLE] data packets carry session id {psid}, requested {want} — session filtering disabled "
+            "for this download; please report"
+        )
+    return state is False
+
+
+def _offsets_checked(off, have, file_meta):
+    """Whether offset rules apply to this packet (see ENFORCE_DATA_OFFSETS)."""
+    if ENFORCE_DATA_OFFSETS is True or ENFORCE_DATA_OFFSETS is False:
+        return ENFORCE_DATA_OFFSETS
+    state = file_meta.get("offset_check")
+    if state is not None:
+        return state
+    samples = file_meta.setdefault("offset_samples", [])
+    samples.append((off, have))
+    if off != have:
+        file_meta["offset_check"] = False
+        logging.warning(
+            f"[BLE] session {file_meta.get('sid')}: data offsets don't look like contiguous byte offsets "
+            f"(offset, bytes so far: {samples}) — offset checks disabled for this download; please report"
+        )
+    elif len(samples) >= _OFFSET_PROBE_PACKETS:
+        file_meta["offset_check"] = True
+    return False  # probe packets are appended as they come (they fit so far)
+
+
+def _on_file_data(dd, file_data, file_done, file_meta):
+    """One type-2 data packet: [2][sessionId u32][offset u32][len u8][bytes].
+
+    Only packets for the session being downloaded (file_meta["sid"]) count; a
+    late packet from an earlier or stalled file is ignored and counted. Both
+    that and the offset rules adapt per download (FILTER_DATA_SESSIONS,
+    ENFORCE_DATA_OFFSETS).
+    """
+    psid, off = struct.unpack_from("<II", dd, 1)
+    want = file_meta.get("sid")
+    if not _session_ok(psid, want, file_meta, first_data=off != _END_OFFSET):
+        _count_stray(file_meta, f"data packet for session {psid} at offset {off:#x}")
+        return
+    if off == _END_OFFSET:
+        file_meta["end"] = True
+        file_meta["end_error"] = dd[9]
+        file_meta["end_sid"] = psid
+        file_done.set()
+        return
+    if file_meta.get("gap"):
+        return  # already incomplete; the sync loop is stopping this download
+    payload = dd[10 : 10 + dd[9]]
+    have = len(file_data)
+    if off != have and "offset_mismatch" not in file_meta:
+        file_meta["offset_mismatch"] = (off, have)
+    if not _offsets_checked(off, have, file_meta) or off == have:
+        file_data.extend(payload)
+    elif off < have:
+        # Retransmission: drop what we already have; keep any new bytes past the end.
+        file_meta["duplicates"] = file_meta.get("duplicates", 0) + 1
+        logging.debug(f"[BLE] session {psid}: retransmitted data at offset {off} (have {have})")
+        file_data.extend(payload[have - off :])
+    else:
+        file_meta["gap"] = (off, have)
+        logging.warning(f"[BLE] session {psid}: data gap — packet at offset {off}, only {have} bytes received")
+        file_done.set()
+
+
 def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_done, file_meta):
     """Build the encrypted-channel notification handler.
 
     File transfer bookkeeping goes into `file_meta` (reset by the sync loop per
-    file) so the sync can decide whether a download really completed:
+    file, which then sets "sid" to the session it requests) so the sync can
+    decide whether a download really completed. Data packets, the end marker
+    and the cmd-29 tail only count when their session id is "sid" (unless
+    session filtering fell back for this download: "sid_filter" False); others
+    are ignored and counted in "stray".
+      - "sid_filter" / "offset_check": per-download outcome of the "auto"
+        checks (True enforced, False fell back to accepting everything).
       - "end" / "end_error": data packet with offset 0xFFFFFFFF; byte 9 is the
         device's error code for the transfer (0 = OK).
       - "tail" / "tail_sid" / "tail_crc": cmd 29 SyncFileTail (sessionId@3-6,
@@ -153,8 +280,11 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
       - "start_status": cmd 28 SyncFileHead reply byte 7. Assumed to be a
         status (0 = accepted) but UNCONFIRMED: logged, never used to reject a
         file that delivered data.
+      - "duplicates": retransmitted data packets dropped (offset already had).
+      - "gap": (offset, bytes had) of the first packet past the end of the
+        data received: the download is incomplete.
       - "offset_mismatch": first data packet whose offset != bytes received so
-        far (diagnostic only).
+        far (diagnostic).
     """
 
     def handler(s, d):
@@ -166,28 +296,25 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
         if len(dd) < 1:
             return
         if dd[0] == 2 and len(dd) >= 10:
-            off = struct.unpack_from("<I", dd, 5)[0]
-            if off == 0xFFFFFFFF:
-                file_meta["end"] = True
-                file_meta["end_error"] = dd[9]
-                file_meta["end_sid"] = struct.unpack_from("<I", dd, 1)[0]
-                file_done.set()
-            else:
-                if off != len(file_data) and "offset_mismatch" not in file_meta:
-                    file_meta["offset_mismatch"] = (off, len(file_data))
-                file_data.extend(dd[10 : 10 + dd[9]])
+            _on_file_data(dd, file_data, file_done, file_meta)
         elif dd[0] == 1:
             cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
             logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
             if cid == 29:
-                file_meta["tail"] = True
-                if len(dd) >= 7:
-                    file_meta["tail_sid"] = struct.unpack_from("<I", dd, 3)[0]
-                if len(dd) >= 9:
-                    file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
-                file_done.set()
+                tail_sid = struct.unpack_from("<I", dd, 3)[0] if len(dd) >= 7 else None
+                if not _session_ok(tail_sid, file_meta.get("sid"), file_meta, first_data=False):
+                    _count_stray(file_meta, f"cmd-29 tail for session {tail_sid}")
+                else:
+                    file_meta["tail"] = True
+                    file_meta["tail_sid"] = tail_sid
+                    if len(dd) >= 9:
+                        file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
+                    file_done.set()
             elif cid == 28 and len(dd) >= 8:
+                # It's the reply to the request just sent, so it's kept even if
+                # its session id differs (as before); the id is kept for the logs.
                 file_meta["start_status"] = dd[7]
+                file_meta["start_sid"] = struct.unpack_from("<I", dd, 3)[0]
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))
@@ -568,15 +695,15 @@ async def connect_device(address=None):
             }
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
-        # Send SN_SIG 3 times for reliability on weak connections
-        for _ in range(3):
+        # Send SN_SIG several times for reliability on weak connections
+        for _ in range(SN_SIG_SEND_REPEATS):
             for i in range(tc):
                 await cl.write_gatt_char(
                     W, struct.pack("<H", 65040) + bytes([tc, i]) + sig[i * 100 : (i + 1) * 100], response=False
                 )
                 await asyncio.sleep(0.02)
-        # Wait up to 10 seconds for device response (was 5s — too tight for weak signals)
-        for _ in range(100):
+        # Wait for the device's ACK or session blob (same limits as the WiFi worker)
+        for _ in range(int(SN_SIG_REPLY_WAIT_S * 10)):
             await asyncio.sleep(0.1)
             if ack.is_set() or done.is_set():
                 break
@@ -671,7 +798,9 @@ async def connect_device(address=None):
     _device_state["file_data"] = file_data
     _device_state["file_done"] = file_done
     _device_state["file_meta"] = file_meta
-    _device_state["connected"] = True
+    # send_cmd() works from here, but the device only counts as connected once
+    # it has accepted the BIND_TOKEN below.
+    _device_state["handshaking"] = True
 
     # Send BIND_TOKEN handshake (cmd_id=1) — required for device to accept commands.
     # Format matches the official Android app (nh/a0.java) and the WiFi sync worker:
@@ -692,22 +821,39 @@ async def connect_device(address=None):
             logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
         except Exception as e:
             logging.warning(f"[BLE] Cloud bind failed: {e}")
-    if not device_token:
-        raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
-    if len(device_token) > 32:
-        logging.warning(
-            "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
-            "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
-            len(device_token),
-        )
     try:
-        token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
-    except UnicodeEncodeError as e:
-        raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
-    r1 = await send_cmd(bytes([1, 1, 0, 2, 0, 0]) + token32)
-    r2 = await send_cmd(bytes([1, 1, 0, 2, 0, 1]) + token32)
-    logging.info(f"[BLE] Handshake responses: HS1={r1 is not None}, HS2={r2 is not None}")
-    await send_cmd(bytes([1, 4, 0]) + struct.pack("<I", int(time.time())) + bytes([0, 0]))
+        if not device_token:
+            raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
+        if len(device_token) > 32:
+            logging.warning(
+                "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
+                "(this likely indicates a configuration error — the device-bound token should be ≤32 ASCII chars).",
+                len(device_token),
+            )
+        try:
+            token32 = device_token[:32].encode("ascii").ljust(32, b"\x00")
+        except UnicodeEncodeError as e:
+            raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
+    except ValueError:
+        await _disconnect_quietly(cl)
+        _reset_state()
+        raise
+    # cmd 1 twice, then cmd 4 (time sync with this Mac's time zone); the replies
+    # say whether the device accepted the token (ble_proto.handshake_verdict).
+    # Only a rejection fails the connect; "no reply at all" is logged by
+    # bind_handshake() and the connect carries on, as in v2.4.0.
+    verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
+    if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
+        await _disconnect_quietly(cl)
+        _reset_state()
+        return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
+    _device_state["port_version"] = hs_info["port_version"]
+    if hs_info["port_version"] is not None and hs_info["port_version"] < 7:
+        # BLE data packets and the file list use an older layout below port
+        # version 7 (PROTOCOL.md 7.2); only the >= 7 layout is implemented.
+        logging.warning(f"[BLE] Device port version {hs_info['port_version']} (< 7): file transfer layout untested")
+    _device_state["handshaking"] = False
+    _device_state["connected"] = True
     await send_cmd(bytes([1, 3, 0]), timeout=3)
     await send_cmd(bytes([1, 6, 0]), timeout=3)
 
@@ -728,7 +874,7 @@ async def connect_device(address=None):
 async def send_cmd(pt, timeout=5):
     """Send an encrypted command and wait for response."""
     cl = _device_state["client"]
-    if not cl or not _device_state["connected"]:
+    if not cl or not (_device_state["connected"] or _device_state.get("handshaking")):
         return None
     cipher = _device_state["cipher"]
     key, nonce, aad = _device_state["session_keys"]
@@ -864,109 +1010,49 @@ async def depair_device():
 
 
 async def list_device_files():
-    """List files on the connected device.
+    """List files on the connected device (cmd 26).
 
-    The file list can span multiple BLE notification packets. Each packet has:
-    - Offset 0-2: cmd type + cmd_id (3 bytes)
-    - Offset 3-6: unknown (4 bytes, maybe timestamp)
-    - Offset 7-8: total file count (uint16)
-    - Offset 9-10: index offset of this packet (uint16) — how many files before this
-    - Offset 11+: file entries (10 bytes each: sid, size, byte, byte)
-
-    We collect multiple packets until we have all `total` files.
+    The reply can span several notifications. Each one has the total file
+    count (u16 at 7), the index of its first entry (u16 at 9), then entries
+    (10 bytes on the NotePin S: sid u32, size u32, two unknown bytes).
+    ble_proto.FileListAssembler checks the start index (as the SDK does),
+    skips retransmissions and duplicate session ids, holds out-of-order
+    notifications, and ignores trailing bytes that don't make a whole entry
+    (a notification without one whole entry is dropped). A list that stays
+    short only means the missing files wait for the next sync.
     """
-    import sys
+    lst = FileListAssembler(_device_state.get("port_version"))
 
-    files = []
-    expected_total = None
-
-    # Clear previous multi-packet buffer
+    # The notify handler appends every cmd-26 notification to file_list_packets,
+    # including the one send_cmd returns as its reply, so only that list is read
+    # (reading `r` as well would count the first packet twice).
     _device_state["file_list_packets"] = []
-
-    # Send the request
     r = await send_cmd(bytes([1, 26, 0]), timeout=10)
     if r:
-        print(f"[BLE] list_files first response: {len(r)} bytes: {r.hex()[:200]}", file=sys.stderr, flush=True)
+        logging.debug(f"[BLE] list_files first response: {len(r)} bytes: {r.hex()[:200]}")
 
-    def _parse_packet_records(pkt):
-        """Extract file records from a single BLE notification packet."""
-        records = []
-        if len(pkt) < 11:
-            return records
-        total = struct.unpack_from("<H", pkt, 7)[0]
-        pkt_start = struct.unpack_from("<H", pkt, 9)[0]
-        print(f"[BLE] packet: total={total} start_idx={pkt_start} bytes={len(pkt)}", file=sys.stderr, flush=True)
-        offset = 11
-        while offset + 10 <= len(pkt):
-            sid = struct.unpack_from("<I", pkt, offset)[0]
-            fsize = struct.unpack_from("<I", pkt, offset + 4)[0]
-            if 0 < fsize < 500_000_000 and sid > 0:
-                duration_est = (fsize - 512) / 80 * 0.02 if fsize > 512 else 0
-                records.append(
-                    {
-                        "session_id": sid,
-                        "size": fsize,
-                        "duration_est": round(duration_est, 1),
-                    }
-                )
-            offset += 10
-        return records
+    consumed = 0
 
-    def _total_from_packet(pkt):
-        """Read the expected total file count from a packet header."""
-        if len(pkt) < 9:
-            return None
-        return struct.unpack_from("<H", pkt, 7)[0]
+    def _consume():
+        nonlocal consumed
+        packets = list(_device_state.get("file_list_packets") or [])
+        for pkt in packets[consumed:]:
+            lst.add(pkt)
+        consumed = len(packets)
 
-    # The BLE notification handler fires during the `send_cmd` await and appends
-    # the first response packet to `file_list_packets` — the same object that
-    # `send_cmd` returns as `r`.  Processing `r` directly AND then iterating
-    # `file_list_packets` would double-process that first packet, temporarily
-    # inflating `len(files)` and risking premature termination of the poll loop.
-    #
-    # Fix (F-py-019): take a snapshot of `file_list_packets` after send_cmd
-    # returns; process every packet from the snapshot (which includes r exactly
-    # once).  Do NOT process `r` separately.
-    initial_packets = list(_device_state.get("file_list_packets", []))
-    prev_consumed = len(initial_packets)
-    for pkt in initial_packets:
-        if expected_total is None:
-            expected_total = _total_from_packet(pkt)
-        files.extend(_parse_packet_records(pkt))
-
-    # Wait for additional packets if we expected more files
-    if expected_total is not None and len(files) < expected_total:
-        print(f"[BLE] Waiting for more packets ({len(files)}/{expected_total})", file=sys.stderr, flush=True)
-        # Wait up to 3 seconds for more packets to arrive
-        for _ in range(30):
+    _consume()
+    if r is not None and not lst.complete:
+        logging.info(f"[BLE] file list: waiting for more packets ({lst.count}/{lst.total})")
+        for _ in range(30):  # up to 3 s
             await asyncio.sleep(0.1)
-            new_packets = list(_device_state.get("file_list_packets", []))
-            if len(new_packets) > prev_consumed:
-                # Process only the newly arrived packets (slice from prev_consumed onward)
-                for pkt in new_packets[prev_consumed:]:
-                    if expected_total is None:
-                        expected_total = _total_from_packet(pkt)
-                    files.extend(_parse_packet_records(pkt))
-                prev_consumed = len(new_packets)
-            if expected_total is not None and len(files) >= expected_total:
+            _consume()
+            if lst.complete:
                 break
-
-    # Dedup by session_id — BLE retransmits can cause the same record to appear
-    # in multiple packets. Preserve insertion order; first occurrence wins.
-    seen_sids: set = set()
-    deduped: list = []
-    for rec in files:
-        if rec["session_id"] not in seen_sids:
-            seen_sids.add(rec["session_id"])
-            deduped.append(rec)
-    files = deduped
-
-    print(
-        f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})",
-        file=sys.stderr,
-        flush=True,
-    )
-    return files
+    if lst.total is not None and not lst.complete:
+        problems = f" ({'; '.join(lst.problems)})" if lst.problems else ""
+        logging.warning(f"[BLE] file list incomplete: {lst.count} of {lst.total} entries{problems}")
+    logging.info(f"[BLE] list_device_files: {len(lst.records)} files (device total {lst.total})")
+    return lst.records
 
 
 async def get_device_info():
@@ -1282,8 +1368,10 @@ def evaluate_download(sid, expected_size, data, meta, interrupted=None):
     say the request is start=0/end=fileSize and that offset 0xFFFFFFFF is the
     end packet carrying an error code), so they fail SAFE:
 
-    - interrupted (abort / stall / disconnect / refused), no end-of-file marker,
-      or an end packet with a non-zero error byte → DOWNLOAD_PARTIAL.
+    - interrupted (abort / stall / disconnect / refused / data gap), a gap in
+      the data offsets, no end-of-file marker, or an end packet with a non-zero
+      error byte → DOWNLOAD_PARTIAL. End markers and tails only count for the
+      session requested (the notify handler ignores the rest).
     - The cmd-28 reply status is NOT checked here: its meaning is unconfirmed.
       (The receive loop treats it as a refusal only if no data arrives at all.)
     - Byte count == size from the file list → DOWNLOAD_OK.
@@ -1294,6 +1382,8 @@ def evaluate_download(sid, expected_size, data, meta, interrupted=None):
     """
     if interrupted:
         return DOWNLOAD_PARTIAL, interrupted
+    if meta.get("gap"):
+        return DOWNLOAD_PARTIAL, "gap in the received data"
     if not (meta.get("end") or meta.get("tail")):
         return DOWNLOAD_PARTIAL, "no end-of-file marker"
     if meta.get("end") and meta.get("end_error"):
@@ -1425,6 +1515,111 @@ WIFI_KILL_WAIT_S = 10
 
 _wifi_sync_status.update({"active": False, "budget_s": None, "deadline": None})
 
+# <data dir>/wifi_sync.log: rotated to wifi_sync.log.1 once it reaches this size
+# (one old file kept), so it can't grow forever.
+WIFI_LOG_NAME = "wifi_sync.log"
+WIFI_LOG_MAX_BYTES = 1_000_000
+
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = [
+    # JSON / repr / key=value forms of token- or signature-like fields
+    re.compile(
+        r"""(?i)(["']?\b(?:access_token|bind_token|token|sn_sig|signature|sig|authorization)\b["']?\s*[:=]\s*)"""
+        r"""("[^"]*"|'[^']*'|[^\s,;}\]]+)"""
+    ),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),  # bearer tokens
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"),  # JWTs
+]
+
+
+def redact_secrets(text, secrets=()):
+    """Remove credentials from a log line.
+
+    Exact known values (this device's BIND_TOKEN and SN signature) are replaced
+    wherever they appear; token / signature fields and bearer tokens / JWTs are
+    replaced by pattern, so a value we weren't told about doesn't leak either.
+    """
+    text = str(text)
+    for s in secrets:
+        if s and len(s) >= 8:
+            text = text.replace(s, _REDACTED)
+    text = _SECRET_PATTERNS[0].sub(lambda m: m.group(1) + _REDACTED, text)
+    text = _SECRET_PATTERNS[1].sub("bearer " + _REDACTED, text)
+    return _SECRET_PATTERNS[2].sub(_REDACTED, text)
+
+
+WIFI_LOG_SCRUB_MARKER = "wifi_sync.log.scrubbed"
+
+
+def _configured_secrets():
+    """Every BIND_TOKEN and SN signature in the config (for exact-value redaction)."""
+    try:
+        config = load_config()
+    except Exception:
+        return []
+    found = []
+    for key in ("device_bind_tokens", "device_sn_signatures"):
+        values = config.get(key) or {}
+        if isinstance(values, dict):
+            found.extend(v for v in values.values() if isinstance(v, str))
+    return found
+
+
+def scrub_wifi_logs(data_dir=None):
+    """One-time clean-up of logs written before redaction existed.
+
+    Before v2.4.1, wifi_sync.log recorded the raw cloud replies, which contain
+    the BIND_TOKEN and SN signature. Rewrites wifi_sync.log and wifi_sync.log.1
+    through redact_secrets() (temp file + atomic replace), then writes a
+    marker file so it never runs again. Returns True if it ran. Never raises;
+    on failure the marker isn't written and the next start tries again.
+    """
+    data_dir = DATA_DIR if data_dir is None else data_dir
+    if not data_dir:
+        return False
+    marker = data_dir / WIFI_LOG_SCRUB_MARKER
+    if marker.exists():
+        return False
+    secrets = None
+    try:
+        for name in (WIFI_LOG_NAME, WIFI_LOG_NAME + ".1"):
+            path = data_dir / name
+            if not path.exists():
+                continue
+            if secrets is None:
+                secrets = _configured_secrets()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            clean = redact_secrets(text, secrets)
+            if clean != text:
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(clean, encoding="utf-8")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+                logging.info(f"[WiFi] removed credentials from {name}")
+        marker.write_text("wifi_sync logs redacted\n")
+        return True
+    except Exception as e:
+        logging.warning(f"[WiFi] couldn't scrub the old WiFi sync logs: {e}")
+        return False
+
+
+def append_rotating_log(path, line, max_bytes=None):
+    """Append `line` to `path`; first move a file of max_bytes or more to `path`.1.
+
+    Never raises: logging must not break a sync.
+    """
+    limit = WIFI_LOG_MAX_BYTES if max_bytes is None else max_bytes
+    try:
+        if path.stat().st_size >= limit:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+    try:
+        with open(path, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
 
 class _WifiDeadline:
     """When the parent stops waiting for the worker (monotonic clock)."""
@@ -1528,6 +1723,7 @@ def run_wifi_recovery_in_background(recover):
     _wifi_recovery_idle.clear()
 
     def go():
+        scrub_wifi_logs()  # once per install: old logs may hold credentials
         try:
             recover()
         except Exception as e:
@@ -1617,17 +1813,16 @@ def _do_wifi_sync_locked(deadline):
 
     _on_status("Starting WiFi transfer...", 5)
 
-    # Log WiFi sync to file for production debugging
-    _wifi_log = DATA_DIR / "wifi_sync.log" if DATA_DIR else None
+    # Log WiFi sync to file for production debugging (rotated, secrets redacted)
+    _wifi_log = DATA_DIR / WIFI_LOG_NAME if DATA_DIR else None
+    scrub_wifi_logs()  # no-op once done (normally already at startup)
+    secrets = []  # this device's BIND_TOKEN and SN signature, once known
 
     def _wlog(msg):
+        msg = redact_secrets(msg, secrets)
         print(f"[WiFi] {msg}")
         if _wifi_log:
-            try:
-                with open(_wifi_log, "a") as f:
-                    f.write(f"{datetime.now().isoformat()} {msg}\n")
-            except Exception:
-                pass
+            append_rotating_log(_wifi_log, f"{datetime.now().isoformat()} {msg}\n")
 
     proc = None
     try:
@@ -1664,21 +1859,29 @@ def _do_wifi_sync_locked(deadline):
 
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        secrets.extend(s for s in (device_token, device_sig) if s)
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
         if (not device_token or not device_sig) and sn and is_logged_in():
             _wlog("Credentials missing — attempting auto-fetch from cloud...")
             try:
                 if not device_token:
                     bind_result = bind_device(sn)
-                    _wlog(f"bind_device result: {bind_result}")
                     device_token = get_device_bind_token(sn)
+                    secrets.extend(s for s in (device_token, (bind_result or {}).get("token")) if s)
+                    _wlog(f"bind_device: {'token received' if device_token else (bind_result or {}).get('error')}")
                 if not device_sig:
                     sig_result = fetch_sn_signature(sn)
-                    _wlog(f"fetch_sn_signature result: {sig_result}")
                     device_sig = get_device_sn_signature(sn)
+                    secrets.extend(s for s in (device_sig, (sig_result or {}).get("signature")) if s)
+                    _wlog(
+                        f"fetch_sn_signature: {'signature received' if device_sig else (sig_result or {}).get('error')}"
+                    )
             except Exception as e:
                 _wlog(f"Auto-fetch failed: {e}")
-        _wlog(f"Credentials: bind_token={'yes' if device_token else 'NO'}, sn_sig={'yes' if device_sig else 'NO'}")
+        _wlog(
+            f"Credentials: bind token {'present' if device_token else 'MISSING'}, "
+            f"SN signature {'present' if device_sig else 'MISSING'}"
+        )
         if not device_token or not device_sig:
             _on_status("Device not registered", 0)
             _wlog("ABORT: missing credentials")
@@ -2010,6 +2213,7 @@ async def _sync_files_inner(progress_callback=None, background=False):
         file_data.clear()
         file_done.clear()
         file_meta.clear()
+        file_meta["sid"] = sid  # the notify handler ignores packets for any other session
 
         cipher = _device_state["cipher"]
         key, nonce, aad = _device_state["session_keys"]
@@ -2076,6 +2280,9 @@ async def _sync_files_inner(progress_callback=None, background=False):
                     interrupted = "stalled"
                     break
 
+        if interrupted is None and file_meta.get("gap"):
+            got_off, have = file_meta["gap"]
+            interrupted = f"data gap (packet at offset {got_off} after {have} bytes)"
         # The end-of-file data packet and the cmd-29 tail (which carries the CRC)
         # may arrive in either order — give the tail a moment to land.
         if interrupted is None and file_meta.get("end") and not file_meta.get("tail"):
@@ -2086,9 +2293,14 @@ async def _sync_files_inner(progress_callback=None, background=False):
 
         raw_data = bytes(file_data)
         meta = dict(file_meta)
+        file_meta["sid"] = None  # late packets for this file are now stray
         if meta.get("offset_mismatch"):
             got_off, have = meta["offset_mismatch"]
             logging.info(f"[BLE] session {sid}: first out-of-sequence data packet offset={got_off}, had {have} bytes")
+        if meta.get("duplicates"):
+            logging.info(f"[BLE] session {sid}: dropped {meta['duplicates']} retransmitted data packet(s)")
+        if meta.get("stray"):
+            logging.info(f"[BLE] session {sid}: ignored {meta['stray']} packet(s) for other sessions")
         if meta.get("start_status") not in (None, 0):
             logging.warning(
                 f"[BLE] session {sid}: cmd-28 reply status {meta['start_status']} with {len(raw_data)} bytes "

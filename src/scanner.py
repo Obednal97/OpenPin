@@ -1,15 +1,19 @@
-"""Scan for Plaud BLE devices."""
+"""Parse Plaud BLE advertising data (used by app/state/device.py scan_devices)."""
 
 from __future__ import annotations
 
-import asyncio
 import struct
 
-from bleak import BleakScanner
-from bleak.backends.device import BLEDevice
-from bleak.backends.scanner import AdvertisementData
-
-from .constants import PROJECT_CODES, SERVICE_UUID
+# Project codes (device models), as they appear in serial-number prefixes and
+# the older advertising format.
+PROJECT_CODES = {
+    712: "IzyRec",
+    880: "PLAUD NotePin",
+    881: "PLAUD Note Pro",
+    882: "Plaud NotePin S",
+    888: "Plaud Note",
+    901: "G101 Glasses",
+}
 
 
 def parse_manufacturer_data(mfr_data: dict) -> dict | None:
@@ -93,65 +97,3 @@ def parse_manufacturer_data(mfr_data: dict) -> dict | None:
             continue
 
     return None
-
-
-async def scan_for_plaud(timeout: float = 10.0) -> list[tuple[BLEDevice, dict]]:
-    """Scan for Plaud BLE devices.
-
-    Returns list of (device, parsed_info) tuples.
-    """
-    found_devices = []
-
-    def detection_callback(device: BLEDevice, adv: AdvertisementData):
-        # Check by name first (fastest)
-        name = device.name or adv.local_name or ""
-        is_plaud_name = any(p in (name.upper()) for p in ["PLAUD", "IZYREC", "NOTEPIN"])
-
-        # Check by service UUID
-        has_service = SERVICE_UUID.lower() in [s.lower() for s in adv.service_uuids]
-
-        # Check manufacturer data
-        mfr_info = parse_manufacturer_data(adv.manufacturer_data) if adv.manufacturer_data else None
-
-        if is_plaud_name or has_service or mfr_info:
-            info = mfr_info or {}
-            info["name"] = name
-            info["rssi"] = adv.rssi
-            info["address"] = device.address
-            info["service_uuids"] = adv.service_uuids
-
-            # Check if already found
-            if not any(d[0].address == device.address for d in found_devices):
-                found_devices.append((device, info))
-                model = info.get("model", "Unknown")
-                sn = info.get("serial_number", "?")
-                print(f"  Found: {name} ({device.address}) - {model} SN:{sn} RSSI:{adv.rssi}")
-
-    print(f"Scanning for Plaud devices ({timeout}s)...")
-    scanner = BleakScanner(detection_callback=detection_callback)
-    await scanner.start()
-    await asyncio.sleep(timeout)
-    await scanner.stop()
-
-    if not found_devices:
-        print("No Plaud devices found. Make sure your device is nearby and not connected to the phone app.")
-
-    return found_devices
-
-
-async def main():
-    devices = await scan_for_plaud(timeout=15)
-    print(f"\nFound {len(devices)} Plaud device(s)")
-    for device, info in devices:
-        print(f"\n  Device: {info.get('name', '?')}")
-        print(f"  Address: {device.address}")
-        print(f"  Model: {info.get('model', 'Unknown')}")
-        print(f"  Serial: {info.get('serial_number', '?')}")
-        print(f"  Port Version: {info.get('port_version', '?')}")
-        print(f"  RSSI: {info.get('rssi', '?')}")
-        if info.get("service_uuids"):
-            print(f"  Services: {info['service_uuids']}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

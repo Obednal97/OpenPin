@@ -6,23 +6,29 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # User data directory — outside the app bundle so it persists across updates.
-# 1. PLAUD_DATA_DIR env var, if set (tests/conftest.py points it at a temp dir
-#    so the suite never touches real recordings, config or tokens; dev runs can
-#    use it too)
-# 2. Packaged app: ~/Library/Application Support/Plaud V2/
-# 3. Dev mode (running from a git checkout): the project root
+# 1. PLAUD_DATA_DIR env var, if set. The Rust shell always sets it: to
+#    ~/Library/Application Support/Plaud V2 in release builds and to
+#    ".../Plaud V2 (Dev)" in debug builds (`tauri dev`), unless it was already
+#    set (src-tauri/src/paths.rs). tests/conftest.py points it at a temp dir.
+# 2. Otherwise ~/Library/Application Support/Plaud V2 — the installed app's
+#    folder, whether this runs from the app bundle or a checkout. There is no
+#    "dev mode" fallback: running app/api_server.py by hand without
+#    PLAUD_DATA_DIR uses real data (see docs/DEVELOPMENT.md). The repo root is
+#    never used: it may be synced elsewhere and the folder holds API keys.
 DATA_DIR_ENV = "PLAUD_DATA_DIR"
-_is_packaged = not (PROJECT_ROOT / ".git").exists()
-_env_data_dir = os.environ.get(DATA_DIR_ENV, "").strip()
-if _env_data_dir:
-    _data_dir = Path(_env_data_dir).expanduser().resolve()
-    _data_dir.mkdir(parents=True, exist_ok=True)
-elif _is_packaged:
-    _data_dir = Path(os.path.expanduser("~/Library/Application Support/Plaud V2"))
-    _data_dir.mkdir(parents=True, exist_ok=True)
-else:
-    _data_dir = PROJECT_ROOT
+PACKAGED_DATA_DIR = Path("~/Library/Application Support/Plaud V2").expanduser()
 
+
+def resolve_data_dir(env_value: str | None = None) -> Path:
+    """The data folder for a PLAUD_DATA_DIR value (None/blank = not set)."""
+    env_value = (env_value or "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return PACKAGED_DATA_DIR
+
+
+_data_dir = resolve_data_dir(os.environ.get(DATA_DIR_ENV))
+_data_dir.mkdir(parents=True, exist_ok=True)
 DATA_DIR = _data_dir
 
 # Python dependency lockfiles (see scripts/lock-python-deps.sh). The Rust shell
@@ -90,8 +96,16 @@ TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
 CONFIG_PATH = DATA_DIR / ".plaud_v2_config.json"
-HF_TOKEN_PATH = DATA_DIR / ".hf_token"
 PLAUD_CONFIG_PATH = DATA_DIR / ".plaud_config.json"
+
+# Local speaker identification (src/transcribe.py). The built-in `diarize`
+# package needs no account. The optional pyannote fallback loads a gated
+# Hugging Face pipeline: it needs a token (saved from Settings, 0600) and the
+# user must accept the terms of both models below on huggingface.co.
+HF_TOKEN_PATH = DATA_DIR / ".hf_token"
+HF_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
+PYANNOTE_PIPELINE_MODEL = "pyannote/speaker-diarization-3.1"
+PYANNOTE_GATED_MODELS = (PYANNOTE_PIPELINE_MODEL, "pyannote/segmentation-3.0")
 
 # Plaud Cloud API
 PLAUD_API_DOMAINS = {
