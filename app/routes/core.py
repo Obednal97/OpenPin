@@ -2,13 +2,13 @@
 
 import os
 import subprocess
-import tempfile
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from flask import Blueprint, Response, abort, jsonify, request, send_file
 
-from app.utils.constants import RECORDINGS_DIR, get_all_recordings_dirs
+from app.utils.constants import get_all_recordings_dirs
 from app.utils.system import ensure_ffmpeg
 
 bp = Blueprint("core", __name__)
@@ -38,21 +38,61 @@ def health():
     return jsonify({"status": "ok", "version": _APP_VERSION})
 
 
-@bp.route("/audio/<path:filepath>")
-def serve_audio(filepath):
-    # Search all known recording directories for the file
-    full_path = None
+# Audio files the player may request, mapped to the mimetype we serve them as.
+# Only bare filenames inside a known recordings directory are served.
+_AUDIO_MIMETYPES = {".ogg": "audio/ogg", ".mp3": "audio/mpeg"}
+_MAX_AUDIO_NAME_LEN = 200
+
+
+def _validate_audio_name(filename):
+    """Return the filename if it is a safe bare audio filename, else None.
+
+    Session ids from cloud sync are derived from user-chosen recording names,
+    so they can contain spaces, dots, brackets and non-ASCII letters; a strict
+    [A-Za-z0-9_-] allow-list would break playback for them. Instead we reject
+    anything that could leave the directory (separators, NUL, leading dot,
+    "..") and rely on resolve() + containment as the real boundary.
+    """
+    if not filename or len(filename) > _MAX_AUDIO_NAME_LEN:
+        return None
+    if "/" in filename or "\\" in filename or "\x00" in filename:
+        return None
+    if filename.startswith(".") or ".." in filename:
+        return None
+    if Path(filename).name != filename:
+        return None
+    if Path(filename).suffix.lower() not in _AUDIO_MIMETYPES:
+        return None
+    return filename
+
+
+def _find_local_audio(filename):
+    """Resolve a validated filename inside one of the recordings dirs.
+
+    Symlinks are resolved first, then the result must still sit inside the
+    (resolved) recordings dir — so a symlink pointing elsewhere is refused.
+    """
     for rec_dir in get_all_recordings_dirs():
-        candidate = rec_dir / filepath
-        if candidate.exists():
-            full_path = candidate
-            break
+        try:
+            root = Path(rec_dir).resolve()
+            candidate = (root / filename).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if candidate.is_relative_to(root) and candidate.is_file():
+            return candidate
+    return None
+
+
+@bp.route("/audio/<path:filename>")
+def serve_audio(filename):
+    filename = _validate_audio_name(filename)
+    if filename is None:
+        abort(404)
+
+    full_path = _find_local_audio(filename)
     if full_path is None:
-        # Try as absolute path
-        full_path = Path(filepath)
-    if not full_path.exists():
         # Fall back to Google Drive streaming for cloud-only recordings
-        session_id = Path(filepath).stem
+        session_id = Path(filename).stem
         try:
             from app.state import gdrive
             synced = gdrive.get_synced_files()
@@ -90,13 +130,13 @@ def serve_audio(filepath):
         if "audio/ogg" not in accept and "audio/*" not in accept and "*/*" not in accept:
             want_m4a = True
 
-    if want_m4a and str(full_path).endswith(".ogg"):
+    if want_m4a and full_path.suffix.lower() == ".ogg":
         m4a_path = _get_or_transcode_m4a(full_path)
         if m4a_path and os.path.exists(m4a_path):
             return send_file(m4a_path, mimetype="audio/mp4")
         # Fallback to OGG if transcode fails
 
-    return send_file(str(full_path), mimetype="audio/ogg")
+    return send_file(str(full_path), mimetype=_AUDIO_MIMETYPES[full_path.suffix.lower()])
 
 
 def _get_or_transcode_m4a(ogg_path):
