@@ -251,19 +251,56 @@ def mcp_call(method, params=None):
 
     text = r.text
     for line in text.split("\n"):
-        if line.startswith("data: "):
-            result = json.loads(line[6:])
-            if "error" in result:
-                raise ValueError(result["error"].get("message", str(result["error"])))
-            return result.get("result", result)
+        if line.startswith("data:"):
+            try:
+                message = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            # Skip server notifications (progress etc.) — we want the response.
+            if isinstance(message, dict) and ("result" in message or "error" in message):
+                return _unwrap_mcp_message(message)
 
     try:
-        result = r.json()
-        if "error" in result:
-            raise ValueError(result["error"].get("message", str(result["error"])))
-        return result.get("result", result)
-    except Exception:
+        message = r.json()
+    except ValueError:
         raise ValueError(f"Unexpected MCP response: {text[:200]}")
+    if not isinstance(message, dict):
+        raise ValueError(f"Unexpected MCP response: {text[:200]}")
+    return _unwrap_mcp_message(message)
+
+
+def _unwrap_mcp_message(message):
+    """Return the ``result`` of a JSON-RPC response, raising ValueError on failure.
+
+    Two kinds of failure exist: a JSON-RPC ``error`` (protocol level), and a
+    tool failure, which MCP reports as a *successful* response (HTTP 200) whose
+    result has ``isError: true`` and the error text in ``content``. Treating the
+    latter as success made failed pushes report "Pushed to Notion!".
+    """
+    if "error" in message:
+        err = message["error"]
+        raise ValueError(err.get("message", str(err)) if isinstance(err, dict) else str(err))
+    result = message.get("result", message)
+    if isinstance(result, dict) and result.get("isError"):
+        raise ValueError(_mcp_error_text(result))
+    return result
+
+
+def _mcp_error_text(result):
+    """Join the text parts of an MCP tool-error result into one message."""
+    content = result.get("content")
+    if not isinstance(content, list):
+        content = [content] if content else []
+    parts = []
+    for item in content:
+        if isinstance(item, dict):
+            text = item.get("text")
+            if text:
+                parts.append(str(text))
+        elif item:
+            parts.append(str(item))
+    msg = "\n".join(parts).strip()
+    return msg or "Notion MCP tool call failed"
 
 
 def start_connect():
