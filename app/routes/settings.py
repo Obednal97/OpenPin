@@ -48,6 +48,8 @@ def get_settings():
             "auto_summarise": config.get("auto_summarise", False),
             "notion_auto_push": config.get("notion_auto_push", False),
             "auto_prefer_wifi": config.get("auto_prefer_wifi", False),
+            # Read directly by the Rust shell (commands::crash_reports_enabled).
+            "crash_reports_enabled": config.get("crash_reports_enabled", True) is not False,
             "transcription_provider": config.get("transcription_provider", "deepgram"),
             "diarization_provider": config.get("diarization_provider", "deepgram"),
             "summarization_provider": config.get("summarization_provider", "anthropic"),
@@ -114,6 +116,9 @@ def save_settings():
             config["webhooks"] = data["webhooks"]
         if "auto_prefer_wifi" in data:
             config["auto_prefer_wifi"] = data["auto_prefer_wifi"]
+        if "crash_reports_enabled" in data:
+            # Stored as a real bool: Rust treats only `false` as "off".
+            config["crash_reports_enabled"] = data["crash_reports_enabled"] is not False
         if "setup_dismissed" in data:
             config["setup_dismissed"] = data["setup_dismissed"]
         if "gdrive_auto_sync" in data:

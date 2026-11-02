@@ -286,6 +286,7 @@ class TestEndpointJSONShapes:
             "auto_summarise",
             "notion_auto_push",
             "auto_prefer_wifi",
+            "crash_reports_enabled",
             "transcription_provider",
             "diarization_provider",
             "summarization_provider",
@@ -478,6 +479,15 @@ class TestSettingsRoundTrip:
         assert data["auto_summarise"] is True
         assert data["auto_prefer_wifi"] is True
         assert data["notion_auto_push"] is True
+
+    def test_crash_reports_enabled_defaults_on_and_roundtrips(self, flask_client, tmp_path):
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
+        flask_client.post("/settings", json={"crash_reports_enabled": False}, content_type="application/json")
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is False
+        # Rust reads the raw config file and only treats a JSON `false` as off.
+        assert json.loads((tmp_path / ".plaud_v2_config.json").read_text())["crash_reports_enabled"] is False
+        flask_client.post("/settings", json={"crash_reports_enabled": True}, content_type="application/json")
+        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
 
     def test_setup_dismissed_roundtrip(self, flask_client):
         flask_client.post("/settings", json={"setup_dismissed": True}, content_type="application/json")
