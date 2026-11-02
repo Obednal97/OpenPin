@@ -182,9 +182,7 @@ def ensure_installed(package, pip_name=None, required: bool = False, *, extra: s
         # pins without their hashes.
         pins = collect_constraints(req_dir) if req_dir.is_dir() else {}
         if pins:
-            tmp_constraints = tempfile.NamedTemporaryFile(
-                "w", prefix="plaud-constraints-", suffix=".txt", delete=False
-            )
+            tmp_constraints = tempfile.NamedTemporaryFile("w", prefix="plaud-constraints-", suffix=".txt", delete=False)
             with tmp_constraints:
                 tmp_constraints.write("".join(f"{k}=={v}\n" for k, v in sorted(pins.items())))
             targets += ["-c", tmp_constraints.name]
@@ -247,10 +245,7 @@ def ensure_installed(package, pip_name=None, required: bool = False, *, extra: s
 # ---- FFmpeg auto-download ----
 
 # Where to cache downloaded FFmpeg (persists across app updates)
-_FFMPEG_DIR = os.path.join(
-    os.path.expanduser("~"),
-    "Library", "Application Support", "com.plaud.v2", "bin"
-)
+_FFMPEG_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "com.plaud.v2", "bin")
 _FFMPEG_PATH = os.path.join(_FFMPEG_DIR, "ffmpeg")
 
 # Download URL for static macOS FFmpeg from evermeet.cx
