@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 
 import requests as http_requests
@@ -35,6 +36,8 @@ _cloud_state = {
     "api_domain": PLAUD_API_DOMAINS["eu"],
     "user": None,
     "desktop_uuid": None,
+    "device_id": None,  # stable per-install x-device-id (lazy, see _client_device_id)
+    "timezone": None,  # system IANA timezone (lazy, see _system_timezone)
 }
 _cloud_state_lock = threading.Lock()
 
@@ -61,13 +64,68 @@ class PlaudAuthError(Exception):
     """
 
 
+_DEVICE_ID_KEY = "plaud_client_device_id"
+
+
+def _client_device_id():
+    """Stable per-install id for the x-device-id header (16 hex, like the web app's).
+
+    Generated once and kept in the config, so Plaud sees the same client
+    across launches. Falls back to a per-process id if the config can't be written.
+    """
+    cached = _cloud_state.get("device_id")
+    if cached:
+        return cached
+    device_id = ""
+    try:
+        device_id = load_config().get(_DEVICE_ID_KEY) or ""
+    except Exception:
+        pass
+    if not device_id:
+        device_id = uuid.uuid4().hex[:16]
+        try:
+            update_config(lambda c: c.setdefault(_DEVICE_ID_KEY, device_id))
+        except Exception as e:
+            logging.warning("[Cloud] Couldn't save the client device id: %s", e)
+    _cloud_state["device_id"] = device_id
+    return device_id
+
+
+def _system_timezone():
+    """The system's IANA timezone name (e.g. "Europe/London"), or "UTC" if unknown."""
+    cached = _cloud_state.get("timezone")
+    if cached:
+        return cached
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if not tz:
+        try:
+            target = os.path.realpath("/etc/localtime")
+            if "zoneinfo/" in target:
+                tz = target.split("zoneinfo/", 1)[1]
+        except Exception:
+            tz = ""
+    _cloud_state["timezone"] = tz or "UTC"
+    return _cloud_state["timezone"]
+
+
 def _auth_headers(token):
-    return {
+    """Request headers Plaud's API expects. Built fresh per request (new x-request-id)."""
+    headers = {
+        "Accept": "application/json, text/plain, */*",
         "Authorization": f"bearer {token}",
         "Content-Type": "application/json",
         "app-platform": "desktop",
         "app-language": "en",
+        "edit-from": "desktop",
+        "x-device-id": _client_device_id(),
+        "timezone": _system_timezone(),
+        "x-request-id": uuid.uuid4().hex,
+        "User-Agent": "PlaudV2",
     }
+    id_hash = (_cloud_state.get("user") or {}).get("id_hash")
+    if id_hash:  # known once /user/me has answered
+        headers["x-pld-user"] = id_hash
+    return headers
 
 
 def _json_or_empty(response):
@@ -108,7 +166,10 @@ def user_from_reply(body):
     body = body if isinstance(body, dict) else {}
     user = body.get("data_user")
     if body.get("status") == 0 and isinstance(user, dict) and user.get("id"):
-        return {"id": user["id"], "nickname": user.get("nickname") or "", "email": user.get("email") or ""}
+        summary = {"id": user["id"], "nickname": user.get("nickname") or "", "email": user.get("email") or ""}
+        if user.get("id_hash"):  # sent back as the x-pld-user header
+            summary["id_hash"] = user["id_hash"]
+        return summary
     msg = _plaud_msg(body) or "no account in the reply"
     raise PlaudAuthError(f"Plaud rejected the token ({msg})")
 
@@ -287,15 +348,9 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
     Auto-recovers from region mismatch errors by switching to the correct
     API domain indicated in the error response and retrying once.
     """
-    headers = {
-        "Authorization": f"bearer {_cloud_state['token']}",
-        "Content-Type": "application/json",
-        "app-platform": "desktop",
-        "app-language": "en",
-    }
-
     for attempt in range(2):
         domain = _cloud_state["api_domain"]
+        headers = _auth_headers(_cloud_state["token"])  # fresh x-request-id per attempt
         if method == "GET":
             r = http_requests.get(f"{domain}{endpoint}", headers=headers, params=params, timeout=30)
         else:
@@ -926,12 +981,36 @@ def _cloud_call_error(exc):
     return str(exc)
 
 
+def _resolve_bind_token():
+    """The BLE BIND_TOKEN: the account's user id (32 hex), or None if it can't be found.
+
+    Plaud's bind reply carries no token; the token is the user id. It is the
+    login JWT's ``sub`` claim (no network needed), with /user/me's
+    ``data_user.id`` as the fallback.
+    """
+    try:
+        payload = (_cloud_state["token"] or "").split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        sub = claims.get("sub")
+        if isinstance(sub, str) and sub:
+            return sub
+    except Exception as e:
+        logging.info("[Cloud] No user id in the login token (%s); asking /user/me", e)
+    try:
+        user_id = (cloud_api("/user/me").get("data_user") or {}).get("id")
+        if isinstance(user_id, str) and user_id:
+            return user_id
+    except Exception as e:
+        logging.warning("[Cloud] Couldn't read the user id from /user/me: %s", e)
+    return None
+
+
 def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
     """Bind a device to the user's Plaud cloud account.
 
-    Returns the device-specific access_token (BIND_TOKEN) which is needed
-    for the BLE handshake. Each device needs its own token containing
-    the user's account ID and device serial number.
+    Returns the BIND_TOKEN needed for the BLE handshake. Plaud's bind reply
+    has no token field: the bind call registers the device on the account,
+    and the token is the account's user id (see _resolve_bind_token).
     """
     if not _cloud_state["logged_in"] or not _cloud_state["token"]:
         return {"error": "Not logged in to Plaud cloud"}
@@ -947,13 +1026,15 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
                 "version_number": version_number,
             },
         )
-        token = (data.get("data") or {}).get("access_token")
-        if data.get("status") == 0 and token:
+        if data.get("status") == 0:
+            token = _resolve_bind_token()
+            if not token:
+                return {"error": "Plaud registered this NotePin but your account id couldn't be read; try again"}
             # Save per-device token in config
             update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
             pairing_store.backup_serial_async(sn, name)  # Keychain copy once both credentials exist
             return {"token": token, "sn": sn}
-        reason = _plaud_msg(data) or "no device token in the reply"
+        reason = _plaud_msg(data) or f"status {data.get('status')}"
         return {"error": f"Plaud wouldn't register this NotePin ({reason})", "status": data.get("status")}
     except Exception as e:
         return {"error": _cloud_call_error(e)}
@@ -978,6 +1059,11 @@ def fetch_sn_signature(sn):
     POST /device/sn-sign with {"sns": ["<serial_number>"]}
     Returns the per-device RSA signature needed for BLE handshake.
     Stores it in config for offline use.
+
+    Plaud answers -3901 ("token type does not match parse mode") when the
+    login token is the wrong kind: sn-sign wants the user token from the
+    desktop sign-in, not the web app's workspace (WT) token. The official app
+    picks the token by path, with no sn-sign-specific header or field.
     """
     if not _cloud_state["logged_in"] or not _cloud_state["token"]:
         return {"error": "Not logged in to Plaud cloud"}
