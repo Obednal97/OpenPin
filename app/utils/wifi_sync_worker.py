@@ -390,37 +390,98 @@ def _atomic_write(path, data):
     tmp.replace(path)
 
 
-def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
-    """Persist one WiFi-downloaded file and return its result entry.
+async def wait_event(event, timeout):
+    """Wait for an asyncio.Event; True if it was set, False on timeout.
 
-    - Size != expected → raw kept as {sid}_partial.bin, status "partial" (never
-      an .ogg, so the next sync retries it).
-    - Decrypt failure → raw kept as {sid}_encrypted.bin, status "decrypt_failed".
-    - Otherwise the .ogg is written atomically (status "new"); the encrypted
-      original is written first and only dropped for short files, matching BLE.
+    Catches asyncio.TimeoutError explicitly: on Python 3.10 (allowed by
+    pyproject) it is NOT the builtin TimeoutError, so `except TimeoutError`
+    would let the timeout escape and skip the clean error result.
+    """
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return True
+    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+        return False
+
+
+def next_wifi_download(file_queue, recordings_dir, dismissed, new_files):
+    """Pop `file_queue` until an entry needs downloading; return it, or None when empty.
+
+    Dismissed sessions and sessions with an existing {sid}.ogg are recorded in
+    `new_files` as "exists". An existing .ogg means present WHATEVER its size:
+    the worker never deletes or replaces user recordings (a cropped recording
+    is legitimately much smaller than the device's copy — an earlier "< 50 % of
+    the device size → unlink and re-download" heuristic destroyed crops).
+    """
+    while file_queue:
+        f = file_queue.pop(0)
+        sid = f["session_id"]
+        ogg_path = recordings_dir / f"{sid}.ogg"
+        if str(sid) in dismissed:
+            new_files.append({"session_id": sid, "ogg_path": None, "duration": 0, "status": "exists"})
+            continue
+        if ogg_path.exists():
+            new_files.append({"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"})
+            continue
+        # Remove legacy decrypted .ogg.partial files from older versions (never an .ogg).
+        (recordings_dir / f"{sid}.ogg.partial").unlink(missing_ok=True)
+        return f
+    return None
+
+
+def _save_wifi_partial(recordings_dir, sid, raw, expected_size, reason):
+    partial_path = recordings_dir / f"{sid}_partial.bin"
+    status(f"Partial download for {sid}: {reason} — will retry next sync", 40)
+    if raw:
+        try:
+            if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
+                _atomic_write(partial_path, raw)
+        except OSError:
+            pass
+    return {
+        "session_id": sid,
+        "ogg_path": None,
+        "duration": 0,
+        "status": "partial",
+        "received": len(raw),
+        "expected": expected_size,
+        "reason": reason,
+    }
+
+
+def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
+    """Persist one WiFi-downloaded file (the device sent last=1) and return its result entry.
+
+    - Size == expected: the encrypted original is written first (dropped only
+      for short files, matching BLE), then the .ogg atomically → status "new";
+      decrypt failure → raw kept as {sid}_encrypted.bin, status "decrypt_failed".
+    - Size != expected (same fail-safe rule as BLE; the size semantics are
+      unconfirmed on real hardware): if it decrypts to valid Opus it's accepted
+      as "new" with size_mismatch {received, expected} and its encrypted
+      original kept; otherwise raw is kept as {sid}_partial.bin, status
+      "partial" (never an .ogg, so the next sync retries it). WiFi sync never
+      deletes files from the device.
     """
     from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 
     recordings_dir.mkdir(exist_ok=True)
     raw_size = len(raw)
     partial_path = recordings_dir / f"{sid}_partial.bin"
-    if expected_size <= 0 or raw_size != expected_size:
-        status(f"Partial download for {sid}: got {raw_size}/{expected_size} bytes — will retry next sync", 40)
-        if raw:
-            try:
-                if not partial_path.exists() or partial_path.stat().st_size <= raw_size:
-                    _atomic_write(partial_path, raw)
-            except OSError:
-                pass
-        return {
-            "session_id": sid,
-            "ogg_path": None,
-            "duration": 0,
-            "status": "partial",
-            "received": raw_size,
-            "expected": expected_size,
-            "reason": f"size mismatch ({raw_size} of {expected_size} bytes)",
-        }
+    size_mismatch = raw_size != expected_size
+    frames = None
+    if size_mismatch:
+        reason = f"size mismatch ({raw_size} of {expected_size} bytes)"
+        if not raw:
+            return _save_wifi_partial(recordings_dir, sid, raw, expected_size, reason)
+        try:
+            frames = decrypt_ble_file(raw, app_rsa_key)
+        except BleDecryptError as e:
+            return _save_wifi_partial(recordings_dir, sid, raw, expected_size, f"{reason}; decrypt failed: {e}")
+        logging.warning(
+            f"[WiFi] size mismatch accepted for session {sid}: received {raw_size} bytes, file list said "
+            f"{expected_size} (last=1, decrypts to valid Opus) — kept"
+        )
+        status(f"Size mismatch accepted for {sid}: {raw_size}/{expected_size} bytes (decrypts OK)", 40)
 
     enc_path = recordings_dir / f"{sid}_encrypted.bin"
     try:
@@ -428,19 +489,23 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
     partial_path.unlink(missing_ok=True)
-    try:
-        frames = decrypt_ble_file(raw, app_rsa_key)
-    except BleDecryptError as e:
-        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed", "error": str(e)}
+    if frames is None:
+        try:
+            frames = decrypt_ble_file(raw, app_rsa_key)
+        except BleDecryptError as e:
+            return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed", "error": str(e)}
     final_path = recordings_dir / f"{sid}.ogg"
     try:
         _atomic_write(final_path, wrap_opus_ogg(frames))
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
-    if raw_size <= 500_000:
+    if raw_size <= 500_000 and not size_mismatch:
         enc_path.unlink(missing_ok=True)
     duration = len(frames) // 80 * 0.02
-    return {"session_id": sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"}
+    entry = {"session_id": sid, "ogg_path": str(final_path), "duration": round(duration, 1), "status": "new"}
+    if size_mismatch:
+        entry["size_mismatch"] = {"received": raw_size, "expected": expected_size}
+    return entry
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
@@ -671,29 +736,9 @@ async def main():
         async def download_next():
             nonlocal current_sid, current_expected_size
             download_buf.clear()
-            while file_queue:
-                f = file_queue.pop(0)
+            f = next_wifi_download(file_queue, recordings_dir, dismissed, new_files)
+            if f is not None:
                 sid = f["session_id"]
-                ogg_path = recordings_dir / f"{sid}.ogg"
-                partial_path = recordings_dir / f"{sid}.ogg.partial"
-                if str(sid) in dismissed:
-                    new_files.append({"session_id": sid, "ogg_path": None, "duration": 0, "status": "exists"})
-                    continue
-                if ogg_path.exists():
-                    # Re-download if existing file is suspiciously small (<90% of expected)
-                    existing_size = ogg_path.stat().st_size
-                    expected = f["size"]
-                    if expected > 0 and existing_size < expected * 0.5:
-                        status(f"Re-downloading {sid} (existing {existing_size} bytes, expected ~{expected})", 35)
-                        ogg_path.unlink()
-                    else:
-                        new_files.append(
-                            {"session_id": sid, "ogg_path": str(ogg_path), "duration": 0, "status": "exists"}
-                        )
-                        continue
-                # Remove legacy decrypted .ogg.partial files from older versions
-                if partial_path.exists():
-                    partial_path.unlink()
                 current_sid = sid
                 current_expected_size = f["size"]
                 dl_req = build_wifi_packet(12, {"session": sid, "scene": 0, "start": 0, "end": f["size"]})
@@ -755,8 +800,8 @@ async def main():
                         download_buf.extend(chunk)
                     is_last = json_data.get("last", 0) if isinstance(json_data, dict) else 0
                     if is_last:
-                        # Exact size required (like BLE): the device may send
-                        # is_last on a truncated stream if the link is dropping.
+                        # Same fail-safe rule as BLE: exact size → saved; a size
+                        # mismatch is kept only if it decrypts, else partial.
                         entry = save_wifi_download(
                             recordings_dir, current_sid, bytes(download_buf), current_expected_size, app_rsa_key
                         )
@@ -815,24 +860,18 @@ async def main():
             return
 
         status("Waiting for handshake...", 25)
-        try:
-            await asyncio.wait_for(handshake_done.wait(), timeout=30)
-        except TimeoutError:
+        if not await wait_event(handshake_done, 30):
             print(json.dumps({"error": "Handshake timed out", "files": new_files}))
             return
 
         status("Getting file list...", 30)
-        try:
-            await asyncio.wait_for(file_list_received.wait(), timeout=15)
-        except TimeoutError:
+        if not await wait_event(file_list_received, 15):
             print(json.dumps({"error": "File list timed out", "files": new_files}))
             return
 
         total_size = sum(f["size"] for f in wifi_files)
         dl_timeout = max(total_size / 50000, 60)
-        try:
-            await asyncio.wait_for(all_downloads_done.wait(), timeout=dl_timeout)
-        except TimeoutError:
+        if not await wait_event(all_downloads_done, dl_timeout):
             done_so_far = sum(1 for f in new_files if f["status"] == "new")
             total_expected = len(wifi_files)
             status(f"Download timed out: got {done_so_far}/{total_expected} files", 88)
