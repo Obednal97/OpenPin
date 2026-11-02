@@ -1,4 +1,5 @@
 mod commands;
+mod deep_link;
 mod lifecycle;
 mod logging;
 mod paths;
@@ -100,6 +101,10 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // plaud://login?auth_code=… sign-in links (see deep_link.rs). On macOS the
+        // OS sends them to the running app as an Apple Event, so the
+        // single-instance plugin needs no deep-link feature.
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let window = app.get_webview_window("main")
                 .expect("Main window must exist — check tauri.conf.json windows config");
@@ -114,6 +119,20 @@ pub fn run() {
             // SIGTERM/SIGINT (logout, `kill`, Ctrl-C in dev) would otherwise
             // end the process without stopping the Python backend.
             lifecycle::handle_termination_signals(app.handle());
+
+            // Plaud sign-in links: while running, and the one that launched the
+            // app (normally delivered after setup through the same event; the
+            // startup value is checked too, and repeats are dropped).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    deep_link::handle_urls(&handle, &event.urls());
+                });
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    deep_link::handle_urls(app.handle(), &urls);
+                }
+            }
 
             // macOS: themed dock icon. (Traffic lights: titleBarStyle Overlay +
             // trafficLightPosition in tauri.conf.json.)
@@ -271,6 +290,8 @@ pub fn run() {
             commands::install_update,
             commands::show_notification,
             commands::select_directory,
+            deep_link::has_pending_sign_in_code,
+            deep_link::take_pending_sign_in_code,
         ])
         .on_window_event(|window, event| {
             match event {
