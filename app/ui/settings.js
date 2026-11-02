@@ -28,11 +28,11 @@ const PROVIDERS = {
 
 function renderSettings() {
   // Language
-  $('#language-select').value = app.settings.language || 'en';
+  $('#language-select').value = app.settings.language || 'auto';
 
   // English variant — show only when language is English or auto
   const engVariant = $('#english-variant-group');
-  const lang = app.settings.language || 'en';
+  const lang = app.settings.language || 'auto';
   if (engVariant) engVariant.classList.toggle('hidden', lang !== 'en' && lang !== 'auto');
   const engSelect = $('#english-variant-select');
   if (engSelect) engSelect.value = app.settings.english_variant || 'us';
@@ -141,7 +141,9 @@ function renderModelSelector() {
   const modelSelector = $('#model-selector');
   if (!modelSelector) return;
   const models = app.settings.models || {};
+  // Smallest download first (the API's JSON keys arrive alphabetically)
   modelSelector.innerHTML = Object.entries(models)
+    .sort((a, b) => (a[1].download_mb || 0) - (b[1].download_mb || 0))
     .map(([name, info]) => {
       const selected = name === (app.settings.model || 'small');
       const disabled = !info.fits;
