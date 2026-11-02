@@ -11,17 +11,17 @@ from pathlib import Path
 import requests as http_requests
 
 from app.utils.audio import unwrap_ogg_to_raw_opus, wrap_opus_ogg
-from app.utils.config import load_config, save_config
+from app.utils.config import load_config, update_config
 from app.utils.constants import (
     CLOUD_RECORDINGS_DIR,
     PLAUD_API_DOMAINS,
     PLAUD_CONFIG_PATH,
     PLAUD_WEB_HOST,
-    RECORDINGS_DIR,
     TRANSCRIPTS_DIR,
     get_all_recordings_dirs,
     get_recordings_dir,
 )
+from app.utils.paths import is_auxiliary_stem
 from app.utils.recording_utils import extract_recording_date
 
 # Module-level state
@@ -210,9 +210,7 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
         if method == "GET":
             r = http_requests.get(f"{domain}{endpoint}", headers=headers, params=params, timeout=30)
         else:
-            r = http_requests.post(
-                f"{domain}{endpoint}", headers=headers, params=params, json=json_body, timeout=30
-            )
+            r = http_requests.post(f"{domain}{endpoint}", headers=headers, params=params, json=json_body, timeout=30)
 
         # Check for region mismatch before raise_for_status
         if attempt == 0:
@@ -321,7 +319,6 @@ def logout():
     return {"logged_out": True}
 
 
-
 def download_cloud_recordings():
     """Download all cloud recordings, convert raw Opus to OGG."""
     if not _cloud_state["logged_in"] or not _cloud_state["token"]:
@@ -385,6 +382,11 @@ def download_cloud_recordings():
             )
             continue
 
+        # Re-check with a fresh config: the user may have deleted this
+        # recording while earlier files were downloading.
+        if session_id in set(load_config().get("deleted_ids", [])):
+            continue
+
         try:
             url_data = cloud_api(f"/file/temp-url/{fid}", params={"is_opus": 1})
             url = url_data.get("temp_url_opus") or url_data.get("temp_url") or ""
@@ -431,11 +433,7 @@ def download_cloud_recordings():
                 results.append({"session_id": session_id, "status": "unknown_format", "cloud_name": name})
                 continue
 
-            conf = load_config()
-            cids = conf.get("cloud_file_ids", {})
-            cids[session_id] = fid
-            conf["cloud_file_ids"] = cids
-            save_config(conf)
+            update_config(lambda c, sid=session_id, fid=fid: c.setdefault("cloud_file_ids", {}).__setitem__(sid, fid))
 
             results.append(
                 {
@@ -578,6 +576,8 @@ def upload_local_recordings_to_cloud():
         session_id = f.stem
         if session_id.startswith("cloud_"):
             continue
+        if is_auxiliary_stem(session_id):
+            continue  # crop backup / temp file, not a recording
 
         rec_date = extract_recording_date(session_id)
         if rec_date:
@@ -611,22 +611,20 @@ def upload_local_recordings_to_cloud():
         try:
             result = upload_to_cloud(str(f), display_name, duration, start_time_ms=rec_ts_ms)
             if not result.get("error"):
-                conf = load_config()
-                uploaded_names = conf.get("uploaded_filenames", [])
-                if display_name not in uploaded_names:
-                    uploaded_names.append(display_name)
-                conf["uploaded_filenames"] = uploaded_names
-                uploaded_ids = conf.get("uploaded_session_ids", [])
-                if session_id not in uploaded_ids:
-                    uploaded_ids.append(session_id)
-                conf["uploaded_session_ids"] = uploaded_ids
                 # Track cloud file ID for deletion support
                 cloud_fid = result.get("data", result).get("id", result.get("id", ""))
-                if cloud_fid:
-                    cids = conf.get("cloud_file_ids", {})
-                    cids[session_id] = cloud_fid
-                    conf["cloud_file_ids"] = cids
-                save_config(conf)
+
+                def _record_upload(conf, sid=session_id, name=display_name, cloud_fid=cloud_fid):
+                    uploaded_names = conf.setdefault("uploaded_filenames", [])
+                    if name not in uploaded_names:
+                        uploaded_names.append(name)
+                    uploaded_ids = conf.setdefault("uploaded_session_ids", [])
+                    if sid not in uploaded_ids:
+                        uploaded_ids.append(sid)
+                    if cloud_fid:
+                        conf.setdefault("cloud_file_ids", {})[sid] = cloud_fid
+
+                update_config(_record_upload)
             if result.get("error"):
                 uploaded.append({"session_id": session_id, "status": "error", "error": result["error"]})
             else:
@@ -704,20 +702,20 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
         return {"error": "Not logged in to Plaud cloud"}
 
     try:
-        data = cloud_api("/device/bind", method="POST", json_body={
-            "sn": sn,
-            "name": name,
-            "model": model,
-            "version_number": version_number,
-        })
+        data = cloud_api(
+            "/device/bind",
+            method="POST",
+            json_body={
+                "sn": sn,
+                "name": name,
+                "model": model,
+                "version_number": version_number,
+            },
+        )
         if data.get("status") == 0 and data.get("data", {}).get("access_token"):
             token = data["data"]["access_token"]
             # Save per-device token in config
-            config = load_config()
-            device_tokens = config.get("device_bind_tokens", {})
-            device_tokens[sn] = token
-            config["device_bind_tokens"] = device_tokens
-            save_config(config)
+            update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
             return {"token": token, "sn": sn}
         return {"error": data.get("msg", "Bind failed"), "raw": data}
     except Exception as e:
@@ -746,11 +744,7 @@ def fetch_sn_signature(sn):
             signatures = data.get("data", {}).get("signature", {})
             sig = signatures.get(sn)
             if sig:
-                config = load_config()
-                device_sigs = config.get("device_sn_signatures", {})
-                device_sigs[sn] = sig
-                config["device_sn_signatures"] = device_sigs
-                save_config(config)
+                update_config(lambda c: c.setdefault("device_sn_signatures", {}).__setitem__(sn, sig))
                 return {"signature": sig, "sn": sn}
             return {"error": "No signature returned for this device"}
         return {"error": data.get("msg", "Failed to get signature"), "raw": data}
