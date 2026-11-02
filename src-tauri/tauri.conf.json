@@ -37,7 +37,10 @@
       "../app/icon.icns"
     ],
     "resources": {
-      "../src/*": "src/",
+      "../src/__init__.py": "src/__init__.py",
+      "../src/crypto.py": "src/crypto.py",
+      "../src/scanner.py": "src/scanner.py",
+      "../src/transcribe.py": "src/transcribe.py",
       "../keys/*": "keys/",
       "../app/api_server.py": "app/api_server.py",
       "../app/routes/*": "app/routes/",

@@ -23,9 +23,9 @@ Code these docs describe:
 | `app/state/cloud.py` | Plaud Cloud sign-in, `/device/bind`, `/device/sn-sign`, import and upload |
 | `src/crypto.py`, `src/scanner.py` | RSA helpers, advertising-data parser |
 
-`src/protocol.py`, `src/client.py` and `src/constants.py` are an older standalone client. They still
-send the static `APP_KEY` handshake and use the old command names; don't take protocol facts from
-them.
+An older standalone client (`src/protocol.py`, `src/client.py`, `src/constants.py`) sent the
+static `APP_KEY` handshake and used the old command names. It was deleted in November 2026 (it's in
+git history); don't take protocol facts from it.
 
 ## Status legend
 
