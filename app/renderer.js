@@ -933,8 +933,10 @@ window.plaud.onSystemWake(async () => {
 });
 
 // ---- Init ----
-
-let _startupErrorShown = false;
+// Startup is one state machine in ui/health-gate.js: its splash shows the
+// Rust shell's startup progress until the backend is ready, or a failure
+// screen whose Retry re-runs init(). showStartupError only covers errors that
+// arrive after startup (e.g. the backend crashing for good later on).
 
 function showStartupError(error) {
   const h2 = dom.emptyState.querySelector('h2');
@@ -947,7 +949,6 @@ function showStartupError(error) {
   const hint = isStructured ? error.hint : '';
   const code = isStructured ? error.code : 'UNKNOWN';
 
-  _startupErrorShown = true;
   h2.textContent = title;
   p.innerHTML = '';
 
@@ -974,51 +975,18 @@ window.plaud.onStartupError((error) => {
   showStartupError(error);
 });
 
-// Show startup progress messages (e.g. "Installing dependencies...")
-window.plaud.onStartupStatus((msg) => {
-  const p = dom.emptyState.querySelector('p');
-  if (p && !_startupErrorShown) {
-    p.textContent = msg;
-  }
-});
-
 // Init host-app features immediately (don't wait for Python API)
 initSettingsEvents();
 
+let _rendererInitPassedGate = false;
+
 async function init() {
-  // Check if main process already detected a startup error
-  const apiInfo = await window.plaud.getApiInfo();
-  if (apiInfo.error) {
-    showStartupError(apiInfo.error);
-    return;
-  }
-
-  // Show current startup status from main process
-  if (apiInfo.status) {
-    dom.emptyState.querySelector('p').textContent = apiInfo.status;
-  }
-
-  let apiReady = false;
-  for (let i = 0; i < 30; i++) {
-    try {
-      const h = await window.plaud.health();
-      if (h.status === 'ok') {
-        apiReady = true;
-        break;
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  if (!apiReady) {
-    showStartupError({
-      code: 'SERVER_TIMEOUT',
-      title: 'Server not responding',
-      friendly: 'The Python backend started but never became ready.',
-      hint: 'Try restarting the app. Another instance may be running.',
-    });
-    return;
-  }
+  // Wait for the health gate: it resolves true once the backend answers
+  // /health, or false after showing its failure screen (whose Retry calls
+  // init() again).
+  const ready = await window.plaudStartup.waitForBackend();
+  if (!ready || _rendererInitPassedGate) return;
+  _rendererInitPassedGate = true;
 
   // Server is ready — reset empty state text to default
   dom.emptyState.querySelector('h2').textContent = 'No recordings yet';
@@ -1317,4 +1285,5 @@ function _startBgPoll() {
   app.restartPollingTimers = _restartTimers;
 }
 
+window.plaudStartup.onRetry(init);
 init();
