@@ -6,6 +6,8 @@
  *   GET  /v1/download/<tag>/<asset>     302 to GitHub's signed, token-free asset URL
  *   POST /v1/report                     auto-bug / user bug report → GitHub Issues
  *
+ * Bindings (wrangler.toml): LIMITER, the ReportLimiter Durable Object that
+ * holds the report rate limits and the daily create / comment caps.
  * The only secret is GH_TOKEN (a fine-grained PAT on Obednal97/Plaud-V2 with
  * Contents: read + Issues: read/write). Rotate it with
  *   npx wrangler secret put GH_TOKEN
@@ -17,10 +19,28 @@ export const USER_AGENT = 'plaud-v2-updates-worker';
 const GH_API = 'https://api.github.com';
 
 export const LATEST_TTL_SECONDS = 300;
-export const RATE_LIMIT_PER_HOUR = 20;
-export const MAX_TITLE_CHARS = 200;
+// POST /v1/report limits (enforced by the ReportLimiter Durable Object).
+/** Requests per client IP per minute and per hour (every request counts, dry runs and invalid ones too). */
+export const RATE_LIMIT_PER_MINUTE = 10;
+export const RATE_LIMIT_PER_HOUR = 30;
+/** Requests per minute from all clients together. */
+export const GLOBAL_RATE_LIMIT_PER_MINUTE = 60;
+/** New issues per UTC day, all installs together. */
+export const DAILY_CREATE_LIMIT = 30;
+/** Comments per UTC day, all installs together. */
+export const DAILY_COMMENT_LIMIT = 200;
+/** Comments per issue per UTC day. */
+export const PER_ISSUE_DAILY_COMMENT_LIMIT = 5;
+export const MAX_TITLE_CHARS = 200; // accepted from the client
+export const ISSUE_TITLE_CHARS = 120; // what goes on GitHub
 export const MAX_BODY_BYTES = 20 * 1024;
 const MAX_REQUEST_BYTES = 32 * 1024;
+
+/** First line of every issue this Worker creates; only such issues get comments. */
+export const WORKER_MARKER = '<!-- plaud-v2-worker -->';
+export const UNVERIFIED_NOTICE = 'Automated report submitted by a Plaud V2 install — unverified content';
+/** GitHub author associations only the PAT's owner / collaborators can have. */
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 const TAG_RE = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,32})?$/;
 const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,150}\.(?:dmg|sha256)$/;
@@ -82,11 +102,62 @@ export function versionFromTag(tag) {
   return String(tag || '').replace(/^v/, '');
 }
 
-/** Stop issue text from pinging GitHub users or spoofing our dedupe marker. */
+/**
+ * No @mentions, and no HTML comments at all, so client text can never forge
+ * our `<!-- plaud-v2-worker -->` / `<!-- fp:… -->` markers.
+ */
 export function sanitizeIssueText(text) {
   return String(text)
-    .replace(/<!--\s*fp:/gi, '<!-- (fp):')
-    .replace(/@(?=[A-Za-z0-9-])/g, '@​');
+    .replace(/<!--/g, '<!\u200b--')
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b');
+}
+
+const CONTROL_OR_BIDI_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/** Truncate to `max` code points, ending with an ellipsis when cut. */
+function truncateChars(s, max) {
+  const chars = [...s];
+  return chars.length <= max ? s : `${chars.slice(0, max - 1).join('').trimEnd()}…`;
+}
+
+/**
+ * One line of client text made inert for GitHub: no control/bidi characters,
+ * no markdown/HTML syntax, no @mentions, #123 cross-refs or :emoji: codes.
+ */
+export function plainInline(text, max) {
+  const t = String(text)
+    .replace(CONTROL_OR_BIDI_RE, ' ')
+    // Code spans, HTML and escapes go; "[Auto]" stays readable, but no
+    // `](` / `![` pairs survive to form a link or image.
+    .replace(/[`<>\\]/g, '')
+    .replace(/!\[/g, '[')
+    .replace(/\]\s*\(/g, '] (')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
+    .replace(/#(?=\d)/g, '#\u200b')
+    .replace(/:(?=[a-z0-9_+-]+:)/gi, ':\u200b');
+  return truncateChars(t, max);
+}
+
+/** Issue title: plain text, at most ISSUE_TITLE_CHARS characters. */
+export function plainTitle(text) {
+  return plainInline(text, ISSUE_TITLE_CHARS) || 'Untitled report';
+}
+
+/**
+ * Wrap client text in a tilde code fence so GitHub renders none of it (no
+ * links, images, HTML, mentions or cross-refs). Runs of 3+ tildes are broken
+ * up so nothing inside can close the fence; backtick fences inside a tilde
+ * fence are plain text in CommonMark, so the app's own ``` blocks survive.
+ */
+export function fenceUntrusted(text) {
+  const t = sanitizeIssueText(
+    String(text)
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, ''),
+  ).replace(/~{3,}/g, (m) => m.split('').join('\u200b'));
+  return `~~~~~text\n${t.trimEnd()}\n~~~~~`;
 }
 
 export function fingerprintMarker(fp) {
@@ -148,19 +219,50 @@ export function validateReport(payload) {
   };
 }
 
+function reportMeta(report) {
+  const os = plainInline(report.os, 64) || 'unknown';
+  const kind = report.kind === 'user' ? 'user report' : 'auto report';
+  return `Plaud V2 ${plainInline(report.appVersion, 32)} · macOS ${os} · ${kind}`;
+}
+
 export function buildIssueBody(report) {
-  const parts = [sanitizeIssueText(report.body).trimEnd(), '', '---'];
-  parts.push(`*Plaud V2 ${report.appVersion} · macOS ${sanitizeIssueText(report.os) || 'unknown'} · via update worker*`);
+  const parts = [
+    WORKER_MARKER,
+    `> **${UNVERIFIED_NOTICE}.** Everything in the block below came from the app and is shown as plain text.`,
+    '',
+    `*${reportMeta(report)}*`,
+    '',
+    fenceUntrusted(report.body),
+  ];
   if (report.fingerprint) parts.push('', fingerprintMarker(report.fingerprint));
   return parts.join('\n');
 }
 
 export function buildCommentBody(report) {
   return [
-    `### Another occurrence (${report.appVersion}, macOS ${sanitizeIssueText(report.os) || 'unknown'})`,
+    '### Another occurrence',
+    `> **${UNVERIFIED_NOTICE}.**`,
     '',
-    sanitizeIssueText(report.body).trimEnd(),
+    `*${reportMeta(report)}*`,
+    '',
+    fenceUntrusted(report.body),
   ].join('\n');
+}
+
+/**
+ * True only for an issue this Worker created for `fingerprint`: open, labelled
+ * auto-bug, opened by the token's owner or a collaborator, body starting with
+ * WORKER_MARKER and carrying the fingerprint marker. Client text can contain
+ * neither marker (sanitizeIssueText breaks every `<!--`).
+ */
+export function isWorkerIssue(issue, fingerprint) {
+  if (!issue || typeof issue !== 'object' || issue.pull_request) return false;
+  if (issue.state !== 'open') return false;
+  const labels = Array.isArray(issue.labels) ? issue.labels.map((l) => (typeof l === 'string' ? l : l?.name)) : [];
+  if (!labels.includes('auto-bug')) return false;
+  if (!TRUSTED_ASSOCIATIONS.has(issue.author_association)) return false;
+  if (typeof issue.body !== 'string' || !issue.body.startsWith(WORKER_MARKER)) return false;
+  return issue.body.includes(fingerprintMarker(fingerprint));
 }
 
 // ---------------------------------------------------------------------------
@@ -230,8 +332,12 @@ async function readChecksum(env, asset, dmgName) {
 // GET /v1/latest
 // ---------------------------------------------------------------------------
 
-// Per-isolate memory cache. The Cache API below is per-data-centre and shared
-// by all isolates there; this is a cheap first layer in front of it.
+// Per-isolate memory cache: the layer that always works. The Cache API below
+// is only a best-effort second layer: it is per data centre, and Cloudflare
+// documents it as functional on custom domains, not on workers.dev (it did
+// store entries there when tested on 2026-11-02, but nothing relies on that).
+// Its errors are swallowed. A full miss costs 1-3 GitHub calls against the
+// PAT's 5,000/hour quota.
 let memLatest = null; // { body: string, expires: number }
 
 async function handleLatest(request, env, ctx) {
@@ -243,7 +349,7 @@ async function handleLatest(request, env, ctx) {
   const cacheKey = new Request(new URL('/__cache/v1/latest', request.url).toString(), { method: 'GET' });
   const cache = typeof caches !== 'undefined' ? caches.default : null;
   if (cache) {
-    const hit = await cache.match(cacheKey);
+    const hit = await cache.match(cacheKey).catch(() => undefined);
     if (hit) {
       const body = await hit.text();
       memLatest = { body, expires: now + 60 * 1000 };
@@ -318,46 +424,136 @@ async function sha256Hex(text) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// ---- Limits (Durable Object `ReportLimiter`, binding LIMITER) ----
+//
+// Why a Durable Object: caches.default is per data centre, not atomic, and
+// Cloudflare documents it as functional on custom domains only; the Workers
+// Rate Limiting binding is approximate per location, and on this account it
+// returned success for 45 same-key calls in a row against a 10/min limit
+// (tested 2026-11-02). A Durable Object is single-threaded with durable
+// storage, so its fixed-window counters are exact.
+//
+// Objects: one per hashed client IP ("ip:<hash>") and one "global".
+
 /**
- * Fixed-window per-IP counter stored in the Cache API (no KV namespace
- * needed). The cache is per data centre and increments are not atomic, so this
- * is a best-effort abuse brake, not an exact quota — good enough for a handful
- * of trusted installs. The IP is hashed before it becomes a cache key.
- * Returns { allowed, remaining }.
+ * Fixed-window counters in a Durable Object's storage. All-or-nothing: if any
+ * counter is at its limit nothing is incremented. Window starts are multiples
+ * of the window length since the epoch, so 86400 s windows are UTC days.
+ * @param {{get: Function, put: Function}} storage
+ * @param {Array<{name: string, limit: number, window: number}>} counters
+ * @returns {Promise<{allowed: boolean, retryAfter: number, blocked: string | null}>}
  */
-async function rateLimit(request, limit) {
-  const cache = typeof caches !== 'undefined' ? caches.default : null;
-  if (!cache) return { allowed: true, remaining: limit };
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const hour = Math.floor(Date.now() / 3600_000);
-  const ipHash = (await sha256Hex(`plaud-v2:${ip}`)).slice(0, 32);
-  const key = new Request(new URL(`/__ratelimit/report/${ipHash}/${hour}`, request.url).toString(), { method: 'GET' });
-  const hit = await cache.match(key);
-  const count = hit ? parseInt(await hit.text(), 10) || 0 : 0;
-  if (count >= limit) return { allowed: false, remaining: 0 };
-  const secondsLeft = 3600 - Math.floor((Date.now() / 1000) % 3600);
-  await cache.put(
-    key,
-    new Response(String(count + 1), { headers: { 'Cache-Control': `max-age=${Math.max(secondsLeft, 60)}` } }),
+export async function takeCounters(storage, counters, now = Date.now()) {
+  const rows = await Promise.all(counters.map((c) => storage.get(c.name)));
+  const state = counters.map((c, i) => {
+    const start = Math.floor(now / (c.window * 1000)) * c.window * 1000;
+    const row = rows[i];
+    const count = row && row.start === start ? row.count : 0;
+    return { ...c, start, count };
+  });
+  const full = state.find((s) => s.count >= s.limit);
+  if (full) {
+    return { allowed: false, retryAfter: Math.max(1, Math.ceil((full.start + full.window * 1000 - now) / 1000)), blocked: full.name };
+  }
+  await Promise.all(
+    state.map((s) => storage.put(s.name, { start: s.start, count: s.count + 1, expires: s.start + s.window * 1000 })),
   );
-  return { allowed: true, remaining: limit - count - 1 };
+  return { allowed: true, retryAfter: 0, blocked: null };
 }
 
-/** Find an open auto-bug issue whose body carries `marker`. */
+/** Durable Object: POST {counters: [...]} → takeCounters result. */
+export class ReportLimiter {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const { counters } = await request.json();
+    const storage = this.state.storage;
+    const result = await takeCounters(storage, counters);
+    // Tidy expired rows (per-IP objects would otherwise keep one forever).
+    if ((await storage.getAlarm()) === null) await storage.setAlarm(Date.now() + 3600 * 1000);
+    return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+  }
+
+  async alarm() {
+    const storage = this.state.storage;
+    const now = Date.now();
+    const rows = await storage.list();
+    let left = 0;
+    for (const [key, row] of rows) {
+      if (!row || typeof row.expires !== 'number' || row.expires <= now) await storage.delete(key);
+      else left++;
+    }
+    if (left) await storage.setAlarm(now + 3600 * 1000);
+  }
+}
+
+/** Ask the `objectName` limiter to take `counters`; throws if unavailable. */
+async function takeLimit(env, objectName, counters) {
+  const stub = env.LIMITER.get(env.LIMITER.idFromName(objectName));
+  const resp = await stub.fetch('https://limiter/take', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ counters }),
+  });
+  if (!resp.ok) throw new Error(`limiter returned ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Per-request limits, checked before anything else so invalid and dry-run
+ * requests count too: per client IP (hashed), then all clients together
+ * (protects the PAT's search quota). Fails closed. Returns null when allowed,
+ * else the error Response.
+ */
+async function checkRateLimits(request, env) {
+  if (!env.LIMITER) return json({ ok: false, error: 'rate limiter not configured' }, 503);
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const ipKey = `ip:${(await sha256Hex(`plaud-v2:${ip}`)).slice(0, 32)}`;
+  try {
+    const perIp = await takeLimit(env, ipKey, [
+      { name: 'report-min', limit: RATE_LIMIT_PER_MINUTE, window: 60 },
+      { name: 'report-hour', limit: RATE_LIMIT_PER_HOUR, window: 3600 },
+    ]);
+    if (!perIp.allowed) {
+      return json({ ok: false, error: 'rate limited' }, 429, {
+        'Retry-After': String(perIp.retryAfter),
+        'X-RateLimit-Limit': `${RATE_LIMIT_PER_MINUTE}/min, ${RATE_LIMIT_PER_HOUR}/hour`,
+      });
+    }
+    const global = await takeLimit(env, 'global', [{ name: 'report-min', limit: GLOBAL_RATE_LIMIT_PER_MINUTE, window: 60 }]);
+    if (!global.allowed) {
+      return json({ ok: false, error: 'rate limited (all clients)' }, 429, { 'Retry-After': String(global.retryAfter) });
+    }
+  } catch {
+    return json({ ok: false, error: 'rate limiter unavailable' }, 503);
+  }
+  return null;
+}
+
+/**
+ * Daily caps on GitHub writes, in the "global" limiter object. Returns
+ * {allowed, retryAfter}; throws if the limiter is unavailable.
+ */
+function reserveDaily(env, counters) {
+  return takeLimit(env, 'global', counters.map(([name, limit]) => ({ name, limit, window: 86400 })));
+}
+
+/** Find the open issue this Worker created for `fingerprint` (see isWorkerIssue). */
 async function findIssueByMarker(env, fingerprint) {
-  const marker = fingerprintMarker(fingerprint);
   // 1) Search API (body text is indexed, incl. the HTML comment's text).
   const q = `repo:${REPO} is:issue is:open label:auto-bug in:body "${fingerprint}"`;
   const search = await ghJson(env, `/search/issues?q=${encodeURIComponent(q)}&per_page=10`);
   if (search.ok && Array.isArray(search.data?.items)) {
-    const hit = search.data.items.find((i) => i.state === 'open' && typeof i.body === 'string' && i.body.includes(marker));
+    const hit = search.data.items.find((i) => isWorkerIssue(i, fingerprint));
     if (hit) return hit;
   }
   // 2) The search index lags issue creation by up to a minute or two; scan the
   //    most recent open auto-bug issues directly so bursts still dedupe.
   const list = await ghJson(env, `/repos/${REPO}/issues?state=open&labels=auto-bug&per_page=100&sort=created&direction=desc`);
   if (list.ok && Array.isArray(list.data)) {
-    const hit = list.data.find((i) => !i.pull_request && typeof i.body === 'string' && i.body.includes(marker));
+    const hit = list.data.find((i) => isWorkerIssue(i, fingerprint));
     if (hit) return hit;
   }
   if (!search.ok && !list.ok) throw new Error(`GitHub search failed (${search.status}/${list.status})`);
@@ -365,28 +561,27 @@ async function findIssueByMarker(env, fingerprint) {
 }
 
 async function handleReport(request, env) {
-  const rl = await rateLimit(request, RATE_LIMIT_PER_HOUR);
-  const rlHeaders = { 'X-RateLimit-Limit': String(RATE_LIMIT_PER_HOUR), 'X-RateLimit-Remaining': String(rl.remaining) };
-  if (!rl.allowed) return json({ ok: false, error: 'rate limited' }, 429, { ...rlHeaders, 'Retry-After': '3600' });
+  const limited = await checkRateLimits(request, env);
+  if (limited) return limited;
 
   const ctype = request.headers.get('Content-Type') || '';
   if (!ctype.toLowerCase().includes('application/json')) {
-    return json({ ok: false, error: 'Content-Type must be application/json' }, 415, rlHeaders);
+    return json({ ok: false, error: 'Content-Type must be application/json' }, 415);
   }
   const declared = parseInt(request.headers.get('Content-Length') || '0', 10);
-  if (declared > MAX_REQUEST_BYTES) return json({ ok: false, error: 'request too large' }, 413, rlHeaders);
+  if (declared > MAX_REQUEST_BYTES) return json({ ok: false, error: 'request too large' }, 413);
   const raw = await request.text();
   if (new TextEncoder().encode(raw).length > MAX_REQUEST_BYTES) {
-    return json({ ok: false, error: 'request too large' }, 413, rlHeaders);
+    return json({ ok: false, error: 'request too large' }, 413);
   }
   let payload;
   try {
     payload = JSON.parse(raw);
   } catch {
-    return json({ ok: false, error: 'invalid JSON' }, 400, rlHeaders);
+    return json({ ok: false, error: 'invalid JSON' }, 400);
   }
   const v = validateReport(payload);
-  if (!v.ok) return json({ ok: false, error: v.error }, 400, rlHeaders);
+  if (!v.ok) return json({ ok: false, error: v.error }, 400);
   const report = v.value;
 
   try {
@@ -394,37 +589,45 @@ async function handleReport(request, env) {
       const existing = await findIssueByMarker(env, report.fingerprint);
       if (existing) {
         if (report.dryRun) {
-          return json({ ok: true, dry_run: true, action: 'would_comment', issue_number: existing.number }, 200, rlHeaders);
+          return json({ ok: true, dry_run: true, action: 'would_comment', issue_number: existing.number });
+        }
+        const quota = await reserveDaily(env, [
+          [`comments:${existing.number}`, PER_ISSUE_DAILY_COMMENT_LIMIT],
+          ['comments', DAILY_COMMENT_LIMIT],
+        ]);
+        if (!quota.allowed) {
+          // This issue already has plenty of occurrences today; nothing for the app to retry.
+          return json({ ok: true, action: 'suppressed', issue_number: existing.number, url: existing.html_url });
         }
         const c = await ghJson(env, `/repos/${REPO}/issues/${existing.number}/comments`, {
           method: 'POST',
           body: JSON.stringify({ body: buildCommentBody(report) }),
         });
-        if (!c.ok) return json({ ok: false, error: `GitHub returned ${c.status}` }, 502, rlHeaders);
-        return json({ ok: true, action: 'commented', issue_number: existing.number, url: existing.html_url }, 200, rlHeaders);
+        if (!c.ok) return json({ ok: false, error: `GitHub returned ${c.status}` }, 502);
+        return json({ ok: true, action: 'commented', issue_number: existing.number, url: existing.html_url });
       }
     }
     if (report.dryRun) {
-      return json({ ok: true, dry_run: true, action: 'would_create', issue_number: null }, 200, rlHeaders);
+      return json({ ok: true, dry_run: true, action: 'would_create', issue_number: null });
+    }
+    const quota = await reserveDaily(env, [['creates', DAILY_CREATE_LIMIT]]);
+    if (!quota.allowed) {
+      return json({ ok: false, error: 'daily report limit reached' }, 429, { 'Retry-After': String(quota.retryAfter) });
     }
     const created = await ghJson(env, `/repos/${REPO}/issues`, {
       method: 'POST',
       body: JSON.stringify({
-        title: sanitizeIssueText(report.title),
+        title: plainTitle(report.title),
         body: buildIssueBody(report),
         labels: [report.kind === 'user' ? 'user-report' : 'auto-bug'],
       }),
     });
     if (created.status !== 201 || !created.data) {
-      return json({ ok: false, error: `GitHub returned ${created.status}` }, 502, rlHeaders);
+      return json({ ok: false, error: `GitHub returned ${created.status}` }, 502);
     }
-    return json(
-      { ok: true, action: 'created', issue_number: created.data.number, url: created.data.html_url },
-      201,
-      rlHeaders,
-    );
+    return json({ ok: true, action: 'created', issue_number: created.data.number, url: created.data.html_url }, 201);
   } catch (e) {
-    return json({ ok: false, error: String(e && e.message ? e.message : e) }, 502, rlHeaders);
+    return json({ ok: false, error: String(e && e.message ? e.message : e) }, 502);
   }
 }
 

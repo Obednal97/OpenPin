@@ -244,6 +244,7 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 // (infra/update-worker/). The app ships no GitHub token: the Worker holds it as
 // a secret, so it can be rotated without an app release.
 
+mod report_scrub;
 mod sha256;
 
 /// Base URL of the update / bug-report Worker (infra/update-worker/).
@@ -266,14 +267,27 @@ fn worker_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
-/// Client for the DMG download. In reqwest's *blocking* client `timeout` is
-/// applied to each wait (sending the request, then every `read()` call), so it
-/// acts as an idle timeout, not a cap on the whole transfer — a slow but
-/// steady download never times out.
-fn download_client() -> reqwest::blocking::Client {
+/// How long the DMG download may go without receiving a byte.
+const DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Client for the DMG download: a connect timeout plus an *idle* timeout, and
+/// no cap on the whole transfer, so a slow but steady download on a poor
+/// connection never times out.
+///
+/// reqwest 0.12's blocking `ClientBuilder` has no `read_timeout`; its
+/// `timeout` is not a total deadline either (unlike the async client's): the
+/// blocking wrapper keeps it for itself and applies it to each wait
+/// separately — the request until the response headers arrive
+/// (`blocking::Client::execute_request`), then every `read()` of the body
+/// (`blocking::Response`'s `Read` impl). Nothing is passed to the async
+/// client, so it has no total timeout. That makes it exactly an idle timeout.
+/// `download_timeout_is_idle_not_total` pins this behaviour, so a reqwest
+/// upgrade that changes it fails the tests.
+fn download_client(idle: std::time::Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(idle)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
@@ -544,6 +558,16 @@ fn download_update(
     dest: &std::path::Path,
     on_progress: impl Fn(u32),
 ) -> Result<(), String> {
+    download_update_with_idle(release, dest, DOWNLOAD_IDLE_TIMEOUT, on_progress)
+}
+
+/// `download_update` with the idle timeout as a parameter (for tests).
+fn download_update_with_idle(
+    release: &LatestRelease,
+    dest: &std::path::Path,
+    idle_timeout: std::time::Duration,
+    on_progress: impl Fn(u32),
+) -> Result<(), String> {
     use std::io::{Read, Write};
 
     let part = {
@@ -554,8 +578,9 @@ fn download_update(
     let _ = std::fs::remove_file(&part);
 
     // The Worker answers with a 302 to GitHub's signed, token-free URL;
-    // reqwest follows it.
-    let mut resp = download_client()
+    // reqwest follows it. Each read may wait up to `idle_timeout`; the whole
+    // transfer has no time limit (see download_client).
+    let mut resp = download_client(idle_timeout)
         .get(&release.download_url)
         .header("User-Agent", worker_user_agent())
         .send()
@@ -983,7 +1008,10 @@ fn scrub_identifiers(s: &str, salt: &str) -> String {
     out
 }
 
-/// Everything that leaves the machine in a bug report goes through this.
+/// Everything that leaves the machine in a bug report goes through this:
+/// home / user paths, then secrets and personal data (URLs' queries,
+/// Notion/Drive links, credentials, API keys, e-mails, long tokens — see
+/// `report_scrub`), then device identifiers.
 fn scrub_report_text(s: &str, home: &str, salt: &str) -> String {
     let mut t = s.to_string();
     let home = home.trim_end_matches('/');
@@ -991,6 +1019,7 @@ fn scrub_report_text(s: &str, home: &str, salt: &str) -> String {
         t = t.replace(home, "~");
     }
     t = scrub_user_dirs(&t);
+    t = report_scrub::scrub_secrets(&t);
     scrub_identifiers(&t, salt)
 }
 
@@ -1108,16 +1137,33 @@ fn python_env_info() -> String {
     info.join("\n")
 }
 
+/// Backend fields for the system-info block, or None if the server lock is
+/// held and `wait` is false.
+fn server_snapshot(wait: bool) -> Option<(bool, u16, String, String)> {
+    let server = if wait {
+        // Tolerate a poisoned lock.
+        python::get_server().lock().unwrap_or_else(|e| e.into_inner())
+    } else {
+        match python::get_server().try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    };
+    Some((server.process.is_some(), server.port, server.python_path.clone(), server.python_version.clone()))
+}
+
 /// `include_python_env` runs `pip` twice (a second or more); the panic path
-/// skips it so the report goes out within the hook's time budget.
+/// passes false: it skips that, and it never waits for the backend lock —
+/// the panicking thread may be the one holding it (the panic hook runs
+/// before unwinding releases it), so a blocking `lock()` would stall the
+/// report until the hook gives up. If the lock is busy the backend lines say
+/// so instead.
 fn system_info_block(version: &str, include_python_env: bool) -> String {
-    // Tolerate a poisoned lock: this also runs while reporting a panic.
-    let server = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
-    let python_running = server.process.is_some();
-    let port = server.port;
-    let py_path = server.python_path.clone();
-    let py_ver = server.python_version.clone();
-    drop(server);
+    let (python_running, port, py_path, py_ver) = match server_snapshot(include_python_env) {
+        Some((running, port, path, ver)) => (if running { "running" } else { "not running" }, port.to_string(), path, ver),
+        None => ("unknown (lock busy)", "unknown".to_string(), "unknown".to_string(), "unknown".to_string()),
+    };
 
     let mem_mb = {
         std::process::Command::new("sysctl")
@@ -1146,7 +1192,7 @@ fn system_info_block(version: &str, include_python_env: bool) -> String {
         macos_name(),
         std::env::consts::ARCH,
         mem_mb,
-        if python_running { "running" } else { "not running" }
+        python_running
     )
 }
 
@@ -1284,8 +1330,8 @@ fn error_fingerprint(message: &str) -> String {
 }
 
 /// Most of a message that goes into a report (the full text stays in the
-/// local diagnostics log).
-const REPORT_MESSAGE_MAX_CHARS: usize = 2000;
+/// local diagnostics log). Applied before and after scrubbing.
+const REPORT_MESSAGE_MAX_CHARS: usize = 1000;
 /// Traceback lines kept in a report (the innermost frames).
 const REPORT_STACK_MAX_LINES: usize = 15;
 /// The Worker rejects bodies over 20 KB; stay under it.
@@ -1314,7 +1360,9 @@ fn build_auto_report(
     is_dev: bool,
     scrub: impl Fn(&str) -> String,
 ) -> serde_json::Value {
-    let msg = scrub(&truncate_chars(message, REPORT_MESSAGE_MAX_CHARS));
+    // Scrub a generous slice, then cap: cutting first could split a secret
+    // so its remains no longer match a pattern.
+    let msg = truncate_chars(&scrub(&truncate_chars(message, REPORT_MESSAGE_MAX_CHARS * 4)), REPORT_MESSAGE_MAX_CHARS);
     let fingerprint = report_fingerprint(&msg);
     let dev_tag = if is_dev { "[DEV] " } else { "" };
     let title = truncate_chars(&format!("[Auto] {dev_tag}{}", msg.replace(['\r', '\n'], " ")), REPORT_TITLE_MAX_CHARS);
@@ -1652,6 +1700,95 @@ mod tests {
         let keep = "hash abcdef0123456789abcd x123456789012345678 ABCDEFABCDEFABCD";
         assert_eq!(scrub_report_text(keep, "/x", SALT), keep);
         assert_eq!(scrub_report_text("café — ✓", "/x", SALT), "café — ✓");
+    }
+
+    /// One-shot HTTP server on 127.0.0.1 that sends `chunks` with `gap`
+    /// between them (after `stall` before the last one). Returns the URL.
+    fn slow_server(chunks: usize, chunk: usize, gap: std::time::Duration, stall: std::time::Duration) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 2048];
+            let _ = sock.read(&mut req);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", chunks * chunk);
+            let _ = sock.write_all(head.as_bytes());
+            for i in 0..chunks {
+                std::thread::sleep(if i + 1 == chunks { stall } else { gap });
+                if sock.write_all(&vec![b'x'; chunk]).is_err() {
+                    return;
+                }
+                let _ = sock.flush();
+            }
+        });
+        format!("http://{addr}/x.dmg")
+    }
+
+    #[test]
+    fn download_timeout_is_idle_not_total() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("plaud-v2-dl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let release = |url: String, size: u64| LatestRelease {
+            version: "9.9.9".into(),
+            asset: LatestAsset { name: "x.dmg".into(), size, sha256: None },
+            download_url: url,
+        };
+        let idle = Duration::from_millis(700);
+
+        // Slow but steady: 6 chunks 300 ms apart = ~1.8 s total, well past the
+        // 0.7 s timeout, but no single wait exceeds it → succeeds.
+        let started = std::time::Instant::now();
+        let url = slow_server(6, 1000, Duration::from_millis(300), Duration::from_millis(300));
+        let dest = dir.join("steady.dmg");
+        download_update_with_idle(&release(url, 6000), &dest, idle, |_| {}).expect("steady download should not time out");
+        assert!(started.elapsed() > idle * 2, "transfer was too fast to prove anything");
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 6000);
+
+        // Stalls for 2.5 s mid-body → fails after ~idle, not after the stall.
+        let url = slow_server(3, 1000, Duration::from_millis(50), Duration::from_millis(2500));
+        let dest = dir.join("stalled.dmg");
+        let started = std::time::Instant::now();
+        let err = download_update_with_idle(&release(url, 3000), &dest, idle, |_| {}).unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(2000), "idle timeout didn't fire: {:?}", started.elapsed());
+        assert!(err.starts_with("Download interrupted"), "{err}");
+        assert!(!dest.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panic_path_never_waits_for_the_server_lock() {
+        // Same thread holding the lock = the panicking thread's situation; a
+        // blocking lock() here would deadlock the test.
+        let guard = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
+        assert!(server_snapshot(false).is_none());
+        let info = system_info_block("2.3.0", false);
+        assert!(info.contains("**Python server:** unknown (lock busy)"), "{info}");
+        drop(guard);
+        assert!(server_snapshot(true).is_some());
+    }
+
+    #[test]
+    fn report_text_has_no_secrets() {
+        let msg = "Notion push failed for ollie@example.com: 401 at https://api.notion.com/v1/pages/0123456789abcdef0123456789abcdef \
+                   (Authorization: Bearer ntn_123456789012345678901234567890abcd) GET http://127.0.0.1:5123/audio?token=s3cr3t \
+                   key sk-ant-api03-AbCdEfGhIjKlMnOpQrSt [SN: 8820B50256947317]";
+        let s = scrub_report_text(msg, "/Users/ollie", SALT);
+        for leaked in ["ollie@example.com", "0123456789abcdef0123456789abcdef", "ntn_1234", "s3cr3t", "AbCdEfGhIjKlMnOpQrSt", "8820B50256947317", "/v1/pages"] {
+            assert!(!s.contains(leaked), "{leaked} leaked: {s}");
+        }
+        assert!(s.starts_with("Notion push failed for [email]: 401 at https://api.notion.com/[redacted]"), "{s}");
+
+        // The message cap holds after scrubbing, and a secret straddling the
+        // pre-scrub cut can't leave a recognisable fragment.
+        // (Cutting at 1000 first would leave "sk-ant-api03-AbCd", too short to match.)
+        let long = format!("{} sk-ant-api03-AbCdEfGhIjKlMnOpQrSt {}", "x".repeat(982), "y ".repeat(2000));
+        let p = build_auto_report(&long, "", "ctx", "", "2.3.0", false, |s| scrub_report_text(s, "/Users/ollie", SALT));
+        let body = p["body"].as_str().unwrap();
+        assert!(!body.contains("AbCd") && !p["title"].as_str().unwrap().contains("AbCd"));
+        let fenced = body.split("```\n").nth(1).unwrap_or("");
+        assert!(fenced.trim_end_matches(['`', '\n']).chars().count() <= REPORT_MESSAGE_MAX_CHARS + 1, "{}", fenced.len());
     }
 
     #[test]
