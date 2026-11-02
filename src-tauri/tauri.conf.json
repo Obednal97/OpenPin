@@ -3,7 +3,7 @@
   "version": "2.4.0",
   "identifier": "com.plaud.v2",
   "build": {
-    "beforeBuildCommand": "bash scripts/prepare-frontend.sh",
+    "beforeBuildCommand": { "script": "bash scripts/prepare-frontend.sh", "cwd": ".." },
     "frontendDist": "../dist-tauri"
   },
   "app": {
