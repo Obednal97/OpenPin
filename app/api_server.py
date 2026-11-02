@@ -5,7 +5,9 @@ Wraps the existing BLE/crypto/transcription code as HTTP endpoints.
 Spawned by the Tauri Rust shell as a child process on localhost:5123.
 """
 
+import hmac
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -30,16 +32,90 @@ log = logging.getLogger("werkzeug")
 log.setLevel(logging.WARNING)
 
 
+# ---------------------------------------------------------------------------
+# Request hardening: CORS allow-list, Host check, per-launch API token
+# ---------------------------------------------------------------------------
+#
+# The backend listens on 127.0.0.1, which any web page in any browser on this
+# machine can reach. Three layers keep those pages out:
+#
+# 1. CORS: only the Tauri webview origins get an Access-Control-Allow-Origin
+#    header, so other pages can't read responses (and can't send the token
+#    header, which forces a preflight that fails).
+# 2. Host check: requests whose Host isn't 127.0.0.1/localhost are refused,
+#    which blocks DNS rebinding (attacker.example resolving to 127.0.0.1).
+# 3. Token: the Rust shell generates a random token per launch and passes it in
+#    PLAUD_API_TOKEN. Every request must send it in the X-Plaud-Token header
+#    (GET /audio may use ?token= instead, since <audio src> can't set headers).
+#    /health and CORS preflights are exempt.
+#
+# If PLAUD_API_TOKEN is unset (tests, or running api_server.py by hand) the
+# token check is skipped with a loud warning; CORS and Host checks still apply.
+
+API_TOKEN_HEADER = "X-Plaud-Token"
+# Tauri 2 serves the app from tauri://localhost on macOS/Linux and
+# http(s)://tauri.localhost on Windows.
+ALLOWED_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost"})
+# Endpoints reachable without the token (Rust's readiness probe uses /health).
+_TOKEN_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def _expected_token() -> str:
+    # Read on each request so tests can set/unset the env var.
+    return os.environ.get("PLAUD_API_TOKEN", "")
+
+
+if not _expected_token():
+    logging.warning(
+        "!!! PLAUD_API_TOKEN is not set: API token auth is DISABLED. "
+        "Only acceptable in tests or when running api_server.py by hand. !!!"
+    )
+
+
+def _host_allowed(host: str) -> bool:
+    """Accept 127.0.0.1 / localhost with any (or no) port."""
+    if not host:
+        return False
+    hostname, sep, port = host.rpartition(":")
+    if not sep:
+        hostname, port = host, ""
+    if port and not port.isdigit():
+        return False
+    return hostname.lower() in ALLOWED_HOSTNAMES
+
+
+@app.before_request
+def _enforce_request_security():
+    if not _host_allowed(request.headers.get("Host", "")):
+        return jsonify({"error": "Forbidden host"}), 403
+
+    if request.method == "OPTIONS":
+        # CORS preflight: answer directly (after_request adds the CORS headers
+        # only for allowed origins). The view never runs.
+        return app.make_default_options_response()
+
+    expected = _expected_token()
+    if not expected or request.path in _TOKEN_EXEMPT_PATHS:
+        return None
+
+    supplied = request.headers.get(API_TOKEN_HEADER, "")
+    if not supplied and request.method == "GET" and request.path.startswith("/audio/"):
+        supplied = request.args.get("token", "")
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
 @app.after_request
 def add_cors(response):
-    # Restrict CORS to localhost origins only (Tauri uses tauri://localhost or http://localhost)
     origin = request.headers.get("Origin", "")
-    if origin and ("localhost" in origin or "127.0.0.1" in origin or "tauri://" in origin):
+    if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-    else:
-        response.headers["Access-Control-Allow-Origin"] = "http://127.0.0.1"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = f"Content-Type, Authorization, {API_TOKEN_HEADER}"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "600"
+    response.vary.add("Origin")
     return response
 
 
@@ -108,8 +184,6 @@ app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 
 if __name__ == "__main__":
-    import os
-
     from werkzeug.serving import make_server
 
     # Recover metadata from transcript files and start background workers
