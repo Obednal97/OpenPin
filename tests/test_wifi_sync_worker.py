@@ -628,7 +628,7 @@ def test_second_worker_refused_by_lockfile(tmp_path):
 
 
 def _worker_stdin(monkeypatch, tmp_path):
-    args = {"sn": "8820B50256947317", "bind_token": "t", "sn_sig": "s", "state_dir": str(tmp_path)}
+    args = {"sn": "8810A00012345678", "bind_token": "t", "sn_sig": "s", "state_dir": str(tmp_path)}
     monkeypatch.setattr(worker.sys, "stdin", io.StringIO(json.dumps(args)))
 
 
@@ -828,7 +828,7 @@ def test_transfer_sigterm_cleans_up_in_order(mac, tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(worker, "_get_current_ssid", lambda: "")
     monkeypatch.setattr(worker.asyncio, "sleep", _fast_sleep)
     args = {
-        "sn": "8820B50256947317",
+        "sn": "8810A00012345678",
         "recordings_dir": str(tmp_path / "rec"),
         "app_key_path": str(key_file),
         "state_dir": str(tmp_path),
@@ -838,9 +838,9 @@ def test_transfer_sigterm_cleans_up_in_order(mac, tmp_path, monkeypatch, capsys)
     assert result["wifi_restore"]["restored"] is True
     assert events == [
         "WiFi_Open",
-        "join Plaud7317",
+        "join Plaud5678",
         "ws closed",
-        "forget Plaud7317",
+        "forget Plaud5678",
         "WiFi_Close",
         "restore_internet 192.168.84.2",
         "ble disconnect",

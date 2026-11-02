@@ -955,7 +955,7 @@ fn is_uuid_at(b: &[u8], i: usize) -> bool {
 }
 
 /// Hash device identifiers: `[SN: …]` tags, standalone 16-hex-digit tokens
-/// (the Plaud serial format, e.g. `8820B50256947317`), and CoreBluetooth
+/// (the Plaud serial format, e.g. `8810A00012345678`), and CoreBluetooth
 /// peripheral UUIDs.
 fn scrub_identifiers(s: &str, salt: &str) -> String {
     let b = s.as_bytes();
@@ -1681,14 +1681,14 @@ mod tests {
 
     #[test]
     fn scrubs_serials_and_uuids() {
-        let msg = "API error: /device/connect [SN: 8820B50256947317] — HTTP 500 (device 8820B50256947317)";
+        let msg = "API error: /device/connect [SN: 8810A00012345678] — HTTP 500 (device 8810A00012345678)";
         let s = scrub_report_text(msg, "/Users/ollie", SALT);
-        assert!(!s.contains("8820B50256947317"), "{s}");
-        let tag = id_tag(SALT, "8820B50256947317");
+        assert!(!s.contains("8810A00012345678"), "{s}");
+        let tag = id_tag(SALT, "8810A00012345678");
         assert_eq!(tag.len(), 8);
         assert!(s.contains(&format!("[SN: {tag}]")), "{s}");
         assert!(s.contains(&format!("sn-{tag}")), "{s}");
-        assert_ne!(id_tag("other", "8820B50256947317"), tag);
+        assert_ne!(id_tag("other", "8810A00012345678"), tag);
 
         let ble = "Device with address 3F2504E0-4F89-11D3-9A0C-0305E82C3301 not found; char 00002bb1-0000-1000-8000-00805f9b34fb";
         let s = scrub_report_text(ble, "/Users/ollie", SALT);
@@ -1773,9 +1773,9 @@ mod tests {
     fn report_text_has_no_secrets() {
         let msg = "Notion push failed for ollie@example.com: 401 at https://api.notion.com/v1/pages/0123456789abcdef0123456789abcdef \
                    (Authorization: Bearer ntn_123456789012345678901234567890abcd) GET http://127.0.0.1:5123/audio?token=s3cr3t \
-                   key sk-ant-api03-AbCdEfGhIjKlMnOpQrSt [SN: 8820B50256947317]";
+                   key sk-ant-api03-AbCdEfGhIjKlMnOpQrSt [SN: 8810A00012345678]";
         let s = scrub_report_text(msg, "/Users/ollie", SALT);
-        for leaked in ["ollie@example.com", "0123456789abcdef0123456789abcdef", "ntn_1234", "s3cr3t", "AbCdEfGhIjKlMnOpQrSt", "8820B50256947317", "/v1/pages"] {
+        for leaked in ["ollie@example.com", "0123456789abcdef0123456789abcdef", "ntn_1234", "s3cr3t", "AbCdEfGhIjKlMnOpQrSt", "8810A00012345678", "/v1/pages"] {
             assert!(!s.contains(leaked), "{leaked} leaked: {s}");
         }
         assert!(s.starts_with("Notion push failed for [email]: 401 at https://api.notion.com/[redacted]"), "{s}");
@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn auto_report_payload() {
-        let long_msg = format!("boom in /Users/ollie/a.py [SN: 8820B50256947317] {}", "é".repeat(3000));
+        let long_msg = format!("boom in /Users/ollie/a.py [SN: 8810A00012345678] {}", "é".repeat(3000));
         let stack: String = (1..=50).map(|i| format!("frame {i}\n")).collect();
         let p = build_auto_report(
             &long_msg,
@@ -1823,7 +1823,7 @@ mod tests {
         assert!(title.chars().count() <= 200);
         assert!(body.len() <= 20 * 1024);
         assert!(!body.contains("/Users/ollie"));
-        assert!(!body.contains("8820B50256947317"));
+        assert!(!body.contains("8810A00012345678"));
         assert!(body.contains("frame 50") && !body.contains("frame 35\n"));
         assert_eq!(p["kind"], "auto");
         assert_eq!(p["app_version"], "2.3.0");
