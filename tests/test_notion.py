@@ -542,3 +542,216 @@ def test_queue_paused_by_real_auth_error(env, mcp_http, queue_state):
     notion_queue.enqueue(SID)
     _run_queue_once(queue_state)
     assert queue_state.paused is True
+
+
+# ---------------------------------------------------------------------------
+# MCP lifecycle / Streamable HTTP rules and OAuth (RFC 8707)
+# ---------------------------------------------------------------------------
+
+
+class _Resp:
+    def __init__(self, status=200, body=None, headers=None, text=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self.text = text if text is not None else (json.dumps(body) if body is not None else "")
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"{self.status_code} Error", response=self)
+
+
+INIT_OK = {"jsonrpc": "2.0", "id": "1", "result": {"protocolVersion": "2025-11-25", "capabilities": {}}}
+
+
+@pytest.fixture
+def scripted_http():
+    """Real mcp_init/mcp_call over a scripted ``http_requests.post``.
+
+    Responses are picked by JSON-RPC method ("token" for token-endpoint
+    posts): a list per key, popped in order, the last one repeating.
+    """
+    from app.state import notion as ns
+
+    calls = []
+    script = {}
+
+    def fake_post(url, json=None, data=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json, "data": data, "headers": dict(headers or {}), "timeout": timeout})
+        key = json.get("method") if json is not None else "token"
+        responses = script.get(key) or [_Resp(202)]
+        return responses.pop(0) if len(responses) > 1 else responses[0]
+
+    with (
+        patch.dict(
+            ns._notion_state,
+            {
+                "access_token": "tok-1",
+                "refresh_token": "ref-1",
+                "token_endpoint": "https://auth.example/token",
+                "client_id": "cid",
+                "client_secret": "",
+                "resource": "https://mcp.notion.com/mcp",
+                "connected": True,
+                "refresh_dead": False,
+            },
+        ),
+        patch.object(ns, "_notion_session_id", None),
+        patch.object(ns, "_negotiated_protocol_version", None),
+        patch.object(ns, "_token_expires_at", 0),
+        patch.object(ns, "save"),
+        patch.object(ns.http_requests, "post", side_effect=fake_post),
+    ):
+        yield types.SimpleNamespace(calls=calls, script=script, ns=ns)
+
+
+def _by_method(calls, method):
+    return [c for c in calls if (c["json"] or {}).get("method") == method]
+
+
+def _token_posts(calls):
+    return [c for c in calls if c["json"] is None]
+
+
+def test_initialize_sends_initialized_notification_and_protocol_header(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    h.script["notifications/initialized"] = [_Resp(202)]
+    h.script["tools/call"] = [_Resp(200, TOOL_OK)]
+
+    assert h.ns.mcp_call("notion-fetch", {"id": "x"}) == TOOL_OK["result"]
+
+    methods = [(c["json"] or {}).get("method") for c in h.calls]
+    assert methods == ["initialize", "notifications/initialized", "tools/call"]
+    init = h.calls[0]
+    assert "Mcp-Session-Id" not in init["headers"]
+    assert init["json"]["params"]["protocolVersion"] == h.ns.MCP_PROTOCOL_VERSION
+    note = h.calls[1]
+    assert "id" not in note["json"]  # a notification, not a request
+    assert note["headers"]["Mcp-Session-Id"] == "S1"
+    assert note["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+    call = h.calls[2]
+    assert call["headers"]["Mcp-Session-Id"] == "S1"
+    assert call["headers"]["MCP-Protocol-Version"] == "2025-11-25"
+
+
+def test_protocol_header_uses_version_server_negotiated(scripted_http):
+    h = scripted_http
+    init = {"jsonrpc": "2.0", "id": "1", "result": {"protocolVersion": "2025-06-18"}}
+    h.script["initialize"] = [_Resp(200, init, headers={"mcp-session-id": "S1"})]
+    h.script["tools/call"] = [_Resp(200, TOOL_OK)]
+    h.ns.mcp_call("notion-fetch", {})
+    assert _by_method(h.calls, "tools/call")[0]["headers"]["MCP-Protocol-Version"] == "2025-06-18"
+
+
+def test_expired_session_404_reinitialises_once(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [
+        _Resp(200, INIT_OK, headers={"mcp-session-id": "S1"}),
+        _Resp(200, INIT_OK, headers={"mcp-session-id": "S2"}),
+    ]
+    h.script["tools/call"] = [_Resp(404, text="Session not found"), _Resp(200, TOOL_OK)]
+    assert h.ns.mcp_call("notion-fetch", {}) == TOOL_OK["result"]
+    tool_calls = _by_method(h.calls, "tools/call")
+    assert [c["headers"]["Mcp-Session-Id"] for c in tool_calls] == ["S1", "S2"]
+    assert len(_by_method(h.calls, "initialize")) == 2
+
+
+def test_repeated_404_is_not_retried_forever(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    h.script["tools/call"] = [_Resp(404, text="Session not found")]
+    with pytest.raises(Exception, match="404"):
+        h.ns.mcp_call("notion-fetch", {})
+    assert len(_by_method(h.calls, "tools/call")) == 2
+
+
+def test_400_surfaces_server_error_without_resending(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(200, INIT_OK, headers={"mcp-session-id": "S1"})]
+    bad = {"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid arguments: page_id is required"}}
+    h.script["tools/call"] = [_Resp(400, bad)]
+    with pytest.raises(ValueError, match="page_id is required"):
+        h.ns.mcp_call("notion-update-page", {})
+    assert len(_by_method(h.calls, "tools/call")) == 1
+    assert len(_by_method(h.calls, "initialize")) == 1
+
+
+def test_mcp_init_401_refreshes_then_retries(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(401, text="unauthorized"), _Resp(200, INIT_OK, headers={"mcp-session-id": "S9"})]
+    h.script["token"] = [_Resp(200, {"access_token": "tok-2", "refresh_token": "ref-2", "expires_in": 28800})]
+    assert h.ns.mcp_init() == "S9"
+    inits = _by_method(h.calls, "initialize")
+    assert [c["headers"]["Authorization"] for c in inits] == ["Bearer tok-1", "Bearer tok-2"]
+    token_calls = _token_posts(h.calls)
+    assert len(token_calls) == 1
+    assert token_calls[0]["data"]["grant_type"] == "refresh_token"
+    assert token_calls[0]["data"]["resource"] == "https://mcp.notion.com/mcp"
+    assert h.ns._notion_state["refresh_token"] == "ref-2"
+
+
+def test_dead_refresh_token_needs_reconnect_and_is_not_retried(scripted_http):
+    h = scripted_http
+    h.script["initialize"] = [_Resp(401, text="unauthorized")]
+    h.script["token"] = [_Resp(400, {"error": "invalid_grant"})]
+    with pytest.raises(ValueError, match="reconnect"):
+        h.ns.mcp_init()
+    assert h.ns._notion_state["refresh_dead"] is True
+    assert h.ns.needs_reconnect() is True
+    assert h.ns.get_state()["needs_reconnect"] is True
+    n_token = len(_token_posts(h.calls))
+    assert h.ns.refresh_token() is False
+    assert len(_token_posts(h.calls)) == n_token  # no new token request
+
+
+def test_refresh_skipped_when_another_thread_already_refreshed(scripted_http):
+    h = scripted_http
+    h.ns._notion_state["access_token"] = "tok-new"
+    assert h.ns.refresh_token(stale_access_token="tok-1") is True
+    assert h.calls == []
+
+
+def test_concurrent_401s_refresh_once(scripted_http):
+    h = scripted_http
+    h.script["token"] = [_Resp(200, {"access_token": "tok-2", "refresh_token": "ref-2"})]
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(h.ns.refresh_token(stale_access_token="tok-1")))
+        for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert results == [True] * 4
+    assert len(_token_posts(h.calls)) == 1
+
+
+def test_authorize_and_code_exchange_send_resource(scripted_http):
+    from urllib.parse import parse_qs, urlparse
+
+    h = scripted_http
+    meta = {
+        "authorization_endpoint": "https://auth.example/authorize",
+        "token_endpoint": "https://auth.example/token",
+        "resource": "https://mcp.notion.com/mcp",
+    }
+    with patch.object(h.ns, "_discover", return_value=meta), patch.object(h.ns, "_start_callback_server"):
+        url = h.ns.start_connect()
+    q = parse_qs(urlparse(url).query)
+    assert q["resource"] == ["https://mcp.notion.com/mcp"]
+    assert q["code_challenge_method"] == ["S256"]
+
+    h.script["token"] = [_Resp(200, {"access_token": "tok-3", "refresh_token": "ref-3"})]
+    with patch("app.utils.notion_queue.resume") as resume:
+        h.ns._exchange_code("the-code")
+    token_call = _token_posts(h.calls)[-1]
+    assert token_call["data"]["grant_type"] == "authorization_code"
+    assert token_call["data"]["resource"] == "https://mcp.notion.com/mcp"
+    assert h.ns._notion_state["access_token"] == "tok-3"
+    resume.assert_called_once()
