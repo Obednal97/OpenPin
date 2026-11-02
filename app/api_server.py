@@ -264,6 +264,11 @@ if __name__ == "__main__":
     from app.state import cloud as _cloud_state
 
     _cloud_state.init()
+    # Keychain copy of the NotePin pairing credentials: back up what the config
+    # has, restore what a wiped data folder lost (background thread).
+    from app.utils import pairing_store as _pairing_store
+
+    _pairing_store.start_startup_sync()
     from app.utils import notion_queue as _notion_queue
 
     _notion_queue.start_worker()

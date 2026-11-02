@@ -140,6 +140,13 @@ transcribed, summary generated). The app POSTs JSON: `{event, timestamp, data}`.
 is readable only by you), in `~/Library/Application Support/Plaud V2/`. Deleted recordings go to
 the macOS Trash.
 
+**Pairing backup:** the two keys your NotePin needs to connect (its SN signature and bind token,
+issued by Plaud's cloud when you pair) are also kept in your login Keychain, as "Plaud V2 pairing"
+items, so the pairing survives an app or cleaner deleting the folder above. **Erase & Disconnect**
+removes them. **Settings › Device › Export pairing…** saves them to a file (readable only by you):
+anyone with that file can connect to your NotePin, so keep it somewhere safe, such as a password
+manager.
+
 **Leaves your Mac only if you set it up:**
 
 - Audio goes to the transcription provider you choose (Deepgram, Groq or OpenAI).
@@ -178,6 +185,9 @@ Common problems:
   `~/Library/Application Support/com.plaud.v2/venv` and open the app again: it rebuilds it.
 - **Device not found.** Check the NotePin is on, nearby and not connected to the Plaud phone app,
   and that Bluetooth is allowed in **System Settings › Privacy & Security › Bluetooth**.
+- **Pairing lost after a cleaner deleted the app's data.** Open the app and connect as usual: it
+  restores the pairing from your login Keychain, without a Plaud sign-in. If the Keychain copy is
+  gone too, use **Settings › Device › Import pairing…** with an export, or sign in to Plaud again.
 - **WiFi didn't come back after a WiFi sync.** The app restores your networks itself, also on the
   next launch if it was interrupted. If a network can't be restored, the app tells you which one;
   rejoin it from the WiFi menu.

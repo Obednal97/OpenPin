@@ -288,6 +288,30 @@ window.plaud = {
   setFindMy: (enabled) => apiCall('POST', '/device/find-my', { enabled }),
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
+  // Pairing backup (Settings › Device). Responses never contain credentials.
+  pairingStatus: () => apiCall('GET', '/device/pairing'),
+  exportPairing: (path) => apiCall('POST', '/device/pairing/export', { path }),
+  importPairing: (path) => apiCall('POST', '/device/pairing/import', { path }),
+  // Native save/open panels from the dialog plugin (capability dialog:default
+  // allows save and open). Resolve to an absolute path, or null if cancelled.
+  choosePairingExportPath: (defaultPath) =>
+    invoke('plugin:dialog|save', {
+      options: {
+        title: 'Export pairing',
+        defaultPath,
+        filters: [{ name: 'Pairing export', extensions: ['json'] }],
+        canCreateDirectories: true,
+      },
+    }),
+  choosePairingImportFile: () =>
+    invoke('plugin:dialog|open', {
+      options: {
+        title: 'Import pairing',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Pairing export', extensions: ['json'] }],
+      },
+    }),
   // opts e.g. { background: true } for automatic syncs; no args = no body, as before.
   sync: (opts) => apiCall('POST', '/device/sync', opts || null),
   syncStatus: () => apiCall('GET', '/device/sync-status'),
