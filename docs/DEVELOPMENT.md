@@ -55,32 +55,42 @@ on local transcription, diarization or DistilBART; they pull in PyTorch.
 ```bash
 bash scripts/prepare-frontend.sh                     # copies the frontend into dist-tauri/
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"     # if rustup came from Homebrew
-PLAUD_DATA_DIR=~/plaud-dev-data npx --yes @tauri-apps/cli@2.12 dev
+npx --yes @tauri-apps/cli@2.12 dev
 ```
 
-- **Always set `PLAUD_DATA_DIR`.** A Tauri build copies the backend into
-  `src-tauri/target/<profile>/app/` and runs that copy. It has no `.git` next to it, so
-  `app/utils/constants.py` treats it as packaged and would use your real
-  `~/Library/Application Support/Plaud V2/` (recordings, config, tokens). `PLAUD_DATA_DIR` keeps
-  dev data separate.
+- **Dev builds keep their own data.** A debug build (`tauri dev`, `cargo build`) passes
+  `PLAUD_DATA_DIR=~/Library/Application Support/Plaud V2 (Dev)` to the backend, so it never reads
+  or writes the installed app's recordings, config or tokens. Set `PLAUD_DATA_DIR` yourself to use
+  another folder; it wins in debug and release builds. Don't point it into `~/projects` or the repo:
+  the folder holds API keys and device tokens, and synced folders would copy them.
+- Debug builds also keep their own shell state in `~/Library/Application Support/com.plaud.v2.dev/`
+  (venv, lockfiles, `server.pid`, `tauri-prefs.json`, `updates/`, `diagnostics.log`) and log to
+  `~/Library/Logs/Plaud V2 (Dev)/`. They share only the downloaded Python runtime
+  (`com.plaud.v2/python/`) and FFmpeg (`com.plaud.v2/bin/`) with the installed app. The first dev
+  launch builds its own venv, so it takes a minute. All of this is in `src-tauri/src/paths.rs`.
+- **Quit the installed app first.** Both builds have the bundle id `com.plaud.v2`, so they share
+  the single-instance lock (`/tmp/com_plaud_v2_si.sock`): starting a dev build while the installed
+  app runs only brings the installed app's window forward and exits. They also share the webview's
+  storage (`~/Library/WebKit/com.plaud.v2`).
+- Tauri copies the backend into `src-tauri/target/<profile>/app/` and runs that copy, not `app/`,
+  so rebuild (or re-run `tauri dev`) after editing Python.
 - There is no `beforeDevCommand` or dev server: the window loads `dist-tauri/`. Re-run
   `prepare-frontend.sh` (and reload with Cmd+R) after editing HTML, CSS or JS.
-- The Rust side always uses the real `~/Library/Application Support/com.plaud.v2/` for the Python
-  runtime and venv, and `~/Library/Logs/Plaud V2/` for logs, dev or not.
 - Dev builds send crash reports too, tagged `[DEV]`, unless `crash_reports_enabled` is `false` in
-  the real config (the Rust side reads only that file).
+  the dev config (the Rust side reads the config in the same data folder as the backend).
 - `RUST_LOG=debug` (or e.g. `RUST_LOG=warn,plaud_v2::python=debug`) raises log levels; debug
   builds also log to stderr.
 
 ### Backend only
 
 ```bash
-PLAUD_DATA_DIR=~/plaud-dev-data python app/api_server.py
+PLAUD_DATA_DIR="$HOME/Library/Application Support/Plaud V2 (Dev)" python app/api_server.py
 curl -s http://127.0.0.1:5123/health
 ```
 
-Run straight from the checkout, the default data folder is the repo root, so set
-`PLAUD_DATA_DIR` here too. Without `PLAUD_API_TOKEN` the token check is off (it logs a warning);
+`app/utils/constants.py` picks the data folder as: `PLAUD_DATA_DIR` if set, otherwise the installed
+app's `~/Library/Application Support/Plaud V2/`, even from a checkout. There is no "dev mode"
+guess, so always set `PLAUD_DATA_DIR` when running the backend by hand. Without `PLAUD_API_TOKEN` the token check is off (it logs a warning);
 the CORS and Host checks still apply, so only `curl`-style clients can use it, not a browser page.
 
 ## Tests
@@ -127,10 +137,11 @@ Settings are in `pyproject.toml` (Python 3.12 target, line length 120).
   `SUPPORTED_ARCH` in `python.rs`, and the lockfiles). Change them together;
   `tests/test_tauri_parity.py` checks they agree.
 - **New backend files** under `app/routes`, `state`, `providers` or `utils` are bundled
-  automatically; anything elsewhere needs adding to `bundle.resources` in `tauri.conf.json` and to
-  `scripts/prepare-frontend.sh`.
+  automatically; anything elsewhere (including a new `src/` module, which are listed one by one)
+  needs adding to `bundle.resources` in `tauri.conf.json` and to `scripts/prepare-frontend.sh`.
+  `tests/test_tauri_parity.py` checks that every `src/` module the backend imports is bundled.
 - **Device protocol:** the BLE handshake uses the per-device **BIND_TOKEN**, not the static APP_KEY
-  that appears in old notes and `src/client.py`.
+  that appears in old notes.
 
 ## Python dependencies
 

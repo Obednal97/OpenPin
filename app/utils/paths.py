@@ -1,9 +1,12 @@
 """Validation for client-supplied session ids and paths.
 
-The local API has no auth, so every session id or path that arrives in a
-request body must be checked before it is joined onto a directory: an id like
-``../../x`` or an absolute path would otherwise let a caller delete or rewrite
-files anywhere on disk.
+The local API requires the per-launch ``X-Plaud-Token`` (see
+``app/api_server.py``), but that only proves the caller is the app's webview;
+it says nothing about the values it sends. So every session id or path that
+arrives in a request body must still be checked before it is joined onto a
+directory: an id like ``../../x`` or an absolute path would otherwise let a
+caller (a webview bug, or a backend run without ``PLAUD_API_TOKEN``) delete or
+rewrite files anywhere on disk.
 
 Session ids seen in practice:
 

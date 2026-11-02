@@ -610,7 +610,7 @@
           <div class="proc-section-header">
             <h3>Speaker Identification</h3>
             <span class="proc-subtitle">Diarization</span>
-            <span class="proc-info-icon" data-tooltip="Labels who is speaking (Speaker 1, Speaker 2...). Deepgram includes this automatically with transcription at no extra cost and is much faster. Local runs on your Mac but is significantly slower.">
+            <span class="proc-info-icon" data-tooltip="Labels who is speaking (Speaker 1, Speaker 2...). Deepgram does this itself when it transcribes. With any other transcription provider, a speaker model runs on your Mac after transcription (no account needed).">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><text x="8" y="12" text-anchor="middle" fill="currentColor" font-size="11" font-weight="600">i</text></svg>
             </span>
           </div>
@@ -619,18 +619,20 @@
             <span class="toggle-switch"></span>
             <span>Enable speaker identification</span>
           </label>
-          <p id="diarization-auto-note" class="settings-hint hidden" style="margin-top:var(--sp-2)">Handled automatically by Deepgram as part of transcription.</p>
-          <div id="diarization-options" class="hidden" style="margin-top:var(--sp-3)">
-            <div class="proc-provider-row">
-              <label class="proc-label" for="diarization-provider">Provider</label>
-              <select id="diarization-provider" class="proc-select">
-                <option value="deepgram">Deepgram (built-in)</option>
-                <option value="local">Local (automatic)</option>
-              </select>
-              <span class="proc-recommended" id="diarization-rec">Recommended</span>
+          <!-- Who labels speakers follows the transcription provider (set by renderDiarizationSection) -->
+          <p id="diarization-mode-note" class="settings-hint hidden" style="margin-top:var(--sp-2)"></p>
+          <div id="hf-token-area" class="hidden" style="margin-top:var(--sp-3)">
+            <label class="proc-label" for="hf-token-input">Hugging Face token (optional)</label>
+            <p class="settings-hint">Not needed for normal use. It only lets the app fall back to pyannote when the built-in model can't run and pyannote.audio is installed. Accept the terms for <code>pyannote/speaker-diarization-3.1</code> and <code>pyannote/segmentation-3.0</code> on huggingface.co first.</p>
+            <div id="hf-token-entry" class="token-input-row">
+              <input type="password" id="hf-token-input" class="settings-input" placeholder="Paste token (hf_...)" autocomplete="off" spellcheck="false">
+              <button id="hf-token-save-btn" class="btn-small">Save</button>
             </div>
-            <div id="diarization-key-area"></div>
-            <p id="diarization-local-note" class="settings-hint hidden">Runs on your Mac using the diarize library. No API key needed, but significantly slower than Deepgram.</p>
+            <div id="hf-token-saved" class="hidden">
+              <span class="ai-key-badge connected">Saved ✓</span>
+              <button id="hf-token-remove-btn" class="btn-small">Remove</button>
+            </div>
+            <p id="hf-token-status" class="ai-key-status hidden"></p>
           </div>
         </div>
 

@@ -335,7 +335,7 @@ class TestEndpointJSONShapes:
             "auto_prefer_wifi",
             "crash_reports_enabled",
             "transcription_provider",
-            "diarization_provider",
+            "hf_token_set",
             "summarization_provider",
             "has_paired_devices",
             "setup_dismissed",
@@ -498,14 +498,12 @@ class TestSettingsRoundTrip:
             "/settings",
             json={
                 "transcription_provider": "groq",
-                "diarization_provider": "pyannote",
                 "summarization_provider": "openai",
             },
             content_type="application/json",
         )
         data = flask_client.get("/settings").get_json()
         assert data["transcription_provider"] == "groq"
-        assert data["diarization_provider"] == "pyannote"
         assert data["summarization_provider"] == "openai"
 
     def test_auto_flags_roundtrip(self, flask_client):
@@ -968,6 +966,41 @@ class TestSidecarManagement:
         assert standalone and standalone.groups() == py.groups()
         header = (PROJECT_ROOT / "app" / "requirements" / "core.txt").read_text().splitlines()[1]
         assert f"CPython {py.group(1)}.{py.group(2)}, {plat.group(1)}-apple-darwin" in header
+
+    def test_shell_and_backend_agree_on_the_data_dir(self):
+        """The shell always passes PLAUD_DATA_DIR, and its release default is
+        the backend's packaged folder; debug builds use a separate one."""
+        python_rs = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
+        paths_rs = (PROJECT_ROOT / "src-tauri" / "src" / "paths.rs").read_text()
+        constants = (PROJECT_ROOT / "app" / "utils" / "constants.py").read_text()
+        assert ".env(crate::paths::DATA_DIR_ENV, crate::paths::data_dir())" in python_rs
+        assert 'pub const DATA_DIR_ENV: &str = "PLAUD_DATA_DIR";' in paths_rs
+        release = re.search(r'const RELEASE_DATA_DIR: &str = "([^"]+)";', paths_rs)
+        dev = re.search(r'const DEV_DATA_DIR: &str = "([^"]+)";', paths_rs)
+        assert release and dev and release.group(1) != dev.group(1)
+        assert f'Path("~/Library/Application Support/{release.group(1)}")' in constants
+
+    def test_bundle_ships_every_src_module_the_app_imports(self):
+        """tauri.conf.json lists src/ modules one by one; every module the
+        backend (or a bundled src/ module) imports must be among them."""
+        conf = json.loads((PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text())
+        bundled = {
+            Path(dest).stem
+            for dest in conf["bundle"]["resources"].values()
+            if dest.startswith("src/") and dest.endswith(".py")
+        }
+        assert "__init__" in bundled
+        pattern = re.compile(r"^\s*(?:from\s+src\.(\w+)\s+import|import\s+src\.(\w+))", re.M)
+
+        def imported(files):
+            return {a or b for f in files for a, b in pattern.findall(f.read_text())}
+
+        needed = imported((PROJECT_ROOT / "app").rglob("*.py"))
+        needed |= imported(PROJECT_ROOT / "src" / f"{m}.py" for m in needed)
+        assert needed, "no src imports found; pattern broken?"
+        assert needed <= bundled, f"not bundled: {sorted(needed - bundled)}"
+        for m in bundled:
+            assert (PROJECT_ROOT / "src" / f"{m}.py").is_file(), m
 
     def test_tauri_rust_has_sidecar_or_command(self):
         """Tauri config or Rust code must reference Python sidecar."""

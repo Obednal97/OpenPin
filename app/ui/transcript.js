@@ -952,6 +952,9 @@ async function transcribeRecording(oggPath, sessionId) {
         openTranscript(sessionId);
       }
 
+      // Speaker labels couldn't run (e.g. the model failed to install): say why.
+      if (result.diarization_message) toast(result.diarization_message, 'info');
+
       if (result.diarizing) {
         toast('Speaker detection running in background...', 'info');
         // Cancel any prior diarization poll before starting a new one — otherwise
@@ -959,32 +962,37 @@ async function transcribeRecording(oggPath, sessionId) {
         // user back to this session whenever the speakers field appears.
         if (_diarPollHandleTx) clearInterval(_diarPollHandleTx);
         if (_diarPollTimeoutHandleTx) clearTimeout(_diarPollTimeoutHandleTx);
+        const stopDiarPoll = () => {
+          if (_diarPollHandleTx) clearInterval(_diarPollHandleTx);
+          if (_diarPollTimeoutHandleTx) clearTimeout(_diarPollTimeoutHandleTx);
+          _diarPollHandleTx = null;
+          _diarPollTimeoutHandleTx = null;
+        };
         _diarPollHandleTx = setInterval(async () => {
           try {
             const transcriptData = await window.plaud.transcripts();
             const t = transcriptData.find((tr) => tr.session_id === sessionId);
-            if (t && t.speakers && t.speakers.length > 0) {
-              clearInterval(_diarPollHandleTx);
-              _diarPollHandleTx = null;
-              if (_diarPollTimeoutHandleTx) {
-                clearTimeout(_diarPollTimeoutHandleTx);
-                _diarPollTimeoutHandleTx = null;
-              }
+            if (!t) return;
+            // The backend sets diarization_status to done / none / failed when
+            // the background job ends ("running" until then).
+            const status = t.diarization_status || '';
+            const finished = (status && status !== 'running') || (t.speakers && t.speakers.length > 0);
+            if (!finished) return;
+            stopDiarPoll();
+            app.transcripts[sessionId] = t;
+            if (t.speakers && t.speakers.length > 0) {
               toast(`Speaker detection complete: ${t.speakers.length} speaker(s) found`, 'success');
-              app.transcripts[sessionId] = t;
               if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
                 openTranscript(sessionId);
               }
+            } else {
+              toast(t.diarization_message || 'No speakers detected', 'info');
             }
           } catch {}
         }, 5000);
-        _diarPollTimeoutHandleTx = setTimeout(() => {
-          if (_diarPollHandleTx) {
-            clearInterval(_diarPollHandleTx);
-            _diarPollHandleTx = null;
-          }
-          _diarPollTimeoutHandleTx = null;
-        }, 300000);
+        // Safety net only (the status above normally ends the poll): long
+        // recordings plus a first-run model install can take a while on CPU.
+        _diarPollTimeoutHandleTx = setTimeout(stopDiarPoll, 30 * 60 * 1000);
       }
     }
   } catch (err) {

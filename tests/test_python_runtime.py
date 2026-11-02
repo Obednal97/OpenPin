@@ -311,9 +311,11 @@ class TestTranscribeInstallsThroughEnsureInstalled:
 
         calls = []
         monkeypatch.setitem(sys.modules, "diarize", None)
+        monkeypatch.setattr(tr, "_diarize_install_failed_at", None)
+        monkeypatch.setattr(tr, "get_hf_token", lambda: None)
         monkeypatch.setattr(system, "ensure_installed", lambda *a, **k: calls.append((a, k)) or False)
-        with pytest.raises(ImportError):
-            tr.diarize_audio_fast("x.wav")
+        with pytest.raises(tr.DiarizationError):
+            tr.diarize_audio("x.wav")
         assert calls == [(("diarize",), {"extra": "diarize"})]
 
     def test_no_ad_hoc_pip_left(self):
@@ -347,13 +349,47 @@ class TestDataDir:
         assert Path(r.stdout.strip()) == target.resolve()
         assert target.is_dir()
 
-    def test_dev_checkout_default_is_repo_root(self):
+    def test_env_var_wins_over_the_packaged_folder(self, tmp_path):
+        # Even with a fake HOME whose packaged folder already exists, and when
+        # run from a source checkout: PLAUD_DATA_DIR is what counts.
+        home = tmp_path / "home"
+        (home / "Library/Application Support/Plaud V2").mkdir(parents=True)
+        target = tmp_path / "dev data"
         r = _run_python(
             "from app.utils import constants; print(constants.DATA_DIR)",
-            {"PLAUD_DATA_DIR": None},
+            {"PLAUD_DATA_DIR": str(target), "HOME": str(home)},
         )
         assert r.returncode == 0, r.stderr
-        assert Path(r.stdout.strip()).resolve() == ROOT.resolve()
+        assert Path(r.stdout.strip()) == target.resolve()
+
+    def test_tilde_in_env_var_is_expanded(self, tmp_path):
+        r = _run_python(
+            "from app.utils import constants; print(constants.DATA_DIR)",
+            {"PLAUD_DATA_DIR": "~/plaud dev", "HOME": str(tmp_path)},
+        )
+        assert r.returncode == 0, r.stderr
+        assert Path(r.stdout.strip()) == (tmp_path / "plaud dev").resolve()
+
+    def test_default_is_the_packaged_folder_even_in_a_checkout(self, tmp_path):
+        # No repo-root fallback: the checkout may be synced to other machines
+        # and the data folder holds API keys. HOME is faked so the real
+        # Application Support folder is never touched.
+        r = _run_python(
+            "from app.utils import constants; print(constants.DATA_DIR)",
+            {"PLAUD_DATA_DIR": None, "HOME": str(tmp_path)},
+        )
+        assert r.returncode == 0, r.stderr
+        expected = tmp_path / "Library/Application Support/Plaud V2"
+        assert Path(r.stdout.strip()) == expected
+        assert expected.is_dir()
+        assert Path(r.stdout.strip()).resolve() != ROOT.resolve()
+
+    def test_resolve_data_dir(self, tmp_path):
+        from app.utils.constants import PACKAGED_DATA_DIR, resolve_data_dir
+
+        assert resolve_data_dir(None) == PACKAGED_DATA_DIR
+        assert resolve_data_dir("  ") == PACKAGED_DATA_DIR
+        assert resolve_data_dir(str(tmp_path)) == tmp_path.resolve()
 
 
 # ---------------------------------------------------------------------------

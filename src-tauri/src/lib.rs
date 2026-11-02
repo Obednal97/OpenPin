@@ -1,6 +1,7 @@
 mod commands;
 mod lifecycle;
 mod logging;
+mod paths;
 mod power;
 mod python;
 
@@ -59,9 +60,7 @@ pub fn home_dir() -> std::path::PathBuf {
 
 /// Simple prefs file for Tauri-level settings (dock visibility, etc.)
 fn prefs_path() -> std::path::PathBuf {
-    home_dir()
-        .join("Library/Application Support/com.plaud.v2")
-        .join("tauri-prefs.json")
+    paths::app_support_dir().join("tauri-prefs.json")
 }
 
 fn load_prefs() -> serde_json::Value {
@@ -81,7 +80,7 @@ fn save_prefs(prefs: &serde_json::Value) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ~/Library/Logs/Plaud V2/app.log (+ stderr in debug). First, so that
+    // ~/Library/Logs/Plaud V2/app.log ("Plaud V2 (Dev)" in debug builds, + stderr). First, so that
     // everything after it, panics included, is logged.
     logging::init();
     // Report Rust panics (see lifecycle::install_panic_hook for the ordering).
