@@ -1,11 +1,7 @@
 """Tests for processing settings — provider preferences, profile context."""
 
-import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -18,7 +14,7 @@ class TestProviderPreferences:
         r = flask_client.get("/settings")
         data = r.get_json()
         assert "transcription_provider" in data
-        assert "diarization_provider" in data
+        assert "diarization_provider" not in data  # retired: follows the transcription provider
         assert "summarization_provider" in data
 
     def test_settings_saves_provider_preferences(self, flask_client):
