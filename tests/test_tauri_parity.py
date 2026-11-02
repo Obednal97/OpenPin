@@ -969,6 +969,19 @@ class TestSidecarManagement:
         header = (PROJECT_ROOT / "app" / "requirements" / "core.txt").read_text().splitlines()[1]
         assert f"CPython {py.group(1)}.{py.group(2)}, {plat.group(1)}-apple-darwin" in header
 
+    def test_shell_and_backend_agree_on_the_data_dir(self):
+        """The shell always passes PLAUD_DATA_DIR, and its release default is
+        the backend's packaged folder; debug builds use a separate one."""
+        python_rs = (PROJECT_ROOT / "src-tauri" / "src" / "python.rs").read_text()
+        paths_rs = (PROJECT_ROOT / "src-tauri" / "src" / "paths.rs").read_text()
+        constants = (PROJECT_ROOT / "app" / "utils" / "constants.py").read_text()
+        assert ".env(crate::paths::DATA_DIR_ENV, crate::paths::data_dir())" in python_rs
+        assert 'pub const DATA_DIR_ENV: &str = "PLAUD_DATA_DIR";' in paths_rs
+        release = re.search(r'const RELEASE_DATA_DIR: &str = "([^"]+)";', paths_rs)
+        dev = re.search(r'const DEV_DATA_DIR: &str = "([^"]+)";', paths_rs)
+        assert release and dev and release.group(1) != dev.group(1)
+        assert f'Path("~/Library/Application Support/{release.group(1)}")' in constants
+
     def test_tauri_rust_has_sidecar_or_command(self):
         """Tauri config or Rust code must reference Python sidecar."""
         tauri_conf = PROJECT_ROOT / "src-tauri" / "tauri.conf.json"

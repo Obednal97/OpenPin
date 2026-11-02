@@ -404,11 +404,11 @@ fn pending_update() -> &'static std::sync::Mutex<Option<PendingUpdate>> {
 }
 
 fn updates_dir() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/updates")
+    crate::paths::app_support_dir().join("updates")
 }
 
 fn update_log_path() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Logs/Plaud V2/update.log")
+    crate::paths::log_dir().join("update.log")
 }
 
 fn running_app_path() -> String {
@@ -1207,7 +1207,7 @@ const DIAGNOSTICS_MAX_BYTES: u64 = 1024 * 1024;
 static DIAG_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn diagnostics_log_path() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/diagnostics.log")
+    crate::paths::app_support_dir().join("diagnostics.log")
 }
 
 fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {

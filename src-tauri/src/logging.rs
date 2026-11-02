@@ -1,5 +1,6 @@
-//! Rust-side log file: `~/Library/Logs/Plaud V2/app.log`, rotated at ~1 MB
-//! with one old file kept (`app.log.1`), plus stderr in debug builds.
+//! Rust-side log file: `~/Library/Logs/Plaud V2/app.log` (`Plaud V2 (Dev)` for
+//! debug builds, see `paths`), rotated at ~1 MB with one old file kept
+//! (`app.log.1`), plus stderr in debug builds.
 //!
 //! Levels: `info` for this crate (`plaud_v2::*`) and the backend's output
 //! (`python` target), `warn` for dependencies. `RUST_LOG` overrides that with
@@ -20,7 +21,7 @@ use log::{LevelFilter, Log, Metadata, Record};
 const MAX_BYTES: u64 = 1_000_000;
 
 pub fn log_path() -> PathBuf {
-    crate::home_dir().join("Library/Logs/Plaud V2/app.log")
+    crate::paths::log_dir().join("app.log")
 }
 
 /// Level filter built from defaults or `RUST_LOG`.

@@ -124,8 +124,9 @@ fn find_free_port(start: u16) -> Result<u16, String> {
 // ---------------------------------------------------------------------------
 //
 // The backend runs in a venv at ~/Library/Application Support/com.plaud.v2/venv
-// built on a pinned CPython 3.12 from python-build-standalone, which the app
-// downloads (SHA-256 checked against the hashes below) into .../com.plaud.v2/python.
+// (com.plaud.v2.dev/venv for debug builds, see `paths`) built on a pinned
+// CPython 3.12 from python-build-standalone, which the app downloads (SHA-256
+// checked against the hashes below) into com.plaud.v2/python, shared by both.
 // Core packages come from app/requirements/core.txt (exact pins + hashes),
 // embedded in this binary. The venv records the lockfile's SHA-256, so an app
 // update that changes the lockfile re-syncs the venv on the next launch.
@@ -191,12 +192,12 @@ const PYTHON_CANDIDATES: &[&str] = &[
     "/usr/local/bin/python3",
 ];
 
-fn app_support_dir() -> PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2")
-}
+use crate::paths::app_support_dir;
 
+/// Managed runtime, shared by dev and release builds (a venv notices a swapped
+/// runtime through its stamp and rebuilds).
 fn bundled_python_dir() -> PathBuf {
-    app_support_dir().join("python")
+    crate::paths::shared_support_dir().join("python")
 }
 
 fn venv_dir() -> PathBuf {
@@ -420,8 +421,8 @@ fn try_download_standalone() -> Result<(), String> {
         .ok_or_else(|| format!("no Python build for {}", std::env::consts::ARCH))?;
     log::info!("[Python] Downloading standalone Python: {}", asset.filename);
 
-    let support = app_support_dir();
-    let work = support.join("python-download");
+    // Next to python/ so the final rename stays on one volume.
+    let work = crate::paths::shared_support_dir().join("python-download");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("create {}: {e}", work.display()))?;
     let result = (|| {
@@ -876,8 +877,9 @@ fn build_path(app: &AppHandle) -> String {
     let resource_path = app.path().resource_dir().unwrap_or_default();
     let bundled_bin = resource_path.join("bin");
 
-    // App support bin/ — where FFmpeg gets downloaded on first use
-    let app_support_bin = crate::home_dir().join("Library/Application Support/com.plaud.v2/bin");
+    // App support bin/ — where FFmpeg gets downloaded on first use (shared by
+    // dev and release builds; app/utils/system.py hard-codes it)
+    let app_support_bin = crate::paths::shared_support_dir().join("bin");
 
     let extra_paths = vec![
         app_support_bin.to_string_lossy().to_string(),
@@ -899,7 +901,7 @@ fn build_path(app: &AppHandle) -> String {
 }
 
 fn pid_file_path() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/server.pid")
+    app_support_dir().join("server.pid")
 }
 
 fn write_pid_file(pid: u32) {
@@ -1397,6 +1399,10 @@ fn spawn_backend(
         .env("PLAUD_PYTHON_RUNTIME", runtime)
         // /health reports it (the plaud-v2 package itself isn't installed in the venv).
         .env("PLAUD_APP_VERSION", env!("CARGO_PKG_VERSION"))
+        // Always explicit, so the backend and the Rust side (crash-report
+        // setting) agree: PLAUD_DATA_DIR if the shell got one, else
+        // "Plaud V2 (Dev)" for debug builds and "Plaud V2" for release.
+        .env(crate::paths::DATA_DIR_ENV, crate::paths::data_dir())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1420,7 +1426,9 @@ fn script_cwd(script: &Path) -> PathBuf {
 fn find_server_script(app: &AppHandle) -> PathBuf {
     // Check bundled Resources FIRST — the CARGO_MANIFEST_DIR dev path is baked at
     // compile time and will still exist on the dev machine even in production builds.
-    // We must prefer the bundled version so _is_packaged resolves correctly.
+    // Debug builds find a copy here too (tauri copies the resources into
+    // target/debug/), so dev runs that copy, not the repo's app/. Which data
+    // folder it uses doesn't depend on this: spawn_backend passes PLAUD_DATA_DIR.
     if let Ok(resource_dir) = app.path().resource_dir() {
         let bundled = resource_dir.join("app").join("api_server.py");
         if bundled.exists() {
