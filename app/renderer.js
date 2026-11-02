@@ -489,6 +489,13 @@ window.plaud.onUpdateStatus((data) => {
     };
   } else if (data.status === 'error') {
     console.error('[Updater]', data.message);
+    // If an update was in progress (banner showing), say what went wrong
+    // instead of leaving it on "Downloading…" / "Installing…".
+    if (!banner.classList.contains('hidden')) {
+      message.textContent = `Update failed: ${data.message || 'unknown error'}`;
+      actionBtn.style.display = 'none';
+      actionBtn.disabled = false;
+    }
   } else if (data.status === 'up-to-date') {
     console.log('[Updater] App is up to date');
   }
@@ -497,10 +504,21 @@ window.plaud.onUpdateStatus((data) => {
   for (const fn of app.updateListeners.splice(0)) fn(data);
 });
 
-$('#update-action').addEventListener('click', () => {
+$('#update-action').addEventListener('click', async () => {
   $('#update-message').textContent = 'Installing update, restarting...';
   $('#update-action').disabled = true;
-  window.plaud.installUpdate();
+  try {
+    const res = await window.plaud.installUpdate();
+    // On success the app quits; we only get here if the install was refused
+    // (e.g. running from a mounted DMG / App Translocation).
+    if (res && res.installing === false) {
+      $('#update-message').textContent = res.error || 'The update could not be installed.';
+      $('#update-action').disabled = false;
+    }
+  } catch (err) {
+    $('#update-message').textContent = `Update failed: ${err && err.message ? err.message : err}`;
+    $('#update-action').disabled = false;
+  }
 });
 
 $('#update-dismiss').addEventListener('click', () => {
@@ -676,11 +694,19 @@ async function executeWifiSync(claimedGen) {
   let pollActive = true;
   const pollProgress = async () => {
     const pollStartedAt = Date.now();
-    const POLL_MAX_MS = 5 * 60 * 1000; // 5 minutes
+    // The backend reports its own time budget (`deadline`, UNIX seconds) and
+    // stops + restores the worker itself; only give up well after that. Without
+    // a deadline, fall back to a generous fixed ceiling (the parent can take
+    // ~16 min before it returns, even for small transfers).
+    const POLL_FALLBACK_MAX_MS = 20 * 60 * 1000;
+    let wifiDeadlineS = 0;
     while (pollActive) {
-      if (Date.now() - pollStartedAt > POLL_MAX_MS) {
+      const timedOut = wifiDeadlineS
+        ? Date.now() / 1000 > wifiDeadlineS + 240
+        : Date.now() - pollStartedAt > POLL_FALLBACK_MAX_MS;
+      if (timedOut) {
         pollActive = false;
-        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync did not complete within 5 minutes', 0, 'error');
+        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync took longer than expected. Your WiFi settings are restored automatically.', 0, 'error');
         const panel = $('#wifi-confirm-overlay .modal-panel');
         panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
           '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
@@ -689,6 +715,7 @@ async function executeWifiSync(claimedGen) {
       }
       try {
         const s = await window.plaud.wifiSyncStatus();
+        if (s && typeof s.deadline === 'number' && s.deadline > 0) wifiDeadlineS = s.deadline;
         // Re-check pollActive after the async status call: the main sync may have
         // already finished (setting pollActive=false) and rendered a terminal
         // success/error state with an appended Close/Done button. Calling
@@ -755,7 +782,7 @@ async function executeWifiSync(claimedGen) {
                 f.ogg_path,
                 app.settings.model || 'small',
                 app.settings.diarize || false,
-                app.settings.language || 'en',
+                app.settings.language || 'auto',
               );
             } catch {}
           }
@@ -1225,7 +1252,7 @@ function _startBgPoll() {
                         f.ogg_path,
                         app.settings.model || 'small',
                         app.settings.diarize || false,
-                        app.settings.language || 'en',
+                        app.settings.language || 'auto',
                       );
                     } catch {}
                   }

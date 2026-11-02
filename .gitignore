@@ -23,6 +23,8 @@ wifi_sync.log
 *.log
 .redownload_backup/
 .trash/
+wifi_restore.json
+wifi_sync.lock
 
 # Bundled binaries (downloaded by scripts/download-ffmpeg.sh)
 bin/
