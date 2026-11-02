@@ -2,6 +2,8 @@
 
 import asyncio
 import base64
+import binascii
+import inspect
 import json
 import logging
 import os
@@ -14,15 +16,14 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from app.utils.audio import decrypt_ble_file, wrap_opus_ogg
+from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.config import load_config, save_config
 from app.utils.constants import (
     APP_KEY_PATH,
-    BLE_BATTERY_UUID,
     DATA_DIR,
     PROJECT_ROOT,
-    RECORDINGS_DIR,
     SESSIONS_DIR,
+    get_all_recordings_dirs,
     get_recordings_dir,
 )
 from app.utils.constants import (
@@ -47,6 +48,7 @@ _device_state = {
     "cmd_resp": None,
     "file_data": None,
     "file_done": None,
+    "file_meta": None,
     "serial_number": None,
 }
 
@@ -59,6 +61,41 @@ _wifi_sync_status = {"message": "", "percent": 0}  # Progress for WiFi sync poll
 _ble_sync_status = {"message": "", "percent": 0, "active": False}
 _loop = None
 _loop_thread = None
+
+# BLE file-receive tuning (module-level so tests can shrink them).
+_RECV_POLL_S = 2  # how often the receive loop checks abort / disconnect / stall
+_STALL_TIMEOUT_S = 60  # no new bytes for this long = stalled transfer
+_TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail (CRC)
+_DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
+
+
+def _update_config(mutate):
+    """Load the config, apply `mutate(config)` in place, save it.
+
+    TODO(integration, fix/phase1-safety): replace the body with
+    `update_config(mutate)` from app.utils.config, which does the same
+    load-mutate-save under the config lock.
+    """
+    config = load_config()
+    mutate(config)
+    save_config(config)
+
+
+def _finalize_redownload_backup(sid):
+    """Hook called right after a fresh {sid}.ogg is atomically in place.
+
+    TODO(integration, fix/phase1-safety): app.utils.redownload_backup provides
+    finalize_redownload_backup(sid); the guarded import makes this a no-op on
+    branches that don't have it yet.
+    """
+    try:
+        from app.utils.redownload_backup import finalize_redownload_backup
+    except ImportError:
+        return
+    try:
+        finalize_redownload_backup(str(sid))
+    except Exception as e:
+        logging.warning(f"finalize_redownload_backup({sid}) failed: {e}")
 
 
 def _reset_state():
@@ -76,50 +113,94 @@ def _reset_state():
     _device_state["cmd_resp"] = None
     _device_state["file_data"] = None
     _device_state["file_done"] = None
+    _device_state["file_meta"] = None
 
 
 def _on_disconnect(client):
-    """Callback fired by bleak when BLE connection drops unexpectedly."""
+    """Callback fired by bleak when BLE connection drops unexpectedly.
+
+    Only acts for the CURRENT client. After force_reset()/verify replace or drop
+    a client, the old BleakClient's callback can still fire later (when its link
+    finally dies or our scheduled disconnect completes); without this check it
+    would wipe the state of a newer, healthy connection.
+    """
+    current = _device_state.get("client")
+    if client is not current:
+        logging.info("BLE disconnect callback from a stale client — ignored")
+        return
     logging.warning("BLE device disconnected unexpectedly")
     _reset_state()
 
 
-async def _setup_notify(cl):
-    """Re-register the BLE notification handler using existing state."""
-    cipher = _device_state["cipher"]
-    key, nonce, aad = _device_state["session_keys"]
-    cmd_evt = _device_state["cmd_evt"]
-    cmd_resp = _device_state["cmd_resp"]
-    file_data = _device_state["file_data"]
-    file_done = _device_state["file_done"]
+async def _disconnect_quietly(cl, timeout=5):
+    """Best-effort disconnect of a BleakClient we no longer track."""
+    try:
+        await asyncio.wait_for(cl.stop_notify(N), timeout=timeout)
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(cl.disconnect(), timeout=timeout)
+    except Exception as e:
+        logging.debug(f"Disconnect of stale BLE client failed (ignored): {e}")
+
+
+def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_done, file_meta):
+    """Build the encrypted-channel notification handler.
+
+    File transfer bookkeeping goes into `file_meta` (reset by the sync loop per
+    file) so the sync can decide whether a download really completed:
+      - "end" / "end_error": data packet with offset 0xFFFFFFFF; byte 9 is the
+        device's error code for the transfer (0 = OK).
+      - "tail" / "tail_sid" / "tail_crc": cmd 29 SyncFileTail (sessionId@3-6,
+        crc16@7-8).
+      - "start_status": cmd 28 SyncFileHead reply status@7 (0 = accepted).
+      - "offset_mismatch": first data packet whose offset != bytes received so
+        far (diagnostic only).
+    """
 
     def handler(s, d):
         try:
             dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
-        except Exception:
+        except Exception as e:
+            logging.warning(f"[BLE] Notification decrypt failed ({len(d)}B): {e}")
             return
         if len(dd) < 1:
             return
         if dd[0] == 2 and len(dd) >= 10:
             off = struct.unpack_from("<I", dd, 5)[0]
             if off == 0xFFFFFFFF:
+                file_meta["end"] = True
+                file_meta["end_error"] = dd[9]
+                file_meta["end_sid"] = struct.unpack_from("<I", dd, 1)[0]
                 file_done.set()
             else:
+                if off != len(file_data) and "offset_mismatch" not in file_meta:
+                    file_meta["offset_mismatch"] = (off, len(file_data))
                 file_data.extend(dd[10 : 10 + dd[9]])
         elif dd[0] == 1:
             cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
+            logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
             if cid == 29:
+                file_meta["tail"] = True
+                if len(dd) >= 7:
+                    file_meta["tail_sid"] = struct.unpack_from("<I", dd, 3)[0]
+                if len(dd) >= 9:
+                    file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
                 file_done.set()
+            elif cid == 28 and len(dd) >= 8:
+                file_meta["start_status"] = dd[7]
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))
             # Only wake send_cmd() if this is the response it's waiting for.
+            # Unsolicited cmd_type==1 packets (record events, late replies) carry a
+            # different cmd_id and must not be returned as the current command's reply.
             expected = _device_state.get("expected_cmd_id")
             if expected is None or cid == expected:
                 cmd_resp[0] = dd
                 cmd_evt.set()
 
-    await cl.start_notify(N, handler)
+    return handler
 
 
 def get_state():
@@ -204,9 +285,7 @@ class _keep_awake:
         try:
             from Foundation import NSProcessInfo
 
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
-                self._OPTIONS, self._reason
-            )
+            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
         except Exception as e:
             logging.debug(f"App Nap suppression unavailable: {e}")
             self._token = None
@@ -424,7 +503,10 @@ async def connect_device(address=None):
             except Exception:
                 pass
         sn = _device_state.get("serial_number", "unknown")
-        return {"connected": False, "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting."}
+        return {
+            "connected": False,
+            "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting.",
+        }
 
     _device_state["client"] = cl
 
@@ -449,7 +531,14 @@ async def connect_device(address=None):
         await cl.start_notify(N, h)
         # Get per-device SN_SIG from cloud API (stored in config)
         # If not cached, try fetching from cloud on the spot
-        from app.state.cloud import get_device_sn_signature, get_device_bind_token, is_logged_in, fetch_sn_signature, bind_device
+        from app.state.cloud import (
+            bind_device,
+            fetch_sn_signature,
+            get_device_bind_token,
+            get_device_sn_signature,
+            is_logged_in,
+        )
+
         sn = _device_state.get("serial_number", "")
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
         if not sn_sig_b64 and sn and is_logged_in():
@@ -470,8 +559,14 @@ async def connect_device(address=None):
             if not sn:
                 return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
             if not is_logged_in():
-                return {"connected": False, "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again."}
-            return {"connected": False, "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again."}
+                return {
+                    "connected": False,
+                    "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again.",
+                }
+            return {
+                "connected": False,
+                "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again.",
+            }
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
         # Send SN_SIG 3 times for reliability on weak connections
@@ -500,7 +595,10 @@ async def connect_device(address=None):
                 await cl.stop_notify(N)
             except Exception:
                 pass
-            return {"connected": False, "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting.",
+            }
 
         blob = bytearray()
         for i in sorted(rsa.keys()):
@@ -518,11 +616,17 @@ async def connect_device(address=None):
         err_msg = str(e)
         # Translate raw BLE errors to user-friendly messages
         if "service discovery" in err_msg.lower():
-            return {"connected": False, "error": "Connection was lost during setup. Try moving the device closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Connection was lost during setup. Try moving the device closer and reconnecting.",
+            }
         if "disconnected" in err_msg.lower() or "not connected" in err_msg.lower():
             return {"connected": False, "error": "Device disconnected during setup. Try reconnecting."}
         if "timeout" in err_msg.lower():
-            return {"connected": False, "error": "Device took too long to respond. Try moving it closer and reconnecting."}
+            return {
+                "connected": False,
+                "error": "Device took too long to respond. Try moving it closer and reconnecting.",
+            }
         return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
 
     # Save session (atomic write — prevents corruption on mid-write crash)
@@ -559,42 +663,15 @@ async def connect_device(address=None):
     cmd_resp = [None]
     file_data = bytearray()
     file_done = asyncio.Event()
+    file_meta = {}
 
-    def handler(s, d):
-        try:
-            dd = cipher.decrypt(nonce, bytes(d), aad)[4:]
-        except Exception as e:
-            logging.warning(f"[BLE] Notification decrypt failed ({len(d)}B): {e}")
-            return
-        if len(dd) < 1:
-            return
-        if dd[0] == 2 and len(dd) >= 10:
-            off = struct.unpack_from("<I", dd, 5)[0]
-            if off == 0xFFFFFFFF:
-                file_done.set()
-            else:
-                file_data.extend(dd[10 : 10 + dd[9]])
-        elif dd[0] == 1:
-            cid = struct.unpack_from("<H", dd, 1)[0] if len(dd) >= 3 else 0
-            logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
-            if cid == 29:
-                file_done.set()
-            # cmd_id 26 = file list response (may span multiple packets)
-            if cid == 26:
-                _device_state.setdefault("file_list_packets", []).append(bytes(dd))
-            # Only wake send_cmd() if this is the response it's waiting for.
-            # Unsolicited cmd_type==1 packets (record events, late replies) carry a
-            # different cmd_id and must not be returned as the current command's reply.
-            expected = _device_state.get("expected_cmd_id")
-            if expected is None or cid == expected:
-                cmd_resp[0] = dd
-                cmd_evt.set()
-
+    handler = _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_done, file_meta)
     await cl.start_notify(N, handler)
     _device_state["cmd_evt"] = cmd_evt
     _device_state["cmd_resp"] = cmd_resp
     _device_state["file_data"] = file_data
     _device_state["file_done"] = file_done
+    _device_state["file_meta"] = file_meta
     _device_state["connected"] = True
 
     # Send BIND_TOKEN handshake (cmd_id=1) — required for device to accept commands.
@@ -602,13 +679,16 @@ async def connect_device(address=None):
     #   [cmd_type=1][cmd_id=1 LE][version=2][audioChannel=0][flag=0/1] + token32
     # Two commands are sent: flag=0 then flag=1 (both required).
     # The token is the per-device BIND_TOKEN from the cloud API (not the static APP_KEY).
-    from app.state.cloud import get_device_bind_token, bind_device as cloud_bind_device, is_logged_in as cloud_logged_in
+    from app.state.cloud import bind_device as cloud_bind_device
+    from app.state.cloud import get_device_bind_token
+    from app.state.cloud import is_logged_in as cloud_logged_in
+
     device_token = get_device_bind_token(sn)
     if not device_token and sn and cloud_logged_in():
         # BIND_TOKEN missing — try creating it now (handles first-time pairing)
         logging.info(f"[BLE] No BIND_TOKEN for {sn}, attempting cloud bind...")
         try:
-            result = cloud_bind_device(sn)
+            cloud_bind_device(sn)
             device_token = get_device_bind_token(sn)
             logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
         except Exception as e:
@@ -667,9 +747,7 @@ async def send_cmd(pt, timeout=5):
     # (button-press record events, late/duplicate replies); without this the first
     # such packet would be returned here and its bytes misread (e.g. a sessionId
     # byte parsed as battery %). The SDK matches responses to requests the same way.
-    _device_state["expected_cmd_id"] = (
-        struct.unpack_from("<H", pt, 1)[0] if len(pt) >= 3 else None
-    )
+    _device_state["expected_cmd_id"] = struct.unpack_from("<H", pt, 1)[0] if len(pt) >= 3 else None
     ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + pt, aad)
     cmd_evt.clear()
     cmd_resp[0] = None
@@ -735,6 +813,7 @@ async def depair_device():
 
         await cl.start_notify(N, verify_handler)
         from app.state.cloud import get_device_sn_signature
+
         sn_for_verify = _device_state.get("serial_number", "")
         sn_sig_verify = get_device_sn_signature(sn_for_verify)
         if not sn_sig_verify:
@@ -768,11 +847,12 @@ async def depair_device():
             except Exception:
                 pass
 
-    config = load_config()
-    config["paired_devices"] = {}
-    config.pop("known_devices_by_sn", None)
-    config.pop("known_devices", None)
-    save_config(config)
+    def _forget_devices(config):
+        config["paired_devices"] = {}
+        config.pop("known_devices_by_sn", None)
+        config.pop("known_devices", None)
+
+    _update_config(_forget_devices)
 
     sk_path = PROJECT_ROOT / "session_keys.json"
     if sk_path.exists():
@@ -797,6 +877,7 @@ async def list_device_files():
     We collect multiple packets until we have all `total` files.
     """
     import sys
+
     files = []
     expected_total = None
 
@@ -881,7 +962,11 @@ async def list_device_files():
             deduped.append(rec)
     files = deduped
 
-    print(f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})", file=sys.stderr, flush=True)
+    print(
+        f"[BLE] list_device_files: returning {len(files)} files (expected {expected_total})",
+        file=sys.stderr,
+        flush=True,
+    )
     return files
 
 
@@ -925,7 +1010,9 @@ async def get_device_info():
         r = await send_cmd(bytes([1, 3, 0]), timeout=3)
         if r and len(r) >= 8:
             state_val = struct.unpack_from("<I", r, 3)[0] if len(r) >= 7 else 0
-            info["recording_state"] = state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
+            info["recording_state"] = (
+                state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
+            )
             # Recording is determined by the active session id, not `state`:
             # measured idle -> session 0, scene 0; recording -> session != 0, scene 1.
             # (The `state` field is a bitfield, not a 0-3 enum, so the old
@@ -999,14 +1086,28 @@ async def set_find_my(enabled):
 
 
 async def delete_device_file(session_id):
-    """Delete a file from the device by session ID (cmd 31)."""
+    """Delete a file from the device by session ID (cmd 31).
+
+    Reports deleted:True ONLY when the device replies with a SyncRecFileDelRsp
+    for this session (sessionId@3-6, SDK C9810v0 for portVersion >= 7) whose
+    status@7 is 0. No reply (timeout, disconnect) or any other status means we
+    don't know the file is gone, so deleted:False.
+    """
+    session_id = int(session_id)
     r = await send_cmd(
         bytes([1, 31, 0]) + struct.pack("<I", session_id),
-        timeout=5,
+        timeout=_DELETE_REPLY_TIMEOUT_S,
     )
-    if r and len(r) >= 8:
-        status = r[7] if len(r) > 7 else r[3]
-        return {"deleted": status == 0, "session_id": session_id}
+    if not r or len(r) < 8:
+        logging.warning(f"Delete of session {session_id}: no (or short) reply from device")
+        return {"deleted": False, "session_id": session_id, "error": "No reply from device"}
+    reply_sid = struct.unpack_from("<I", r, 3)[0]
+    status = r[7]
+    if reply_sid != session_id:
+        logging.warning(f"Delete of session {session_id}: reply was for session {reply_sid}")
+        return {"deleted": False, "session_id": session_id, "error": "Reply for a different session"}
+    if status != 0:
+        return {"deleted": False, "session_id": session_id, "status": status, "error": f"Device status {status}"}
     return {"deleted": True, "session_id": session_id}
 
 
@@ -1022,11 +1123,38 @@ async def stop_recording():
     return {"recording": False}
 
 
-async def sync_files(progress_callback=None):
-    """Download all files from device, decrypt, save as .ogg."""
-    global _syncing
+SYNC_BUSY_ERROR = "Sync already in progress"
+
+
+def claim_sync():
+    """Try to take the sync slot without blocking. Returns True if acquired.
+
+    A caller that gets True MUST hand ownership to sync_files(_claimed=True)
+    (which releases it) or call release_sync() itself.
+    """
+    global _sync_abort
     if not _syncing.acquire(blocking=False):
-        return {"error": "Sync already in progress"}
+        return False
+    # A stale abort (e.g. /abort-sync pressed when nothing was running) must not
+    # silently cancel this new sync. Cleared at claim time, not when the
+    # coroutine starts, so an abort sent while it waits for _ble_lock still counts.
+    _sync_abort = False
+    return True
+
+
+def release_sync():
+    _syncing.release()
+
+
+async def sync_files(progress_callback=None, _claimed=False):
+    """Download all files from device, decrypt, save as .ogg.
+
+    `_claimed=True` means the caller already took the sync slot via
+    claim_sync() (in the Flask thread, before queueing behind _ble_lock); this
+    coroutine then owns it and releases it when done.
+    """
+    if not _claimed and not claim_sync():
+        return {"error": SYNC_BUSY_ERROR, "busy": True}
     _ble_sync_status.update({"message": "Preparing…", "percent": 5, "active": True})
     try:
         # Suppress macOS App Nap so backgrounding the window can't throttle the
@@ -1036,6 +1164,163 @@ async def sync_files(progress_callback=None):
     finally:
         _ble_sync_status.update({"message": "", "percent": 0, "active": False})
         _syncing.release()
+
+
+def run_sync_blocking(timeout=1800):
+    """Run a BLE sync from a Flask thread. Returns None if a sync is already running.
+
+    The sync slot is claimed HERE, before queueing behind _ble_lock, so a second
+    /sync arriving while the first is running (or still waiting for the lock)
+    is rejected immediately instead of running a full second sync afterwards.
+    """
+    if not claim_sync():
+        return None
+    coro = sync_files(_claimed=True)
+    try:
+        return run_async(coro, timeout=timeout)
+    except BaseException:
+        # If the coroutine never started it can't release the slot itself.
+        if inspect.getcoroutinestate(coro) == inspect.CORO_CREATED:
+            coro.close()
+            release_sync()
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Download integrity
+# ---------------------------------------------------------------------------
+
+# cmd 29 (SyncFileTail) carries a CRC-16 of the file, computed on the phone by
+# the native tntGetFileCrc() (libtnt_ble_utils.so) — its exact variant (and
+# whether it covers the raw bytes) is NOT visible in the decompiled Java. Until
+# a real-device run confirms which variant matches (see the "[BLE] CRC" log
+# lines), CRC is logged but never used to reject a file. Set this to the
+# confirmed variant name (a key of crc16_variants()) to enforce it.
+CRC16_ENFORCED_VARIANT = None
+
+
+def _crc16_reflected(data, poly_rev, init):
+    crc = init
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ poly_rev if crc & 1 else crc >> 1
+    return crc & 0xFFFF
+
+
+def crc16_variants(data, slow_limit=1_000_000):
+    """Common CRC-16 variants of `data` → {name: crc}.
+
+    XMODEM / CCITT-FALSE use binascii's C implementation (fast at any size); the
+    reflected variants are pure Python, so they're only computed for files up to
+    `slow_limit` bytes to keep the event loop responsive.
+    """
+    out = {
+        "XMODEM": binascii.crc_hqx(data, 0),
+        "CCITT-FALSE": binascii.crc_hqx(data, 0xFFFF),
+    }
+    if len(data) <= slow_limit:
+        out["ARC"] = _crc16_reflected(data, 0xA001, 0)
+        out["MODBUS"] = _crc16_reflected(data, 0xA001, 0xFFFF)
+        out["KERMIT"] = _crc16_reflected(data, 0x8408, 0)
+    return out
+
+
+def _check_tail_crc(sid, data, device_crc):
+    """Compare the device's cmd-29 CRC with candidate CRC-16s of `data`.
+
+    Returns (ok, matched_variant). ok is False only when CRC16_ENFORCED_VARIANT
+    is set and doesn't match.
+    """
+    if device_crc is None:
+        return True, None
+    variants = crc16_variants(data)
+    matched = [name for name, v in variants.items() if v == device_crc]
+    if matched:
+        logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches {','.join(matched)}")
+    else:
+        logging.info(f"[BLE] CRC session {sid}: device=0x{device_crc:04x} matches none of {sorted(variants)}")
+    if CRC16_ENFORCED_VARIANT and CRC16_ENFORCED_VARIANT in variants:
+        if variants[CRC16_ENFORCED_VARIANT] != device_crc:
+            return False, None
+    return True, (matched[0] if matched else None)
+
+
+def evaluate_download(sid, expected_size, data, meta, interrupted=None):
+    """Decide whether a received file is complete. Returns (ok, reason).
+
+    Accepted only if: the transfer wasn't interrupted (abort/stall/disconnect);
+    the device signalled the end (0xFFFFFFFF end packet and/or the cmd-29 tail)
+    with no error code; the device didn't reject the cmd-28 request; the byte
+    count equals the size from the file list; and the CRC (when enforced) matches.
+    """
+    if interrupted:
+        return False, interrupted
+    if not (meta.get("end") or meta.get("tail")):
+        return False, "no end-of-file marker"
+    if meta.get("end") and meta.get("end_error"):
+        return False, f"device reported transfer error {meta['end_error']}"
+    if meta.get("start_status") not in (None, 0):
+        return False, f"device rejected download (status {meta['start_status']})"
+    if len(data) != expected_size:
+        return False, f"size mismatch ({len(data)} of {expected_size} bytes)"
+    ok, _ = _check_tail_crc(sid, data, meta.get("tail_crc"))
+    if not ok:
+        return False, "CRC mismatch"
+    return True, None
+
+
+def gdrive_cloud_synced_ids():
+    """Session ids (as str) already uploaded to Google Drive in 'cloud' storage mode.
+
+    In cloud mode the local .ogg is deleted after upload, so local presence alone
+    would re-download (and re-upload) the same files on every sync.
+    """
+    try:
+        if load_config().get("storage_mode", "local") != "cloud":
+            return set()
+        from app.state.gdrive import get_synced_files
+
+        return {str(k) for k in get_synced_files()}
+    except Exception:
+        return set()
+
+
+def find_local_recording(sid, rec_dirs=None):
+    """Return the path of an existing complete .ogg for `sid`, or None.
+
+    Partial downloads ({sid}_partial.bin) and failed decrypts
+    ({sid}_encrypted.bin) are deliberately NOT treated as present, so the next
+    sync retries them.
+    """
+    for d in rec_dirs if rec_dirs is not None else get_all_recordings_dirs():
+        p = d / f"{sid}.ogg"
+        if p.exists():
+            return p
+    return None
+
+
+def is_already_synced(sid, rec_dirs=None, cloud_ids=None):
+    """True if the recording is present locally or (cloud mode) in Google Drive."""
+    if find_local_recording(sid, rec_dirs) is not None:
+        return True
+    if cloud_ids is None:
+        cloud_ids = gdrive_cloud_synced_ids()
+    return str(sid) in cloud_ids
+
+
+def _atomic_write(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+async def _send_stop_sync():
+    """Tell the device to stop streaming the current file (cmd 30)."""
+    try:
+        await send_cmd(bytes([1, 30, 0]), timeout=2)
+    except Exception as e:
+        logging.debug(f"stop-sync (cmd 30) failed: {e}")
 
 
 def do_wifi_sync_blocking():
@@ -1055,9 +1340,11 @@ def do_wifi_sync_blocking():
     # Signal any running BLE sync to abort, then wait up to 10s for it to release.
     _sync_abort = True
     acquired = _syncing.acquire(timeout=10)
-    _sync_abort = False
     if not acquired:
+        # Leave the abort flag set so the still-running BLE sync stops at its
+        # next check (every sync clears it at start, so it can't go stale).
         return {"error": "BLE sync still running after 10s; WiFi sync aborted"}
+    _sync_abort = False
 
     sn = _device_state["serial_number"]
     key, nonce, aad = _device_state["session_keys"]
@@ -1070,6 +1357,7 @@ def do_wifi_sync_blocking():
 
     # Log WiFi sync to file for production debugging
     _wifi_log = DATA_DIR / "wifi_sync.log" if DATA_DIR else None
+
     def _wlog(msg):
         print(f"[WiFi] {msg}")
         if _wifi_log:
@@ -1103,7 +1391,14 @@ def do_wifi_sync_blocking():
         _reset_state()
 
         # Build worker args — worker does its own BLE connect + handshake
-        from app.state.cloud import get_device_bind_token, get_device_sn_signature, is_logged_in, bind_device, fetch_sn_signature
+        from app.state.cloud import (
+            bind_device,
+            fetch_sn_signature,
+            get_device_bind_token,
+            get_device_sn_signature,
+            is_logged_in,
+        )
+
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
@@ -1127,18 +1422,21 @@ def do_wifi_sync_blocking():
             if not is_logged_in():
                 return {"error": "Log into Plaud Cloud in Settings first, then try again."}
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
-        worker_args = json.dumps({
-            "sn": sn,
-            "recordings_dir": str(get_recordings_dir()),
-            "app_key_path": str(APP_KEY_PATH),
-            "dismissed": list(load_config().get("deleted_ids", [])),
-            "bind_token": device_token,
-            "sn_sig": device_sig,
-        })
+        worker_args = json.dumps(
+            {
+                "sn": sn,
+                "recordings_dir": str(get_recordings_dir()),
+                "app_key_path": str(APP_KEY_PATH),
+                "dismissed": list(load_config().get("deleted_ids", [])),
+                "bind_token": device_token,
+                "sn_sig": device_sig,
+            }
+        )
 
         # Find the worker script
         import importlib.util
         from pathlib import Path as _Path
+
         worker_path = _Path(importlib.util.find_spec("app.utils.wifi_sync_worker").origin)
         python_bin = sys.executable
         _wlog(f"Spawning worker: {python_bin} {worker_path}")
@@ -1147,6 +1445,7 @@ def do_wifi_sync_blocking():
         # Run worker as subprocess — it has its own clean asyncio.run().
         # Credentials go in via stdin, not argv, so `ps aux` can't see them.
         import subprocess as sp
+
         proc = sp.Popen(
             [python_bin, str(worker_path)],
             stdin=sp.PIPE,
@@ -1209,10 +1508,17 @@ def do_wifi_sync_blocking():
             _on_status("WiFi transfer failed", 0)
             stderr_tail = "\n".join(_worker_stderr[-15:])
             _wlog(f"Worker FAILED: code={proc.returncode} stderr={stderr_tail[:300]}")
-            return {"error": f"WiFi worker exited with code {proc.returncode}", "output": stdout_str[:200], "traceback": stderr_tail}
+            return {
+                "error": f"WiFi worker exited with code {proc.returncode}",
+                "output": stdout_str[:200],
+                "traceback": stderr_tail,
+            }
 
         if stdout_str:
             result = json.loads(stdout_str)
+            for f in result.get("files", []):
+                if f.get("status") == "new" and f.get("session_id") is not None:
+                    _finalize_redownload_backup(f["session_id"])
             done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
             _on_status(f"Complete: {done_count} file(s)", 100)
             return result
@@ -1222,11 +1528,84 @@ def do_wifi_sync_blocking():
     except Exception as e:
         _wlog(f"EXCEPTION: {e}")
         import traceback
+
         traceback.print_exc()
         _on_status(f"WiFi transfer failed: {e}", 0)
         return {"error": str(e)}
     finally:
         _syncing.release()
+
+
+def _save_partial(sid, raw, expected, reason, rec_dir):
+    """Keep an incomplete download as raw encrypted bytes ({sid}_partial.bin).
+
+    It is never an .ogg, so the file is not "present" and the next sync retries
+    it; it is never auto-deleted from the device. A bigger earlier partial is
+    not overwritten by a smaller one.
+    """
+    partial_path = rec_dir / f"{sid}_partial.bin"
+    saved = None
+    if raw:
+        try:
+            if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
+                _atomic_write(partial_path, raw)
+            saved = str(partial_path)
+        except OSError as e:
+            logging.warning(f"Could not save partial download for session {sid}: {e}")
+    logging.warning(f"BLE sync: session {sid} incomplete — {reason}; kept as partial, will retry next sync")
+    return {
+        "session_id": sid,
+        "ogg_path": None,
+        "duration": 0,
+        "status": "partial",
+        "received": len(raw),
+        "expected": expected,
+        "reason": reason,
+        "partial_path": saved,
+    }
+
+
+def _save_complete(sid, raw, app_rsa_key, rec_dir):
+    """Persist a verified download: encrypted original first, then the .ogg.
+
+    The encrypted original ({sid}_encrypted.bin) is written before decrypting
+    and kept whenever decrypt or the .ogg write fails. Only status "new" means
+    the recording is safely on disk (and may be auto-deleted from the device).
+    """
+    enc_path = rec_dir / f"{sid}_encrypted.bin"
+    ogg_path = rec_dir / f"{sid}.ogg"
+    partial_path = rec_dir / f"{sid}_partial.bin"
+    try:
+        _atomic_write(enc_path, raw)
+    except OSError as e:
+        logging.warning(f"Could not save encrypted download for session {sid}: {e}")
+        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
+    # The complete encrypted copy supersedes any earlier partial.
+    partial_path.unlink(missing_ok=True)
+    try:
+        opus_frames = decrypt_ble_file(raw, app_rsa_key)
+    except BleDecryptError as e:
+        logging.warning(f"Decrypt failed for session {sid}: {e} — encrypted original kept")
+        return {
+            "session_id": sid,
+            "ogg_path": None,
+            "duration": 0,
+            "status": "decrypt_failed",
+            "error": str(e),
+            "encrypted_path": str(enc_path),
+        }
+    try:
+        _atomic_write(ogg_path, wrap_opus_ogg(opus_frames))
+    except OSError as e:
+        logging.warning(f"Could not write {ogg_path}: {e} — encrypted original kept")
+        return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
+    # Fresh .ogg is in place (runs before the caller's maybe_auto_upload).
+    _finalize_redownload_backup(sid)
+    # Long recordings keep their encrypted backup (allows re-decrypt), as before.
+    if len(raw) <= 500_000:
+        enc_path.unlink(missing_ok=True)
+    duration = len(opus_frames) // 80 * 0.02
+    return {"session_id": sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
 
 
 async def _sync_files_inner(progress_callback=None):
@@ -1241,32 +1620,50 @@ async def _sync_files_inner(progress_callback=None):
 
     active_rec_dir = get_recordings_dir()
     active_rec_dir.mkdir(exist_ok=True)
+    try:
+        rec_dirs = list(get_all_recordings_dirs())
+    except Exception:
+        rec_dirs = []
+    if active_rec_dir not in rec_dirs:
+        rec_dirs.insert(0, active_rec_dir)
     dismissed = set(load_config().get("deleted_ids", []))
+    cloud_ids = gdrive_cloud_synced_ids()
 
     new_files = []
+    verified_sids = []  # passed every integrity check AND written to disk
+    aborted = False
     total = len(files)
     for i, f in enumerate(files):
-        # Check abort flag (user switching to WiFi sync)
-        global _sync_abort
         if _sync_abort:
-            _sync_abort = False
-            logging.info("BLE sync aborted (switching to WiFi)")
+            aborted = True
+            logging.info("BLE sync aborted (between files)")
             break
 
         sid = f["session_id"]
         fsize = f["size"]
-        ogg_path = active_rec_dir / f"{sid}.ogg"
 
         if str(sid) in dismissed:
             continue
 
-        if ogg_path.exists():
+        existing = find_local_recording(sid, rec_dirs)
+        if existing is not None:
             new_files.append(
                 {
                     "session_id": sid,
-                    "ogg_path": str(ogg_path),
+                    "ogg_path": str(existing),
                     "duration": f["duration_est"],
                     "status": "exists",
+                }
+            )
+            continue
+        if str(sid) in cloud_ids:
+            new_files.append(
+                {
+                    "session_id": sid,
+                    "ogg_path": None,
+                    "duration": f["duration_est"],
+                    "status": "exists",
+                    "location": "gdrive",
                 }
             )
             continue
@@ -1279,15 +1676,17 @@ async def _sync_files_inner(progress_callback=None):
                 "active": True,
             }
         )
+        cl = _device_state["client"]
         file_data = _device_state["file_data"]
         file_done = _device_state["file_done"]
-        if file_data is None or file_done is None:
+        file_meta = _device_state.get("file_meta")
+        if cl is None or file_data is None or file_done is None or file_meta is None:
             # Device disconnected (or never fully handshaked) — abort cleanly.
             logging.warning("BLE sync: device state reset mid-sync — aborting")
-            _reset_state()
             break
         file_data.clear()
         file_done.clear()
+        file_meta.clear()
 
         cipher = _device_state["cipher"]
         key, nonce, aad = _device_state["session_keys"]
@@ -1295,28 +1694,35 @@ async def _sync_files_inner(progress_callback=None):
         sync_cmd = bytes([1, 28, 0]) + struct.pack("<I", sid) + struct.pack("<I", 0) + struct.pack("<I", fsize)
         ct = cipher.encrypt(nonce, struct.pack("<I", _device_state["seq"]) + sync_cmd, aad)
         try:
-            await _device_state["client"].write_gatt_char(W, ct, response=False)
+            await cl.write_gatt_char(W, ct, response=False)
         except Exception as e:
             logging.warning(f"BLE write failed during sync for session {sid}: {e}")
             _reset_state()
             break
 
+        interrupted = None
         last_progress_len = 0
         last_progress_time = time.time()
         # Abort only when data genuinely stops arriving. 60s tolerates background
         # throttling / transient BLE pauses that the old 15s window cut short
         # mid-transfer on large files. A real disconnect is caught immediately
         # below, so this no longer needs to be aggressive.
-        stall_timeout = 60
+        stall_timeout = _STALL_TIMEOUT_S
         while not file_done.is_set():
+            # Abort is checked inside the receive loop (not only between files)
+            # so "switch to WiFi" doesn't wait for a long file to finish.
+            if _sync_abort:
+                interrupted = "aborted"
+                break
             try:
-                await asyncio.wait_for(file_done.wait(), timeout=2)
+                await asyncio.wait_for(file_done.wait(), timeout=_RECV_POLL_S)
             except TimeoutError:
                 now = time.time()
                 # Connection genuinely dropped — stop immediately rather than
                 # waiting out the stall window.
-                if not _device_state["connected"] or _device_state["file_data"] is None:
+                if not _device_state["connected"] or _device_state["file_data"] is not file_data:
                     logging.warning(f"Sync: device disconnected mid-file for session {sid}")
+                    interrupted = "disconnected"
                     break
                 # Check if data is still flowing
                 current_len = len(file_data)
@@ -1332,66 +1738,79 @@ async def _sync_files_inner(progress_callback=None):
                             }
                         )
                 elif now - last_progress_time > stall_timeout:
-                    logging.warning(f"Sync stalled for session {sid} — no data for {stall_timeout}s, device likely out of range")
+                    logging.warning(
+                        f"Sync stalled for session {sid} — no data for {stall_timeout}s, device likely out of range"
+                    )
+                    interrupted = "stalled"
                     break
 
-        if not file_data:
-            # If we also lost connection, stop trying further files
+        # The end-of-file data packet and the cmd-29 tail (which carries the CRC)
+        # may arrive in either order — give the tail a moment to land.
+        if interrupted is None and file_meta.get("end") and not file_meta.get("tail"):
+            for _ in range(int(_TAIL_WAIT_S / 0.1)):
+                if file_meta.get("tail") or not _device_state["connected"]:
+                    break
+                await asyncio.sleep(0.1)
+
+        raw_data = bytes(file_data)
+        meta = dict(file_meta)
+        if meta.get("offset_mismatch"):
+            got_off, have = meta["offset_mismatch"]
+            logging.info(f"[BLE] session {sid}: first out-of-sequence data packet offset={got_off}, had {have} bytes")
+        if interrupted in ("aborted", "stalled") and _device_state["connected"]:
+            # Stop the device streaming this file so stale packets don't bleed
+            # into the next transfer.
+            await _send_stop_sync()
+
+        ok, reason = evaluate_download(sid, fsize, raw_data, meta, interrupted)
+        if not ok:
+            new_files.append(_save_partial(sid, raw_data, fsize, reason, active_rec_dir))
+            if interrupted == "aborted":
+                aborted = True
+                logging.info(f"BLE sync aborted mid-file (session {sid})")
+                break
             if not _device_state["connected"]:
                 break
             continue
 
-        raw_data = bytes(file_data)
-        # Save encrypted backup for long recordings (allows re-decrypt if needed)
-        if len(raw_data) > 500_000:
-            enc_path = active_rec_dir / f"{sid}_encrypted.bin"
-            enc_path.write_bytes(raw_data)
-        opus_frames = decrypt_ble_file(raw_data, app_rsa_key)
-        if opus_frames:
-            ogg = wrap_opus_ogg(opus_frames)
-            tmp_path = ogg_path.with_suffix(".ogg.partial")
-            tmp_path.write_bytes(ogg)
-            tmp_path.rename(ogg_path)
-            duration = len(opus_frames) // 80 * 0.02
-            new_files.append(
-                {
-                    "session_id": sid,
-                    "ogg_path": str(ogg_path),
-                    "duration": round(duration, 1),
-                    "status": "new",
-                }
-            )
-            # Auto-upload to Google Drive if storage mode requires it
-            try:
-                from app.state.gdrive import maybe_auto_upload
-                maybe_auto_upload(sid, str(ogg_path))
-            except Exception:
-                pass
-        else:
-            raw_path = active_rec_dir / f"{sid}_encrypted.bin"
-            raw_path.write_bytes(raw_data)
-            new_files.append(
-                {
-                    "session_id": sid,
-                    "ogg_path": None,
-                    "duration": 0,
-                    "status": "decrypt_failed",
-                }
-            )
+        entry = _save_complete(sid, raw_data, app_rsa_key, active_rec_dir)
+        new_files.append(entry)
+        if entry["status"] != "new":
+            continue
+        verified_sids.append(sid)
+        # Auto-upload to Google Drive if storage mode requires it. gdrive keys
+        # its synced-files map by str (JSON object keys), so pass a str id —
+        # an int never matches after a config reload.
+        try:
+            from app.state.gdrive import maybe_auto_upload
 
-    # Auto-delete synced files from device if enabled
+            maybe_auto_upload(str(sid), entry["ogg_path"])
+        except Exception:
+            pass
+
+    # Auto-delete synced files from the device — only files that passed every
+    # integrity check AND whose .ogg was written successfully.
     auto_delete = load_config().get("auto_delete_after_sync", False)
     deleted_from_device = []
+    delete_failed = []
     if auto_delete:
-        for f in new_files:
-            if f["status"] == "new" and f.get("session_id"):
-                try:
-                    await delete_device_file(f["session_id"])
-                    deleted_from_device.append(f["session_id"])
-                except Exception:
-                    pass
+        for sid in verified_sids:
+            if not _device_state["connected"]:
+                delete_failed.append(sid)
+                continue
+            try:
+                r = await delete_device_file(sid)
+            except Exception as e:
+                logging.warning(f"Delete of session {sid} raised: {e}")
+                r = {"deleted": False}
+            (deleted_from_device if r.get("deleted") else delete_failed).append(sid)
 
-    return {"files": new_files, "deleted_from_device": deleted_from_device}
+    result = {"files": new_files, "deleted_from_device": deleted_from_device}
+    if delete_failed:
+        result["delete_failed"] = delete_failed
+    if aborted:
+        result["aborted"] = True
+    return result
 
 
 def save_known_device(address, name=None, serial_number=None):
@@ -1399,15 +1818,17 @@ def save_known_device(address, name=None, serial_number=None):
     sn = serial_number or _device_state.get("serial_number")
     if not sn or sn == "unknown":
         return
-    config = load_config()
-    paired = config.get("paired_devices", {})
-    paired[sn] = {
-        "name": name or "Plaud Device",
-        "last_address": address,
-        "last_connected": datetime.now().isoformat(),
-    }
-    config["paired_devices"] = paired
-    save_config(config)
+
+    def _remember(config):
+        paired = config.get("paired_devices", {})
+        paired[sn] = {
+            "name": name or "Plaud Device",
+            "last_address": address,
+            "last_connected": datetime.now().isoformat(),
+        }
+        config["paired_devices"] = paired
+
+    _update_config(_remember)
 
 
 def get_paired_serials():
@@ -1444,15 +1865,28 @@ async def verify_connection():
     except Exception:
         pass
     logging.info("verify_connection: live probe failed — resetting stale connection")
+    old = _device_state.get("client")
     _reset_state()
+    if old is not None:
+        # Really drop the old link: a half-dead BleakClient left connected keeps
+        # the peripheral busy and its late disconnect callback used to clobber a
+        # newer connection's state (now ignored by _on_disconnect).
+        asyncio.ensure_future(_disconnect_quietly(old))
     return False
 
 
 def force_reset():
     """Force connection state back to disconnected (used when a probe can't even
     acquire the BLE lock — i.e. a hung op has wedged it). Safe to call from the
-    Flask thread: it only rewrites the state dict."""
+    Flask thread: it rewrites the state dict and schedules (without waiting for)
+    a real disconnect of the old BleakClient on the BLE loop."""
+    old = _device_state.get("client")
     _reset_state()
+    if old is not None:
+        try:
+            asyncio.run_coroutine_threadsafe(_disconnect_quietly(old), _get_loop())
+        except Exception as e:
+            logging.debug(f"force_reset: could not schedule disconnect: {e}")
 
 
 def is_syncing():
@@ -1460,8 +1894,16 @@ def is_syncing():
 
 
 def abort_sync():
+    """Ask a running BLE sync to stop. Returns True if a sync was running.
+
+    With nothing running this is a no-op (the flag used to stay set and
+    silently cancel the next sync; every sync also clears it on start).
+    """
     global _sync_abort
+    if not _syncing.locked():
+        return False
     _sync_abort = True
+    return True
 
 
 def get_wifi_sync_status():
