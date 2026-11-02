@@ -5,6 +5,7 @@ import json
 import stat
 import sys
 import types
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -464,23 +465,149 @@ def test_deepgram_speakers_need_no_local_job(route_env):  # noqa: F811
     assert json.loads((trn / "1715000000.json").read_text())["diarization_status"] == "done"
 
 
+def _local_setup(rec):
+    from app.utils.config import save_config
+
+    (rec / "1715000000.ogg").write_bytes(b"OggS" + bytes(100))
+    save_config({"transcription_provider": "local", "diarize": True})
+
+
+def _whisper_only():
+    return T.Transcript(
+        text="Hello. Hi there.",
+        language="en",
+        duration=9,
+        segments=[T.TranscriptSegment(0, 5, "Hello."), T.TranscriptSegment(5, 9, "Hi there.")],
+    )
+
+
 def test_local_whisper_path_reports_why(route_env):  # noqa: F811
+    client, rec, trn = route_env
+    _local_setup(rec)
+    thread = MagicMock()
+    with (
+        patch("src.transcribe.transcribe", return_value=_whisper_only()) as fn,
+        patch("src.transcribe.known_unavailable_reason", return_value="Speaker labels skipped: offline"),
+        patch("app.routes.transcribe.threading.Thread", thread),
+    ):
+        r = _transcribe(client, rec / "1715000000.ogg")
+    assert fn.call_args.kwargs["diarize"] is False  # never inline
+    body = r.get_json()
+    assert body["diarizing"] is False
+    assert body["diarization_message"] == "Speaker labels skipped: offline"
+    thread.assert_not_called()
+    saved = json.loads((trn / "1715000000.json").read_text())
+    assert saved["diarization_status"] == "failed"
+    assert saved["provider"] == "local"
+
+
+def test_local_transcribe_saves_text_before_slow_diarization(route_env):  # noqa: F811
+    """The response (and the saved text) don't wait for speaker detection."""
+    import threading
+
+    client, rec, trn = route_env
+    _local_setup(rec)
+    release, entered = threading.Event(), threading.Event()
+    done = T.DiarizationResult("done", segments=[dict(s) for s in RAW[:2]], engine="diarize")
+
+    def slow_diarize(path):
+        entered.set()
+        assert release.wait(10), "test never released the diarization"
+        return done
+
+    started = []
+    real_thread = threading.Thread
+
+    def record_thread(*a, **k):
+        th = real_thread(*a, **k)
+        started.append(th)
+        return th
+
+    path = trn / "1715000000.json"
+    with (
+        patch("src.transcribe.transcribe", return_value=_whisper_only()) as fn,
+        patch("src.transcribe.known_unavailable_reason", return_value=None),
+        patch("src.transcribe.run_diarization", side_effect=slow_diarize),
+        patch("app.routes.transcribe.threading.Thread", side_effect=record_thread),
+    ):
+        try:
+            r = _transcribe(client, rec / "1715000000.ogg")
+            assert entered.wait(5)
+            # Diarization is still blocked, yet the request has finished.
+            assert fn.call_args.kwargs["diarize"] is False
+            body = r.get_json()
+            assert r.status_code == 200, body
+            assert body["diarizing"] is True
+            assert body["text"] == "Hello. Hi there."
+            saved = json.loads(path.read_text())
+            assert saved["text"] == "Hello. Hi there."
+            assert saved["diarization_status"] == "running"
+            assert saved["provider"] == "local"
+            assert "speakers" not in saved
+        finally:
+            release.set()
+            for th in started:
+                th.join(10)
+    assert len(started) == 1 and not started[0].is_alive()
+
+    saved = json.loads(path.read_text())
+    assert saved["diarization_status"] == "done"
+    assert saved["text"] == "Hello. Hi there."
+    assert saved["provider"] == "local+diarize"
+    assert saved["speakers"] == ["Speaker 1", "Speaker 2"]
+    assert [s["speaker"] for s in saved["segments"]] == ["Speaker 1", "Speaker 2"]
+    txt = path.with_suffix(".txt").read_text()
+    assert "[Speaker 1] Hello." in txt and "[Speaker 2] Hi there." in txt
+
+
+@pytest.mark.parametrize("crash", ["run", "merge"])
+def test_local_transcribe_survives_crashing_diarization(route_env, crash):  # noqa: F811
+    client, rec, trn = route_env
+    _local_setup(rec)
+    done = T.DiarizationResult("done", segments=[dict(s) for s in RAW[:2]], engine="diarize")
+    run = (
+        patch("src.transcribe.run_diarization", side_effect=RuntimeError("onnx segfault-ish"))
+        if crash == "run"
+        else patch("src.transcribe.run_diarization", return_value=done)
+    )
+    merge = patch("src.transcribe.merge_transcript_with_diarization", side_effect=ValueError("bad segments"))
+    with (
+        patch("src.transcribe.transcribe", return_value=_whisper_only()),
+        patch("src.transcribe.known_unavailable_reason", return_value=None),
+        patch("app.routes.transcribe.threading.Thread", _SyncThread),
+        run,
+        merge if crash == "merge" else nullcontext(),
+        patch("app.routes.transcribe.fire_webhooks") as hooks,
+    ):
+        r = _transcribe(client, rec / "1715000000.ogg")
+    assert r.status_code == 200, r.get_json()
+    path = trn / "1715000000.json"
+    saved = json.loads(path.read_text())
+    assert saved["text"] == "Hello. Hi there."
+    assert [s["text"] for s in saved["segments"]] == ["Hello.", "Hi there."]
+    assert saved["diarization_status"] == "failed"
+    assert saved["diarization_message"]
+    assert saved["provider"] == "local"
+    assert "speakers" not in saved
+    assert "Hello." in path.with_suffix(".txt").read_text()
+    assert hooks.call_count == 1  # webhook still fires once, after the job
+
+
+def test_local_transcribe_without_diarize_fires_webhook_now(route_env):  # noqa: F811
     from app.utils.config import save_config
 
     client, rec, trn = route_env
     (rec / "1715000000.ogg").write_bytes(b"OggS" + bytes(100))
-    save_config({"transcription_provider": "local", "diarize": True})
-    t = T.Transcript(
-        text="Hello.",
-        segments=[T.TranscriptSegment(0, 5, "Hello.")],
-        diarization_status="failed",
-        diarization_message="Speaker labels skipped: offline",
-    )
-    with patch("src.transcribe.transcribe", return_value=t) as fn:
+    save_config({"transcription_provider": "local", "diarize": False})
+    thread = MagicMock()
+    with (
+        patch("src.transcribe.transcribe", return_value=_whisper_only()),
+        patch("app.routes.transcribe.threading.Thread", thread),
+        patch("app.routes.transcribe.fire_webhooks") as hooks,
+    ):
         r = _transcribe(client, rec / "1715000000.ogg")
-    assert fn.call_args.kwargs["diarize"] is True
-    body = r.get_json()
-    assert body["diarization_message"] == "Speaker labels skipped: offline"
+    assert r.get_json()["diarizing"] is False
+    thread.assert_not_called()
+    assert hooks.call_count == 1
     saved = json.loads((trn / "1715000000.json").read_text())
-    assert saved["diarization_status"] == "failed"
-    assert saved["provider"] == "local"
+    assert "diarization_status" not in saved

@@ -660,7 +660,10 @@ def transcribe(
         model: Whisper model name (base/small/medium/turbo/large)
         diarize: Label speakers (no token needed; see diarize_audio). If it
             can't run, the transcript is returned without speakers and
-            ``diarization_status``/``diarization_message`` say why.
+            ``diarization_status``/``diarization_message`` say why. This
+            runs inline (it can wait on another diarization, a pip install
+            or a model download), so the app's /transcribe route passes
+            False and labels speakers in a background thread after saving.
         language: Force language (e.g., "en"); None auto-detects
     """
     transcript = transcribe_with_whisper(audio_path, model=model, language=language, initial_prompt=initial_prompt)

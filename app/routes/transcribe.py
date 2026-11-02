@@ -149,8 +149,15 @@ def _error_json(base, exc):
     return base
 
 
-def _background_diarize(*, audio_path, session_id, transcript_path, segments, text, language, duration, cloud_provider):
-    """Label speakers in a cloud transcript on this Mac, then update its JSON.
+def _background_diarize(
+    *, audio_path, session_id, transcript_path, segments, text, language, duration, provider, write_txt=False
+):
+    """Label speakers in a saved transcript on this Mac, then update its JSON.
+
+    Runs after the transcript text is already saved (cloud or local Whisper),
+    so a slow, hung or crashing diarization never costs the user their text.
+    ``write_txt`` rewrites the .txt with speaker labels too (the local path
+    saves a timestamped .txt; the cloud path saves plain text).
 
     Always leaves ``diarization_status`` as "done", "none" or "failed" (with a
     ``diarization_message`` for the user) so the frontend's poll can stop, and
@@ -171,20 +178,32 @@ def _background_diarize(*, audio_path, session_id, transcript_path, segments, te
     }
     webhook_segments = segments
     speakers = []
-    if result is not None:
+    t_obj = None
+    if result is not None and result.status != "done":
         fields = {"diarization_status": result.status, "diarization_message": result.message}
-        if result.status == "done":
+    elif result is not None:
+        try:
             t_obj = Transcript(text=text, language=language, duration=duration)
             for s in segments:
                 t_obj.segments.append(TranscriptSegment(start=s["start"], end=s["end"], text=s["text"]))
             t_obj = merge_transcript_with_diarization(t_obj, result.segments)
+        except Exception as e:
+            # A bad merge must still end the job (and the frontend's poll).
+            logging.warning("[bg-diarize] merge failed for %s: %s", session_id, e)
+            t_obj = None
+            fields["diarization_message"] = "Speaker labels skipped: could not match speakers to the text"
+        if t_obj is not None:
             webhook_segments = [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t_obj.segments
             ]
             speakers = sorted({s.speaker for s in t_obj.segments if s.speaker})
-            fields.update(
-                {"segments": webhook_segments, "speakers": speakers, "provider": f"{cloud_provider}+{result.engine}"}
-            )
+            fields = {
+                "diarization_status": result.status,
+                "diarization_message": result.message,
+                "segments": webhook_segments,
+                "speakers": speakers,
+                "provider": f"{provider}+{result.engine}",
+            }
 
     tp = Path(transcript_path)
     try:
@@ -196,6 +215,8 @@ def _background_diarize(*, audio_path, session_id, transcript_path, segments, te
                 return
             td.update(fields)
             _write_text_atomic(tp, json.dumps(td, indent=2, ensure_ascii=False))
+            if write_txt and t_obj is not None:
+                _write_text_atomic(tp.with_suffix(".txt"), t_obj.formatted)
     except (OSError, ValueError) as e:
         logging.warning("[bg-diarize] Could not update transcript %s: %s", session_id, e)
         return
@@ -211,6 +232,28 @@ def _background_diarize(*, audio_path, session_id, transcript_path, segments, te
     if speakers:
         payload["speakers"] = speakers
     fire_webhooks("transcribe", payload)
+
+
+def _plan_local_diarization(t_data):
+    """Set the initial diarization status on a transcript about to be saved.
+
+    Returns ``(run_background, message)``: either the background job should
+    start ("running"), or it's known it can't run and ``message`` says why
+    ("failed"). Never runs the model itself, so it can't block a request.
+    """
+    from src.transcribe import known_unavailable_reason
+
+    reason = known_unavailable_reason()
+    if reason:
+        t_data["diarization_status"] = "failed"
+        t_data["diarization_message"] = reason
+        return False, reason
+    t_data["diarization_status"] = "running"
+    return True, ""
+
+
+def _start_background_diarize(**kwargs):
+    threading.Thread(target=_background_diarize, kwargs=kwargs, daemon=True).start()
 
 
 bp = Blueprint("transcribe", __name__)
@@ -392,35 +435,23 @@ def transcribe_file():
                 if _cloud_has_speakers:
                     t_data["diarization_status"] = "done"
                 else:
-                    from src.transcribe import known_unavailable_reason
-
-                    reason = known_unavailable_reason()
-                    if reason:
-                        t_data["diarization_status"] = "failed"
-                        t_data["diarization_message"] = diarization_message = reason
-                    else:
-                        t_data["diarization_status"] = "running"
-                        run_local_diarization = True
+                    run_local_diarization, diarization_message = _plan_local_diarization(t_data)
             _merge_transcript(session_id, transcript_path, t_data, txt_text=text)
 
             # Auto-detect spoken tags from the beginning of the transcript
             spoken_tags = _apply_spoken_tags(session_id, text)
 
             if run_local_diarization:
-                threading.Thread(
-                    target=_background_diarize,
-                    kwargs={
-                        "audio_path": str(path),
-                        "session_id": str(session_id),
-                        "transcript_path": str(transcript_path),
-                        "segments": list(segments),
-                        "text": str(text),
-                        "language": str(lang),
-                        "duration": float(duration),
-                        "cloud_provider": prov,
-                    },
-                    daemon=True,
-                ).start()
+                _start_background_diarize(
+                    audio_path=str(path),
+                    session_id=str(session_id),
+                    transcript_path=str(transcript_path),
+                    segments=list(segments),
+                    text=str(text),
+                    language=str(lang),
+                    duration=float(duration),
+                    provider=prov,
+                )
             else:
                 # No background diarization: fire the webhook now
                 fire_webhooks(
@@ -468,7 +499,11 @@ def transcribe_file():
         from src.transcribe import transcribe as do_transcribe
 
         try:
-            t = do_transcribe(str(path), model=model, language=language, diarize=diarize, initial_prompt=vocab_prompt)
+            # Whisper only: speaker labels run in the background below, after
+            # the text is saved, exactly as on the cloud path. Inline they
+            # could wait on another diarization, a pip install or a model
+            # download, and a crash there would lose the finished text.
+            t = do_transcribe(str(path), model=model, language=language, diarize=False, initial_prompt=vocab_prompt)
         except RuntimeError as e:
             # whisper.load_audio wraps ffmpeg failures as RuntimeError — convert
             # file-missing failures into a clean 400 instead of a reported 500.
@@ -478,55 +513,68 @@ def transcribe_file():
             raise
 
         if t.text:
+            local_segments = [
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
+            ]
             # Same fields Transcript.save() writes, merged into the existing JSON
             local_fields = {
                 "text": t.text,
                 "language": t.language,
                 "duration": t.duration,
-                "segments": [
-                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
-                ],
+                "segments": local_segments,
                 "provider": "local",
             }
-            if t.diarization_status:
-                local_fields["diarization_status"] = t.diarization_status
-                local_fields["diarization_message"] = t.diarization_message
+            run_local_diarization = False
+            diarization_message = ""
+            if diarize:
+                run_local_diarization, diarization_message = _plan_local_diarization(local_fields)
             _merge_transcript(session_id, transcript_path, local_fields, txt_text=t.formatted)
 
             # Auto-detect spoken tags
             local_spoken_tags = _apply_spoken_tags(session_id, t.text)
 
-            speakers = list({s.speaker for s in t.segments if s.speaker})
-            local_segments = [
-                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
-            ]
-            fire_webhooks(
-                "transcribe",
-                {
-                    "session_id": session_id,
-                    "text": t.text[:500],
-                    "duration": t.duration,
-                    "language": t.language,
-                    "speakers": speakers,
-                    "segments": local_segments,
-                },
-            )
+            if run_local_diarization:
+                _start_background_diarize(
+                    audio_path=str(path),
+                    session_id=str(session_id),
+                    transcript_path=str(transcript_path),
+                    segments=list(local_segments),
+                    text=str(t.text),
+                    language=str(t.language or ""),
+                    duration=float(t.duration or 0),
+                    provider="local",
+                    write_txt=True,
+                )
+            else:
+                # No background diarization: fire the webhook now
+                fire_webhooks(
+                    "transcribe",
+                    {
+                        "session_id": session_id,
+                        "text": t.text[:500],
+                        "duration": t.duration,
+                        "language": t.language,
+                        "speakers": [],
+                        "segments": local_segments,
+                    },
+                )
 
             resp = {
                 "session_id": session_id,
                 "text": t.text,
                 "duration": t.duration,
                 "language": t.language,
-                "speakers": speakers,
-                "segments": [
-                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
-                ],
+                "speakers": [],
+                "segments": local_segments,
                 "path": str(transcript_path),
                 "provider": "local",
                 "warning": _cloud_error,
+                # Same contract as the cloud path: the frontend polls the
+                # transcript's diarization_status while this is True.
+                "diarizing": run_local_diarization,
             }
-            if t.diarization_message:
-                resp["diarization_message"] = t.diarization_message
+            if diarization_message:
+                resp["diarization_message"] = diarization_message
             if local_spoken_tags:
                 resp["spoken_tags"] = local_spoken_tags
             return jsonify(resp)
