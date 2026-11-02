@@ -4,6 +4,7 @@ Nothing here touches the real network: subprocess.run is replaced, and the
 networksetup call that's simulated is the read-only -listallhardwareports.
 """
 
+import asyncio
 import subprocess
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import app.utils.wifi_sync_worker as worker
-from tests.plaud_fakes import make_plaud_file
+from tests.plaud_fakes import make_plaud_file, py310_asyncio
 
 
 @pytest.fixture(scope="module")
@@ -113,19 +114,76 @@ def test_status_survives_broken_pipe(monkeypatch):
     worker.status("still running restore", 90)  # must not raise
 
 
-def test_wifi_download_requires_exact_size(tmp_path, app_key):
+def test_wifi_exact_size_download_saved(tmp_path, app_key):
     data = make_plaud_file(app_key)
-    short = data[: int(len(data) * 0.95)]  # used to pass the old >=90% rule
-    e = worker.save_wifi_download(tmp_path, 5, short, len(data), app_key)
-    assert e["status"] == "partial"
-    assert (e["received"], e["expected"]) == (len(short), len(data))
-    assert not (tmp_path / "5.ogg").exists()
-    assert (tmp_path / "5_partial.bin").read_bytes() == short
-
+    (tmp_path / "5_partial.bin").write_bytes(data[:100])
     e = worker.save_wifi_download(tmp_path, 5, data, len(data), app_key)
     assert e["status"] == "new"
+    assert "size_mismatch" not in e
     assert (tmp_path / "5.ogg").exists()
     assert not (tmp_path / "5_partial.bin").exists()
+    assert not (tmp_path / "5_encrypted.bin").exists()  # small file: backup dropped
+
+
+def test_wifi_size_mismatch_kept_if_it_decrypts(tmp_path, app_key, caplog):
+    data = make_plaud_file(app_key)
+    short = data[: int(len(data) * 0.95)]
+    with caplog.at_level("WARNING"):
+        e = worker.save_wifi_download(tmp_path, 7, short, len(data), app_key)
+    assert e["status"] == "new"
+    assert e["size_mismatch"] == {"received": len(short), "expected": len(data)}
+    assert (tmp_path / "7.ogg").exists()
+    assert (tmp_path / "7_encrypted.bin").read_bytes() == short  # kept for diagnosis
+    assert "[WiFi] size mismatch accepted for session 7" in caplog.text
+
+
+def test_wifi_size_mismatch_that_does_not_decrypt_is_partial(tmp_path, app_key):
+    data = make_plaud_file(app_key, decryptable=False)
+    short = data[: int(len(data) * 0.95)]
+    e = worker.save_wifi_download(tmp_path, 8, short, len(data), app_key)
+    assert e["status"] == "partial"
+    assert (e["received"], e["expected"]) == (len(short), len(data))
+    assert "decrypt failed" in e["reason"]
+    assert not (tmp_path / "8.ogg").exists()
+    assert (tmp_path / "8_partial.bin").read_bytes() == short
+
+    e = worker.save_wifi_download(tmp_path, 9, b"", 1000, app_key)
+    assert e["status"] == "partial"
+    assert not (tmp_path / "9_partial.bin").exists()
+
+
+def test_wifi_worker_never_deletes_an_existing_ogg(tmp_path):
+    """A cropped recording is far smaller than the device copy; it must survive."""
+    cropped = tmp_path / "11.ogg"
+    cropped.write_bytes(b"OggS" + b"\0" * 96)
+    (tmp_path / "13.ogg.partial").write_bytes(b"legacy")
+    queue = [
+        {"session_id": 11, "size": 5_000_000},
+        {"session_id": 12, "size": 10},
+        {"session_id": 13, "size": 20},
+    ]
+    new_files = []
+    nxt = worker.next_wifi_download(queue, tmp_path, {"12"}, new_files)
+    assert nxt == {"session_id": 13, "size": 20}
+    assert cropped.read_bytes() == b"OggS" + b"\0" * 96
+    assert new_files == [
+        {"session_id": 11, "ogg_path": str(cropped), "duration": 0, "status": "exists"},
+        {"session_id": 12, "ogg_path": None, "duration": 0, "status": "exists"},
+    ]
+    assert not (tmp_path / "13.ogg.partial").exists()  # legacy leftovers (never an .ogg) still cleaned
+    assert worker.next_wifi_download(queue, tmp_path, set(), new_files) is None
+
+
+def test_wait_event_handles_py310_asyncio_timeout(monkeypatch):
+    monkeypatch.setattr(worker, "asyncio", py310_asyncio())
+
+    async def go():
+        evt = asyncio.Event()
+        timed_out = await worker.wait_event(evt, 0.01)
+        evt.set()
+        return timed_out, await worker.wait_event(evt, 0.01)
+
+    assert asyncio.run(go()) == (False, True)
 
 
 def test_wifi_decrypt_failure_keeps_encrypted(tmp_path, app_key):
