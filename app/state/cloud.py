@@ -323,6 +323,9 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
         return r.json()
 
 
+_LOGIN_UUID_KEY = "plaud_login_desktop_uuid"
+
+
 def get_login_url(region="eu"):
     """Generate the OAuth login URL for Plaud web login."""
     import uuid as uuid_mod
@@ -332,6 +335,13 @@ def get_login_url(region="eu"):
     with _cloud_state_lock:
         _cloud_state["desktop_uuid"] = desktop_uuid
         _cloud_state["api_domain"] = api_domain
+    # Also on disk: the browser's plaud:// link can arrive after the backend
+    # (or the whole app) restarted, and the exchange needs this id. It isn't a
+    # secret (it's in the sign-in URL); it's only good with a fresh code.
+    try:
+        update_config(lambda c: c.__setitem__(_LOGIN_UUID_KEY, desktop_uuid))
+    except Exception as e:
+        logging.warning("[Cloud] Couldn't save the sign-in id: %s", e)
     login_url = f"{PLAUD_WEB_HOST}/launch-desktop?from=desktop&desktop_uuid={desktop_uuid}"
     return login_url, desktop_uuid
 
@@ -422,6 +432,11 @@ def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None):
     with _cloud_state_lock:
         desktop_uuid = desktop_uuid or _cloud_state.get("desktop_uuid") or ""
         domain = _domain_for_auth_code(code) or fallback_domain or _cloud_state["api_domain"]
+    if not desktop_uuid:
+        try:
+            desktop_uuid = load_config().get(_LOGIN_UUID_KEY) or ""
+        except Exception:
+            desktop_uuid = ""
     r = http_requests.post(
         f"{domain}/auth/access-token-auth-code",
         json={"client_id": "web", "auth_code": code, "desktop_uuid": desktop_uuid},
