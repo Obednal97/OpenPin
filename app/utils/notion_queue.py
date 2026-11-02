@@ -99,7 +99,7 @@ class _State:
         with self._lock:
             self.entries[session_id] = {
                 "session_id": session_id,
-                "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                "enqueued_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017 (requires-python >=3.10)
                 "attempts": 0,
                 "next_retry_at": time.time(),
                 "last_error": None,
@@ -141,7 +141,7 @@ class _State:
                 return
             self.entries[sid] = {
                 "session_id": sid,
-                "enqueued_at": entry.get("enqueued_at") or datetime.now(timezone.utc).isoformat(),
+                "enqueued_at": entry.get("enqueued_at") or datetime.now(timezone.utc).isoformat(),  # noqa: UP017 (requires-python >=3.10)
                 "attempts": attempts,
                 "next_retry_at": time.time() + delay,
                 "last_error": error,
@@ -255,6 +255,7 @@ def _worker_loop() -> None:
                 last_pause_check = now
                 try:
                     from app.state import notion as _notion
+
                     if _notion.verify_connection():
                         _state.resume()
                 except Exception:
