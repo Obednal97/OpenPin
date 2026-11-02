@@ -773,9 +773,9 @@ pub fn install_update(app: tauri::AppHandle) -> UpdateResult {
         return refuse(pending, format!("Couldn't start the installer: {e}"));
     }
 
-    // Quit the app so the script can replace it
-    crate::python::stop_python_server();
-    app.exit(0);
+    // Quit the app so the script can replace it. quit_app hides the window,
+    // stops the backend exactly once off the main thread, then exits.
+    crate::quit_app(&app, 0);
 
     UpdateResult { installing: true, error: None }
 }
