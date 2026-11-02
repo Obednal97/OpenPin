@@ -75,7 +75,7 @@ def connect():
     try:
         data = request.get_json(silent=True) or {}
         address = data.get("address")
-        serial_number = data.get("serial_number")
+        serial_number = data.get("serial_number") or dev.paired_serial_for_address(address)
         # Set SN before connect so handshake can look up per-device credentials
         if serial_number:
             dev.set_serial_number(serial_number)
@@ -277,7 +277,7 @@ def scan_known():
             return jsonify({"found": False, "reason": "never_paired"})
         devices = dev.run_async(dev.scan_devices_with_retry(attempts=2, scan_duration=4))
         for d in devices:
-            sn = d.get("serial_number", "")
+            sn = d.get("serial_number") or dev.paired_serial_for_address(d["address"])
             if sn and sn in known_sns:
                 return jsonify(
                     {
