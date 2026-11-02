@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import struct
 import sys
 import threading
@@ -1455,6 +1456,56 @@ WIFI_KILL_WAIT_S = 10
 
 _wifi_sync_status.update({"active": False, "budget_s": None, "deadline": None})
 
+# <data dir>/wifi_sync.log: rotated to wifi_sync.log.1 once it reaches this size
+# (one old file kept), so it can't grow forever.
+WIFI_LOG_NAME = "wifi_sync.log"
+WIFI_LOG_MAX_BYTES = 1_000_000
+
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = [
+    # JSON / repr / key=value forms of token- or signature-like fields
+    re.compile(
+        r"""(?i)(["']?\b(?:access_token|bind_token|token|sn_sig|signature|sig|authorization)\b["']?\s*[:=]\s*)"""
+        r"""("[^"]*"|'[^']*'|[^\s,;}\]]+)"""
+    ),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),  # bearer tokens
+    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"),  # JWTs
+]
+
+
+def redact_secrets(text, secrets=()):
+    """Remove credentials from a log line.
+
+    Exact known values (this device's BIND_TOKEN and SN signature) are replaced
+    wherever they appear; token / signature fields and bearer tokens / JWTs are
+    replaced by pattern, so a value we weren't told about doesn't leak either.
+    """
+    text = str(text)
+    for s in secrets:
+        if s and len(s) >= 8:
+            text = text.replace(s, _REDACTED)
+    text = _SECRET_PATTERNS[0].sub(lambda m: m.group(1) + _REDACTED, text)
+    text = _SECRET_PATTERNS[1].sub("bearer " + _REDACTED, text)
+    return _SECRET_PATTERNS[2].sub(_REDACTED, text)
+
+
+def append_rotating_log(path, line, max_bytes=None):
+    """Append `line` to `path`; first move a file of max_bytes or more to `path`.1.
+
+    Never raises: logging must not break a sync.
+    """
+    limit = WIFI_LOG_MAX_BYTES if max_bytes is None else max_bytes
+    try:
+        if path.stat().st_size >= limit:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+    try:
+        with open(path, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
 
 class _WifiDeadline:
     """When the parent stops waiting for the worker (monotonic clock)."""
@@ -1647,17 +1698,15 @@ def _do_wifi_sync_locked(deadline):
 
     _on_status("Starting WiFi transfer...", 5)
 
-    # Log WiFi sync to file for production debugging
-    _wifi_log = DATA_DIR / "wifi_sync.log" if DATA_DIR else None
+    # Log WiFi sync to file for production debugging (rotated, secrets redacted)
+    _wifi_log = DATA_DIR / WIFI_LOG_NAME if DATA_DIR else None
+    secrets = []  # this device's BIND_TOKEN and SN signature, once known
 
     def _wlog(msg):
+        msg = redact_secrets(msg, secrets)
         print(f"[WiFi] {msg}")
         if _wifi_log:
-            try:
-                with open(_wifi_log, "a") as f:
-                    f.write(f"{datetime.now().isoformat()} {msg}\n")
-            except Exception:
-                pass
+            append_rotating_log(_wifi_log, f"{datetime.now().isoformat()} {msg}\n")
 
     proc = None
     try:
@@ -1694,21 +1743,29 @@ def _do_wifi_sync_locked(deadline):
 
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        secrets.extend(s for s in (device_token, device_sig) if s)
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
         if (not device_token or not device_sig) and sn and is_logged_in():
             _wlog("Credentials missing — attempting auto-fetch from cloud...")
             try:
                 if not device_token:
                     bind_result = bind_device(sn)
-                    _wlog(f"bind_device result: {bind_result}")
                     device_token = get_device_bind_token(sn)
+                    secrets.extend(s for s in (device_token, (bind_result or {}).get("token")) if s)
+                    _wlog(f"bind_device: {'token received' if device_token else (bind_result or {}).get('error')}")
                 if not device_sig:
                     sig_result = fetch_sn_signature(sn)
-                    _wlog(f"fetch_sn_signature result: {sig_result}")
                     device_sig = get_device_sn_signature(sn)
+                    secrets.extend(s for s in (device_sig, (sig_result or {}).get("signature")) if s)
+                    _wlog(
+                        f"fetch_sn_signature: {'signature received' if device_sig else (sig_result or {}).get('error')}"
+                    )
             except Exception as e:
                 _wlog(f"Auto-fetch failed: {e}")
-        _wlog(f"Credentials: bind_token={'yes' if device_token else 'NO'}, sn_sig={'yes' if device_sig else 'NO'}")
+        _wlog(
+            f"Credentials: bind token {'present' if device_token else 'MISSING'}, "
+            f"SN signature {'present' if device_sig else 'MISSING'}"
+        )
         if not device_token or not device_sig:
             _on_status("Device not registered", 0)
             _wlog("ABORT: missing credentials")

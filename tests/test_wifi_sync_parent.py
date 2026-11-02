@@ -462,3 +462,85 @@ def test_restore_notice_ack_route(flask_client, monkeypatch):
     assert r.status_code == 200
     assert r.get_json() == {"acknowledged": True}
     assert calls == [1]
+
+
+# ── wifi_sync.log: rotation and redaction ───────────────────────────────────
+
+
+def test_wifi_log_rotates_keeping_one_old_file(tmp_path):
+    log = tmp_path / "wifi_sync.log"
+    for i in range(30):
+        dev.append_rotating_log(log, f"line {i:02d} " + "x" * 40 + "\n", max_bytes=200)
+    old = tmp_path / "wifi_sync.log.1"
+    assert log.stat().st_size < 200 + 60
+    assert old.exists() and old.stat().st_size < 200 + 60
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["wifi_sync.log", "wifi_sync.log.1"]
+    assert "line 29" in log.read_text()
+
+
+def test_wifi_log_default_limit_is_about_a_megabyte():
+    assert 500_000 <= dev.WIFI_LOG_MAX_BYTES <= 2_000_000
+
+
+def test_wifi_log_write_failure_is_ignored(tmp_path):
+    dev.append_rotating_log(tmp_path / "missing-dir" / "wifi_sync.log", "x\n")  # no raise
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "bind_device result: {'token': 'abcdefgh12345678', 'sn': '8810A00012345678'}",
+        '{"access_token": "abcdefgh12345678", "status": 0}',
+        "Authorization: bearer eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl",
+        "fetch_sn_signature result: {'signature': 'QUJDREVGR0g=', 'sn': 'x'}",
+        "token=abcdefgh12345678 next",
+    ],
+)
+def test_redact_secrets_patterns(line):
+    out = dev.redact_secrets(line)
+    for secret in ("abcdefgh12345678", "eyJhbGciOi", "QUJDREVGR0g="):
+        assert secret not in out
+    assert "[redacted]" in out
+
+
+def test_redact_secrets_known_values_and_harmless_text():
+    sig = "U0lHTkFUVVJFX0JBU0U2NA" * 10
+    out = dev.redact_secrets(f"worker traceback ... {sig} ... TOKEN1234567890XY", [sig, "TOKEN1234567890XY"])
+    assert sig not in out and "TOKEN1234567890XY" not in out
+    # Ordinary status lines are left alone (and short values are never treated as secrets).
+    msg = "Credentials: bind token present, SN signature present"
+    assert dev.redact_secrets(msg, ["sig"]) == msg
+    assert dev.redact_secrets("Sending SN_SIG (256 bytes, 3 chunks)...") == "Sending SN_SIG (256 bytes, 3 chunks)..."
+
+
+def test_wifi_sync_log_never_contains_credentials(parent, monkeypatch, tmp_path):
+    """Credentials fetched from the cloud mid-sync, and a worker line echoing
+    the token, never reach wifi_sync.log."""
+    token, sig = "BINDTOKEN0123456789abcdefghijklm", "U0lHTkFUVVJF" * 30
+    have = {"token": None, "sig": None}
+
+    def bind(sn):
+        have["token"] = token
+        return {"token": token, "sn": sn}
+
+    def fetch(sn):
+        have["sig"] = sig
+        return {"signature": sig, "sn": sn}
+
+    monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: have["token"])
+    monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: have["sig"])
+    monkeypatch.setattr("app.state.cloud.bind_device", bind)
+    monkeypatch.setattr("app.state.cloud.fetch_sn_signature", fetch)
+    out = {"files": [], "method": "wifi"}
+    proc = FakeProc(
+        parent,
+        exits_after=5,
+        stdout=json.dumps(out).encode() + b"\n",
+        stderr_lines=[{"status": f"debug {token} {sig}", "percent": 3}],
+    )
+    spawn(monkeypatch, proc)
+    assert dev.do_wifi_sync_blocking() == out
+    assert json.loads(proc.stdin.written)["bind_token"] == token  # the worker still gets it
+    text = (tmp_path / "wifi_sync.log").read_text()
+    assert "Starting WiFi sync" in text and "token received" in text and "signature received" in text
+    assert token not in text and sig not in text
