@@ -16,6 +16,12 @@
    failure screen only on a real error, when Rust says ready but the
    page can't reach /health, or at the ceiling.
 
+   A failure isn't always final: after SERVER_TIMEOUT Rust keeps
+   polling /health, and a slow first start can still come up. While
+   the failure screen is shown the gate keeps reading the status and,
+   once Rust says ready, carries on as if Retry had been clicked
+   (without asking Rust to restart anything).
+
    API (window.plaudStartup):
      waitForBackend() -> Promise<boolean>  true once ready; false when
                                            the failure screen is shown
@@ -35,12 +41,15 @@
   const READY_GRACE_MS = 30000; // Rust "ready" but /health unreachable from the page
   const NO_STATUS_CEILING_MS = 60000; // no startup status available (older shell)
   const BG_POLL_INTERVAL_MS = 5000;
+  const RECOVERY_POLL_MS = 2000; // failure screen: check whether Rust became ready
 
   let _bgPollerHandle = null;
   let _bgPollerStarted = false;
   let _gateRun = null; // in-flight / settled-true waitForBackend() promise
   let _retryHandler = null;
   let _lastStatus = null;
+  let _recoveryTimer = null;
+  let _recoveryGen = 0; // bumped to cancel an in-flight recovery check
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -194,6 +203,43 @@
     }, BG_POLL_INTERVAL_MS);
   }
 
+  // ---- Recovery from a failure Rust gets over by itself ----
+
+  function stopRecoveryWatch() {
+    _recoveryGen++;
+    if (_recoveryTimer) clearTimeout(_recoveryTimer);
+    _recoveryTimer = null;
+  }
+
+  /** Re-run startup (the renderer's init, or just the gate). */
+  function resumeStartup() {
+    if (typeof _retryHandler === 'function') {
+      _retryHandler();
+    } else {
+      waitForBackend();
+    }
+  }
+
+  /** While the failure screen is up, poll Rust; when it says ready, carry on. */
+  function watchForRecovery() {
+    stopRecoveryWatch();
+    const gen = _recoveryGen;
+    const tick = async () => {
+      _recoveryTimer = null;
+      const st = await readStartupStatus();
+      if (gen !== _recoveryGen) return; // Retry clicked (or a newer watch) meanwhile
+      if (st && st.phase === 'ready') {
+        _lastStatus = st;
+        stopRecoveryWatch();
+        showProgress('Connecting…', 0);
+        resumeStartup();
+        return;
+      }
+      _recoveryTimer = setTimeout(tick, RECOVERY_POLL_MS);
+    };
+    _recoveryTimer = setTimeout(tick, RECOVERY_POLL_MS);
+  }
+
   // ---- State machine ----
 
   /** One startup attempt. Resolves true when ready, false after showing the failure screen. */
@@ -210,6 +256,7 @@
       if (st && st.phase === 'error') {
         pushHealth('down');
         showFailure(st.error || {});
+        watchForRecovery();
         return false;
       }
 
@@ -250,6 +297,7 @@
           hint: 'Retry, or open the diagnostics log if this keeps happening.',
           detail: st && st.message ? `Last step: ${st.message}` : '',
         });
+        if (st) watchForRecovery();
         return false;
       }
 
@@ -276,6 +324,7 @@
   }
 
   async function retry() {
+    stopRecoveryWatch();
     const last = _lastStatus;
     showProgress('Retrying…', 0);
     // Server up but unreachable from the page: the webview's network stack
@@ -284,17 +333,14 @@
       window.location.reload();
       return;
     }
-    // Ask Rust to stop any half-started backend and start it again.
+    // Ask Rust to stop any half-started backend and start it again (Rust
+    // leaves a backend that is answering /health alone).
     if (last) {
       try {
         await invokeRust('retry_startup');
       } catch {}
     }
-    if (typeof _retryHandler === 'function') {
-      _retryHandler();
-    } else {
-      waitForBackend();
-    }
+    resumeStartup();
   }
 
   window.plaudStartup = {
