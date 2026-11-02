@@ -159,14 +159,29 @@ def internal_error(e):
 
 
 def _recover_wifi():
-    """Check if we're stuck on a Plaud hotspot from a crashed WiFi sync and restore internet."""
+    """Undo what a crashed or killed WiFi sync left behind, then restore internet.
+
+    If the worker's restore record exists (wifi_restore.json in the data dir),
+    restore from it: saved networks back in their original order, the hotspot
+    forgotten, WiFi power-cycled if still on the hotspot; the record is deleted
+    only after a verified restore. It's skipped while a worker (e.g. from an
+    app instance that's still running) holds the sync lock. Without a record,
+    fall back to checking for a Plaud hotspot by name.
+    """
     try:
         import subprocess
         import time
 
         # en0 on MacBooks, en1 on Mac mini / Studio / iMac (en0 is Ethernet there).
         # Lazy import: the worker module has no import-time side effects.
-        from app.utils.wifi_sync_worker import get_wifi_interface
+        from app.utils.constants import DATA_DIR
+        from app.utils.wifi_sync_worker import get_wifi_interface, recover_from_record
+
+        recovery = recover_from_record(DATA_DIR)
+        if recovery["status"] != "none":
+            log_fn = logging.info if recovery["status"] == "restored" else logging.warning
+            log_fn(f"[WiFi Recovery] From restore record: {recovery}")
+            return
 
         iface = get_wifi_interface()
         result = subprocess.run(
