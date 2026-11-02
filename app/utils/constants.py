@@ -96,8 +96,16 @@ TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
 CONFIG_PATH = DATA_DIR / ".plaud_v2_config.json"
-HF_TOKEN_PATH = DATA_DIR / ".hf_token"
 PLAUD_CONFIG_PATH = DATA_DIR / ".plaud_config.json"
+
+# Local speaker identification (src/transcribe.py). The built-in `diarize`
+# package needs no account. The optional pyannote fallback loads a gated
+# Hugging Face pipeline: it needs a token (saved from Settings, 0600) and the
+# user must accept the terms of both models below on huggingface.co.
+HF_TOKEN_PATH = DATA_DIR / ".hf_token"
+HF_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
+PYANNOTE_PIPELINE_MODEL = "pyannote/speaker-diarization-3.1"
+PYANNOTE_GATED_MODELS = (PYANNOTE_PIPELINE_MODEL, "pyannote/segmentation-3.0")
 
 # Plaud Cloud API
 PLAUD_API_DOMAINS = {
