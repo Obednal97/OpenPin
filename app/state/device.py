@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
-from app.utils.config import load_config, save_config
+from app.utils.config import load_config, update_config
 from app.utils.constants import (
     APP_KEY_PATH,
     DATA_DIR,
@@ -70,28 +70,14 @@ _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
 
 
 def _update_config(mutate):
-    """Load the config, apply `mutate(config)` in place, save it.
-
-    TODO(integration, fix/phase1-safety): replace the body with
-    `update_config(mutate)` from app.utils.config, which does the same
-    load-mutate-save under the config lock.
-    """
-    config = load_config()
-    mutate(config)
-    save_config(config)
+    """Load the config, apply `mutate(config)` in place, save it — under the config lock."""
+    update_config(mutate)
 
 
 def _finalize_redownload_backup(sid):
-    """Hook called right after a fresh {sid}.ogg is atomically in place.
+    """Hook called right after a fresh {sid}.ogg is atomically in place."""
+    from app.utils.redownload_backup import finalize_redownload_backup
 
-    TODO(integration, fix/phase1-safety): app.utils.redownload_backup provides
-    finalize_redownload_backup(sid); the guarded import makes this a no-op on
-    branches that don't have it yet.
-    """
-    try:
-        from app.utils.redownload_backup import finalize_redownload_backup
-    except ImportError:
-        return
     try:
         finalize_redownload_backup(str(sid))
     except Exception as e:
