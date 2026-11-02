@@ -29,6 +29,13 @@
       "csp": "default-src 'self' 'unsafe-inline' asset: http://asset.localhost ipc: http://ipc.localhost; connect-src 'self' http://127.0.0.1:* ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: asset: http://asset.localhost https://*; font-src 'self' https://fonts.gstatic.com; media-src 'self' http://127.0.0.1:* asset: http://asset.localhost"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["plaud"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["dmg"],

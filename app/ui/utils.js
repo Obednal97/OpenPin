@@ -46,6 +46,10 @@ const app = {
   transcribeSpeed: null,
   activeTab: 'transcript',
   pendingDesktopUuid: null,
+  // Settings › Plaud Cloud: true while waiting for the browser sign-in (shows #cloud-login-waiting)
+  cloudLoginPending: false,
+  // Bumped by each successful sign-in in Settings/renderer, so a slower loadCloudStatus() can't undo it
+  cloudSignInSeq: 0,
   currentSessionId: null,
 };
 
@@ -163,6 +167,51 @@ function setLoading(btn, loading) {
     btn.classList.remove('loading');
     btn.disabled = false;
   }
+}
+
+// ---- Plaud sign-in paste boxes ----
+// They take the plaud://login?auth_code=… link the browser opens after
+// "Continue to desktop", the bare auth code from it (contains "::", which may
+// be URL-encoded as %3A%3A), or a bearer token (a JWT, "eyJ…", from
+// web.plaud.ai's local storage; a "Bearer " prefix is fine).
+
+/** { kind: 'code', code } | { kind: 'token', token } | { kind: 'invalid' } | { kind: 'empty' } */
+function parsePlaudSignInInput(raw) {
+  let text = String(raw || '').trim();
+  text = text.replace(/^bearer(\s+|$)/i, '').trim();
+  if (!text) return { kind: 'empty' };
+  if (text.startsWith('eyJ')) return { kind: 'token', token: text };
+  const decode = (s) => {
+    try {
+      return decodeURIComponent(s).trim();
+    } catch {
+      return '';
+    }
+  };
+  if (/^plaud:/i.test(text)) {
+    const m = text.match(/[?&]auth_code=([^&#]*)/);
+    const code = m ? decode(m[1]) : '';
+    return code ? { kind: 'code', code } : { kind: 'invalid' };
+  }
+  if (text.includes('::') || /%3A%3A/i.test(text)) {
+    const code = decode(text);
+    return code ? { kind: 'code', code } : { kind: 'invalid' };
+  }
+  return { kind: 'token', token: text };
+}
+
+/**
+ * Sign in with what was pasted: an auth code is exchanged (with the desktop_uuid
+ * from the last browser sign-in; the backend falls back to its own), a token is
+ * checked. Returns the backend's reply, or null after a toast when nothing usable
+ * was pasted. Throws on network errors.
+ */
+async function submitPlaudSignInInput(raw) {
+  const parsed = parsePlaudSignInInput(raw);
+  if (parsed.kind === 'code') return window.plaud.cloudExchangeToken(parsed.code, app.pendingDesktopUuid || '');
+  if (parsed.kind === 'token') return window.plaud.cloudLoginToken(parsed.token, 'eu');
+  toast(parsed.kind === 'invalid' ? 'That link has no sign-in code' : 'Paste the sign-in link, code or token', 'error');
+  return null;
 }
 
 // Escapes for BOTH element content and quoted attribute values ("..." or '...').
