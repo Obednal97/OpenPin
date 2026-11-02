@@ -69,6 +69,35 @@ _TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail
 _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
 
 
+def _update_config(mutate):
+    """Load the config, apply `mutate(config)` in place, save it.
+
+    TODO(integration, fix/phase1-safety): replace the body with
+    `update_config(mutate)` from app.utils.config, which does the same
+    load-mutate-save under the config lock.
+    """
+    config = load_config()
+    mutate(config)
+    save_config(config)
+
+
+def _finalize_redownload_backup(sid):
+    """Hook called right after a fresh {sid}.ogg is atomically in place.
+
+    TODO(integration, fix/phase1-safety): app.utils.redownload_backup provides
+    finalize_redownload_backup(sid); the guarded import makes this a no-op on
+    branches that don't have it yet.
+    """
+    try:
+        from app.utils.redownload_backup import finalize_redownload_backup
+    except ImportError:
+        return
+    try:
+        finalize_redownload_backup(str(sid))
+    except Exception as e:
+        logging.warning(f"finalize_redownload_backup({sid}) failed: {e}")
+
+
 def _reset_state():
     """Reset all connection state to disconnected defaults."""
     _device_state["connected"] = False
@@ -801,11 +830,12 @@ async def depair_device():
             except Exception:
                 pass
 
-    config = load_config()
-    config["paired_devices"] = {}
-    config.pop("known_devices_by_sn", None)
-    config.pop("known_devices", None)
-    save_config(config)
+    def _forget_devices(config):
+        config["paired_devices"] = {}
+        config.pop("known_devices_by_sn", None)
+        config.pop("known_devices", None)
+
+    _update_config(_forget_devices)
 
     sk_path = PROJECT_ROOT / "session_keys.json"
     if sk_path.exists():
@@ -1452,6 +1482,9 @@ def do_wifi_sync_blocking():
 
         if stdout_str:
             result = json.loads(stdout_str)
+            for f in result.get("files", []):
+                if f.get("status") == "new" and f.get("session_id") is not None:
+                    _finalize_redownload_backup(f["session_id"])
             done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
             _on_status(f"Complete: {done_count} file(s)", 100)
             return result
@@ -1531,6 +1564,8 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir):
     except OSError as e:
         logging.warning(f"Could not write {ogg_path}: {e} — encrypted original kept")
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
+    # Fresh .ogg is in place (runs before the caller's maybe_auto_upload).
+    _finalize_redownload_backup(sid)
     # Long recordings keep their encrypted backup (allows re-decrypt), as before.
     if len(raw) <= 500_000:
         enc_path.unlink(missing_ok=True)
@@ -1748,15 +1783,17 @@ def save_known_device(address, name=None, serial_number=None):
     sn = serial_number or _device_state.get("serial_number")
     if not sn or sn == "unknown":
         return
-    config = load_config()
-    paired = config.get("paired_devices", {})
-    paired[sn] = {
-        "name": name or "Plaud Device",
-        "last_address": address,
-        "last_connected": datetime.now().isoformat(),
-    }
-    config["paired_devices"] = paired
-    save_config(config)
+
+    def _remember(config):
+        paired = config.get("paired_devices", {})
+        paired[sn] = {
+            "name": name or "Plaud Device",
+            "last_address": address,
+            "last_connected": datetime.now().isoformat(),
+        }
+        config["paired_devices"] = paired
+
+    _update_config(_remember)
 
 
 def get_paired_serials():
