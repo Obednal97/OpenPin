@@ -135,6 +135,52 @@ def test_query_token_not_accepted_outside_audio(flask_client):
     assert r.status_code == 401
 
 
+def test_query_token_accepted_for_device_disconnect_beacon(flask_client):
+    """Cmd+R sends navigator.sendBeacon(.../device/disconnect?token=…, text/plain):
+    no custom header, so no CORS preflight during unload."""
+    with patch("app.routes.device.dev.run_async", return_value={"disconnected": True}) as run:
+        r = flask_client.post(
+            f"/device/disconnect?token={TEST_API_TOKEN}",
+            data="{}",
+            content_type="text/plain",
+            headers={"X-Plaud-Token": "", "Origin": "tauri://localhost"},
+        )
+    assert r.status_code == 200
+    run.assert_called_once()
+    # Run's argument is the disconnect coroutine; close it to avoid a warning
+    run.call_args[0][0].close()
+
+
+def test_query_token_device_disconnect_empty_body(flask_client):
+    with patch("app.routes.device.dev.run_async", return_value={"disconnected": True}) as run:
+        r = flask_client.post(f"/device/disconnect?token={TEST_API_TOKEN}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 200
+    run.call_args[0][0].close()
+
+
+def test_wrong_query_token_rejected_for_device_disconnect(flask_client):
+    with patch("app.routes.device.dev.run_async") as run:
+        r = flask_client.post("/device/disconnect?token=wrong", data="{}", headers={"X-Plaud-Token": ""})
+        r2 = flask_client.post("/device/disconnect", data="{}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+    assert r2.status_code == 401
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/device/connect", "/device/depair", "/recordings/delete", "/settings", "/device/disconnect/x"],
+)
+def test_query_token_rejected_for_other_posts(flask_client, path):
+    r = flask_client.post(f"{path}?token={TEST_API_TOKEN}", json={}, headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+
+
+def test_query_token_rejected_for_get_device_disconnect(flask_client):
+    r = flask_client.get(f"/device/disconnect?token={TEST_API_TOKEN}", headers={"X-Plaud-Token": ""})
+    assert r.status_code == 401
+
+
 def test_no_token_configured_skips_token_check(flask_client):
     """Dev mode: without PLAUD_API_TOKEN the token check is off, Host/CORS still apply."""
     with patch.dict(os.environ, {}, clear=False):
