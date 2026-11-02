@@ -3,18 +3,20 @@ zone, hotspot close, and the WebSocket file-list flow. No hardware, no network."
 
 import asyncio
 import base64
+import json
 import struct
 from types import SimpleNamespace
 
 import bleak
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 import app.state.device as dev
 import app.utils.wifi_sync_worker as worker
 import src.crypto
 from app.utils import ble_proto
-from tests.plaud_fakes import FakeNotePin
+from tests.plaud_fakes import FakeNotePin, make_plaud_file
 
 _real_sleep = asyncio.sleep
 
@@ -165,3 +167,91 @@ def test_close_hotspot_without_reply_is_short(ble, statuses, monkeypatch):
     assert "Hotspot close reply: no reply" in statuses
     assert loop_time[0] < 1
     assert worker.CLOSE_HOTSPOT_TIMEOUT_S <= 10
+
+
+# -- WebSocket session: file list messages -----------------------------------------
+
+
+class FakeWs:
+    """The device's WebSocket connection to the Mac: plays scripted messages.
+
+    `script` is a list of callables; each returns the next device→Mac message
+    (or None) once the Mac's previous send has been seen in `sent`."""
+
+    local_address = ("192.168.84.2", 8081)
+    remote_address = ("192.168.84.1", 50000)
+
+    def __init__(self, cipher, nonce, aad, script):
+        self.cipher, self.nonce, self.aad = cipher, nonce, aad
+        self.script = list(script)
+        self.sent = []  # (wifi cmd id, json) the Mac sent
+        self._seq = 0
+
+    def enc(self, plaintext):
+        self._seq += 1
+        return self.cipher.encrypt(self.nonce, struct.pack("<I", self._seq) + plaintext, self.aad)
+
+    async def send(self, data):
+        pt = self.cipher.decrypt(self.nonce, data, self.aad)[4:]
+        self.sent.append(worker.parse_wifi_packet(pt))
+
+    async def close(self, *a):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while self.script:
+            msg = self.script.pop(0)(self)
+            if msg is not None:
+                return self.enc(msg)
+        raise StopAsyncIteration
+
+
+def wifi_list(*files):
+    body = b"".join(struct.pack("<IIH", sid, size, 0) for sid, size in files)
+    return worker.build_wifi_packet(11, {"status": 0, "count": len(files)}) + body
+
+
+def wifi_chunk(data, last):
+    return worker.build_wifi_packet(13, {"last": int(last)}) + data
+
+
+def test_second_file_list_does_not_restart_the_download(tmp_path, monkeypatch, app_key):
+    monkeypatch.setattr(worker, "get_wifi_ip", lambda: "192.168.84.2")
+    monkeypatch.setattr(worker.asyncio, "sleep", _fast_sleep)
+    a, b, c = (make_plaud_file(app_key, frames=n) for n in (200, 210, 220))
+    key, nonce, aad = b"k" * 32, b"n" * 12, b"a" * 12
+    cipher = ChaCha20Poly1305(key)
+    s = worker.WifiSession(cipher, nonce, aad, "tok", tmp_path, set(), app_key, original_ip="10.0.0.5")
+    half = len(a) // 2
+    script = [
+        lambda ws: worker.build_wifi_packet(2, {}),  # device asks for the handshake
+        lambda ws: worker.build_wifi_packet(1, {}),  # accepted
+        lambda ws: wifi_list((1, len(a)), (2, len(b))),
+        lambda ws: wifi_chunk(a[:half], last=False),
+        # A second list message arrives mid-download (with a new file).
+        lambda ws: wifi_list((1, len(a)), (2, len(b)), (3, len(c))),
+        lambda ws: wifi_chunk(a[half:], last=True),
+        lambda ws: wifi_chunk(b, last=True),
+        lambda ws: wifi_chunk(c, last=True),
+    ]
+    ws = FakeWs(cipher, nonce, aad, script)
+    asyncio.run(s.handler(ws))
+
+    requests = [j["session"] for cid, j in ws.sent if cid == 12]
+    assert requests == [1, 2, 3], "file 1 must not be requested twice"
+    assert [cid for cid, _ in ws.sent].count(11) == 1
+    assert {e["session_id"]: e["status"] for e in s.new_files} == {1: "new", 2: "new", 3: "new"}
+    assert s.all_done.is_set()
+
+
+def test_wifi_list_json_counts(tmp_path):
+    # Sanity check of the helpers above: the JSON part parses and the entries follow it.
+    pkt = wifi_list((1, 100))
+    cid, info = worker.parse_wifi_packet(pkt)
+    jlen = struct.unpack_from("<H", pkt, 6)[0]
+    assert cid == 11 and info == {"status": 0, "count": 1}
+    assert pkt[8 + jlen :] == struct.pack("<IIH", 1, 100, 0)
+    assert json.loads(pkt[8 : 8 + jlen]) == info

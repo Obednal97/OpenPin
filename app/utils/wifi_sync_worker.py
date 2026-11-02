@@ -1604,14 +1604,15 @@ class WifiSession:
             return cipher.encrypt(nonce, struct.pack("<I", seq) + payload, aad)
 
         download_buf = bytearray()
-        current = {"sid": 0, "size": 0}
+        current = {"sid": 0, "size": 0, "active": False}
         queue = []
 
         async def download_next():
             download_buf.clear()
+            current["active"] = False
             f = next_wifi_download(queue, self.recordings_dir, self.dismissed, self.new_files)
             if f is not None:
-                current["sid"], current["size"] = f["session_id"], f["size"]
+                current["sid"], current["size"], current["active"] = f["session_id"], f["size"], True
                 req = build_wifi_packet(12, {"session": f["session_id"], "scene": 0, "start": 0, "end": f["size"]})
                 await websocket.send(encrypt(req))
                 status(f"Downloading session {f['session_id']}...", 40)
@@ -1652,10 +1653,17 @@ class WifiSession:
                             codec = struct.unpack_from("<H", bin_data, i + 8)[0]
                             entries.append({"session_id": sid, "size": fsize, "codec": codec})
                         self.merge_file_list(entries)
-                    queue[:] = self.pending_files()
                     self.file_list_received.set()
                     status(f"{len(self.wifi_files)} file(s) found", 35)
-                    await download_next()
+                    if current["active"]:
+                        # Another list message (paging, or the device re-sending
+                        # it) while a file is downloading: queue the new entries
+                        # without touching the download in flight.
+                        queued = {f["session_id"] for f in queue} | {current["sid"]}
+                        queue.extend(f for f in self.pending_files() if f["session_id"] not in queued)
+                    else:
+                        queue[:] = self.pending_files()
+                        await download_next()
 
                 elif cmd_id == 13:
                     json_len_c = struct.unpack_from("<H", decrypted, 6)[0]
