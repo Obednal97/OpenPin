@@ -93,9 +93,10 @@ export APPLE_SIGNING_IDENTITY="Developer ID Application: Oliver Bednal (4SN93PWF
 export APPLE_API_KEY="$ASC_KEY_ID" APPLE_API_ISSUER="$ASC_ISSUER_ID" APPLE_API_KEY_PATH="$ASC_KEY_PATH"
 
 # 3. Build, sign and notarise the .app, then build the DMG.
-#    Use the @tauri-apps/cli version that matches the `tauri` crate in src-tauri/Cargo.lock
-#    (`grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock`), e.g. 2.10.x for tauri 2.10.3.
-npx --yes @tauri-apps/cli@2.10 build
+#    Use the @tauri-apps/cli minor version that matches the `tauri` crate in src-tauri/Cargo.lock
+#    (e.g. tauri 2.12.5 → @tauri-apps/cli@2.12).
+TAURI_MINOR=$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^version = "([0-9]+\.[0-9]+)\..*/\1/p')
+npx --yes "@tauri-apps/cli@$TAURI_MINOR" build
 ```
 
 **If `bundle_dmg.sh` fails** (on a headless Mac the Finder AppleScript that lays out the DMG
@@ -106,7 +107,7 @@ skips the Finder step:
 ```bash
 cd src-tauri/target/release/bundle/dmg
 # Add --skip-jenkins in front of the exact arguments the failed build passed
-# (`npx --yes @tauri-apps/cli@2.10 build --verbose` prints the bundle_dmg.sh command line):
+# (`npx --yes "@tauri-apps/cli@$TAURI_MINOR" build --verbose` prints the bundle_dmg.sh command line):
 ./bundle_dmg.sh --skip-jenkins <same arguments as the failed run>
 cd -
 ```

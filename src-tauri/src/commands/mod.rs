@@ -773,7 +773,11 @@ pub fn install_update(app: tauri::AppHandle) -> UpdateResult {
         return refuse(pending, format!("Couldn't start the installer: {e}"));
     }
 
-    // Quit the app so the script can replace it
+    // Quit the app so the script can replace it (the script waits for this
+    // PID to exit). MERGE NOTE: on the phase2 integration branch replace these
+    // two lines with `crate::quit_app(&app, 0);` (lib.rs re-export of
+    // lifecycle::quit_app — hides the window, stops the backend once off the
+    // main thread, then exits). It doesn't exist on this branch yet.
     crate::python::stop_python_server();
     app.exit(0);
 
@@ -1053,7 +1057,7 @@ fn macos_name() -> String {
 
 /// Get Python env diagnostics (pip version, key packages) — recomputed fresh each call
 fn python_env_info() -> String {
-    let server = python::get_server().lock().unwrap();
+    let server = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
     let py_path = server.python_path.clone();
     drop(server);
     if py_path.is_empty() {
@@ -1107,8 +1111,11 @@ fn python_env_info() -> String {
     info.join("\n")
 }
 
-fn system_info_block(version: &str) -> String {
-    let server = python::get_server().lock().unwrap();
+/// `include_python_env` runs `pip` twice (a second or more); the panic path
+/// skips it so the report goes out within the hook's time budget.
+fn system_info_block(version: &str, include_python_env: bool) -> String {
+    // Tolerate a poisoned lock: this also runs while reporting a panic.
+    let server = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
     let python_running = server.process.is_some();
     let port = server.port;
     let py_path = server.python_path.clone();
@@ -1130,7 +1137,11 @@ fn system_info_block(version: &str) -> String {
             .unwrap_or(0)
     };
 
-    let py_env = python_env_info();
+    let py_env = if include_python_env {
+        python_env_info()
+    } else {
+        "_(skipped for crash reports)_".to_string()
+    };
 
     format!(
         "- **Device:** `{}`\n- **Version:** {version}\n- **Framework:** Tauri\n- **macOS:** {}\n- **Arch:** {}\n- **RAM:** {} MB\n- **API port:** {port}\n- **Python:** {py_ver}\n- **Python path:** `{py_path}`\n- **Python server:** {}\n\n**Python environment**\n{py_env}",
@@ -1331,8 +1342,15 @@ fn build_auto_report(
     })
 }
 
-#[tauri::command]
-pub fn report_error(message: String, stack: Option<String>, context: Option<String>) {
+/// Log locally, apply the filters, and if the error should be reported, send
+/// it on a new thread. Returns a receiver that gets `()` once the send has
+/// finished (success or failure), or `None` if nothing is being sent.
+fn spawn_error_report(
+    message: String,
+    stack: Option<String>,
+    context: Option<String>,
+    include_python_env: bool,
+) -> Option<std::sync::mpsc::Receiver<()>> {
     let ctx = context.unwrap_or_else(|| "unknown".to_string());
     log::error!("[BugReporter] {ctx}: {message}");
 
@@ -1344,40 +1362,69 @@ pub fn report_error(message: String, stack: Option<String>, context: Option<Stri
 
     // FILTER: legitimate aborts — log only
     if is_abort_error(&message) {
-        return;
+        return None;
     }
 
-    // FILTER: backend is known to be down — log only
-    if backend_health().lock().unwrap().as_str() == "down" {
-        return;
+    // FILTER: backend is known to be down — log only.
+    // (Locks tolerate poisoning: this also runs from the panic hook.)
+    if backend_health().lock().unwrap_or_else(|e| e.into_inner()).as_str() == "down" {
+        return None;
     }
 
     // FILTER: the user turned off "Send anonymous crash reports"
     if !crash_reports_enabled() {
-        return;
+        return None;
     }
 
     // Existing dedupe (per session)
     {
-        let mut set = reported_errors().lock().unwrap();
+        let mut set = reported_errors().lock().unwrap_or_else(|e| e.into_inner());
         if set.contains(&fingerprint) {
-            return;
+            return None;
         }
         set.insert(fingerprint);
     }
 
     let version = app_version();
     let is_dev = is_dev_mode();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
 
     // Send to the Worker in the background; it dedupes into GitHub issues.
     std::thread::spawn(move || {
-        let sys_info = system_info_block(&version);
+        let sys_info = system_info_block(&version, include_python_env);
         let payload = build_auto_report(&message, &stack_str, &ctx, &sys_info, &version, is_dev, scrub_for_report);
         match post_report(&payload) {
             Ok(o) => log::info!("[BugReporter] Report {} (issue #{})", o.action, o.issue_number.unwrap_or(0)),
             Err(e) => log::warn!("[BugReporter] Failed: {e}"),
         }
+        let _ = done_tx.send(());
     });
+    Some(done_rx)
+}
+
+/// Fire-and-forget: returns immediately; the report is sent on its own thread.
+/// (Signature relied on by the frontend IPC and by the panic hook.)
+#[tauri::command]
+pub fn report_error(message: String, stack: Option<String>, context: Option<String>) {
+    let _ = spawn_error_report(message, stack, context, true);
+}
+
+/// For the panic hook: same filters and payload as `report_error`, minus the
+/// slow `pip` environment listing, but waits up to `timeout` for the send to
+/// finish. Returns true if the report was sent (or there was nothing to send:
+/// filtered, disabled or a duplicate) within the timeout, false if it timed
+/// out or the sending thread died.
+#[allow(dead_code)] // called from lifecycle::install_panic_hook on the shell branch
+pub fn report_error_blocking(
+    message: String,
+    stack: Option<String>,
+    context: Option<String>,
+    timeout: std::time::Duration,
+) -> bool {
+    match spawn_error_report(message, stack, context, false) {
+        None => true,
+        Some(done) => done.recv_timeout(timeout).is_ok(),
+    }
 }
 
 #[derive(Serialize)]
@@ -1406,7 +1453,7 @@ pub async fn report_bug(
             &format!("[User Report] {}", scrub_for_report(&truncate_chars(title_text, 80)).replace(['\r', '\n'], " ")),
             REPORT_TITLE_MAX_CHARS,
         );
-        let sys_info = system_info_block(&version);
+        let sys_info = system_info_block(&version, true);
         let body = scrub_for_report(&format!(
             "## User Bug Report\n\n### Expected behaviour\n{}\n\n### Actual behaviour\n{}\n\n{}\n### System\n{sys_info}\n\n---\n*Submitted via in-app bug reporter.*",
             expected.as_deref().unwrap_or("_Not provided_"),
