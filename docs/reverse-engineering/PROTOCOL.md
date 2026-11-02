@@ -143,7 +143,8 @@ Before encryption starts, packets on `2BB1`/`2BB0` use this framing:
    [COMMANDS.md cmd 1](COMMANDS.md#cmd-1--handshake). The static SDK `APP_KEY` (in the
    deleted `src/constants.py`) is **not** sent; sending it makes the device ignore later commands.
 9. Send cmd 4 (time, with the Mac's time zone). Both steps are `ble_proto.bind_handshake()`, which
-   also decides whether the token was accepted (**Implemented**, see cmd 1). Only then does
+   also decides whether the token was accepted (**Implemented**, see cmd 1); only a rejection
+   stops the connect, a device that answers nothing is logged and the connect continues. Only then does
    `device.py` mark the device connected and send cmd 3 (state), cmd 6 (storage) and cmd 9
    (battery). The worker sends nothing more.
 

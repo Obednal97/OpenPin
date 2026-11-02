@@ -113,10 +113,14 @@ unanswered, so (**Implemented**):
 |---|---|---|
 | any | yes | connected (a non-zero status is logged as a warning) |
 | non-zero in either | no | rejected: "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device" |
-| no reply to either | no | fails: "didn't answer the pairing handshake" |
+| no reply to either | no | connected, as in v2.4.0, with a warning ("no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect"); later commands decide |
 | 0 | no | connected, as before (weak link) |
 
-A failed handshake disconnects and never marks the device connected.
+Only a rejection fails the connect: it disconnects and never marks the device connected. Whether
+the NotePin S answers cmd 1 at all is **Unverified** (iOS captures show a 36-byte reply), so silence
+alone isn't treated as a failure. Each reply is waited for at most 1.5 s
+(`ble_proto.HANDSHAKE_REPLY_TIMEOUT_S`) and at most four are awaited (cmd 1 twice, cmd 4, the cmd 3
+probe), so a silent device adds at most 6 s to a connect.
 
 ### cmd 2 — Get SSN
 
@@ -280,8 +284,9 @@ bytes 8–9, skips entries with session ID 0 or size outside 1 byte–500 MB, an
 Like the SDK, it uses a notification only when its start index at 9 continues the entries it
 already has: a retransmitted one is skipped, one that arrives early is held until the gap fills
 (**Implemented**). If a notification's entry bytes aren't a multiple of 10 but are a multiple of
-the width its port version suggests, that width is used; if they fit neither, the notification is
-dropped and logged rather than misread (the SDK silently ignores the remainder).
+the width its port version suggests, that width is used; if they fit neither, every whole entry is
+parsed and the trailing bytes are ignored with a warning, as the SDK (which ignores the remainder
+silently) and v2.4.0 do. Only a notification without one whole entry is dropped.
 
 Size is the number of bytes the download should deliver, 512-byte header included (assumed; see
 the open questions in the [README](README.md#open-questions)).

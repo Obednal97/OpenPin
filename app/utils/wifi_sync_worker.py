@@ -64,10 +64,9 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.append(_PROJECT_ROOT)
 
 from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
-    HANDSHAKE_NO_REPLY,
-    HANDSHAKE_NO_REPLY_ERROR,
     HANDSHAKE_REJECTED,
     HANDSHAKE_REJECTED_ERROR,
+    HANDSHAKE_REPLY_TIMEOUT_S,  # cmd 1 / 4 / 3 replies during the BLE setup (<= 6 s total)
     SN_SIG_REPLY_WAIT_S,
     SN_SIG_SEND_REPEATS,
     WIFI_CLOSE_REPLY_IDS,
@@ -1327,7 +1326,6 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
-HANDSHAKE_REPLY_TIMEOUT_S = 5  # cmd 1 / cmd 4 / cmd 3 replies during the BLE setup
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
@@ -1488,13 +1486,13 @@ async def ble_connect_and_setup():
         except UnicodeEncodeError as e:
             raise ValueError(f"BIND_TOKEN contains non-ASCII characters: {e}") from e
         # cmd 1 twice, then cmd 4 with the local time zone — the same code as device.py.
+        # Only a rejection stops here; "no reply at all" is logged by
+        # bind_handshake() and the sync carries on, as in v2.4.0.
         verdict, _info = await bind_handshake(
             lambda pt: cmd("handshake", pt, timeout=HANDSHAKE_REPLY_TIMEOUT_S), token32, log=lambda m: status(m, 3)
         )
         if verdict == HANDSHAKE_REJECTED:
             raise ValueError(HANDSHAKE_REJECTED_ERROR)
-        if verdict == HANDSHAKE_NO_REPLY:
-            raise ValueError(HANDSHAKE_NO_REPLY_ERROR)
     except ValueError:
         try:
             await asyncio.wait_for(cl.disconnect(), 10)
