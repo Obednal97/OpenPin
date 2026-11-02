@@ -13,6 +13,7 @@ from pathlib import Path
 
 import requests as http_requests
 
+from app.utils import pairing_store
 from app.utils.audio import unwrap_ogg_to_raw_opus, wrap_opus_ogg
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
@@ -950,6 +951,7 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
         if data.get("status") == 0 and token:
             # Save per-device token in config
             update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
+            pairing_store.backup_serial_async(sn, name)  # Keychain copy once both credentials exist
             return {"token": token, "sn": sn}
         reason = _plaud_msg(data) or "no device token in the reply"
         return {"error": f"Plaud wouldn't register this NotePin ({reason})", "status": data.get("status")}
@@ -958,9 +960,16 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
 
 
 def get_device_bind_token(sn):
-    """Get the stored BIND_TOKEN for a device, or None if not available."""
+    """Get the stored BIND_TOKEN for a device, or None if not available.
+
+    If the config has lost it (e.g. a cleaner wiped the data folder), restore
+    the device's pairing from the Keychain backup (app/utils/pairing_store.py).
+    """
     config = load_config()
-    return config.get("device_bind_tokens", {}).get(sn)
+    token = config.get("device_bind_tokens", {}).get(sn)
+    if token or not sn:
+        return token
+    return (pairing_store.restore_serial(sn) or {}).get("bind_token")
 
 
 def fetch_sn_signature(sn):
@@ -980,6 +989,7 @@ def fetch_sn_signature(sn):
             sig = signatures.get(sn)
             if sig:
                 update_config(lambda c: c.setdefault("device_sn_signatures", {}).__setitem__(sn, sig))
+                pairing_store.backup_serial_async(sn)  # Keychain copy once both credentials exist
                 return {"signature": sig, "sn": sn}
             return {"error": "Plaud returned no signature for this NotePin"}
         reason = _plaud_msg(data) or f"status {data.get('status')}"
@@ -989,9 +999,16 @@ def fetch_sn_signature(sn):
 
 
 def get_device_sn_signature(sn):
-    """Get the stored SN_SIG for a device, or None if not available."""
+    """Get the stored SN_SIG for a device, or None if not available.
+
+    Restores from the Keychain backup when the config lacks it, like
+    get_device_bind_token.
+    """
     config = load_config()
-    return config.get("device_sn_signatures", {}).get(sn)
+    sig = config.get("device_sn_signatures", {}).get(sn)
+    if sig or not sn:
+        return sig
+    return (pairing_store.restore_serial(sn) or {}).get("sn_signature")
 
 
 def init():
