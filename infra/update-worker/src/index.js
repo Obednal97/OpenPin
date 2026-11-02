@@ -60,20 +60,22 @@ export function pickChecksumAsset(assets, dmgName) {
  * digest, `shasum -a 256` output (`<hex>  <name>` / `<hex> *<name>`), or a
  * multi-line SHA256SUMS file. Returns lowercase hex or null.
  */
-export function parseChecksum(text, fileName) {
+export function parseChecksum(text, fileName, { dedicated = false } = {}) {
   if (typeof text !== 'string') return null;
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  let fallback = null;
-  for (const line of lines) {
-    const m = line.match(/^([0-9a-fA-F]{64})(?:\s+\*?(.+))?$/);
-    if (!m) continue;
-    const digest = m[1].toLowerCase();
-    const name = m[2] ? m[2].trim() : null;
-    if (name && fileName && (name === fileName || name.endsWith(`/${fileName}`))) return digest;
-    if (!name && lines.length === 1) return digest;
-    if (!name && fallback === null) fallback = digest;
+  const entries = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const m = raw.trim().match(/^([0-9a-fA-F]{64})(?:\s+\*?(.+))?$/);
+    if (m) entries.push({ digest: m[1].toLowerCase(), name: m[2] ? m[2].trim() : null });
   }
-  return fallback;
+  // GitHub turns spaces in uploaded asset names into dots ("Plaud V2_…" →
+  // "Plaud.V2_…"), so compare names with that normalisation too.
+  const norm = (n) => n.replace(/^.*\//, '').replace(/ /g, '.');
+  const named = entries.find((e) => e.name && fileName && norm(e.name) === norm(fileName));
+  if (named) return named.digest;
+  // A dedicated `<dmg>.sha256` file with a single digest is unambiguous.
+  if (dedicated && entries.length === 1) return entries[0].digest;
+  const bare = entries.filter((e) => !e.name);
+  return bare.length === 1 ? bare[0].digest : null;
 }
 
 export function versionFromTag(tag) {
@@ -218,7 +220,7 @@ async function readChecksum(env, asset, dmgName) {
     const resp = await fetch(loc, { headers: { 'User-Agent': USER_AGENT } });
     if (!resp.ok) return null;
     const text = (await resp.text()).slice(0, 64 * 1024);
-    return parseChecksum(text, dmgName);
+    return parseChecksum(text, dmgName, { dedicated: asset.name === `${dmgName}.sha256` });
   } catch {
     return null;
   }

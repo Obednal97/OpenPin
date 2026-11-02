@@ -50,6 +50,12 @@ test('parseChecksum handles bare digests, shasum output and SHA256SUMS', () => {
   assert.equal(parseChecksum(`${'b'.repeat(64)}  other.dmg\n${HEX} *x.dmg\n`, 'x.dmg'), HEX);
   assert.equal(parseChecksum('not a checksum', 'x.dmg'), null);
   assert.equal(parseChecksum(`${'b'.repeat(64)}  other.dmg\n`, 'x.dmg'), null);
+  // GitHub renames "Plaud V2_…" to "Plaud.V2_…" on upload
+  assert.equal(parseChecksum(`${HEX}  Plaud V2_2.4.0_aarch64.dmg\n`, 'Plaud.V2_2.4.0_aarch64.dmg'), HEX);
+  assert.equal(parseChecksum(`${HEX}  /path/to/Plaud V2_2.4.0_aarch64.dmg\n`, 'Plaud.V2_2.4.0_aarch64.dmg'), HEX);
+  // a dedicated <dmg>.sha256 with one digest is trusted whatever name it lists
+  assert.equal(parseChecksum(`${HEX}  renamed.dmg\n`, 'x.dmg', { dedicated: true }), HEX);
+  assert.equal(parseChecksum(`${HEX}  renamed.dmg\n`, 'x.dmg'), null);
 });
 
 test('versionFromTag strips v', () => {
