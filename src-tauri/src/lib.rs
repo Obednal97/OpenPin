@@ -1,4 +1,5 @@
 mod commands;
+mod power;
 mod python;
 
 use tauri::{
@@ -164,7 +165,14 @@ pub fn run() {
                         }
                     }
                 });
+
+                // Sleep/wake: NSWorkspace notifications (setup runs on the main thread)
+                power::install_workspace_observers(app.handle());
             }
+
+            // Wall-clock fallback for wake detection. De-duplicated with the
+            // notifications, so one wake sends one `system-wake` event.
+            power::spawn_fallback_detector(app.handle().clone());
 
             // System tray
             let show = MenuItemBuilder::with_id("show", "Show Plaud V2").build(app)?;
@@ -222,26 +230,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-
-            // System wake detection — poll for sleep/wake transitions
-            let app_handle_wake = app.handle().clone();
-            std::thread::spawn(move || {
-                // Use `pmset -g log` approach: check system uptime discontinuities
-                let mut last_instant = std::time::Instant::now();
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    let now = std::time::Instant::now();
-                    let elapsed = now.duration_since(last_instant);
-                    // If more than 15 seconds passed during a 5-second sleep, system was sleeping
-                    if elapsed.as_secs() > 15 {
-                        log::info!("[PowerMonitor] System wake detected (gap: {}s)", elapsed.as_secs());
-                        if let Some(w) = app_handle_wake.get_webview_window("main") {
-                            let _ = w.emit("system-wake", ());
-                        }
-                    }
-                    last_instant = now;
-                }
-            });
 
             // Start the Python Flask backend
             let app_handle = app.handle().clone();
