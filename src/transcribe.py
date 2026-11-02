@@ -488,9 +488,9 @@ def transcribe(
 
     Args:
         audio_path: Path to audio file (mp3, wav, opus, ogg, etc.)
-        model: Whisper model name (base/small/medium/large)
+        model: Whisper model name (base/small/medium/turbo/large)
         diarize: Enable speaker diarization (requires HuggingFace token)
-        language: Force language (e.g., "en")
+        language: Force language (e.g., "en"); None auto-detects
     """
     # Transcribe with Whisper
     transcript = transcribe_with_whisper(audio_path, model=model, language=language, initial_prompt=initial_prompt)
@@ -579,7 +579,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Transcribe audio files locally")
     parser.add_argument("path", nargs="?", help="Audio file or directory path")
-    parser.add_argument("--model", default="small", help="Whisper model (default: small)")
+    parser.add_argument("--model", default="small", help="Whisper model: base/small/medium/turbo/large (default: small)")
     parser.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
     parser.add_argument("--setup-diarize", action="store_true", help="Set up diarization (HuggingFace token)")
     parser.add_argument("--language", default=None, help="Force language (e.g., en)")
