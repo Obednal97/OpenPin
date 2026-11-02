@@ -576,6 +576,11 @@
 }
 .redownload-notice span { flex: 1; }
 
+/* No local audio yet (ui/transcript.js _txSetAudioControlsEnabled) */
+.audio-player .play-btn:disabled,
+.audio-player .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.audio-player.audio-unavailable .player-track { opacity: 0.4; pointer-events: none; }
+
 /* Summary older than the transcript (summary_stale) */
 .summary-stale-hint {
   font-size: var(--text-sm);
