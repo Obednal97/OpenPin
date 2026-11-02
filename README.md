@@ -20,8 +20,9 @@ with cloud AI providers if you add their API keys.
 - **Local decryption**: audio is decrypted on the Mac (RSA file key + ChaCha20) and saved as Ogg/Opus.
 - **Transcription**: Deepgram Nova-3, Groq Whisper, OpenAI, or local Whisper (`base` to `large`,
   including `turbo`). Custom vocabulary and your profile improve accuracy.
-- **Speaker labels**: Deepgram labels speakers. Local diarization also exists, but for now it only
-  runs if a Hugging Face token is saved as `.hf_token` in the data folder (there's no setting for it yet).
+- **Speaker labels**: Deepgram labels speakers as it transcribes. With any other provider, a speaker
+  model runs on your Mac afterwards (the `diarize` package, installed on first use, no account
+  needed). If it can't run, the transcript is saved without labels and the app says why.
 - **Summaries with titles**: Claude, OpenAI, OpenRouter, a local Ollama model, or DistilBART as a
   last resort. If one provider fails the next one is tried.
 - **Editing**: crop audio with a waveform editor, edit transcript lines, edit summaries as Markdown,

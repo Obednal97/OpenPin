@@ -171,7 +171,7 @@ Other rules:
 | `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
 | `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log` |
 | `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
-| `~/.cache/whisper/`, `~/.cache/huggingface/` | Local Whisper, diarization and DistilBART models (library defaults) |
+| `~/.cache/whisper/`, `~/.cache/huggingface/`, `~/.wespeaker/` | Local Whisper, pyannote and DistilBART models, and the `diarize` package's WeSpeaker model (library defaults) |
 
 `DATA_DIR` is chosen in `app/utils/constants.py`: `PLAUD_DATA_DIR` if set, else the folder above
 when packaged, else (running from a git checkout) the repo root. Users can also pick another
@@ -231,10 +231,29 @@ The provider chosen in Settings goes first, then the other cloud providers that 
 | OpenAI | `gpt-transcribe` | Text only, so segment times are estimated |
 | Local | openai-whisper `base`/`small`/`medium`/`turbo`/`large` | Chosen in Settings, or used when no cloud provider works |
 
-Local diarization (`src/transcribe.py`) tries the `diarize` package, then pyannote-onnx, then
-pyannote. It currently runs only when a Hugging Face token is present in `.hf_token`. The result
-is saved as `transcripts/<id>.json` plus a `.txt`; spoken tags at the start of a recording are
-detected and applied. Webhooks fire on `transcribe`.
+The result is saved as `transcripts/<id>.json` plus a `.txt`; spoken tags at the start of a
+recording are detected and applied. Webhooks fire on `transcribe` (after the background speaker
+labels, when those run).
+
+Speaker labels follow the transcription provider; there's no separate setting beyond the
+on/off toggle. Deepgram returns them with its transcript. For Groq, OpenAI or a Deepgram failure,
+`_background_diarize` (`app/routes/transcribe.py`) labels the cloud transcript on the Mac after
+the response; local Whisper does it inline. Local diarization (`src/transcribe.py`) tries:
+
+1. The `diarize` package (Silero VAD + WeSpeaker ONNX, CPU). No token. The pinned `diarize` extra
+   is installed on first use; a failed install isn't retried for 30 minutes. Its torchaudio 2.11
+   needs torchcodec to decode audio, which the extra doesn't include, so `torchaudio.load` is
+   routed through soundfile, and the audio is converted to 16 kHz mono WAV with FFmpeg first.
+2. pyannote (`pyannote/speaker-diarization-3.1`), only if tier 1 couldn't run, a Hugging Face
+   token is saved and pyannote.audio is already installed. The app never installs pyannote (it
+   isn't in the lockfiles). The token is set in Settings › Processing › Speaker Identification:
+   `POST /settings {hf_token}` checks it against `huggingface.co/api/whoami-v2`, then writes
+   `.hf_token` (mode 0600). `GET /settings` returns only `hf_token_set`. The user must also accept
+   the terms of `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`.
+
+The transcript JSON records `diarization_status` (`running`, `done`, `none` or `failed`) and a
+`diarization_message`. The frontend polls `/transcripts` while it's `running` and shows the
+message when it ends.
 
 ### Summaries (`app/providers/summarize.py`)
 
