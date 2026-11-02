@@ -40,6 +40,7 @@ _PERMANENT_ERROR_MARKERS = (
     "no database selected",
     "validation_error",
     "could not parse",
+    "invalid session_id",
 )
 
 

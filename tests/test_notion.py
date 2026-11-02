@@ -243,8 +243,225 @@ def test_set_database_url_fetches_by_id(env):
     assert r.get_json() == {"saved": True, "database_id": DB_UUID, "database_name": "Meetings"}
 
 
+def test_set_database_url_tool_error_is_reported(env):
+    url = f"https://www.notion.so/{DB_HEX}"
+    with (
+        patch("app.state.notion.mcp_call", side_effect=ValueError("Could not find database")),
+        patch("app.state.notion.set_database") as set_db,
+    ):
+        r = env.client.post("/notion/set-database-url", json={"url": url})
+    assert r.status_code == 500
+    assert "Could not find database" in r.get_json()["error"]
+    set_db.assert_not_called()
+
+
 def test_set_database_url_without_id_is_400(env):
     with patch("app.state.notion.mcp_call") as mcp:
         r = env.client.post("/notion/set-database-url", json={"url": "https://www.notion.so/myteam/No-Id"})
     assert r.status_code == 400
     mcp.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# mcp_call: tool errors (result.isError) must raise
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    def __init__(self, body, sse=False, status_code=200):
+        self.status_code = status_code
+        self.headers = {}
+        if sse:
+            self.text = f"event: message\ndata: {json.dumps(body)}\n\n"
+        else:
+            self.text = body if isinstance(body, str) else json.dumps(body)
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        pass
+
+
+TOOL_ERROR = {
+    "jsonrpc": "2.0",
+    "id": "1",
+    "result": {
+        "isError": True,
+        "content": [
+            {"type": "text", "text": "validation_error: Tags is not a property"},
+            {"type": "text", "text": "that exists."},
+        ],
+    },
+}
+TOOL_OK = {"jsonrpc": "2.0", "id": "1", "result": {"content": [{"type": "text", "text": "ok"}]}}
+
+
+@pytest.fixture
+def mcp_http():
+    """Patch the Notion HTTP layer; yields a setter for the next response."""
+    from app.state import notion as ns
+
+    resp = {}
+    with (
+        patch.dict(ns._notion_state, {"access_token": "tok", "connected": True}),
+        patch.object(ns, "_notion_session_id", "sess"),
+        patch.object(ns, "_ensure_fresh_token"),
+        patch.object(ns, "mcp_init"),
+        patch.object(ns.http_requests, "post", side_effect=lambda *a, **k: resp["r"]) as post,
+    ):
+
+        def set_response(r):
+            resp["r"] = r
+            return post
+
+        yield set_response
+
+
+@pytest.mark.parametrize("sse", [False, True])
+def test_mcp_call_raises_on_tool_error(mcp_http, sse):
+    from app.state import notion as ns
+
+    mcp_http(_FakeResp(TOOL_ERROR, sse=sse))
+    with pytest.raises(ValueError) as exc:
+        ns.mcp_call("notion-create-pages", {})
+    assert str(exc.value) == "validation_error: Tags is not a property\nthat exists."
+
+
+@pytest.mark.parametrize("sse", [False, True])
+def test_mcp_call_returns_result_on_success(mcp_http, sse):
+    from app.state import notion as ns
+
+    mcp_http(_FakeResp(TOOL_OK, sse=sse))
+    assert ns.mcp_call("notion-fetch", {"id": "x"}) == TOOL_OK["result"]
+
+
+@pytest.mark.parametrize("sse", [False, True])
+def test_mcp_call_raises_on_jsonrpc_error(mcp_http, sse):
+    from app.state import notion as ns
+
+    mcp_http(_FakeResp({"jsonrpc": "2.0", "id": "1", "error": {"code": -32602, "message": "Bad params"}}, sse=sse))
+    with pytest.raises(ValueError, match="^Bad params$"):
+        ns.mcp_call("notion-fetch", {})
+
+
+def test_mcp_call_tool_error_without_text(mcp_http):
+    from app.state import notion as ns
+
+    mcp_http(_FakeResp({"jsonrpc": "2.0", "id": "1", "result": {"isError": True, "content": []}}))
+    with pytest.raises(ValueError, match="Notion MCP tool call failed"):
+        ns.mcp_call("notion-fetch", {})
+
+
+def test_mcp_call_sse_skips_notifications(mcp_http):
+    from app.state import notion as ns
+
+    r = _FakeResp(TOOL_OK)
+    note = {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}
+    r.text = f"data: {json.dumps(note)}\n\ndata: {json.dumps(TOOL_ERROR)}\n\n"
+    mcp_http(r)
+    with pytest.raises(ValueError, match="validation_error"):
+        ns.mcp_call("notion-fetch", {})
+
+
+def test_mcp_call_garbage_response(mcp_http):
+    from app.state import notion as ns
+
+    mcp_http(_FakeResp("<html>oops</html>"))
+    with pytest.raises(ValueError, match="Unexpected MCP response"):
+        ns.mcp_call("notion-fetch", {})
+
+
+def test_push_route_reports_tool_error(env, mcp_http):
+    _write_transcript(env.trn, SID, {"text": "hello"})
+    mcp_http(_FakeResp(TOOL_ERROR, sse=True))
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.status_code == 500
+    body = r.get_json()
+    assert "pushed" not in body
+    assert "validation_error" in body["error"]
+    cfg = _cfg()
+    assert "notion_page_urls" not in cfg
+    assert "notion_pushed_titles" not in cfg
+    assert "notion_page_url" not in json.loads((env.trn / f"{SID}.json").read_text())
+
+
+# ---------------------------------------------------------------------------
+# Tag-sync queue: an isError result is a failure, not a success
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def queue_state(tmp_path):
+    from app.utils import notion_queue
+
+    st = notion_queue._State(tmp_path / "notion_queue.json")
+    with patch.object(notion_queue, "_state", st):
+        yield st
+
+
+def _run_queue_once(queue_state):
+    from app.utils import notion_queue
+
+    entry = queue_state.pop_due()
+    assert entry is not None
+    notion_queue._process_one(entry)
+
+
+def _setup_existing_page(env):
+    from app.utils.config import save_config
+
+    save_config({"notion_page_urls": {SID: PAGE_URL}, "recording_tags": {SID: ["A"]}})
+    _write_transcript(env.trn, SID, {"text": "hello"})
+
+
+def test_queue_retries_transient_tool_error(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    err = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "result": {"isError": True, "content": [{"type": "text", "text": "rate limited"}]},
+    }
+    mcp_http(_FakeResp(err))
+    notion_queue.enqueue(SID)
+    _run_queue_once(queue_state)
+    entry = queue_state.entries[SID]  # still queued: not treated as done
+    assert entry["attempts"] == 1
+    assert entry["last_error"] == "rate limited"
+    assert entry["next_retry_at"] > time.time()
+    assert json.loads(queue_state.path.read_text())["entries"][SID]["attempts"] == 1
+
+
+def test_queue_drops_permanent_tool_error(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(TOOL_ERROR))
+    notion_queue.enqueue(SID)
+    with patch.object(queue_state, "record_failure", wraps=queue_state.record_failure) as rf:
+        _run_queue_once(queue_state)
+    rf.assert_called_once()
+    assert rf.call_args.kwargs["permanent"] is True
+    assert "validation_error" in rf.call_args.args[1]
+
+
+def test_queue_success_removes_entry(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(TOOL_OK))
+    notion_queue.enqueue(SID)
+    _run_queue_once(queue_state)
+    assert queue_state.entries == {}
+
+
+def test_queue_drops_invalid_session_id(env, queue_state):
+    from app.utils import notion_queue
+
+    notion_queue.enqueue("../evil")
+    with patch.object(queue_state, "record_failure", wraps=queue_state.record_failure) as rf:
+        _run_queue_once(queue_state)
+    assert rf.call_args.kwargs["permanent"] is True
+    assert queue_state.entries == {}
