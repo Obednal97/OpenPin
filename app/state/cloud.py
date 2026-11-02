@@ -1,5 +1,6 @@
 """Plaud Cloud account state and operations."""
 
+import base64
 import json
 import logging
 import os
@@ -7,6 +8,7 @@ import re
 import tempfile
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import requests as http_requests
@@ -49,25 +51,98 @@ def is_logged_in():
     return _cloud_state["logged_in"]
 
 
-def _try_token(token, api_domain=None):
-    """Validate a token against the Plaud API. Returns user data or None."""
-    domain = api_domain or PLAUD_API_DOMAINS["eu"]
+class PlaudAuthError(Exception):
+    """Plaud answered, and said no: the token or sign-in code isn't valid.
+
+    Raised only when Plaud itself rejects the credential (a non-zero
+    ``status`` in the reply, or HTTP 401/403), never for network trouble or
+    server errors, so callers can tell "signed out" from "offline".
+    """
+
+
+def _auth_headers(token):
+    return {
+        "Authorization": f"bearer {token}",
+        "Content-Type": "application/json",
+        "app-platform": "desktop",
+        "app-language": "en",
+    }
+
+
+def _json_or_empty(response):
     try:
-        r = http_requests.get(
-            f"{domain}/user/me",
-            headers={
-                "Authorization": f"bearer {token}",
-                "Content-Type": "application/json",
-                "app-platform": "desktop",
-                "app-language": "en",
-            },
-            timeout=10,
-        )
-        if r.status_code == 200:
-            return r.json()
+        body = response.json()
     except Exception:
-        pass
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _plaud_msg(body):
+    """Plaud's own explanation in a reply: ``msg``, or FastAPI's ``detail``."""
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("msg") or body.get("detail") or "").strip()
+
+
+def _region_redirect(body, domain):
+    """The API domain a "user region mismatch" reply points to, or None."""
+    if not isinstance(body, dict):
+        return None
+    if body.get("msg") == "user region mismatch" or body.get("status") == -302:
+        correct = ((body.get("data") or {}).get("domains") or {}).get("api")
+        if correct and correct != domain:
+            return correct
     return None
+
+
+def user_from_reply(body):
+    """Decide whether a /user/me reply is a real signed-in user.
+
+    Plaud answers HTTP 200 for most failures and puts the verdict in
+    ``status`` (0 = OK). A reply only counts as a user when ``status`` is 0
+    and ``data_user`` is a dict with an ``id``. Returns the few fields the
+    app shows (id, nickname, email); raises PlaudAuthError with Plaud's
+    message otherwise.
+    """
+    body = body if isinstance(body, dict) else {}
+    user = body.get("data_user")
+    if body.get("status") == 0 and isinstance(user, dict) and user.get("id"):
+        return {"id": user["id"], "nickname": user.get("nickname") or "", "email": user.get("email") or ""}
+    msg = _plaud_msg(body) or "no account in the reply"
+    raise PlaudAuthError(f"Plaud rejected the token ({msg})")
+
+
+def _try_token(token, api_domain=None):
+    """Check a token against Plaud's /user/me.
+
+    Returns ``(user, api_domain)``: the summary from user_from_reply() and
+    the domain that answered (follows one "user region mismatch" redirect).
+    Raises PlaudAuthError when Plaud rejects the token; network errors and
+    5xx replies propagate as requests exceptions.
+    """
+    domain = api_domain or PLAUD_API_DOMAINS["eu"]
+    for attempt in range(2):
+        r = http_requests.get(f"{domain}/user/me", headers=_auth_headers(token), timeout=15)
+        body = _json_or_empty(r)
+        redirect = _region_redirect(body, domain) if attempt == 0 else None
+        if redirect:
+            logging.info("[Cloud] Region mismatch: checking the token at %s", redirect)
+            domain = redirect
+            continue
+        if r.status_code in (401, 403):
+            raise PlaudAuthError(f"Plaud rejected the token ({_plaud_msg(body) or f'HTTP {r.status_code}'})")
+        r.raise_for_status()
+        return user_from_reply(body), domain
+    raise PlaudAuthError("Plaud rejected the token (region redirect loop)")
+
+
+def _forget_saved_token(token):
+    """Delete the saved token file if it still holds ``token``."""
+    try:
+        if PLAUD_CONFIG_PATH.exists() and json.loads(PLAUD_CONFIG_PATH.read_text()).get("token") == token:
+            PLAUD_CONFIG_PATH.unlink()
+    except Exception as e:
+        logging.warning("[Cloud] Couldn't remove the rejected saved token: %s", e)
 
 
 def _extract_plaud_desktop_token():
@@ -110,22 +185,34 @@ def _extract_plaud_desktop_token():
 
 
 def _validate_token_async(token, api_domain, *, save_on_success=False):
-    """Background validation; updates user info or clears logged_in if rejected."""
+    """Background check of a token restored at startup.
+
+    Valid: store the user summary (and save the token if asked, or if Plaud
+    moved the account to another region). Rejected by Plaud: sign out and
+    forget the saved token. Network trouble: leave the login as it is, so
+    the app still starts signed in when offline.
+    """
     try:
-        user_data = _try_token(token, api_domain)
-        if user_data:
-            with _cloud_state_lock:
-                _cloud_state["user"] = user_data
-            if save_on_success:
-                save_cloud_token(token, api_domain)
-        else:
-            with _cloud_state_lock:
-                # Only clear logged_in if this token is still the active one
-                if _cloud_state.get("token") == token:
-                    _cloud_state["logged_in"] = False
-            logging.warning("[Cloud] Saved token rejected by server; logged_in cleared.")
+        user, domain = _try_token(token, api_domain)
+    except PlaudAuthError as e:
+        with _cloud_state_lock:
+            # Only sign out if this token is still the active one
+            if _cloud_state.get("token") == token:
+                _cloud_state["logged_in"] = False
+                _cloud_state["token"] = None
+                _cloud_state["user"] = None
+        _forget_saved_token(token)
+        logging.warning("[Cloud] Saved token rejected by Plaud; signed out. %s", e)
+        return
     except Exception as e:
         logging.warning("[Cloud] Token validation failed (network?): %s", e)
+        return
+    with _cloud_state_lock:
+        still_active = _cloud_state.get("token") == token
+        if still_active:
+            _cloud_state["user"] = user
+    if still_active and (save_on_success or domain != api_domain):
+        save_cloud_token(token, domain)
 
 
 def load_cloud_token():
@@ -219,19 +306,18 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
                 body = r.json()
             except Exception:
                 body = {}
-            if body.get("msg") == "user region mismatch" or body.get("status") == -302:
-                correct_domain = (body.get("data") or {}).get("domains", {}).get("api")
-                if correct_domain and correct_domain != domain:
-                    logging.info(f"Region mismatch: switching API domain from {domain} to {correct_domain}")
-                    with _cloud_state_lock:
-                        _cloud_state["api_domain"] = correct_domain
-                        current_token = _cloud_state["token"]
-                    # Persist via the atomic helper (temp-rename, no lock re-entry).
-                    try:
-                        save_cloud_token(current_token, correct_domain)
-                    except Exception:
-                        pass
-                    continue  # retry with correct domain
+            correct_domain = _region_redirect(body, domain)
+            if correct_domain:
+                logging.info(f"Region mismatch: switching API domain from {domain} to {correct_domain}")
+                with _cloud_state_lock:
+                    _cloud_state["api_domain"] = correct_domain
+                    current_token = _cloud_state["token"]
+                # Persist via the atomic helper (temp-rename, no lock re-entry).
+                try:
+                    save_cloud_token(current_token, correct_domain)
+                except Exception:
+                    pass
+                continue  # retry with correct domain
 
         r.raise_for_status()
         return r.json()
@@ -258,55 +344,124 @@ def auto_detect():
     return {"found": False}
 
 
-def exchange_token(auth_code, desktop_uuid=None):
-    """Exchange auth code for bearer token after OAuth flow."""
-    desktop_uuid = desktop_uuid or _cloud_state.get("desktop_uuid", "")
-    r = http_requests.post(
-        f"{_cloud_state['api_domain']}/auth/access-token-auth-code",
-        json={"client_id": "web", "auth_code": auth_code, "desktop_uuid": desktop_uuid},
-        headers={"Content-Type": "application/json"},
-        timeout=15,
-    )
-    r.raise_for_status()
-    token_data = r.json()
-    token = token_data.get("access_token", token_data.get("token", ""))
-    if not token:
-        return {"error": "No token in response", "raw": token_data}
+# Region in a sign-in code's suffix ("aws:eu-central-1") -> PLAUD_API_DOMAINS key.
+# Only "eu-" has been checked against a real code; the others follow Plaud's
+# domain names, and anything unrecognised keeps the current domain.
+_AUTH_CODE_REGIONS = (("eu-", "eu"), ("us-", "global"), ("cn-", "cn"))
 
+AUTH_CODE_EXPIRED_MESSAGE = "The sign-in code is invalid or has expired. Sign in again and use the new code."
+# Plaud's messages for a sign-in code, and what the app says instead.
+_AUTH_CODE_MESSAGES = {
+    "授权码无效或已过期": AUTH_CODE_EXPIRED_MESSAGE,  # "auth code invalid or expired"
+}
+
+
+def _normalise_auth_code(code):
+    """Trim a pasted sign-in code and undo URL encoding (``%3A%3A`` -> ``::``)."""
+    code = (code or "").strip()
+    if "%" in code:
+        code = urllib.parse.unquote(code)
+    return code
+
+
+def looks_like_auth_code(text):
+    """True for a Plaud sign-in code (``<random>::<base64 region>``), not a bearer token."""
+    text = (text or "").strip()
+    return not text.startswith("eyJ") and ("::" in text or "%3a%3a" in text.lower())
+
+
+def _domain_for_auth_code(code):
+    """The API domain named by a sign-in code's region suffix, or None if unsure."""
+    if "::" not in code:
+        return None
+    suffix = code.rsplit("::", 1)[1].strip()
+    if not suffix:
+        return None
+    try:
+        padded = suffix + "=" * (-len(suffix) % 4)
+        region = base64.b64decode(padded.replace("-", "+").replace("_", "/"), validate=True).decode("ascii")
+    except Exception:
+        return None
+    region = region.rsplit(":", 1)[-1].strip().lower()  # "aws:eu-central-1" -> "eu-central-1"
+    for prefix, key in _AUTH_CODE_REGIONS:
+        if region.startswith(prefix):
+            return PLAUD_API_DOMAINS[key]
+    return None
+
+
+def _auth_code_error(body, http_status):
+    msg = _plaud_msg(body)
+    if msg in _AUTH_CODE_MESSAGES:
+        return _AUTH_CODE_MESSAGES[msg]
+    if msg:
+        return f"Plaud didn't accept the sign-in code ({msg})."
+    return f"Plaud didn't return a token for this sign-in code (HTTP {http_status})."
+
+
+def _sign_in(token, api_domain, user):
+    """Make a checked token the active login and save it."""
     with _cloud_state_lock:
         _cloud_state["token"] = token
-        saved_domain = _cloud_state["api_domain"]
-    save_cloud_token(token, saved_domain)
-
-    user = cloud_api("/user/me")
-    with _cloud_state_lock:
+        _cloud_state["api_domain"] = api_domain
         _cloud_state["logged_in"] = True
         _cloud_state["user"] = user
+    save_cloud_token(token, api_domain)
     return {"logged_in": True, "user": user}
 
 
+def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None):
+    """Exchange a sign-in code for a bearer token, check it, and sign in.
+
+    Returns ``{"logged_in": True, "user": ...}`` or ``{"error": ...}`` with
+    Plaud's reason. Nothing is saved, and the current login is untouched,
+    unless Plaud both issues a token and accepts it on /user/me.
+    """
+    code = _normalise_auth_code(auth_code)
+    if not code:
+        return {"error": "No sign-in code provided"}
+    with _cloud_state_lock:
+        desktop_uuid = desktop_uuid or _cloud_state.get("desktop_uuid") or ""
+        domain = _domain_for_auth_code(code) or fallback_domain or _cloud_state["api_domain"]
+    r = http_requests.post(
+        f"{domain}/auth/access-token-auth-code",
+        json={"client_id": "web", "auth_code": code, "desktop_uuid": desktop_uuid},
+        headers={"Content-Type": "application/json"},
+        timeout=15,
+    )
+    if r.status_code >= 500:
+        r.raise_for_status()
+    body = _json_or_empty(r)
+    token = body.get("access_token") or body.get("token") or ""
+    if not token or body.get("status") not in (None, 0):
+        return {"error": _auth_code_error(body, r.status_code)}
+
+    try:
+        user, domain = _try_token(token, domain)
+    except PlaudAuthError as e:
+        return {"error": str(e)}
+    return _sign_in(token, domain, user)
+
+
 def login_with_token(token, region="eu"):
-    """Login with a manually provided bearer token."""
+    """Sign in with a pasted bearer token (or a pasted sign-in code).
+
+    Returns ``{"logged_in": True, "user": ...}`` or ``{"error": ...}`` when
+    Plaud rejects it; network errors raise. A rejected token is never saved
+    and leaves the current login as it was.
+    """
+    token = (token or "").strip()
     # Strip "Bearer " prefix if pasted from browser local storage
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     api_domain = PLAUD_API_DOMAINS.get(region, PLAUD_API_DOMAINS["eu"])
-    with _cloud_state_lock:
-        _cloud_state["api_domain"] = api_domain
-        _cloud_state["token"] = token
-
+    if looks_like_auth_code(token):
+        # The sign-in page's code pasted into the token field: exchange it.
+        return exchange_token(token, fallback_domain=api_domain)
     try:
-        user = cloud_api("/user/me")
-        with _cloud_state_lock:
-            _cloud_state["logged_in"] = True
-            _cloud_state["user"] = user
-        save_cloud_token(token, api_domain)
-        return {"logged_in": True, "user": user}
-    except Exception:
-        with _cloud_state_lock:
-            _cloud_state["logged_in"] = False
-            _cloud_state["token"] = None
-        raise
+        user, api_domain = _try_token(token, api_domain)
+    except PlaudAuthError as e:
+        return {"error": str(e)}
+    return _sign_in(token, api_domain, user)
 
 
 def logout():
@@ -742,6 +897,19 @@ def list_cloud_devices():
     return data.get("data_devices", [])
 
 
+def _cloud_call_error(exc):
+    """Readable text for a failed cloud_api() call, with Plaud's msg when it sent one."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        msg = _plaud_msg(_json_or_empty(resp))
+        if resp.status_code in (401, 403):
+            reason = msg or "token invalid or expired"
+            return f"Plaud rejected the sign-in ({reason}). Sign in again under Settings › Plaud Cloud."
+        if msg:
+            return f"Plaud Cloud error {resp.status_code} ({msg})"
+    return str(exc)
+
+
 def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
     """Bind a device to the user's Plaud cloud account.
 
@@ -763,14 +931,15 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
                 "version_number": version_number,
             },
         )
-        if data.get("status") == 0 and data.get("data", {}).get("access_token"):
-            token = data["data"]["access_token"]
+        token = (data.get("data") or {}).get("access_token")
+        if data.get("status") == 0 and token:
             # Save per-device token in config
             update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
             return {"token": token, "sn": sn}
-        return {"error": data.get("msg", "Bind failed"), "raw": data}
+        reason = _plaud_msg(data) or "no device token in the reply"
+        return {"error": f"Plaud wouldn't register this NotePin ({reason})", "status": data.get("status")}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _cloud_call_error(e)}
 
 
 def get_device_bind_token(sn):
@@ -792,15 +961,16 @@ def fetch_sn_signature(sn):
     try:
         data = cloud_api("/device/sn-sign", method="POST", json_body={"sns": [sn]})
         if data.get("status") == 0:
-            signatures = data.get("data", {}).get("signature", {})
+            signatures = (data.get("data") or {}).get("signature") or {}
             sig = signatures.get(sn)
             if sig:
                 update_config(lambda c: c.setdefault("device_sn_signatures", {}).__setitem__(sn, sig))
                 return {"signature": sig, "sn": sn}
-            return {"error": "No signature returned for this device"}
-        return {"error": data.get("msg", "Failed to get signature"), "raw": data}
+            return {"error": "Plaud returned no signature for this NotePin"}
+        reason = _plaud_msg(data) or f"status {data.get('status')}"
+        return {"error": f"Plaud wouldn't sign this NotePin's serial ({reason})", "status": data.get("status")}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _cloud_call_error(e)}
 
 
 def get_device_sn_signature(sn):
