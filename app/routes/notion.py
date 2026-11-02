@@ -20,6 +20,7 @@ def _error_json(base, exc):
     base["traceback"] = traceback.format_exc()
     return base
 
+
 bp = Blueprint("notion", __name__, url_prefix="/notion")
 
 
@@ -57,6 +58,7 @@ def disconnect():
 def queue_status():
     """Snapshot of the background tag-sync queue — drives the UI indicator."""
     from app.utils import notion_queue
+
     return jsonify(notion_queue.snapshot())
 
 
@@ -64,6 +66,7 @@ def queue_status():
 def queue_resume():
     """Clear a paused queue (e.g. after the user reconnects Notion)."""
     from app.utils import notion_queue
+
     notion_queue.resume()
     return jsonify(notion_queue.snapshot())
 
@@ -321,8 +324,9 @@ def _fetch_notion_page_title(page_url):
         # Look for title property in the result
         if '"title"' in result_str:
             import re as _re
+
             # Match title in various Notion MCP response formats
-            m = _re.search(r'#\s+(.+?)(?:\n|$)', result_str)
+            m = _re.search(r"#\s+(.+?)(?:\n|$)", result_str)
             if m:
                 return m.group(1).strip()
     except Exception as e:

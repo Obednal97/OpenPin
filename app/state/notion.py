@@ -324,7 +324,9 @@ def _start_callback_server():
                 error = params.get("error", [None])[0]
 
                 if error:
-                    self._respond(f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>")
+                    self._respond(
+                        f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>"
+                    )
                     self._signal({"error": error})
                     return
 
