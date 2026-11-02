@@ -10,13 +10,14 @@ import json
 import os
 import signal
 import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import app.utils.wifi_sync_worker as worker
-from tests.plaud_fakes import FakeMac, make_plaud_file, py310_asyncio
+from tests.plaud_fakes import FakeMac, Gate, make_plaud_file, py310_asyncio
 
 
 @pytest.fixture(scope="module")
@@ -308,7 +309,7 @@ def test_restore_preserves_original_order_and_security(mac):
     snap = worker.snapshot_preferred_networks()
     mac.preferred = []
     result = worker.restore_preferred_networks(snap)
-    assert result == {"verified": True, "missing": [], "order_ok": True}
+    assert result == {"verified": True, "missing": [], "order_ok": True, "errors": {}}
     assert mac.preferred == HOME
     adds = mac.ops("-addpreferredwirelessnetworkatindex")
     assert [(c[3], c[4], c[5]) for c in adds] == [
@@ -335,6 +336,235 @@ def test_unverified_restore_keeps_the_record(mac, tmp_path):
     assert run.finish(False) is False
     rec = record(tmp_path)
     assert [n["ssid"] for n in rec["saved_networks"]] == HOME
+
+
+# -- isolate() vs restore: the lock, the record, fsync -----------------------
+
+
+def isolating_run(tmp_path):
+    run = worker.WifiRun(tmp_path, "Plaud1234", "10.0.0.5")
+    run.begin()
+    run.set_hotspot_ip("192.168.84.2")
+    return run
+
+
+def test_restore_waits_for_isolation_in_flight(mac, tmp_path):
+    """isolate() paused between its record write and the removal; a restore +
+    finish() runs meanwhile. Without the lock the restore saw every network
+    still there, finish() cleared the record, then the removal left the Mac
+    with no saved networks and no record."""
+    run = isolating_run(tmp_path)
+    gate = Gate()
+    mac.on_remove_all = gate
+    isolating = threading.Thread(target=run.isolate)
+    isolating.start()
+    assert gate.reached.wait(5)
+    assert record(tmp_path)["isolated"] is True  # durable, removal not yet run
+
+    outcome = {}
+
+    def cleanup():
+        ok = run.restore_networks()
+        outcome["finished"] = run.finish(ok)
+
+    restoring = threading.Thread(target=cleanup)
+    restoring.start()
+    restoring.join(0.3)  # without the lock the whole cleanup would be done by now
+    gate.open()
+    isolating.join(5)
+    restoring.join(5)
+    assert not isolating.is_alive() and not restoring.is_alive()
+
+    assert mac.preferred == HOME
+    assert outcome["finished"] is True and record(tmp_path) is None
+    ops = [c[1] for c in mac.calls if c[0] == "networksetup"]
+    assert ops.index("-removeallpreferredwirelessnetworks") < ops.index("-addpreferredwirelessnetworkatindex")
+
+
+def test_isolation_waits_for_restore_then_refuses(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    gate = Gate()
+    mac.hooks["-removepreferredwirelessnetwork"] = gate  # the restore pauses while forgetting the hotspot
+    results = {}
+    restoring = threading.Thread(target=lambda: results.update(restored=run.restore_networks()))
+    restoring.start()
+    assert gate.reached.wait(5)
+    isolating = threading.Thread(target=lambda: results.update(isolated=run.isolate()))
+    isolating.start()
+    isolating.join(0.3)
+    gate.open()
+    restoring.join(5)
+    isolating.join(5)
+    assert results == {"restored": True, "isolated": False}
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+    assert mac.preferred == HOME
+    assert run.finish(True) is True
+    assert record(tmp_path) is None
+
+
+def test_no_isolation_once_restore_started(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    assert run.restore_networks() is True
+    assert run.isolate() is False
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+    assert mac.preferred == HOME
+
+
+def test_restore_uses_the_record_after_isolation(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    assert run.isolate() is True
+    run.saved_networks = run.saved_networks[:1]  # memory can't shrink what the record holds
+    assert run.restore_networks() is True
+    assert mac.preferred == HOME
+
+
+def test_isolation_refused_if_record_cannot_be_fsynced(mac, tmp_path, monkeypatch):
+    run = isolating_run(tmp_path)
+
+    def broken_fsync(fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(worker.os, "fsync", broken_fsync)
+    assert run.isolate() is False
+    monkeypatch.undo()
+    assert run.isolated is False and run.saved_networks is None
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+    assert mac.preferred == HOME
+    assert record(tmp_path)["isolated"] is False
+
+
+def test_isolation_refused_if_directory_cannot_be_fsynced(mac, tmp_path, monkeypatch):
+    run = isolating_run(tmp_path)
+    monkeypatch.setattr(worker, "_fsync_dir", lambda path: False)
+    assert run.isolate() is False
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+    assert mac.preferred == HOME
+
+
+def test_isolation_refused_without_a_state_dir(mac):
+    run = worker.WifiRun(None, "Plaud1234", "10.0.0.5")
+    run.begin()
+    assert run.isolate() is False
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+
+
+# -- giving up on a restore that can't succeed ---------------------------------
+
+
+def isolated_record(tmp_path, mac, **extra):
+    snap = worker.snapshot_preferred_networks()
+    worker.write_restore_record(
+        tmp_path, {"hotspot_ssid": "Plaud1234", "isolated": True, "saved_networks": snap, **extra}
+    )
+    mac.preferred = []
+    return snap
+
+
+def test_recovery_gives_up_after_max_attempts(mac, tmp_path):
+    snap = isolated_record(tmp_path, mac)
+    mac.fail_add = {"Office"}  # a generic error: retried
+    for attempt in range(1, worker.MAX_RESTORE_ATTEMPTS):
+        result = worker.recover_from_record(tmp_path)
+        assert result == {"status": "incomplete", "missing": ["Office"], "attempts": attempt}
+        rec = record(tmp_path)
+        assert rec["restore_attempts"] == attempt and rec["saved_networks"] == snap
+        assert worker.restore_notice(tmp_path) is None
+    result = worker.recover_from_record(tmp_path)
+    assert result == {"status": "gave_up", "missing": ["Office"], "attempts": worker.MAX_RESTORE_ATTEMPTS}
+    assert record(tmp_path) is None  # syncs aren't refused any more
+    stuck = worker.read_stuck_record(tmp_path)
+    assert stuck["saved_networks"] == snap and stuck["missing"] == ["Office"]
+    assert stuck["last_errors"] == {"Office": "Error"}
+    assert worker.recover_from_record(tmp_path) == {"status": "none"}  # no more retries at launch
+
+
+def test_permanent_error_gives_up_at_once(mac, tmp_path):
+    isolated_record(tmp_path, mac)
+    mac.fail_add = {"Office"}
+    mac.add_errors = {"Office": "** Error: The network Office was not found."}
+    result = worker.recover_from_record(tmp_path)
+    assert result["status"] == "gave_up" and result["attempts"] == 1
+    assert record(tmp_path) is None
+    assert mac.preferred == ["Home 5G", "Cafe Open"]  # the others were restored
+
+
+def test_restore_notice_shown_until_acknowledged(mac, tmp_path):
+    isolated_record(tmp_path, mac)
+    mac.fail_add = {"Office", "Cafe Open"}
+    mac.add_errors = {"Office": "Invalid network", "Cafe Open": "not found"}
+    assert worker.restore_notice(tmp_path) is None
+    worker.recover_from_record(tmp_path)
+    notice = worker.restore_notice(tmp_path)
+    assert notice["message"] == "Some saved WiFi networks couldn't be restored: Office, Cafe Open"
+    assert notice["networks"] == ["Office", "Cafe Open"]
+    assert worker.acknowledge_restore_notice(tmp_path) is True
+    assert worker.restore_notice(tmp_path) is None
+    assert worker.acknowledge_restore_notice(tmp_path) is False
+    assert worker.read_stuck_record(tmp_path)["missing"] == ["Office", "Cafe Open"]  # kept for diagnostics
+
+
+def test_mixed_errors_are_retried(mac, tmp_path):
+    isolated_record(tmp_path, mac)
+    mac.fail_add = {"Office", "Cafe Open"}
+    mac.add_errors = {"Office": "not found"}  # Cafe Open: a generic error
+    assert worker.recover_from_record(tmp_path)["status"] == "incomplete"
+
+
+def test_worker_gives_up_on_leftover_and_starts_the_sync(mac, tmp_path, monkeypatch, capsys):
+    isolated_record(tmp_path, mac, restore_attempts=worker.MAX_RESTORE_ATTEMPTS - 1)
+    mac.fail_add = {"Office"}
+    started = []
+
+    async def fake_transfer(args):
+        started.append(True)
+        return {"files": [], "method": "wifi"}
+
+    _worker_stdin(monkeypatch, tmp_path)
+    monkeypatch.setattr(worker, "transfer", fake_transfer)
+    asyncio.run(worker.main())
+    assert started == [True]
+    assert record(tmp_path) is None
+    assert worker.restore_notice(tmp_path)["networks"] == ["Office"]
+
+
+def test_in_run_restore_gives_up_on_permanent_errors(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    assert run.isolate() is True
+    mac.fail_add = {"Office"}
+    mac.add_errors = {"Office": "Network not found"}
+    assert run.restore_networks() is False
+    mac.ip = "10.0.0.9"
+    assert run.finish(False) is False
+    assert run.gave_up is True
+    assert record(tmp_path) is None
+    assert worker.restore_notice(tmp_path)["networks"] == ["Office"]
+
+
+def test_in_run_failed_restore_counts_an_attempt(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    assert run.isolate() is True
+    mac.fail_add = {"Office"}
+    assert run.restore_networks() is False
+    mac.ip = "10.0.0.9"
+    assert run.finish(False) is False
+    assert record(tmp_path)["restore_attempts"] == 1
+    assert not run.gave_up
+
+
+def test_give_up_while_on_hotspot_keeps_the_hotspot_part(mac, tmp_path):
+    run = isolating_run(tmp_path)
+    assert run.isolate() is True
+    mac.fail_add = {"Office"}
+    mac.add_errors = {"Office": "not found"}
+    assert run.restore_networks() is False
+    mac.ip = "192.168.84.2"  # still on the hotspot
+    assert run.finish(False) is False
+    rec = record(tmp_path)
+    assert rec["isolated"] is False and rec["saved_networks"] is None
+    assert rec["hotspot_ip"] == "192.168.84.2"
+    mac.ip = "10.0.0.9"
+    assert worker.recover_from_record(tmp_path)["status"] == "restored"
+    assert record(tmp_path) is None
 
 
 def test_hold_mode_forgets_hotspot_but_keeps_saved_networks(mac, tmp_path):
@@ -772,3 +1002,56 @@ def test_hold_gives_up_when_rejoin_fails(mac, tmp_path, monkeypatch):
     run.set_hotspot_ip("192.168.84.2")
     hold = run_hold(monkeypatch, ["", ""], [None], run)
     assert hold.failed == "Could not rejoin the device hotspot"
+
+
+def test_hold_keeps_rejoining_if_record_cannot_be_fsynced(mac, tmp_path, monkeypatch):
+    run = worker.WifiRun(tmp_path, "Plaud1234", "10.0.0.5")
+    run.begin()
+    run.set_hotspot_ip("192.168.84.2")
+    monkeypatch.setattr(worker, "_fsync_dir", lambda path: False)
+    hs, home = "192.168.84.2", "10.0.0.5"
+    hold = run_hold(monkeypatch, [hs, home, hs, home, home, hs, home, home], [hs, hs], run)
+    assert hold.drifts == 2 and hold.failed is None  # rejoined both times
+    assert run.isolated is False
+    assert not mac.ops("-removeallpreferredwirelessnetworks")
+    assert mac.preferred == HOME
+
+
+def test_cleanup_waits_for_isolation_thread_after_cancelling_the_watcher(mac, tmp_path, monkeypatch):
+    """transfer()'s cleanup cancels HotspotHold.watch, but the isolate() thread
+    it started keeps going: cleanup must wait for it, then restore from the record."""
+    run = worker.WifiRun(tmp_path, "Plaud1234", "10.0.0.5")
+    run.begin()
+    run.set_hotspot_ip("192.168.84.2")
+    gate = Gate()
+    mac.on_remove_all = gate
+    monkeypatch.setattr(worker, "get_wifi_ip", lambda: "10.0.0.5")  # auto-joined away, keeps drifting
+
+    async def fake_connect(ssid, password, original_ip, timeout=45):
+        return "192.168.84.2"
+
+    monkeypatch.setattr(worker, "connect_to_hotspot", fake_connect)
+    hold = worker.HotspotHold(run, "Plaud1234", "pass", poll_s=0, max_rejoins=5)
+    hold.drifts = 1  # the next drift isolates
+    events = []
+
+    async def go():
+        task = asyncio.create_task(hold.watch())
+        assert await asyncio.to_thread(gate.reached.wait, 5)  # record written, removal pending
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert not hold._isolation.done()  # cancelling the watcher didn't stop the thread
+        asyncio.get_running_loop().call_later(0.05, gate.open)
+        await hold.wait_isolation()
+        events.append(f"isolation done, {len(mac.preferred)} saved")
+        ok = await asyncio.to_thread(run.restore_networks)
+        events.append(f"restored {ok}")
+        events.append(f"finished {run.finish(ok)}")
+
+    asyncio.run(go())
+    assert events == ["isolation done, 0 saved", "restored True", "finished True"]
+    assert mac.preferred == HOME
+    assert record(tmp_path) is None

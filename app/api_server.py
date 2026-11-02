@@ -153,7 +153,7 @@ def internal_error(e):
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 
-# Startup housekeeping. Both helpers are called from the __main__ block below,
+# Startup housekeeping. These helpers are called from the __main__ block below,
 # never at import time: tests (and anything else that imports this module) must
 # not run networksetup or delete files in the real recordings folders.
 
@@ -164,9 +164,14 @@ def _recover_wifi():
     If the worker's restore record exists (wifi_restore.json in the data dir),
     restore from it: saved networks back in their original order, the hotspot
     forgotten, WiFi power-cycled if still on the hotspot; the record is deleted
-    only after a verified restore. It's skipped while a worker (e.g. from an
-    app instance that's still running) holds the sync lock. Without a record,
-    fall back to checking for a Plaud hotspot by name.
+    only after a verified restore, or given up (kept as wifi_restore.stuck.json,
+    shown once in the UI) after repeated or permanent failures. It's skipped
+    while a worker (e.g. from an app instance that's still running) holds the
+    sync lock. Without a record, fall back to checking for a Plaud hotspot by
+    name.
+
+    Slow (re-adding networks, power-cycling): run it via
+    _start_wifi_recovery() after the server is listening, not before.
     """
     try:
         import subprocess
@@ -201,6 +206,18 @@ def _recover_wifi():
         logging.error(f"[WiFi Recovery] Check failed: {e}")
 
 
+def _start_wifi_recovery():
+    """Run _recover_wifi on a background thread (returns at once).
+
+    Called once the server has bound its port, so a slow restore can't hold up
+    /health past the shell's startup budget. A WiFi sync requested meanwhile
+    waits for it (app.state.device.run_wifi_recovery_in_background).
+    """
+    from app.state import device as device_state
+
+    return device_state.run_wifi_recovery_in_background(_recover_wifi)
+
+
 # Clean up partial files from interrupted syncs
 def _clean_partial_files():
     """Remove .ogg.partial files left by interrupted BLE syncs."""
@@ -229,7 +246,6 @@ app.register_blueprint(settings.bp)
 if __name__ == "__main__":
     from werkzeug.serving import make_server
 
-    _recover_wifi()
     _clean_partial_files()
 
     # Recover metadata from transcript files and start background workers
@@ -261,6 +277,8 @@ if __name__ == "__main__":
         print(f"PLAUD_PORT_BOUND: {candidate}", flush=True)
         print(f"Plaud V2 API server starting on http://127.0.0.1:{candidate}", flush=True)
         bound = True
+        # Listening now: WiFi recovery from a crashed sync runs in the background.
+        _start_wifi_recovery()
         try:
             server.serve_forever()
         finally:

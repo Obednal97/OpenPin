@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 import types
 
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -42,7 +43,9 @@ class FakeMac:
         self.iface = iface
         self.calls = []
         self.fail_add = set()  # SSIDs whose re-add fails
+        self.add_errors = {}  # SSID -> networksetup's error text for a failing re-add (default "Error")
         self.on_remove_all = None  # hook run before -removeallpreferredwirelessnetworks
+        self.hooks = {}  # networksetup op -> hook run before it (e.g. a Gate)
 
     def _done(self, stdout="", returncode=0, stderr=""):
         return types.SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
@@ -54,6 +57,8 @@ class FakeMac:
             return self._done(f"{self.ip}\n" if self.ip else "", 0 if self.ip else 1)
         assert cmd[0] == "networksetup", f"unexpected command {cmd}"
         op = cmd[1]
+        if op in self.hooks:
+            self.hooks[op]()
         if op == "-listpreferredwirelessnetworks":
             body = "".join(f"\t{s}\n" for s in self.preferred)
             return self._done(f"Preferred networks on {cmd[2]}:\n{body}")
@@ -65,7 +70,7 @@ class FakeMac:
         if op == "-addpreferredwirelessnetworkatindex":
             ssid, index = cmd[3], int(cmd[4])
             if ssid in self.fail_add:
-                return self._done("", 1, "Error")
+                return self._done("", 1, self.add_errors.get(ssid, "Error"))
             self.preferred.insert(index, ssid)
             return self._done()
         if op == "-removepreferredwirelessnetwork":
@@ -83,6 +88,26 @@ class FakeMac:
 
     def ops(self, op):
         return [c for c in self.calls if len(c) > 1 and c[1] == op]
+
+
+class Gate:
+    """Pauses a fake command on whatever thread runs it until the test opens it.
+
+    Use as a FakeMac hook (e.g. mac.on_remove_all = gate): `reached` is set when
+    the command gets there, and it blocks until open() is called.
+    """
+
+    def __init__(self, timeout=10):
+        self.reached = threading.Event()
+        self._opened = threading.Event()
+        self._timeout = timeout
+
+    def __call__(self):
+        self.reached.set()
+        assert self._opened.wait(self._timeout), "gate never opened"
+
+    def open(self):
+        self._opened.set()
 
 
 class Py310AsyncioTimeout(Exception):
