@@ -343,13 +343,14 @@ pub fn install_panic_hook() {
         if PANIC_REPORT_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
         }
-        commands::report_error(
-            format!("[PANIC] {message}"),
-            Some(backtrace),
-            Some("rust-panic".to_string()),
-        );
+        let msg = format!("[PANIC] {message}");
+        let ctx = Some("rust-panic".to_string());
         if thread_name == "main" {
-            std::thread::sleep(PANIC_REPORT_GRACE);
+            // A main-thread panic takes the process down: wait (bounded) for
+            // the report to actually be sent instead of sleeping blindly.
+            let _ = commands::report_error_blocking(msg, Some(backtrace), ctx, PANIC_REPORT_GRACE);
+        } else {
+            commands::report_error(msg, Some(backtrace), ctx);
         }
         PANIC_REPORT_IN_FLIGHT.store(false, Ordering::Release);
     }));
