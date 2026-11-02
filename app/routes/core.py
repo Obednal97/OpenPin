@@ -48,16 +48,19 @@ def _validate_audio_name(filename):
     """Return the filename if it is a safe bare audio filename, else None.
 
     Session ids from cloud sync are derived from user-chosen recording names,
-    so they can contain spaces, dots, brackets and non-ASCII letters; a strict
-    [A-Za-z0-9_-] allow-list would break playback for them. Instead we reject
-    anything that could leave the directory (separators, NUL, leading dot,
-    "..") and rely on resolve() + containment as the real boundary.
+    so they can contain spaces, dots (including "..", e.g. "Wait..."),
+    brackets, backslashes and non-ASCII letters; a strict [A-Za-z0-9_-]
+    allow-list, or a blanket ".." test, would break playback for them. The
+    boundary is: one bare path component (no "/" or NUL, not "." / "..", no
+    leading "." so no hidden files), then resolve() + containment in
+    _find_local_audio. A backslash is an ordinary character on macOS, not a
+    separator, so it can't climb out of the directory.
     """
     if not filename or len(filename) > _MAX_AUDIO_NAME_LEN:
         return None
-    if "/" in filename or "\\" in filename or "\x00" in filename:
+    if "/" in filename or "\x00" in filename:
         return None
-    if filename.startswith(".") or ".." in filename:
+    if filename in (".", "..") or filename.startswith("."):
         return None
     if Path(filename).name != filename:
         return None

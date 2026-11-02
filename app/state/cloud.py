@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -21,7 +22,7 @@ from app.utils.constants import (
     get_all_recordings_dirs,
     get_recordings_dir,
 )
-from app.utils.paths import is_auxiliary_stem
+from app.utils.paths import InvalidSessionIdError, is_auxiliary_stem, validate_session_id
 from app.utils.recording_utils import extract_recording_date
 
 # Module-level state
@@ -319,6 +320,54 @@ def logout():
     return {"logged_out": True}
 
 
+# Characters replaced in the name part of a new cloud session id: path
+# separators (/ and the classic Mac :), backslash, and control characters.
+_CLOUD_NAME_UNSAFE_RE = re.compile(r"[/:\\\x00-\x1f\x7f]")
+_CLOUD_NAME_MAX = 40
+
+
+def legacy_cloud_session_id(date_str, filename):
+    """The id older builds gave a cloud recording (only / and : replaced).
+
+    Kept so files already on disk under that name are matched, not
+    downloaded a second time under the newer, cleaner id.
+    """
+    name = str(filename).replace("/", "-").replace(":", "-")
+    return f"cloud_{date_str}_{name[:_CLOUD_NAME_MAX]}".replace(" ", "_")
+
+
+def cloud_session_id(date_str, filename):
+    """Session id for a Plaud Cloud recording: ``cloud_<date>_<name[:40]>``.
+
+    The name is free text from the Plaud app, so besides / and : this also
+    replaces backslashes and control characters, and drops leading dots and
+    trailing dots/spaces ("Plan." -> "Plan", "Wait..." -> "Wait"), which
+    makes for plain, Finder-friendly filenames.
+    """
+    name = _CLOUD_NAME_UNSAFE_RE.sub("-", str(filename)).strip()
+    name = name[:_CLOUD_NAME_MAX].lstrip(".").rstrip(". ") or "recording"
+    return f"cloud_{date_str}_{name}".replace(" ", "_")
+
+
+def _resolve_cloud_session_id(date_str, filename, rec_dir, dismissed, cloud_file_ids):
+    """New-style id, unless the recording is already known under its legacy id."""
+    sid = cloud_session_id(date_str, filename)
+    legacy = legacy_cloud_session_id(date_str, filename)
+    if legacy == sid:
+        return sid
+    try:
+        validate_session_id(legacy)
+    except InvalidSessionIdError:
+        return sid
+    if (
+        legacy in dismissed
+        or legacy in cloud_file_ids
+        or any((rec_dir / f"{legacy}{ext}").exists() for ext in (".ogg", ".mp3"))
+    ):
+        return legacy
+    return sid
+
+
 def download_cloud_recordings():
     """Download all cloud recordings, convert raw Opus to OGG."""
     if not _cloud_state["logged_in"] or not _cloud_state["token"]:
@@ -343,6 +392,7 @@ def download_cloud_recordings():
     active_rec_dir.mkdir(exist_ok=True)
     config = load_config()
     dismissed = set(config.get("deleted_ids", []))
+    cloud_file_ids = config.get("cloud_file_ids", {})
     uploaded_names = set(config.get("uploaded_filenames", []))
     results = []
 
@@ -353,13 +403,14 @@ def download_cloud_recordings():
         dur = f.get("duration", 0)
         if dur > 10000:
             dur = dur / 1000
-        name = f.get("filename", "unknown").replace("/", "-").replace(":", "-")
+        raw_name = f.get("filename", "unknown")
+        name = str(raw_name).replace("/", "-").replace(":", "-")
         fid = f.get("id", "")
 
         from datetime import datetime as dt
 
         date_str = dt.fromtimestamp(ts).strftime("%Y-%m-%d_%H%M") if ts > 0 else "unknown"
-        session_id = f"cloud_{date_str}_{name[:40]}".replace(" ", "_")
+        session_id = _resolve_cloud_session_id(date_str, raw_name, active_rec_dir, dismissed, cloud_file_ids)
         ogg_path = active_rec_dir / f"{session_id}.ogg"
 
         if session_id in dismissed:

@@ -15,11 +15,23 @@ Session ids seen in practice:
 
 Because the cloud part is free text, a strict ``[A-Za-z0-9_-]`` allow-list
 would make existing cloud recordings impossible to delete/tag/rename. So the
-rule is a deny-list of exactly what makes traversal possible: path
-separators (``/`` ``\\``), ``:`` (the classic Mac separator), NUL and other
-control characters, and a leading ``.`` (which covers ``.``, ``..`` and
-hidden files). A valid id is therefore always one non-hidden path component;
-routes additionally check containment with :func:`resolve_inside`.
+rule is a deny-list of exactly what makes traversal possible: ``/`` (the only
+path separator on macOS), ``:`` (the classic Mac separator; cloud ids never
+contain it), NUL, and a leading ``.`` (which covers ``.``, ``..`` and hidden
+files). A valid id is therefore always one non-hidden path component; routes
+additionally check containment with :func:`resolve_inside`.
+
+Deliberately *allowed*, because older builds built cloud ids that contain
+them and those files must stay deletable/taggable/renamable:
+
+- ``\\`` — not a separator on macOS (this app is macOS-only), so
+  ``rec_dir / f"{sid}.ogg"`` stays inside ``rec_dir``.
+- other control characters (tab, newline…) — not path-significant; session
+  ids are never put in HTTP headers or shell commands.
+- ``..`` inside the name (``cloud_…_Wait...``) — only a whole component of
+  ``..`` climbs a directory.
+
+New cloud ids are sanitised further when they are built (app/state/cloud.py).
 """
 
 import re
@@ -27,7 +39,7 @@ from pathlib import Path
 
 MAX_SESSION_ID_LEN = 128
 
-_SESSION_ID_RE = re.compile(r"^[^/\\:\x00-\x1f\x7f]+$")
+_SESSION_ID_RE = re.compile(r"^[^/:\x00]+$")
 
 
 class InvalidSessionIdError(ValueError):
@@ -50,7 +62,7 @@ def validate_session_id(sid) -> str:
     if sid.startswith(".") or not _SESSION_ID_RE.match(sid):
         raise InvalidSessionIdError("Invalid session_id")
     # Belt and braces: the id must be exactly one path component.
-    if Path(sid).name != sid or "/" in sid or "\\" in sid or "\x00" in sid:
+    if Path(sid).name != sid or "/" in sid or "\x00" in sid:
         raise InvalidSessionIdError("Invalid session_id")
     return sid
 
