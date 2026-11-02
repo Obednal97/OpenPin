@@ -296,15 +296,33 @@ def _install_soundfile_audio_loader() -> None:
         return
     original = torchaudio.load
 
+    # torchaudio.load(uri, frame_offset=0, num_frames=-1, normalize=True,
+    # channels_first=True, ...): the leading positional parameters.
+    positional = ("frame_offset", "num_frames", "normalize", "channels_first")
+
     def load(uri, *args, **kwargs):
+        opts = dict(zip(positional, args, strict=False))  # more positionals are fine
+        opts.update(kwargs)
         try:
             import soundfile as sf
             import torch
 
-            data, sample_rate = sf.read(str(uri), dtype="float32", always_2d=True)
+            start = max(0, int(opts.get("frame_offset") or 0))
+            num_frames = int(opts.get("num_frames", -1) or -1)
+            data, sample_rate = sf.read(
+                uri if hasattr(uri, "read") else str(uri),
+                start=start,
+                frames=num_frames if num_frames > 0 else -1,
+                dtype="float32",
+                always_2d=True,
+            )
         except Exception:
             return original(uri, *args, **kwargs)
-        return torch.from_numpy(data.T.copy()), sample_rate
+        # soundfile gives (frames, channels); torchaudio's default is
+        # (channels, frames). Always float32 in [-1, 1] (normalize=True).
+        if opts.get("channels_first", True):
+            data = data.T
+        return torch.from_numpy(data.copy()), sample_rate
 
     load._plaud_soundfile = True
     torchaudio.load = load
@@ -660,7 +678,10 @@ def transcribe(
         model: Whisper model name (base/small/medium/turbo/large)
         diarize: Label speakers (no token needed; see diarize_audio). If it
             can't run, the transcript is returned without speakers and
-            ``diarization_status``/``diarization_message`` say why.
+            ``diarization_status``/``diarization_message`` say why. This
+            runs inline (it can wait on another diarization, a pip install
+            or a model download), so the app's /transcribe route passes
+            False and labels speakers in a background thread after saving.
         language: Force language (e.g., "en"); None auto-detects
     """
     transcript = transcribe_with_whisper(audio_path, model=model, language=language, initial_prompt=initial_prompt)
