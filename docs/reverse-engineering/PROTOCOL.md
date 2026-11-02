@@ -259,7 +259,8 @@ A file only counts as present when `{sid}.ogg` exists, so partials and failed de
 
 Code: `app/utils/wifi_sync_worker.py` (a separate process), started by `device.py`
 `do_wifi_sync_blocking()`. The message flow below is **Confirmed** (it worked in earlier versions).
-The v2.4.0 reconnect, admission and network-restore logic has not yet run against hardware.
+The reconnect, admission and network-restore logic reworked in v2.4.0 is **Implemented**, not yet
+confirmed on hardware.
 
 ### 8.1 Flow
 
