@@ -281,7 +281,7 @@ All `BUG` and `LATENT` P0/P1 findings. Goal: stop wrong behavior under realistic
 - **File:** `.env`
 - **Category / Severity:** SECURITY / P0
 - **Description:** `.env` (gitignored, never committed per audit) contains a live GitHub personal access token, a live Apple app-specific password, and an App Store Connect API key. Live credentials on disk; if the machine is shared or backed up to an unencrypted location, they're leaked. Comment also references the deleted Electron `npm run publish` flow.
-- **Fix:** (1) Verify never committed: `git log --all -S 'github_pat_11A525FRI' && git log --all -S 'zrsc-jwno-lpmg-yhxo'` should both be empty. (2) Rotate both credentials regardless. (3) Update the comment to reference `cargo tauri build`. (4) Add `.env.example` with placeholder values (covered in F-bd-011). (5) Document in `RELEASING.md` that these tokens live in `.env` only, never in code.
+- **Fix:** (1) Verify never committed: `git log --all -S 'github_pat_[REDACTED]' && git log --all -S '[REDACTED-apple-app-specific-password]'` should both be empty. (2) Rotate both credentials regardless. (3) Update the comment to reference `cargo tauri build`. (4) Add `.env.example` with placeholder values (covered in F-bd-011). (5) Document in `RELEASING.md` that these tokens live in `.env` only, never in code.
 - **Effort:** S
 - **Verification:** `git log --all -S '<token-prefix>'` returns no commits. New tokens issued. `.env.example` exists.
 
