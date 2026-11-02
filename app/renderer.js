@@ -911,7 +911,7 @@ window.plaud.onSystemWake(async () => {
               toast(`${check.new_files} new recording(s), syncing...`, 'info');
               const gen = _claimSync('ble');
               try {
-                const r = await window.plaud.sync();
+                const r = await window.plaud.sync({ background: true });
                 if (!isDeviceBusyResponse(r) && !r.error) {
                   await loadRecordings();
                   toast('Sync complete', 'success');
@@ -1241,7 +1241,7 @@ function _startBgPoll() {
         dom.progressBar.classList.add('indeterminate');
         const syncGen = _claimSync('ble');
         try {
-          const result = await window.plaud.sync();
+          const result = await window.plaud.sync({ background: true });
           if (!result.error && !isDeviceBusyResponse(result)) {
             toastPartialSync(result);
             const newFiles = (result.files || []).filter((f) => f.status === 'new');
