@@ -223,6 +223,14 @@ def test_complete_file_accepted_and_auto_deleted(env, app_key):
     assert env["uploads"] == [("101", str(env["rec"] / "101.ogg"))]
 
 
+def test_redownload_backup_hook_only_after_ogg_written(env, app_key, monkeypatch):
+    calls = []
+    monkeypatch.setattr(dev, "_finalize_redownload_backup", lambda sid: calls.append(sid))
+    good, bad = make_plaud_file(app_key), make_plaud_file(app_key)
+    run_sync(FakeDevice({111: good, 112: bad}, {112: "truncate_end"}), [(111, len(good)), (112, len(bad))])
+    assert calls == [111]
+
+
 def test_complete_with_end_packet_but_no_tail_is_accepted(env, app_key):
     data = make_plaud_file(app_key)
     device = FakeDevice({102: data}, {102: "end_only"})
