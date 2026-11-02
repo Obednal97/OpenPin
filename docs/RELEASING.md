@@ -1,133 +1,157 @@
-# Plaud V2 — Release & Auto-Update Guide
+# Releasing
 
-## How Auto-Updates Work
+How to build, sign, notarise and publish a release, and how the update channel works. Tested
+with v2.4.0 on a headless Mac mini.
 
-The Rust shell (`src-tauri/src/commands/mod.rs`, "Auto-Updater") never talks to GitHub. It talks to
-the **`plaud-v2-updates` Cloudflare Worker** (`infra/update-worker/`,
-`https://plaud-v2-updates.leave-hacker-feedback.workers.dev`, the `WORKER_BASE` constant). The
-Worker holds the GitHub token as a secret, so **the app ships no token** and the token can be
-rotated without a release.
+> **Operational status (2 November 2026)** — delete this box once it's resolved.
+>
+> - The fine-grained token the Worker used (`GH_TOKEN`) was **revoked on 2026-11-02**. Until a new
+>   one is set, `/v1/latest`, `/v1/download` and `/v1/report` fail once the Worker's 5-minute
+>   cache expires, so no install can update or send reports. Create a new token and set it as in
+>   [Rotating the Worker's GitHub token](#rotating-the-workers-github-token).
+> - The GitHub token embedded in **v2.3.0 and older** has been revoked too. Those builds can't
+>   update themselves any more: install the latest DMG by hand.
 
-### Update flow (from the user's perspective)
+## Contents
 
-1. App launches, waits 5 seconds, then asks the Worker (`GET /v1/latest`) for the latest published release.
-2. If it's newer, the DMG is downloaded silently in the background.
-3. A blue banner appears at the top: **"v1.2.0 ready to install" [Restart to Update] [x]**.
-4. User clicks "Restart to Update". The app quits, the new `.app` is verified and copied into place, and the app reopens.
-5. App re-checks every 4 hours while running.
-6. Users can check manually via **Settings › General › About › Check for Updates**.
+- [How updates reach users](#how-updates-reach-users)
+- [Prerequisites](#prerequisites)
+- [Release recipe](#release-recipe)
+- [Verify before publishing](#verify-before-publishing)
+- [Publish](#publish)
+- [Rotating the Worker's GitHub token](#rotating-the-workers-github-token)
+- [Crash reports](#crash-reports)
+- [Troubleshooting](#troubleshooting)
 
-### What the updater checks
+## How updates reach users
 
-- **Version:** `major.minor.patch` compared numerically. Anything after `-` or `+` is ignored, so
-  `2.4.0-beta` is never treated as newer than `2.4.0`. Drafts and pre-releases are never offered
-  (GitHub's `releases/latest`).
-- **Server errors** (any non-2xx from the Worker) show as an update error, never as "up to date".
-- **Download:** `GET /v1/download/<tag>/<asset>` answers 302 to GitHub's short-lived signed URL.
-  The DMG is written to `~/Library/Application Support/com.plaud.v2/updates/<name>.part` (15 s
-  connect timeout, 60 s idle timeout, no overall limit), checked against the asset's **size** and,
-  if the release has a `<dmg>.sha256` asset, its **SHA-256**, then renamed into place.
-- **Install** (detached `bash` helper, log in `~/Library/Logs/Plaud V2/update.log`):
-  1. Waits for the old app's PID to exit (up to 30 s).
-  2. Mounts the DMG on a private temp mount point (`hdiutil attach -mountpoint`).
-  3. Refuses the update unless the bundle has `CFBundleIdentifier` `com.plaud.v2`, the expected
-     `CFBundleShortVersionString`, passes `codesign --verify --deep --strict`, is signed by team
-     **4SN93PWF7Z**, and passes Gatekeeper (`spctl -a -t exec`).
-  4. Moves the old app aside (aborts if that fails), copies the new one with `ditto`, re-verifies,
-     then deletes the old copy. On any failure it restores the old app.
-  5. Strips quarantine and relaunches. On abort it relaunches the old app.
-- **App Translocation:** if the app is running from a randomised `/AppTranslocation/` path (opened
-  straight from Downloads or the DMG), the updater refuses and asks the user to move Plaud V2 to
-  Applications.
+The app never talks to GitHub and ships no token. The updater in `src-tauri/src/commands/mod.rs`
+talks to the **`plaud-v2-updates` Cloudflare Worker** (`infra/update-worker/`,
+`https://plaud-v2-updates.leave-hacker-feedback.workers.dev`, the `WORKER_BASE` constant), which
+holds a GitHub token as a secret. The token can be rotated without a release.
 
-Because every build is signed with the same Developer ID, macOS keeps Bluetooth and other
-permissions across updates.
+1. 5 seconds after launch, then every 4 hours, the app calls `GET /v1/latest`: the latest
+   **published** release (no drafts or pre-releases), cached for 5 minutes by the Worker.
+2. Versions compare as `major.minor.patch`; anything after `-` or `+` is ignored, so
+   `2.4.0-beta` is never newer than `2.4.0`. Any non-2xx answer is shown as an update error, never
+   as "up to date".
+3. If it's newer, the app downloads `GET /v1/download/<tag>/<asset>` (a 302 to a short-lived GitHub
+   URL) to `~/Library/Application Support/com.plaud.v2/updates/<name>.part`, with a 15 s connect
+   timeout and a 60 s idle timeout. It checks the **size** and, if the release has a
+   `<dmg>.sha256` asset, the **SHA-256**, then renames the file into place.
+4. A banner offers **Restart to Update**. A detached helper script (log:
+   `~/Library/Logs/Plaud V2/update.log`):
+   1. waits up to 30 s for the app to exit;
+   2. mounts the DMG on a private mount point;
+   3. refuses the update unless the bundle is `com.plaud.v2`, has the expected version, passes
+      `codesign --verify --deep --strict`, is signed by team **4SN93PWF7Z**, and passes Gatekeeper
+      (`spctl -a -t exec`);
+   4. moves the old app aside, copies the new one with `ditto`, checks it again and deletes the
+      old copy, restoring the old app on any failure;
+   5. removes the quarantine flag and relaunches.
+5. If the app runs from a randomised `/AppTranslocation/` path (opened from Downloads or the DMG),
+   the updater refuses and asks the user to move it to Applications.
 
-### What gets published to GitHub Releases
+Every build is signed with the same Developer ID, so macOS keeps Bluetooth and other permissions
+across updates.
 
-| File (as GitHub names it) | Purpose |
-|------|---------|
-| `Plaud.V2_{version}_aarch64.dmg` | First-time installs (drag to Applications) and the auto-update payload |
-| `Plaud.V2_{version}_aarch64.dmg.sha256` | `shasum -a 256` of the DMG. The Worker serves it as `asset.sha256` and the updater verifies the download against it |
+### What a release contains
 
-GitHub replaces spaces in uploaded file names with dots (`Plaud V2_…` becomes `Plaud.V2_…`). The
-Worker copes with either name inside the `.sha256` file. Releases without a `.sha256` still
-update, but only the size is checked.
+| Asset (as GitHub names it) | Purpose |
+|---|---|
+| `Plaud.V2_<version>_aarch64.dmg` | First installs and the update payload |
+| `Plaud.V2_<version>_aarch64.dmg.sha256` | `shasum -a 256` of the DMG; the updater checks the download against it |
 
----
+GitHub turns spaces in uploaded file names into dots (`Plaud V2_…` becomes `Plaud.V2_…`), so the
+recipe renames the DMG before uploading. A release without a `.sha256` still updates, but only the
+size is checked: always upload it.
 
-## Creating a Release
+## Prerequisites
 
-### Prerequisites (this Mac, "ai-mini")
+- **Apple Silicon Mac** with Xcode command-line tools, Node (for `npx`) and Rust via rustup.
+- **Developer ID Application** certificate for team 4SN93PWF7Z
+  (`Developer ID Application: Oliver Bednal (4SN93PWF7Z)`) in an unlocked keychain.
+- An **App Store Connect API key** (team key, `.p8` file) for notarisation. The release needs three
+  values: key ID, issuer ID, and the path to the `.p8`. Notarisation uses only this key; there is
+  no Apple ID password or app-specific password in the process any more.
+- The RSA keys in `keys/` (gitignored; see [DEVELOPMENT.md](DEVELOPMENT.md#keys)). The build fails
+  without them.
+- `gh`, signed in with permission to create releases on `Obednal97/Plaud-V2`.
+- `jq` (used in the checks below).
 
-- Rust via rustup: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`.
-- Signing identity **Developer ID Application: Oliver Bednal (4SN93PWF7Z)** in
-  `~/Library/Keychains/signing.keychain-db`. Unlock it first:
-  `security unlock-keychain -p "$(cat ~/.secrets/signing-keychain.password)" ~/Library/Keychains/signing.keychain-db`
-- Notarisation uses the App Store Connect **API key** (team 4SN93PWF7Z), not an Apple ID password.
-  IDs are in `~/.appstoreconnect/iqralock.env` (`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_PATH`). The
-  `.p8` lives only in 1Password and is mounted on a RAM disk: run `apple-keys-mount` if the key
-  is missing.
-- `gh` signed in as Obednal97 (for `gh release create`).
+Keep all of these outside the repo. Nothing in the repo or the app holds a signing, notarisation
+or GitHub credential.
 
-### Headless release recipe
+**On the owner's Mac mini** (headless): Rust is at `/opt/homebrew/opt/rustup/bin`; the
+certificate is in a dedicated signing keychain that has to be unlocked first; the API key's IDs
+and `.p8` path are in `~/.appstoreconnect/iqralock.env` (`ASC_KEY_ID`, `ASC_ISSUER_ID`,
+`ASC_KEY_PATH`) and the `.p8` is mounted from 1Password by `apple-keys-mount`. See that Mac's
+own notes for the unlock command.
+
+## Release recipe
 
 ```bash
-cd ~/projects/plaud-v2
-export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-V=2.4.0   # the new version
+cd plaud-v2                   # repo root, on master, clean, tests passing
+V=2.4.1                       # the new version
 
-# 1. Bump the version in ALL THREE manifests (they must match):
-#    src-tauri/tauri.conf.json  "version": "$V"
-#    src-tauri/Cargo.toml       version = "$V"   (then `cd src-tauri && cargo check` to refresh Cargo.lock)
-#    pyproject.toml             version = "$V"
+# 1. Bump the version in all three manifests (they must match):
+#      src-tauri/tauri.conf.json   "version": "$V"
+#      src-tauri/Cargo.toml        version = "$V"   (then: cd src-tauri && cargo check && cd ..)
+#      pyproject.toml              version = "$V"
 git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock pyproject.toml
 git commit -m "Bump v$V"
-git tag "v$V" && git push && git push --tags
+git tag "v$V"
+git push origin master "v$V"
 
-# 2. Signing + notarisation environment
-security unlock-keychain -p "$(cat ~/.secrets/signing-keychain.password)" ~/Library/Keychains/signing.keychain-db
-apple-keys-mount
-set -a; . ~/.appstoreconnect/iqralock.env; set +a
+# 2. Signing and notarisation environment (values from wherever you keep them)
 export APPLE_SIGNING_IDENTITY="Developer ID Application: Oliver Bednal (4SN93PWF7Z)"
-export APPLE_API_KEY="$ASC_KEY_ID" APPLE_API_ISSUER="$ASC_ISSUER_ID" APPLE_API_KEY_PATH="$ASC_KEY_PATH"
+export APPLE_API_KEY="<key id>" APPLE_API_ISSUER="<issuer id>" APPLE_API_KEY_PATH="/path/to/AuthKey_<key id>.p8"
+#    On the owner's Mac mini, after unlocking the signing keychain and running apple-keys-mount:
+#    set -a; . ~/.appstoreconnect/iqralock.env; set +a
+#    export APPLE_API_KEY="$ASC_KEY_ID" APPLE_API_ISSUER="$ASC_ISSUER_ID" APPLE_API_KEY_PATH="$ASC_KEY_PATH"
 
-# 3. Build, sign and notarise the .app, then build the DMG.
-#    Use the @tauri-apps/cli minor version that matches the `tauri` crate in src-tauri/Cargo.lock
-#    (e.g. tauri 2.12.5 → @tauri-apps/cli@2.12).
+# 3. Build: Tauri builds, signs and notarises the .app, then builds the DMG.
+#    Use the @tauri-apps/cli minor that matches the tauri crate in Cargo.lock (2.12.x -> 2.12).
+#    CI=true stops the DMG script from driving Finder, which fails on a headless Mac.
 TAURI_MINOR=$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^version = "([0-9]+\.[0-9]+)\..*/\1/p')
-npx --yes "@tauri-apps/cli@$TAURI_MINOR" build
-```
+CI=true npx --yes "@tauri-apps/cli@$TAURI_MINOR" build
 
-**If `bundle_dmg.sh` fails** (on a headless Mac the Finder AppleScript that lays out the DMG
-window can't run), the `.app` is already built, signed and notarised in
-`src-tauri/target/release/bundle/macos/`. Re-run the bundler script with `--skip-jenkins`, which
-skips the Finder step:
-
-```bash
-cd src-tauri/target/release/bundle/dmg
-# Add --skip-jenkins in front of the exact arguments the failed build passed
-# (`npx --yes "@tauri-apps/cli@$TAURI_MINOR" build --verbose` prints the bundle_dmg.sh command line):
-./bundle_dmg.sh --skip-jenkins <same arguments as the failed run>
-cd -
-```
-
-Then sign, notarise and staple **the DMG** itself:
-
-```bash
+# 4. Sign, notarise and staple the DMG itself (Tauri only notarises the .app inside it).
 DMG="src-tauri/target/release/bundle/dmg/Plaud V2_${V}_aarch64.dmg"
 codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
 xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" \
   --issuer "$APPLE_API_ISSUER" --wait
 xcrun stapler staple "$DMG"
-spctl -a -t open --context context:primary-signature -vv "$DMG"   # expect: accepted, Notarized Developer ID
 ```
 
-### Publish
+If `bundle_dmg.sh` still fails, the `.app` is already built, signed and notarised in
+`src-tauri/target/release/bundle/macos/`. Run the build with `--verbose` to see the
+`bundle_dmg.sh` command line, then re-run that script from `src-tauri/target/release/bundle/dmg/`
+with `--skip-jenkins` added in front of the same arguments.
+
+## Verify before publishing
 
 ```bash
-# Name the files the way GitHub will, then write the checksum next to the DMG.
-OUT=/tmp/plaud-release-$V && mkdir -p "$OUT"
+APP="src-tauri/target/release/bundle/macos/Plaud V2.app"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign -dv "$APP" 2>&1 | grep -E 'TeamIdentifier=4SN93PWF7Z|flags=.*runtime'   # team + hardened runtime
+spctl -a -t exec -vv "$APP"                                          # accepted, Notarized Developer ID
+xcrun stapler validate "$APP"
+spctl -a -t open --context context:primary-signature -vv "$DMG"      # accepted, Notarized Developer ID
+xcrun stapler validate "$DMG"
+plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist"   # = $V
+```
+
+Then open the DMG, drag the app to Applications on a test Mac (or over an older install) and check
+it starts, shows the new version in **Settings › General › About**, and connects to the device.
+
+## Publish
+
+Write the release notes to `release-notes.md` (user-facing: what changed and why it matters),
+then:
+
+```bash
+OUT="$(mktemp -d)"
 cp "$DMG" "$OUT/Plaud.V2_${V}_aarch64.dmg"
 ( cd "$OUT" && shasum -a 256 "Plaud.V2_${V}_aarch64.dmg" > "Plaud.V2_${V}_aarch64.dmg.sha256" )
 
@@ -136,131 +160,76 @@ gh release create "v$V" \
   "$OUT/Plaud.V2_${V}_aarch64.dmg.sha256" \
   --title "v$V" --notes-file release-notes.md
 
-# Check what the app will see (the Worker caches /v1/latest for up to 5 minutes):
-curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest | jq '{version, asset}'
+# What installs will see (allow up to 5 minutes for the Worker's cache):
+W=https://plaud-v2-updates.leave-hacker-feedback.workers.dev
+curl -s "$W/v1/latest" | jq '{version, asset}'                   # version = $V, sha256 not null
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$(curl -s "$W/v1/latest" | jq -r .download_url)"   # 302
 ```
 
-Running copies pick the update up within 4 hours (or straight away via **Check for Updates**).
+Running copies pick the update up within 4 hours, or straight away with **Check for Updates**.
+Check an older install updates and that `update.log` ends cleanly.
 
----
+## Rotating the Worker's GitHub token
 
-## Code Signing & Notarization
+The only GitHub token in the system is the Worker secret `GH_TOKEN`. Rotate it any time; no app
+release is needed.
 
-The app is signed with a Developer ID Application certificate and notarised by Apple.
+1. GitHub › Settings › Developer settings › Fine-grained tokens › **Generate new token**, for
+   repository **Obednal97/Plaud-V2** only, with **Contents: Read-only** and **Issues: Read and
+   write** (Metadata: Read-only is added automatically).
+2. Set it (wrangler reads it from the prompt, so it stays out of shell history):
 
-### What this means for users
+   ```bash
+   cd infra/update-worker
+   # Cloudflare credentials in the environment: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+   npx --yes wrangler@4 secret put GH_TOKEN
+   ```
 
-- **Double-click to install.** No Gatekeeper warnings, no right-click › Open.
-- **Permissions persist.** Bluetooth and other permissions survive updates because the signing identity stays the same.
-- **Trusted by macOS.** Apple has scanned and approved the binary.
+3. Check: `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest | jq .version`
+   returns the latest version (wait out the 5-minute cache if it was failing before).
+4. Revoke the old token on GitHub.
 
-### Configuration
+Deploying the Worker, its endpoints, limits and smoke tests:
+[infra/update-worker/README.md](../infra/update-worker/README.md).
 
-- `src-tauri/tauri.conf.json` → `bundle.macOS` (signing identity, provider short name)
-- `src-tauri/Entitlements.plist` (entitlements)
-- `src-tauri/Info.plist` (bundle metadata)
-
-### Entitlements (`src-tauri/Entitlements.plist`)
-
-| Entitlement | Reason |
-|-------------|--------|
-| `device.bluetooth` | BLE communication with Plaud device |
-| `network.client` | HTTP API calls, cloud sync |
-| `files.user-selected.read-write` | Audio export to Downloads |
-
-(Tauri does not need JIT or unsigned-memory entitlements.)
-
-### If notarisation is slow or failing
-
-- Subsequent submissions typically take 2–5 minutes.
-- `xcrun notarytool log <submission-id> --key … --key-id … --issuer …` shows why a submission was rejected.
-- If Apple's timestamp servers are down, codesign fails: retry later.
-
----
-
-## GitHub Tokens
-
-The repo is **private**. No token ships in the app.
-
-### Publish token (this Mac only)
-
-- `gh` CLI, signed in as Obednal97. Used for `gh release create`.
-
-### `GH_TOKEN` Worker secret (server-side only)
-
-- **What:** fine-grained PAT scoped to **Obednal97/Plaud-V2** only: **Contents: Read-only**,
-  **Issues: Read and write** (Metadata: Read-only is automatic).
-- **Used by:** the `plaud-v2-updates` Worker for `/v1/latest`, `/v1/download` and `/v1/report`.
-- **Lives:** only as a Cloudflare Worker secret. Never in the repo or the app.
-
-### Rotating the token (no app release needed)
-
-1. Create a new fine-grained PAT with the scopes above.
-2. `cd infra/update-worker && source ~/.secrets/cloudflare.env && npx --yes wrangler@3 secret put GH_TOKEN`
-   (paste the token at the prompt).
-3. `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest` must still return the latest release.
-4. Revoke the old token on GitHub (Settings › Developer settings › Fine-grained tokens).
-
-### Retiring the token that shipped in v2.3.0 and earlier
-
-Builds up to and including v2.3.0 embed a PAT (XOR-obfuscated in the binary) and call GitHub
-directly. Revoking it stops those builds from updating, so:
-
-1. Ship a release with the Worker-based updater and wait until every install has updated to it.
-2. Then rotate as above (new PAT into the Worker, revoke the old one). Any install still on
-   v2.3.0 or older after that has to be updated by hand from the latest release DMG.
-
----
-
-## First-Time Install for Friends
-
-1. Go to the [latest GitHub Release](https://github.com/Obednal97/Plaud-V2/releases/latest).
-2. Download `Plaud.V2_{version}_aarch64.dmg`.
-3. Open the DMG, drag Plaud V2 to **Applications** (running it straight from the DMG or Downloads blocks self-updates).
-4. Double-click to open. It's signed and notarised, so it just opens.
-5. Grant Bluetooth permission when prompted (one time only).
-6. All future updates happen automatically through the app.
-
----
-
-## Auto Bug Reporter
+## Crash reports
 
 Unhandled errors are reported to GitHub Issues through the Worker (`POST /v1/report`).
 
 - **Opt-out:** Settings › General › System › **Send anonymous crash reports** (on by default,
-  stored as `crash_reports_enabled` in the backend config). When off, nothing is sent, Rust
-  panics included; errors still go to the local diagnostics log.
-- **Dedupe:** the fingerprint is a SHA-256 (first 16 hex chars) of the normalised message (long
-  hex runs → `HEX`, digits → `N`). The Worker comments on the open `auto-bug` issue carrying
-  `<!-- fp:<fingerprint> -->`, or creates one. The app also sends each fingerprint once per session.
-- **What's sent:** error message (≤ 2,000 chars), context, the last 15 traceback lines, app and
-  macOS version, architecture, RAM, Python and package versions, and an anonymous device ID.
-- **Scrubbed before sending:** the home folder becomes `~`, any `/Users/<name>` becomes `/Users/~`,
-  Plaud serial numbers (`[SN: …]` and bare 16-hex-digit serials) and BLE peripheral UUIDs are
-  replaced by 8-hex-char tags salted with this Mac's hardware UUID (which is never sent).
-  Recording, transcript and summary text are never part of a report.
-- **Filtered locally:** `AbortError`s and anything fired while the backend health is `down` go to
-  the local log only.
-- **Rate limit:** the Worker accepts 20 reports per IP per hour.
-- **User reports** (the in-app "Report a bug" form) go the same way with `kind: "user"` and label
-  `user-report`. They are sent even if crash reports are off, because the user asked.
-- Local diagnostics log: `~/Library/Application Support/com.plaud.v2/diagnostics.log` (rotates at 1 MB to `.log.1`).
-- Never crashes the app: all reporting is fire-and-forget.
-
----
+  `crash_reports_enabled` in the config). Off means nothing is sent, Rust panics included; errors
+  still go to the local diagnostics log.
+- **What's sent:** the error message (up to 1,000 characters), context, the last 15 traceback
+  lines, app and macOS version, architecture, RAM, Python and package versions, and an anonymous
+  device ID (8 hex characters of a hash of the Mac's hardware UUID).
+- **Scrubbed first:** the home folder becomes `~`, any `/Users/<name>` becomes `/Users/~`, device
+  serials and BLE UUIDs become salted 8-character tags, and `report_scrub.rs` removes URL query
+  strings, Notion and Google Drive paths, bearer tokens, `key=value` secrets, prefixed API keys,
+  e-mail addresses and long hex or base64 tokens. Recording, transcript and summary text is never
+  part of a report.
+- **Dedupe:** the fingerprint is a SHA-256 (first 16 hex characters) of the normalised message.
+  The Worker comments on the open `auto-bug` issue it created for that fingerprint, or opens one.
+  The app sends each fingerprint once per session.
+- **Not sent:** `AbortError`s, and anything while the backend is down. Both go to
+  `~/Library/Application Support/com.plaud.v2/diagnostics.log` (rotates at 1 MB).
+- **User reports** (the **Report a bug** button) are sent with `kind: "user"` and label
+  `user-report`, even with crash reports off.
+- **Limits** are enforced by the Worker (per IP and global, per minute, hour and day); see its
+  README.
+- Reporting is fire-and-forget and never crashes the app.
 
 ## Troubleshooting
 
 | Problem | Cause | Fix |
-|---------|-------|-----|
-| "Update server returned HTTP 502" | Worker can't reach GitHub, usually an expired or revoked `GH_TOKEN` | Rotate the Worker secret (see above). No app release needed |
-| Update check fails for everyone | Worker down or renamed | `cd infra/update-worker && npx --yes wrangler@3 deploy`; check `npx --yes wrangler@3 tail` |
-| "Downloaded update failed its checksum" | `.sha256` asset doesn't match the DMG | Regenerate the `.sha256` from the uploaded DMG and re-upload it (`gh release upload v$V … --clobber`) |
-| Update downloads but doesn't install | Verification or copy failed | Read `~/Library/Logs/Plaud V2/update.log`: every step and the reason for any abort is there |
-| "Plaud V2 is running from a temporary location…" | App Translocation (run from Downloads/DMG) | Move Plaud V2 to Applications and open it from there |
-| "Restart to Update" can't replace the app | App Management permission (macOS Ventura+) or Applications not writable | Approve in System Settings › Privacy & Security › App Management; check the update log |
-| Notarisation fails | API key not mounted or wrong IDs | `apple-keys-mount`; check `~/.appstoreconnect/iqralock.env` |
-| `bundle_dmg.sh` fails | Finder AppleScript can't run headless | Re-run it with `--skip-jenkins`, then sign/notarise/staple the DMG (see recipe) |
-| Codesign fails repeatedly | Apple timestamp server rate limiting, or keychain locked | Unlock `signing.keychain-db`; wait a few minutes and retry |
-| Python server won't start from Dock | PATH doesn't include Homebrew | Fixed: the Rust shell adds common Python paths to PATH before spawning |
-| FFmpeg not found at runtime | First-launch download failed | App auto-retries on next launch; users can `brew install ffmpeg` as a manual fallback (`utils/system.py` checks `shutil.which("ffmpeg")` first) |
+|---|---|---|
+| "Update server returned HTTP 502" | The Worker can't reach GitHub: usually an expired or revoked `GH_TOKEN` | Rotate the token (above) |
+| Update check fails for everyone | Worker down or not deployed | `cd infra/update-worker && npx --yes wrangler@4 deploy`; watch `npx --yes wrangler@4 tail` |
+| "Downloaded update failed its checksum" | The `.sha256` doesn't match the DMG | Regenerate it from the uploaded DMG and `gh release upload v$V <file> --clobber` |
+| Update downloads but doesn't install | A check or the copy failed | Read `~/Library/Logs/Plaud V2/update.log`; every step and the reason for an abort is there |
+| "Plaud V2 is running from a temporary location…" | App Translocation | Move the app to Applications and open it from there |
+| "Restart to Update" can't replace the app | App Management permission (macOS 13+) or Applications not writable | Allow it in System Settings › Privacy & Security › App Management |
+| `glob pattern ../keys/* path not found` | `keys/` missing | Copy the RSA keys into `keys/` |
+| Notarisation fails | Wrong or missing API key values, or the `.p8` isn't readable | Check the three `APPLE_API_*` variables; `xcrun notarytool log <submission-id> --key … --key-id … --issuer …` shows Apple's reason |
+| `bundle_dmg.sh` fails | Finder scripting can't run headless | Build with `CI=true`, or re-run the script with `--skip-jenkins` (see the recipe) |
+| codesign fails | Keychain locked, or Apple's timestamp server busy | Unlock the signing keychain; retry in a few minutes |
+| Users stuck on the splash after an update | The venv couldn't be re-synced | They click **Retry**; if it keeps failing, delete `~/Library/Application Support/com.plaud.v2/venv` and reopen. `app.log` has the pip output |

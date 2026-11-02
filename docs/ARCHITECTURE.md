@@ -1,205 +1,310 @@
-# Plaud V2 — Architecture
+# Architecture
+
+How Plaud V2 is put together, as of v2.4.0. For running and testing it see
+[DEVELOPMENT.md](DEVELOPMENT.md); for shipping it see [RELEASING.md](RELEASING.md).
 
 ## Overview
 
-Tauri 2 desktop app with a Python Flask backend. The Tauri Rust shell spawns Python as a child process on `localhost:5123`. The renderer is a vanilla-JS frontend served from a WebKit window; it communicates with the backend via HTTP and with the Rust shell via Tauri commands.
+Three parts in one macOS app bundle:
+
+1. **Rust shell** (`src-tauri/`, Tauri 2.12). Owns the window, tray, dock icon, login item,
+   sleep/wake detection, logging, the updater and the crash reporter. It sets up and supervises
+   the Python backend.
+2. **Python backend** (`app/` and `src/`, Flask). Does the real work: Bluetooth, WiFi sync,
+   decryption, transcription, summaries, Notion, Google Drive, Plaud Cloud. Listens on
+   `127.0.0.1`, from port 5123 up.
+3. **Frontend** (`app/index.html`, `app/*.js`, `app/ui/*.js`, `app/css/`). Plain HTML, CSS and
+   JavaScript in the system WebKit view, no framework or bundler. It calls the backend over HTTP
+   and the shell through Tauri commands.
 
 ```
-┌──────────────────────────────────────────────┐
-│  Tauri Rust shell (src-tauri/src/lib.rs)     │
-│  - Spawns Python subprocess (python.rs)      │
-│  - Theme sync (light/dark/auto)              │
-│  - OAuth URL scheme (plaud-v2://)            │
-│  - Tray icon, login items, dock visibility   │
-│  - Auto-updates via GitHub Releases API      │
-│  - Bug reporter + diagnostics log            │
-│  - Code signed + notarized (Developer ID)    │
-├──────────────────────────────────────────────┤
-│  Renderer (index.html + JS modules)          │
-│  - ui/utils.js       → shared state, DOM     │
-│  - ui/recordings.js  → list, search, delete  │
-│  - ui/transcript.js  → view, player, crop,   │
-│                         editable segments     │
-│  - ui/settings.js    → all settings tabs     │
-│  - ui/health-gate.js → backend-ready splash  │
-│  - renderer.js       → orchestrator + init   │
-├──────────────────────────────────────────────┤
-│  tauri-bridge.js                             │
-│  - window.plaud surface (Tauri invoke + HTTP)│
-└───────────────┬──────────────────────────────┘
-                │ HTTP (localhost:5123)
-┌───────────────▼──────────────────────────────┐
-│  Flask API (api_server.py)                   │
-│                                              │
-│  routes/          state/         providers/  │
-│  ├─ core.py       ├─ device.py   ├─ summarize│
-│  ├─ device.py     ├─ cloud.py    ├─ transcribe│
-│  ├─ cloud.py      └─ notion.py   └─ validate │
-│  ├─ notion.py                                │
-│  ├─ recordings.py  utils/                    │
-│  ├─ transcribe.py  ├─ config.py              │
-│  └─ settings.py    ├─ constants.py           │
-│                    ├─ audio.py               │
-│                    ├─ webhooks.py             │
-│                    ├─ system.py               │
-│                    ├─ wifi_sync.py            │
-│                    └─ wifi_sync_worker.py     │
-└──────────────────────────────────────────────┘
+┌─────────────────────── Plaud V2.app ───────────────────────┐
+│ Frontend (WKWebView, tauri://localhost)                    │
+│   tauri-bridge.js → window.plaud.*                         │
+│      │ invoke()/events                 │ fetch() + token   │
+│      ▼                                 ▼                   │
+│ Rust shell (src-tauri/src)        Python backend (Flask)   │
+│   python.rs: runtime, venv,  ───► app/api_server.py        │
+│   spawn, health, restarts         127.0.0.1:5123+          │
+│   commands/: updater, reports                              │
+└──────┬───────────────────────────────────┬─────────────────┘
+       │ HTTPS                             │ BLE, WiFi hotspot, HTTPS
+       ▼                                   ▼
+ plaud-v2-updates Worker          NotePin S, AI providers, Notion,
+ (infra/update-worker) → GitHub   Google Drive, Plaud API, webhooks
 ```
+
+## Module map
+
+### Rust shell (`src-tauri/src/`)
+
+| File | Responsibility |
+|---|---|
+| `lib.rs` | Tauri builder: plugins (opener, single-instance, autostart, notification, dialog), tray menu, themed dock icon and system-theme watcher, hide-on-close, the update-check loop, IPC command list, exit handling |
+| `lifecycle.rs` | Starts the backend on a background thread; startup status for the splash (`get_startup_status`, `retry_startup`); shutdown (BLE disconnect, then SIGTERM/SIGKILL) once, off the main thread; SIGTERM/SIGINT handling; the panic hook |
+| `python.rs` | Managed Python runtime and venv, lockfiles, port choice, per-launch API token, spawning `api_server.py`, `/health` polling, crash restarts (up to 3), orphan cleanup via a PID file |
+| `power.rs` | Sleep/wake: `NSWorkspace` notifications, plus a wall-clock fallback; sends one `system-wake` event per wake |
+| `logging.rs` | `~/Library/Logs/Plaud V2/app.log` (rotates at 1 MB, one old file kept). Backend stdout/stderr lands here too. `RUST_LOG` overrides levels |
+| `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, the bug reporter and the diagnostics log |
+| `commands/report_scrub.rs` | Removes secrets and personal data from bug reports |
+| `commands/sha256.rs` | SHA-256 for update checksums and report IDs (no hashing crate in `Cargo.toml`) |
+
+### Python backend
+
+| Path | Responsibility |
+|---|---|
+| `app/api_server.py` | Flask app, request security (below), blueprint registration, startup housekeeping (partial files, WiFi recovery, Notion queue), port binding |
+| `app/routes/` | HTTP endpoints, one blueprint per area: `core` (`/health`, `/audio`), `device` (`/device/*`: scan, connect, sync, WiFi sync, record, find-my, depair), `recordings` (list, tag, rename, crop, move, delete, re-download, transcripts), `transcribe` (`/transcribe`, `/summarize`, `/validate-key`), `notion` (`/notion/*`), `gdrive` (`/gdrive/*`), `cloud` (`/cloud/*`), `settings` |
+| `app/state/` | Long-lived state and logic: `device.py` (BLE connection, handshake, encrypted command channel, file download, WiFi-sync orchestration), `notion.py` (Notion OAuth and MCP session), `gdrive.py` (Drive OAuth and uploads), `cloud.py` (Plaud account and cloud sync) |
+| `app/providers/` | AI: `transcribe.py` (Deepgram, Groq, OpenAI), `summarize.py` (summary cascade), `validate.py` (API key checks), `_models.py` (every model ID in one place) |
+| `app/utils/` | `config.py` (atomic, locked config), `constants.py` (paths, UUIDs, endpoints), `paths.py` (session-ID validation), `audio.py` (decryption, Ogg wrapping), `wifi_sync_worker.py` (WiFi sync subprocess), `notion_queue.py`, `trash.py`, `redownload_backup.py`, `transcript_locks.py`, `parent_watch.py`, `system.py` (on-demand pip installs, FFmpeg), `webhooks.py`, `recording_utils.py` |
+| `app/requirements/` | Hash-pinned lockfiles: `core.txt` plus the `whisper`, `diarize` and `local-summary` extras. Generated by `scripts/lock-python-deps.sh` |
+| `src/` | Older shared modules: `crypto.py` (RSA and ChaCha20 handshake helpers), `scanner.py` (BLE advertisement parsing), `transcribe.py` (local Whisper and diarization). The app also bundles `client.py`, `protocol.py`, `cloud_api.py`, `summarize.py` and `constants.py`, which only the deleted `scripts/plaud.py` used |
+
+### Frontend
+
+`index.html` loads plain scripts in this order: `tauri-bridge.js`, `ui/health-gate.js`,
+`ui/utils.js`, `ui/recordings.js`, `ui/transcript.js`, `ui/settings.js`, `ui/setup.js`,
+`renderer.js`. They share **one global scope**: two files can't declare the same top-level name
+(v2.1.5 shipped a duplicate `const` and the whole UI failed to load).
+
+| File | Responsibility |
+|---|---|
+| `tauri-bridge.js` | `window.plaud.*`: HTTP calls to the backend (with the token) and Tauri `invoke`/`listen`; error capture for the crash reporter, with a simplified copy of the Rust scrubbing rules |
+| `ui/health-gate.js` | Startup splash: polls `get_startup_status`, shows progress, errors, **Retry** and the diagnostics log |
+| `ui/utils.js` | Shared `app` state and `dom` references, formatters, toasts, Markdown rendering |
+| `ui/recordings.js` | Recording list, search, multi-select, bulk actions, delete dialog |
+| `ui/transcript.js` | Transcript and summary view, audio player, crop editor, tags |
+| `ui/settings.js` | All settings tabs |
+| `ui/setup.js` | First-run onboarding: Plaud sign-in, Bluetooth permission, scan, pair, profile |
+| `renderer.js` | Start-up, sync buttons and progress, polling, WiFi-sync UI, wake handling, updates banner |
+
+CSS lives in `app/css/` (`tokens.css` holds the design tokens; light and dark themes), imported
+by `app/styles.css`.
+
+## Startup
+
+The window is shown first; Python is set up on a background thread while the splash shows
+progress.
+
+```mermaid
+sequenceDiagram
+    participant UI as Frontend (splash)
+    participant Rust as Rust shell
+    participant Py as Python backend
+    Rust->>UI: show window
+    Rust->>Rust: background thread: kill orphan backend (server.pid)
+    Rust->>Rust: find Python: managed CPython 3.12 (download + SHA-256 check), else Homebrew/python.org 3.12
+    Rust->>Rust: venv in sync with core.txt? else pip install --require-hashes
+    Rust->>Rust: free port from 5123, random 32-byte token
+    Rust->>Py: spawn api_server.py (PLAUD_API_PORT, PLAUD_API_TOKEN, ...)
+    Py-->>Rust: stdout "PLAUD_PORT_BOUND: <port>"
+    loop until ready
+        UI->>Rust: get_startup_status
+        Rust->>Py: GET /health
+    end
+    UI->>Rust: get_api_info (URL + token)
+    UI->>Py: API calls with X-Plaud-Token
+```
+
+Details:
+
+- **Runtime.** `python.rs` downloads a pinned python-build-standalone CPython **3.12.16**
+  (`aarch64` only) into `~/Library/Application Support/com.plaud.v2/python/` and checks it against
+  a SHA-256 compiled into the app. If that fails it accepts only a CPython 3.12 from Homebrew or
+  python.org, because the lockfiles hold cp312 wheels. Intel Macs get a clear error.
+- **Venv.** `~/Library/Application Support/com.plaud.v2/venv/`, built from `core.txt` (embedded in
+  the binary and written to `.../com.plaud.v2/requirements/`). A stamp file records the
+  lockfile's SHA-256, so a release that changes `core.txt` re-syncs the venv on next launch. Each
+  launch also checks the core imports and repairs a damaged venv.
+- **Extras** (`whisper`, `diarize`, `local-summary`) are installed on first use by
+  `app/utils/system.py ensure_installed(..., extra=...)`, constrained by `core.txt`.
+- **Readiness.** The backend has 30 s to answer `/health` (120 s right after a fresh download or
+  venv sync). After that the splash shows a timeout, but polling continues and a late start still
+  becomes ready.
+- **Crashes.** The monitor restarts a crashed backend up to 3 times with the same port and token.
+  `app/utils/parent_watch.py` makes Python exit if the shell dies.
+- **Python startup** (`api_server.py __main__`): remove `*.partial` files, recover recording
+  metadata, load the Plaud token, start the Notion queue worker, bind the port (trying up to 8),
+  then run WiFi recovery in the background.
+- **Shutdown.** Tray **Quit**, Cmd+Q, logout and SIGTERM all stop the backend once: BLE
+  disconnect, then SIGTERM, then SIGKILL.
+
+Environment variables passed to Python: `PLAUD_API_PORT`, `PLAUD_API_TOKEN`,
+`PLAUD_REQUIREMENTS_DIR`, `PLAUD_PYTHON_RUNTIME`, `PLAUD_APP_VERSION`. `PLAUD_DATA_DIR`, if set in
+the environment, overrides the data folder.
+
+## Security model
+
+The backend listens on `127.0.0.1`, which any web page in any browser on the Mac can reach. Three
+checks in `app/api_server.py` keep other pages and processes out:
+
+1. **Per-launch token.** The shell generates 32 random bytes per launch and passes them to Python.
+   Every request must send them in `X-Plaud-Token`. Only `GET /audio/...` (an `<audio src>` can't
+   set headers) and `POST /device/disconnect` (sent with `sendBeacon` on reload) may use
+   `?token=` instead. `/health` and CORS preflights are exempt.
+2. **CORS.** Only `tauri://localhost`, `http://tauri.localhost` and `https://tauri.localhost` get
+   CORS headers, so other origins can't read responses or send the token header.
+3. **Host check.** Requests whose `Host` isn't `127.0.0.1` or `localhost` are refused, which
+   blocks DNS rebinding.
+
+Other rules:
+
+- **Session IDs and paths** from requests are validated (`app/utils/paths.py`) and checked to stay
+  inside the recordings folders before use. `/transcribe` only accepts files in those folders.
+- **Deletes** go to the macOS Trash (`app/utils/trash.py`), or to `.trash/` in the data folder if
+  that fails.
+- **Re-download** moves the existing files to `.redownload_backup/<id>/` first and puts them back
+  if the device no longer has the recording.
+- **Config writes** are atomic, keep a `.bak` copy, are mode `0600`, and go through
+  `update_config()` so concurrent writers don't lose each other's changes.
+- **WiFi-sync credentials** (bind token, serial signature) go to the worker on stdin, not in
+  `argv`, so `ps` can't see them.
+- **No secrets in the app or repo.** The updater and crash reporter talk to a Cloudflare Worker
+  that holds the GitHub token. See [SECURITY.md](../SECURITY.md).
+- The webview CSP (`tauri.conf.json`) only allows connections to the app itself and `127.0.0.1`.
+
+## Data locations
+
+| Path | Contents |
+|---|---|
+| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
+| `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log` |
+| `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
+| `~/.cache/whisper/`, `~/.cache/huggingface/` | Local Whisper, diarization and DistilBART models (library defaults) |
+
+`DATA_DIR` is chosen in `app/utils/constants.py`: `PLAUD_DATA_DIR` if set, else the folder above
+when packaged, else (running from a git checkout) the repo root. Users can also pick another
+recordings folder; old folders stay listed.
+
+## Device sync
+
+The protocol is documented in [reverse-engineering/PROTOCOL.md](reverse-engineering/PROTOCOL.md) and
+[reverse-engineering/COMMANDS.md](reverse-engineering/COMMANDS.md). In short:
+
+### Bluetooth (`app/state/device.py`)
+
+1. Scan with bleak and identify devices by the serial number in the manufacturer data (macOS
+   randomises BLE addresses).
+2. Send the serial-number signature, send the app's RSA public key, RSA-decrypt the device's
+   reply to get the ChaCha20-Poly1305 session key, nonce and AAD, and check it decrypts
+   `PLAUD.AI`.
+3. Send the **BIND_TOKEN** handshake (cmd 1, twice: flag 0 then 1). The token is per device and
+   comes from Plaud's API at pairing; the static APP_KEY from older notes doesn't work.
+4. Sync time, read state, storage and battery, list files.
+5. Download each new file. With the expected size and a clean end-of-file marker it's saved. A
+   clean end with a different size is kept only if it decrypts. Anything else (stall, abort,
+   disconnect, no end marker) is kept as `{id}_partial.bin` and retried next sync.
+6. Decrypt (`app/utils/audio.py`): RSA-decrypt the per-file key, XOR each 80-byte Opus frame with
+   a ChaCha20 keystream, check the result looks like Opus, wrap it in Ogg. A file that fails the
+   check raises an error instead of saving noise.
+7. Optionally delete the file from the device, only after an exact, clean download.
+
+### WiFi (`app/utils/wifi_sync_worker.py`)
+
+Used for large files (or on request). It runs as a separate process with its own BLE session,
+because the device drops crypto sessions when BLE reconnects.
+
+1. BLE handshake, then ask the device to open its hotspot.
+2. Write a restore record (`wifi_restore.json`, fsynced) before changing any network setting.
+3. Join the hotspot directly with CoreWLAN. Saved networks are left alone by default; they are
+   paused only if macOS keeps auto-joining away, and only if each can be put back exactly.
+4. The device connects to a WebSocket server the worker opens on the Mac; files are transferred
+   encrypted with the BLE session keys.
+5. Restore: rejoin the original network, re-add any paused networks in their original order,
+   forget the hotspot. The record is deleted only after a verified restore.
+
+A lock file (`wifi_sync.lock`) allows one worker at a time. If the app crashes mid-sync, the next
+launch replays the restore record. A restore that keeps failing is given up after a few tries
+(record moved to `wifi_restore.stuck.json`) and the UI says once which networks are missing.
+
+## AI pipeline
+
+### Transcription (`app/routes/transcribe.py`, `app/providers/transcribe.py`)
+
+The provider chosen in Settings goes first, then the other cloud providers that have keys:
+
+| Provider | Model | Notes |
+|---|---|---|
+| Deepgram | `nova-3` | Default. Speaker labels; custom vocabulary as keywords |
+| Groq | `whisper-large-v3` | Vocabulary and profile as the prompt |
+| OpenAI | `gpt-transcribe` | Text only, so segment times are estimated |
+| Local | openai-whisper `base`/`small`/`medium`/`turbo`/`large` | Chosen in Settings, or used when no cloud provider works |
+
+Local diarization (`src/transcribe.py`) tries the `diarize` package, then pyannote-onnx, then
+pyannote. It currently runs only when a Hugging Face token is present in `.hf_token`. The result
+is saved as `transcripts/<id>.json` plus a `.txt`; spoken tags at the start of a recording are
+detected and applied. Webhooks fire on `transcribe`.
+
+### Summaries (`app/providers/summarize.py`)
+
+All model IDs are in `app/providers/_models.py`. The order is:
+
+1. Anthropic `claude-sonnet-5-5` (or OpenRouter `anthropic/claude-sonnet-5.5` if there's no
+   Anthropic key)
+2. OpenAI `gpt-6-luna` (or OpenRouter `openai/gpt-6-luna` if there's no OpenAI key)
+3. Ollama, if running locally, with the best model already pulled (`qwen3`, `llama3.3`, ...)
+4. DistilBART (`sshleifer/distilbart-cnn-12-6`), installed on demand
+
+The provider group chosen in Settings goes first. LLMs get the transcript as `[mm:ss] Speaker:
+text` lines with the user's profile and tags as context, and return JSON with a summary and a
+title (if a provider gives none, the first sentence of the summary is used). Webhooks fire on `summarize`, and
+Notion auto-push runs if enabled.
+
+## Notion (`app/state/notion.py`, `app/routes/notion.py`, `app/utils/notion_queue.py`)
+
+- Uses Notion's **hosted MCP server** (`https://mcp.notion.com/mcp`, Streamable HTTP). There is no
+  Notion API key: the app discovers the OAuth endpoints, registers itself as a client, and runs an
+  OAuth flow with PKCE. The browser redirects to a one-shot callback server on `localhost:5124`.
+- Each recording is one page, found by its **Session ID** property (upsert), so a push can be
+  repeated safely.
+- The app writes its content between a heading (`Plaud V2 — transcript & summary`) and an end
+  marker, and only ever replaces that section. Tag and title changes update **properties only**.
+- Schema changes only add: a `Session ID` column, a `Tags` multi-select, new tag options.
+- Pushes go through a **durable queue** on disk (`.notion_queue.json`), retried with backoff,
+  paused while Notion auth is broken, with failures listed in Settings with a Retry button.
+
+Google Drive signs in with OAuth through a callback on `localhost:5125`, using the app's own
+Google OAuth client (see [SECURITY.md](../SECURITY.md)), and uploads recordings to a chosen folder.
+
+## Updates and crash reports
+
+The app has no GitHub token. It talks only to the `plaud-v2-updates` Cloudflare Worker
+(`infra/update-worker/`), which holds the token as a secret.
+
+```mermaid
+sequenceDiagram
+    participant App as Rust shell
+    participant W as plaud-v2-updates Worker
+    participant GH as GitHub (private repo)
+    App->>W: GET /v1/latest (5 s after launch, then every 4 h)
+    W->>GH: releases/latest (cached 5 min)
+    W-->>App: version, asset name/size/sha256, download_url
+    App->>W: GET /v1/download/<tag>/<asset>
+    W-->>App: 302 to a short-lived GitHub URL
+    App->>GH: download DMG, check size and SHA-256
+    Note over App: banner: Restart to Update
+    App->>App: helper script: mount DMG, check bundle ID, version,<br/>codesign, team 4SN93PWF7Z, Gatekeeper, swap, relaunch
+```
+
+Crash reports: Rust panics, renderer errors and Python tracebacks go through
+`report_error`. The message is scrubbed (home folder, serials, BLE UUIDs, keys, tokens, e-mail
+addresses, Notion/Drive links), fingerprinted, sent at most once per session, and posted to
+`POST /v1/report`, which comments on the matching open `auto-bug` issue or opens one. Reports are
+skipped when the user turned them off, for `AbortError`s, and while the backend is down; those
+still go to `diagnostics.log`.
+
+Release mechanics and the Worker's limits are in [RELEASING.md](RELEASING.md) and
+[infra/update-worker/README.md](../infra/update-worker/README.md).
 
 ## Packaging
 
-- **Tauri bundle**: `cargo tauri build` produces a signed/notarized `.dmg`. Frontend assets are staged via `scripts/prepare-frontend.sh` (called by Tauri's `beforeBuildCommand`) into `dist-tauri/`, which is the `frontendDist` Tauri serves from the bundled webview.
-- **Bundled resources** (`tauri.conf.json` `bundle.resources`): `src/` (transcription scripts), `keys/` (E2EE RSA keys), and the Python backend (`app/api_server.py`, `app/routes/`, `app/state/`, `app/providers/`, `app/utils/`).
-- **FFmpeg**: Downloaded at first use by `app/utils/system.py` into `~/Library/Application Support/com.plaud.v2/bin/ffmpeg`. Not bundled with the app — keeps the DMG small and avoids licensing complexity.
-- **Code signing**: Developer ID Application certificate, hardened runtime, entitlements at `src-tauri/Entitlements.plist` (Bluetooth, network client, user-selected file access).
-- **Notarization**: Apple notarization via Tauri's bundler. Users can double-click to install without Gatekeeper warnings.
-
-## Python Backend
-
-### Route Modules (`app/routes/`)
-
-| Module | Prefix | Routes | Purpose |
-|--------|--------|--------|---------|
-| `core.py` | `/` | 2 | Health check, audio file serving |
-| `device.py` | `/device` | 17 | BLE scan, connect, disconnect, depair, sync, WiFi sync, record |
-| `cloud.py` | `/cloud` | 12 | Plaud Cloud login, sync, upload, trash, device binding |
-| `notion.py` | `/notion` | 8 | Notion OAuth, database selection, push |
-| `recordings.py` | `/` | 9 | Recording list, tag, rename, export, crop, delete, transcript update |
-| `transcribe.py` | `/` | 3 | Transcribe, summarise, validate API keys |
-| `settings.py` | `/settings` | 2 | Get/save app settings |
-
-### State Managers (`app/state/`)
-
-Each manager owns module-level state and exposes functions to the routes.
-
-- **`device.py`** — BLE connection, APP_KEY handshake (cmd_id=1), RSA + ChaCha20-Poly1305 encrypted command channel, BLE file sync, WiFi sync orchestration. Runs an asyncio event loop in a background thread for BLE operations.
-- **`cloud.py`** — Plaud Cloud authentication (OAuth + token), recording download/upload, OGG-to-raw-Opus unwrapping for cloud upload, device binding and SN signature fetching.
-- **`notion.py`** — OAuth 2.0 PKCE flow, MCP session management, Streamable HTTP transport for Notion API.
-
-### AI Providers (`app/providers/`)
-
-- **`summarize.py`** — Cascade: Anthropic Claude Sonnet 4.6 > OpenAI GPT-5.4-mini > local DistilBART (via model.generate()). Includes profile/tag context injection.
-- **`transcribe.py`** — OpenAI Whisper API client with custom vocabulary support.
-- **`validate.py`** — Lightweight API key validation for OpenAI and Anthropic.
-
-### Utilities (`app/utils/`)
-
-- **`config.py`** — JSON config load/save from `.plaud_v2_config.json`
-- **`constants.py`** — All shared constants (BLE UUIDs, API domains, paths, Whisper models, CRC table)
-- **`audio.py`** — OGG wrapping/unwrapping, BLE file decryption (RSA + ChaCha20 XOR)
-- **`webhooks.py`** — Background webhook firing
-- **`system.py`** — Dependency auto-install, RAM info
-- **`wifi_sync.py`** — WiFi sync coordinator (hotspot enable, connect, handshake)
-- **`wifi_sync_worker.py`** — WiFi sync subprocess (BLE disconnect, hotspot connect, file transfer, internet restore)
-
-## Frontend
-
-Multi-script architecture — modules loaded via `<script>` tags in order, sharing globals through the `app` and `dom` objects defined in `ui/utils.js`.
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `ui/utils.js` | 319 | `$()`, `app` state, `dom` refs, formatters, toast, markdown renderer |
-| `ui/recordings.js` | 487 | Recording list, filtering, select mode, bulk operations, delete dialog |
-| `ui/transcript.js` | 1151 | Transcript view, audio player, audio crop editor, editable segments/summary, tag picker, transcribe/summarise actions |
-| `ui/settings.js` | 1457 | All 6 settings tabs, device manager, cloud account, Notion, AI keys |
-| `renderer.js` | 1002 | Theme toggle, main action buttons, search, init, background polling, WiFi sync UI |
-
-## CSS Design System
-
-Token-based design system with light/dark mode, split into 7 files:
-
-| File | Purpose |
-|------|---------|
-| `css/tokens.css` | Design tokens (spacing, radii, typography, colours), dark/light themes, reset |
-| `css/components.css` | Buttons, inputs, toggles, badges, toasts, checkboxes |
-| `css/layouts.css` | Header, main content, action bar, settings panel |
-| `css/recordings.css` | Search bar, select bar, recording cards |
-| `css/transcript.css` | Transcript view, audio player, audio crop editor, editable summary, tags, markdown, segments |
-| `css/settings.css` | Device manager, cloud account, Notion, AI keys, model selector, delete dialog |
-| `css/utilities.css` | Utility classes, animations, responsive breakpoints |
-
-## Config Files
-
-| File | Purpose |
-|------|---------|
-| `.plaud_v2_config.json` | App settings, API keys, recording metadata, paired devices, webhooks |
-| `.plaud_config.json` | Plaud Cloud bearer token |
-| `.notion_mcp.json` | Notion OAuth tokens and database selection |
-| `.hf_token` | HuggingFace token for diarization — stored in `~/Library/Application Support/Plaud V2/`, supplied per-user via Settings (NOT bundled in the DMG) |
-
-## Key Flows
-
-### BLE Connection & Sync
-
-1. Scan for devices (bleak, 6s, match by manufacturer data)
-2. Connect to device, wait for service discovery
-3. RSA handshake: send SN signature (65040) > receive RSA blob (65042) > decrypt session keys
-4. Establish encrypted ChaCha20-Poly1305 command channel
-5. Send APP_KEY handshake (cmd_id=1) with static APP_KEY + audioChannel + serial number
-6. Sync time (cmd_id=4) + GET_STATE (cmd_id=3) + GET_STORAGE (cmd_id=6)
-7. List files (cmd 26), download each (cmd 28), decrypt (RSA + ChaCha20 XOR), wrap as OGG
-
-### WiFi Sync
-
-1. BLE disconnect (WiFi and BLE share the same radio)
-2. Enable device hotspot via BLE command
-3. Connect Mac to Plaud WiFi hotspot
-4. TCP handshake with device (ChaCha20-Poly1305 encrypted)
-5. Transfer files over WiFi (much faster than BLE)
-6. Restore original WiFi connection (power-cycle + networksetup fallback)
-
-### Transcription
-
-1. If OpenAI key: send to Whisper API, save transcript immediately
-2. If diarization enabled: spawn background thread for pyannote, merge results when done
-3. If no OpenAI key: run local Whisper (bundled FFmpeg handles audio decoding), optionally with diarization inline
-4. Save JSON transcript + TXT formatted version
-
-### Summarisation Cascade
-
-1. Build context: user profile + recording tags
-2. Try Anthropic Claude Sonnet 4.6 (structured JSON prompt)
-3. On failure: try OpenAI GPT-5.4-mini (JSON mode)
-4. On failure: try local DistilBART (chunked, model.generate())
-5. Auto-set recording title from summary if none exists
-
-### Audio Crop
-
-1. Frontend decodes audio via Web Audio API, draws waveform on canvas
-2. User drags start/end handles to select region
-3. Preview plays selection only
-4. Save: backend uses FFmpeg `-ss`/`-to` with `-c copy` (lossless, fast)
-5. Options: overwrite original (backs up as `_uncropped.ogg`) or save as new recording
-
-## Auto-Updates
-
-Custom updater in the Rust shell (`src-tauri/src/commands/mod.rs`) using GitHub Releases API with a read-only PAT (`update_token()` at `commands/mod.rs:201`).
-
-- Checks for updates 5 s after launch, then every 4 hours (loop in `lib.rs`).
-- Downloads the DMG silently, shows banner when ready.
-- Install: detached script mounts the DMG, copies the new `.app` over the old one, relaunches.
-- Manual check available in **Settings > General > About**.
-
-## Auto Bug Reporter
-
-Unhandled errors are automatically reported as GitHub Issues (tagged `auto-bug`). Deduplicates by error fingerprint — same error creates a comment on the existing issue instead of a new one. Catches Rust panics (`panic::set_hook`), Python uncaught exceptions (relayed via the `report_error` Tauri command from the renderer), and renderer errors (`window.onerror` / unhandled rejections).
-
-Two filters keep noise low:
-
-- `AbortError` (timeouts, navigation cancellations) → suppressed from GitHub, written to a local diagnostics log at `~/Library/Application Support/com.plaud.v2/diagnostics.log`.
-- Backend-down state (the health-gate poller flips this) → suppressed from GitHub while the Python server is unreachable.
-
-The diagnostics log rotates at 1 MB to `.log.1` (≈ 2 MB ceiling). Open it from the splash's "Backend not responding" screen via the **Open diagnostics log** button.
-
-## Testing
-
-112 tests via pytest, covering:
-- Config load/save and edge cases
-- OGG wrap/unwrap roundtrip
-- BLE file decryption validation
-- Transcript segment merging and splitting
-- Recording date extraction (unix, cloud, ISO formats)
-- JSON sanitisation
-- API key validation (mocked HTTP)
-- Flask endpoint integration tests
+- `scripts/prepare-frontend.sh` (Tauri's `beforeBuildCommand`) copies the frontend into
+  `dist-tauri/`, which Tauri serves.
+- Bundle resources (`tauri.conf.json`): `src/`, `keys/` (the RSA keys from Plaud's app; gitignored),
+  and the Python backend (`app/api_server.py`, `routes/`, `state/`, `providers/`, `utils/`). The
+  lockfiles are compiled into the binary instead.
+- FFmpeg isn't bundled: `app/utils/system.py` uses one on `PATH` or downloads it to
+  `~/Library/Application Support/com.plaud.v2/bin/` on first use.
+- Signed with Developer ID, hardened runtime, entitlements for Bluetooth, outgoing network and
+  user-selected files (`src-tauri/Entitlements.plist`); notarised.
