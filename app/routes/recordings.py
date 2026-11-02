@@ -842,6 +842,9 @@ def list_transcripts():
                     "summary": data.get("summary", ""),
                     "summary_stale": bool(data.get("summary_stale", False)),
                     "auto_title": data.get("auto_title", ""),
+                    # Speaker labels: "running" | "done" | "none" | "failed" (with a message)
+                    "diarization_status": data.get("diarization_status", ""),
+                    "diarization_message": data.get("diarization_message", ""),
                     "path": str(f),
                 }
             )

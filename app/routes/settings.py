@@ -1,12 +1,36 @@
 """Settings routes."""
 
+import requests as http_requests
 from flask import Blueprint, jsonify, request
 
 from app.utils.config import load_config, update_config
-from app.utils.constants import DEFAULT_RECORDINGS_DIR, DEFAULT_TAGS, WHISPER_MODELS, get_recordings_dir
+from app.utils.constants import DEFAULT_RECORDINGS_DIR, DEFAULT_TAGS, HF_WHOAMI_URL, WHISPER_MODELS, get_recordings_dir
 from app.utils.system import get_ram_info
+from src.transcribe import delete_hf_token, get_hf_token, save_hf_token
 
 bp = Blueprint("settings", __name__)
+
+_HF_TOKEN_MAX_LEN = 256
+
+
+def validate_hf_token(token):
+    """Check a Hugging Face token with GET whoami-v2 (free, read-only).
+
+    Returns (valid: bool, error: str | None). Never logs or echoes the token.
+    """
+    if not token:
+        return False, "No token provided"
+    if not token.startswith("hf_") or len(token) > _HF_TOKEN_MAX_LEN or any(c.isspace() for c in token):
+        return False, "That doesn't look like a Hugging Face token (they start with hf_)"
+    try:
+        r = http_requests.get(HF_WHOAMI_URL, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    except http_requests.RequestException:
+        return False, "Couldn't reach huggingface.co: check your internet connection"
+    if r.status_code == 200:
+        return True, None
+    if r.status_code in (401, 403):
+        return False, "Hugging Face rejected this token"
+    return False, f"Hugging Face returned HTTP {r.status_code}"
 
 
 @bp.route("/settings", methods=["GET"])
@@ -51,7 +75,8 @@ def get_settings():
             # Read directly by the Rust shell (commands::crash_reports_enabled).
             "crash_reports_enabled": config.get("crash_reports_enabled", True) is not False,
             "transcription_provider": config.get("transcription_provider", "deepgram"),
-            "diarization_provider": config.get("diarization_provider", "deepgram"),
+            # Only whether a Hugging Face token is saved; the token never leaves the backend.
+            "hf_token_set": get_hf_token() is not None,
             "summarization_provider": config.get("summarization_provider", "anthropic"),
             "has_paired_devices": bool(config.get("paired_devices", {})),
             "setup_dismissed": config.get("setup_dismissed", False),
@@ -82,6 +107,17 @@ def save_settings():
                 p.mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 return jsonify({"error": f"Cannot create directory: {e}"}), 400
+
+    # Hugging Face token (optional pyannote fallback): validated, then stored in
+    # its own 0600 file in the data dir, never in the config or a response.
+    if "hf_token" in data:
+        token = str(data.get("hf_token") or "").strip()
+        valid, error = validate_hf_token(token)
+        if not valid:
+            return jsonify({"error": error}), 400
+        save_hf_token(token)
+    if data.get("remove_hf_token"):
+        delete_hf_token()
 
     def _apply(config):
         if "model" in data:
@@ -128,8 +164,9 @@ def save_settings():
                 config["storage_mode"] = data["storage_mode"]
         if "transcription_provider" in data:
             config["transcription_provider"] = data["transcription_provider"]
-        if "diarization_provider" in data:
-            config["diarization_provider"] = data["diarization_provider"]
+        # Retired: who labels speakers follows the transcription provider
+        # (Deepgram labels its own transcripts; otherwise the local model).
+        config.pop("diarization_provider", None)
         if "summarization_provider" in data:
             config["summarization_provider"] = data["summarization_provider"]
         if "remove_openai_key" in data:

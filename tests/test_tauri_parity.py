@@ -335,7 +335,7 @@ class TestEndpointJSONShapes:
             "auto_prefer_wifi",
             "crash_reports_enabled",
             "transcription_provider",
-            "diarization_provider",
+            "hf_token_set",
             "summarization_provider",
             "has_paired_devices",
             "setup_dismissed",
@@ -498,14 +498,12 @@ class TestSettingsRoundTrip:
             "/settings",
             json={
                 "transcription_provider": "groq",
-                "diarization_provider": "pyannote",
                 "summarization_provider": "openai",
             },
             content_type="application/json",
         )
         data = flask_client.get("/settings").get_json()
         assert data["transcription_provider"] == "groq"
-        assert data["diarization_provider"] == "pyannote"
         assert data["summarization_provider"] == "openai"
 
     def test_auto_flags_roundtrip(self, flask_client):
