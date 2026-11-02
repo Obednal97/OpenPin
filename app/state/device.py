@@ -1549,6 +1549,61 @@ def redact_secrets(text, secrets=()):
     return _SECRET_PATTERNS[2].sub(_REDACTED, text)
 
 
+WIFI_LOG_SCRUB_MARKER = "wifi_sync.log.scrubbed"
+
+
+def _configured_secrets():
+    """Every BIND_TOKEN and SN signature in the config (for exact-value redaction)."""
+    try:
+        config = load_config()
+    except Exception:
+        return []
+    found = []
+    for key in ("device_bind_tokens", "device_sn_signatures"):
+        values = config.get(key) or {}
+        if isinstance(values, dict):
+            found.extend(v for v in values.values() if isinstance(v, str))
+    return found
+
+
+def scrub_wifi_logs(data_dir=None):
+    """One-time clean-up of logs written before redaction existed.
+
+    Before v2.4.1, wifi_sync.log recorded the raw cloud replies, which contain
+    the BIND_TOKEN and SN signature. Rewrites wifi_sync.log and wifi_sync.log.1
+    through redact_secrets() (temp file + atomic replace), then writes a
+    marker file so it never runs again. Returns True if it ran. Never raises;
+    on failure the marker isn't written and the next start tries again.
+    """
+    data_dir = DATA_DIR if data_dir is None else data_dir
+    if not data_dir:
+        return False
+    marker = data_dir / WIFI_LOG_SCRUB_MARKER
+    if marker.exists():
+        return False
+    secrets = None
+    try:
+        for name in (WIFI_LOG_NAME, WIFI_LOG_NAME + ".1"):
+            path = data_dir / name
+            if not path.exists():
+                continue
+            if secrets is None:
+                secrets = _configured_secrets()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            clean = redact_secrets(text, secrets)
+            if clean != text:
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(clean, encoding="utf-8")
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+                logging.info(f"[WiFi] removed credentials from {name}")
+        marker.write_text("wifi_sync logs redacted\n")
+        return True
+    except Exception as e:
+        logging.warning(f"[WiFi] couldn't scrub the old WiFi sync logs: {e}")
+        return False
+
+
 def append_rotating_log(path, line, max_bytes=None):
     """Append `line` to `path`; first move a file of max_bytes or more to `path`.1.
 
@@ -1669,6 +1724,7 @@ def run_wifi_recovery_in_background(recover):
     _wifi_recovery_idle.clear()
 
     def go():
+        scrub_wifi_logs()  # once per install: old logs may hold credentials
         try:
             recover()
         except Exception as e:
@@ -1760,6 +1816,7 @@ def _do_wifi_sync_locked(deadline):
 
     # Log WiFi sync to file for production debugging (rotated, secrets redacted)
     _wifi_log = DATA_DIR / WIFI_LOG_NAME if DATA_DIR else None
+    scrub_wifi_logs()  # no-op once done (normally already at startup)
     secrets = []  # this device's BIND_TOKEN and SN signature, once known
 
     def _wlog(msg):
