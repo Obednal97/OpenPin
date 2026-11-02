@@ -1,14 +1,39 @@
 """Shared test fixtures for Plaud V2."""
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
+# Isolate the suite from real user data BEFORE anything imports app.*:
+# app/utils/constants.py resolves DATA_DIR at import time, and in a git checkout
+# it would otherwise be the repo root (real recordings, config and cloud token).
+# Always overridden, even if the developer has PLAUD_DATA_DIR set for dev runs.
+TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="plaud-test-data-")).resolve()
+os.environ["PLAUD_DATA_DIR"] = str(TEST_DATA_DIR)
+
+import pytest  # noqa: E402
 
 # Ensure project root is on path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def pytest_configure(config):
+    # Something imported app.utils.constants before this conftest ran, so its
+    # DATA_DIR may point at real data. Stop rather than risk it.
+    constants = sys.modules.get("app.utils.constants")
+    if constants is not None and Path(constants.DATA_DIR).resolve() != TEST_DATA_DIR:
+        raise pytest.UsageError(
+            f"app.utils.constants was imported before tests/conftest.py set PLAUD_DATA_DIR "
+            f"(DATA_DIR={constants.DATA_DIR}); refusing to run against real data."
+        )
+
+
+def pytest_unconfigure(config):
+    shutil.rmtree(TEST_DATA_DIR, ignore_errors=True)
 
 # Token the flask_client fixture sets as PLAUD_API_TOKEN and sends by default.
 TEST_API_TOKEN = "test-token-0123456789abcdef"
