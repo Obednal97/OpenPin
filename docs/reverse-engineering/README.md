@@ -93,9 +93,12 @@ answer them. Log lines to look for are in quotes.
    last …" and "file list incomplete" never appear.
 7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app logs both
    replies ("Handshake replies: HS1=… HS2=…") and treats a non-zero status (byte 3) as a rejection
-   only when the device then answers neither cmd 4 nor cmd 3. No reply at all only logs "no reply
-   to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect". Record the status a working device
-   sends, and what a wrong token produces (a non-zero status, or no reply at all).
+   only when the device then answers neither cmd 4 nor cmd 3. Even then the connect only fails if
+   `ble_proto.FAIL_ON_HANDSHAKE_REJECTED` is on — it ships **off** in v2.4.1, so a "rejection" just
+   logs "Handshake looks rejected … continuing anyway" (same behaviour as v2.4.0). No reply at all
+   logs "no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect". Record the status a
+   working device sends, and what a wrong token produces (a non-zero status, or no reply at all);
+   then turn the switch on.
 8. **Closing the hotspot.** Does `[1,10,0,0]` close it, or is cmd 13 needed? The worker now logs
    the reply ("Hotspot close reply: cmd 10 status …" or "cmd 13 …", or "no reply"). Compare it
    with whether the `Plaud…` network disappears after a WiFi sync.

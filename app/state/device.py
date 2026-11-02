@@ -17,6 +17,7 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from app.utils import ble_proto
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
     HANDSHAKE_REJECTED,
@@ -842,7 +843,7 @@ async def connect_device(address=None):
     # Only a rejection fails the connect; "no reply at all" is logged by
     # bind_handshake() and the connect carries on, as in v2.4.0.
     verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
-    if verdict == HANDSHAKE_REJECTED:
+    if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
         await _disconnect_quietly(cl)
         _reset_state()
         return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}

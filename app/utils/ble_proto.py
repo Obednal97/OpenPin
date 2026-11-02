@@ -51,6 +51,13 @@ def reply_matches(reply, expected):
 
 HANDSHAKE_REJECTED_ERROR = "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device"
 
+# Whether a HANDSHAKE_REJECTED verdict fails the connect. Off until a real
+# NotePin has shown what a rejected token looks like: the status byte's meaning
+# is unconfirmed, so for now a "rejection" is only logged (a WARNING with the raw
+# replies) and the connect carries on exactly as in v2.4.0. Turn on once the
+# hardware logs confirm the semantics (docs/reverse-engineering/README.md, Q7).
+FAIL_ON_HANDSHAKE_REJECTED = False
+
 # How long to wait for each reply during bind_handshake(). At most
 # HANDSHAKE_MAX_REPLY_WAITS replies are awaited (cmd 1 twice, cmd 4, the cmd 3
 # probe), so a device that answers none of them adds at most 4 x 1.5 = 6 s to a
@@ -160,7 +167,14 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
             "(whether the device answers cmd 1 is unverified; later commands decide)"
         )
     elif verdict == HANDSHAKE_REJECTED:
-        logging.warning(f"[BLE] Handshake rejected: status {statuses}, no reply to cmd 4 or cmd 3")
+        logging.warning(
+            f"[BLE] Handshake looks rejected: status {statuses}, no reply to cmd 4 or cmd 3"
+            + (
+                ""
+                if FAIL_ON_HANDSHAKE_REJECTED
+                else " — continuing anyway (FAIL_ON_HANDSHAKE_REJECTED is off); please report"
+            )
+        )
     port_version = next((h["port_version"] for h in reversed(hs) if h and "port_version" in h), None)
     return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4}
 

@@ -56,8 +56,19 @@ def test_accepted_handshake_connects(connect_env, monkeypatch):
     assert device.received[0][6:38] == TOKEN.encode()
 
 
+def test_rejected_bind_token_only_warns_by_default(connect_env, monkeypatch, caplog):
+    """Until hardware confirms the status semantics, a 'rejection' is logged, not fatal (as v2.4.0)."""
+    assert ble_proto.FAIL_ON_HANDSHAKE_REJECTED is False
+    device = FakeNotePin(hs_status=1, silent={3, 4, 6, 9})
+    with caplog.at_level("WARNING"):
+        result = connect(monkeypatch, device)
+    assert result["connected"] is True
+    assert "Handshake looks rejected" in caplog.text and "continuing anyway" in caplog.text
+
+
 def test_rejected_bind_token_fails_connect(connect_env, monkeypatch):
-    """Non-zero handshake status and no answer to later commands = token rejected."""
+    """With the switch on: non-zero handshake status and no answer to later commands = rejected."""
+    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", True)
     device = FakeNotePin(hs_status=1, silent={3, 4, 6, 9})
     result = connect(monkeypatch, device)
     assert result == {"connected": False, "error": ble_proto.HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
