@@ -888,9 +888,11 @@ pub fn confirm_ready_now() -> bool {
 }
 
 /// Called when the app starts quitting, before it looks for a backend to stop:
-/// stops new spawns and waits (briefly) for one in flight to be registered, so
-/// `stop_python_server` can find it. A spawn that finishes after this stops
-/// its own process (see `spawn_and_register`).
+/// stops new spawns and waits (briefly) for one in flight to finish. That spawn
+/// either registered its process before seeing the flag (so
+/// `stop_python_server` finds it) or saw the flag and stopped the process
+/// itself (see `spawn_and_register`). Bounded at 3 s: a self-stop takes at most
+/// ~1 s of SIGTERM grace plus SIGKILL.
 pub fn begin_shutdown() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -1403,14 +1405,19 @@ fn spawn_and_register(
         server.generation += 1;
         Ok(server.generation)
     })();
+    // SPAWNING stays set until a self-stop below has finished, so shutdown
+    // (begin_shutdown waits for it) doesn't exit the app halfway through it.
+    let result = result.and_then(|generation| {
+        if SHUTTING_DOWN.load(Ordering::SeqCst) {
+            log::info!("[Python] Quit requested during startup; stopping the backend just spawned");
+            terminate_backend(Duration::from_secs(1));
+            Err(SpawnError::Quitting)
+        } else {
+            Ok(generation)
+        }
+    });
     SPAWNING.store(false, Ordering::SeqCst);
-    let generation = result?;
-    if SHUTTING_DOWN.load(Ordering::SeqCst) {
-        log::info!("[Python] Quit requested during startup; stopping the backend just spawned");
-        terminate_backend(Duration::from_secs(1));
-        return Err(SpawnError::Quitting);
-    }
-    Ok(generation)
+    result
 }
 
 /// Forward the backend's stdout/stderr to the log (target `python`, so it lands
