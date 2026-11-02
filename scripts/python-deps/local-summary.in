@@ -1,0 +1,4 @@
+# Optional extra: local summaries with distilbart (app/providers/summarize.py).
+transformers
+sentencepiece
+torch
