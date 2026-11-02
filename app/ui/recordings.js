@@ -40,8 +40,39 @@ function getFilteredRecordings() {
   return filtered;
 }
 
+// Session ids that select mode can act on: visible under the current
+// search/tag filter, excluding incomplete transfers (which can't be selected).
+function _selectableVisibleIds() {
+  return getFilteredRecordings()
+    .filter((rec) => !rec.partial)
+    .map((rec) => rec.session_id);
+}
+
+// Drop selected ids that the current filter hides (or that no longer exist),
+// so bulk actions only ever touch recordings the user can see.
+function pruneSelectionToVisible() {
+  if (app.selectedIds.size === 0) return;
+  const visible = new Set(_selectableVisibleIds());
+  for (const sid of [...app.selectedIds]) {
+    if (!visible.has(sid)) app.selectedIds.delete(sid);
+  }
+}
+
+// Select-all toggles only the recordings currently visible.
+function toggleSelectAllVisible() {
+  const visible = _selectableVisibleIds();
+  const allSelected = visible.length > 0 && visible.every((sid) => app.selectedIds.has(sid));
+  if (allSelected) {
+    visible.forEach((sid) => app.selectedIds.delete(sid));
+  } else {
+    visible.forEach((sid) => app.selectedIds.add(sid));
+  }
+  renderRecordingsList();
+}
+
 function renderRecordingsList() {
   const filtered = getFilteredRecordings();
+  pruneSelectionToVisible();
   if (app.recordings.length === 0) {
     dom.emptyState.classList.remove('hidden');
     // Context-aware empty state message
@@ -100,7 +131,7 @@ function renderRecordingsList() {
       const isSelected = app.selectedIds.has(rec.session_id);
 
       return `
-      <div class="recording-card ${app.selectMode ? 'select-mode' : ''} ${isSelected ? 'selected' : ''} ${rec.partial ? 'recording-partial' : ''}" data-sid="${rec.session_id}">
+      <div class="recording-card ${app.selectMode ? 'select-mode' : ''} ${isSelected ? 'selected' : ''} ${rec.partial ? 'recording-partial' : ''}" data-sid="${escapeHtml(rec.session_id)}">
         ${
           rec.partial
             ? `
@@ -112,13 +143,13 @@ function renderRecordingsList() {
         `
             : app.selectMode
               ? `
-          <label class="select-checkbox" data-sid="${rec.session_id}">
+          <label class="select-checkbox" data-sid="${escapeHtml(rec.session_id)}">
             <input type="checkbox" ${isSelected ? 'checked' : ''}>
             <span class="checkbox-mark"></span>
           </label>
         `
               : `
-          <button class="recording-play-btn" data-sid="${rec.session_id}" title="Play">
+          <button class="recording-play-btn" data-sid="${escapeHtml(rec.session_id)}" title="Play">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M4 2l10 6-10 6z"/>
             </svg>
@@ -127,7 +158,7 @@ function renderRecordingsList() {
         }
         <div class="recording-info">
           ${rec.title ? `<div class="recording-title">${rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(rec.title)}</div>` : ''}
-          <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${date}</div>
+          <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(date)}</div>
           <div class="recording-duration">${rec.partial ? 'Sync again to complete transfer' : dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
           ${preview ? `<div class="recording-preview">${escapeHtml(preview)}</div>` : ''}
         </div>
@@ -240,7 +271,10 @@ function updateSelectBar() {
         const tag = btn.dataset.tag;
 
         if (app.selectMode && app.selectedIds.size > 0) {
-          const ids = [...app.selectedIds];
+          // Only tag recordings that are both selected and visible right now.
+          const visibleIds = new Set(_selectableVisibleIds());
+          const ids = [...app.selectedIds].filter((sid) => visibleIds.has(sid));
+          if (ids.length === 0) return;
           const allHaveTag = ids.every((sid) => {
             const rec = app.recordings.find((r) => r.session_id === sid);
             return rec && (rec.tags || []).includes(tag);
@@ -301,108 +335,131 @@ function updateSelectBar() {
 }
 
 async function deleteSelected() {
+  pruneSelectionToVisible();
   if (app.selectedIds.size === 0) return;
   const ids = Array.from(app.selectedIds);
-  const count = ids.length;
+  return showDeleteDialog(ids, ids.length);
+}
 
-  const hasCloud = ids.some((sid) => {
-    const rec = app.recordings.find((r) => r.session_id === sid);
-    return rec && rec.cloud_synced;
+function _recordingLabel(sid) {
+  const rec = app.recordings.find((r) => r.session_id === sid);
+  if (!rec) return String(sid);
+  return rec.title || formatDate(rec.date) || String(sid);
+}
+
+/**
+ * Confirm-then-delete for one or many recordings. Always asks first, naming the
+ * count and up to 3 titles. When any of them is synced to Plaud Cloud and the
+ * user is signed in, also offers "Move to Trash and delete from Plaud Cloud".
+ * Cancel is the default button. Resolves true if something was deleted.
+ * (`count` is kept for call-site compatibility; ids.length is authoritative.)
+ */
+async function showDeleteDialog(ids, count, onDeleted) {
+  ids = (ids || []).filter(Boolean);
+  if (ids.length === 0) return false;
+  count = ids.length;
+  const plural = count === 1 ? 'recording' : 'recordings';
+
+  const cloudRecs = ids
+    .map((sid) => app.recordings.find((r) => r.session_id === sid))
+    .filter((r) => r && r.cloud_synced);
+  const offerCloud = cloudRecs.length > 0 && !!(app.cloudState && app.cloudState.logged_in);
+
+  const names = ids.slice(0, 3).map(_recordingLabel);
+  if (count > 3) names.push(`…and ${count - 3} more`);
+
+  const actions = [{ id: 'local', label: 'Move to Trash', destructive: true }];
+  if (offerCloud) {
+    actions.push({ id: 'both', label: 'Move to Trash and delete from Plaud Cloud', destructive: true });
+  }
+  let message = `${count === 1 ? 'This recording' : `These ${count} recordings`} (audio, transcript and summary) will be moved to the Trash.`;
+  if (offerCloud) {
+    message += cloudRecs.length === count
+      ? ` ${count === 1 ? 'It is' : 'They are'} also synced to Plaud Cloud.`
+      : ' Some are also synced to Plaud Cloud.';
+  } else if (cloudRecs.length > 0) {
+    message += ' Copies in Plaud Cloud are not affected.';
+  }
+
+  const choice = await showConfirmDialog({
+    title: `Delete ${count} ${plural}?`,
+    message,
+    items: names,
+    actions,
   });
+  if (!choice) return false;
 
-  if (hasCloud) {
-    showDeleteDialog(ids, count);
-  } else {
-    try {
-      await window.plaud.deleteRecordings(ids);
-      toast(`Deleted ${count} recording(s)`, 'success');
-      exitSelectMode();
-      await loadRecordings();
-    } catch (err) {
-      toast(`Delete failed: ${err.message}`, 'error');
+  try {
+    const cloudIds = choice === 'both'
+      ? ids
+          .map((sid) => {
+            const rec = app.recordings.find((r) => r.session_id === sid);
+            return rec && rec.cloud_id;
+          })
+          .filter(Boolean)
+      : [];
+
+    const res = await window.plaud.deleteRecordings(ids);
+    if (res && res.error) {
+      toast(`Delete failed: ${res.error}`, 'error');
+      return false;
     }
+    const n = res && typeof res.count === 'number' ? res.count : count;
+    const nPlural = n === 1 ? 'recording' : 'recordings';
+    const localMsg = res && res.trashed ? `Moved ${n} ${nPlural} to Trash` : `Deleted ${n} ${nPlural}`;
+
+    if (choice === 'both') {
+      if (cloudIds.length > 0) {
+        try {
+          const cr = await window.plaud.cloudTrash(cloudIds);
+          if (cr && cr.error) toast(`${localMsg}, but cloud delete failed: ${cr.error}`, 'error');
+          else toast(`${localMsg} and deleted from Plaud Cloud`, 'success');
+        } catch (err) {
+          toast(`${localMsg}, but cloud delete failed: ${err.message}`, 'error');
+        }
+      } else {
+        toast(`${localMsg}. Cloud file ID not available: remove it from Plaud Cloud manually`, 'info');
+      }
+    } else {
+      toast(localMsg, 'success');
+    }
+
+    if (onDeleted) onDeleted();
+    exitSelectMode();
+    await loadRecordings();
+    return true;
+  } catch (err) {
+    toast(`Delete failed: ${err.message}`, 'error');
+    return false;
   }
 }
 
-function showDeleteDialog(ids, count, onDeleted) {
-  const overlay = document.createElement('div');
-  overlay.className = 'delete-dialog-overlay';
-  overlay.innerHTML = `
-    <div class="delete-dialog">
-      <h3>Delete ${count} recording${count > 1 ? 's' : ''}?</h3>
-      <p class="settings-desc">Some recordings are synced to Plaud Cloud.</p>
-      <div class="delete-dialog-actions">
-        <button class="action-btn subtle" id="delete-local-btn">
-          Delete locally only
-        </button>
-        <button class="action-btn delete" id="delete-both-btn">
-          Delete from cloud &amp; local
-        </button>
-      </div>
-      <button class="action-btn subtle" id="delete-cancel-btn" style="width:100%;margin-top:8px;justify-content:center;">
-        Cancel
-      </button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.offsetHeight;
-  overlay.classList.add('visible');
-
-  const cleanup = () => {
-    overlay.classList.remove('visible');
-    setTimeout(() => overlay.remove(), 300);
-  };
-
-  document.getElementById('delete-cancel-btn').addEventListener('click', cleanup);
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) cleanup();
+// Re-download clears the local audio so the next sync fetches it again from
+// the device. Confirm first: if the device no longer has it, it's gone.
+async function confirmRedownload(sessionId) {
+  const autoDelete = !!(app.settings && app.settings.auto_delete_after_sync);
+  const choice = await showConfirmDialog({
+    title: 'Re-download from device?',
+    message: `The local copy of "${_recordingLabel(sessionId)}" will be replaced with the copy on your Plaud device the next time you sync.`,
+    note: autoDelete
+      ? '"Delete recordings from device after sync" is on, so the device may no longer have this recording.'
+      : '',
+    actions: [{ id: 'redownload', label: 'Replace from device', destructive: true }],
   });
-
-  document.getElementById('delete-local-btn').addEventListener('click', async () => {
-    cleanup();
-    try {
-      await window.plaud.deleteRecordings(ids);
-      toast(`Deleted ${count} recording(s) locally`, 'success');
-      if (onDeleted) onDeleted();
-      exitSelectMode();
-      await loadRecordings();
-    } catch (err) {
-      toast(`Delete failed: ${err.message}`, 'error');
+  if (choice !== 'redownload') return false;
+  try {
+    const res = await window.plaud.redownloadRecordings([sessionId]);
+    if (res && res.error) {
+      toast(`Failed: ${res.error}`, 'error');
+      return false;
     }
-  });
-
-  document.getElementById('delete-both-btn').addEventListener('click', async () => {
-    cleanup();
-    try {
-      const cloudIds = ids
-        .map((sid) => {
-          const rec = app.recordings.find((r) => r.session_id === sid);
-          return rec && rec.cloud_id;
-        })
-        .filter(Boolean);
-
-      await window.plaud.deleteRecordings(ids);
-
-      if (cloudIds.length > 0 && app.cloudState.logged_in) {
-        try {
-          await window.plaud.cloudTrash(cloudIds);
-          toast(`Deleted ${count} recording(s) from local and cloud`, 'success');
-        } catch (err) {
-          toast(`Deleted locally but cloud trash failed: ${err.message}`, 'error');
-        }
-      } else if (app.cloudState.logged_in) {
-        toast(`Deleted locally — cloud file ID not available, remove from cloud manually`, 'info');
-      } else {
-        toast(`Deleted ${count} recording(s) locally`, 'success');
-      }
-
-      if (onDeleted) onDeleted();
-      exitSelectMode();
-      await loadRecordings();
-    } catch (err) {
-      toast(`Delete failed: ${err.message}`, 'error');
-    }
-  });
+    toast('Recording cleared — connect device and sync to re-download', 'info');
+    await loadRecordings();
+    return true;
+  } catch (err) {
+    toast(`Failed: ${err.message}`, 'error');
+    return false;
+  }
 }
 
 
@@ -570,14 +627,8 @@ function _showContextMenu(x, y, sessionId) {
   items.push({ label: 'Move to...', icon: 'move', action: () => {
     showMoveDialog([sessionId], () => { loadRecordings(); });
   }});
-  items.push({ label: 'Re-download from device', icon: 'refresh', action: async () => {
-    try {
-      await window.plaud.redownloadRecordings([sessionId]);
-      toast('Recording cleared — connect device and sync to re-download', 'info');
-      await loadRecordings();
-    } catch (err) {
-      toast(`Failed: ${err.message}`, 'error');
-    }
+  items.push({ label: 'Re-download from device', icon: 'refresh', action: () => {
+    confirmRedownload(sessionId);
   }});
   items.push({ label: 'Delete', icon: 'delete', destructive: true, action: () => {
     showDeleteDialog([sessionId], 1, () => { loadRecordings(); });

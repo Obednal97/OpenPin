@@ -554,53 +554,13 @@ function openTranscript(sessionId, autoPlay = false) {
     }
   };
 
-  // Delete recording
+  // Delete recording — same confirmation as every other delete path
   const deleteBtn = $('#delete-recording-btn');
   if (deleteBtn) {
     deleteBtn.addEventListener('click', () => {
-      if (rec.cloud_synced) {
-        // Cloud recording — show choice dialog, then navigate back
-        showDeleteDialog([sessionId], 1, () => {
-          closeTranscript();
-        });
-      } else {
-        // Local only — confirm and delete
-        const overlay = document.createElement('div');
-        overlay.className = 'delete-dialog-overlay';
-        overlay.innerHTML = `
-          <div class="delete-dialog">
-            <h3>Delete recording?</h3>
-            <p class="settings-desc">This will delete the audio and transcript permanently.</p>
-            <div class="delete-dialog-actions">
-              <button class="action-btn delete" id="confirm-delete-btn">Delete</button>
-            </div>
-            <button class="action-btn subtle" id="cancel-delete-btn" style="width:100%;margin-top:8px;justify-content:center;">Cancel</button>
-          </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.offsetHeight;
-        overlay.classList.add('visible');
-
-        const cleanup = () => {
-          overlay.classList.remove('visible');
-          setTimeout(() => overlay.remove(), 300);
-        };
-
-        document.getElementById('cancel-delete-btn').addEventListener('click', cleanup);
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
-
-        document.getElementById('confirm-delete-btn').addEventListener('click', async () => {
-          cleanup();
-          try {
-            await window.plaud.deleteRecordings([sessionId]);
-            toast('Recording deleted', 'success');
-            closeTranscript();
-            await loadRecordings();
-          } catch (err) {
-            toast(`Delete failed: ${err.message}`, 'error');
-          }
-        });
-      }
+      showDeleteDialog([sessionId], 1, () => {
+        if (app.currentSessionId === sessionId) closeTranscript();
+      });
     });
   }
 

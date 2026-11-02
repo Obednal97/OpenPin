@@ -169,6 +169,103 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+/**
+ * Modal confirmation dialog. Resolves with the chosen action's `id`, or null
+ * when cancelled (Cancel button, Escape, or clicking the backdrop).
+ *
+ *   showConfirmDialog({
+ *     title: 'Delete 2 recordings?',
+ *     message: 'Plain text, never HTML.',
+ *     items: ['Standup', 'Budget'],          // optional bullet list (plain text)
+ *     note: 'Optional warning line',          // optional, shown highlighted
+ *     actions: [{ id: 'trash', label: 'Move to Trash', destructive: true }],
+ *     cancelLabel: 'Cancel',
+ *   })
+ *
+ * Cancel is the default (focused, prominent) button; destructive actions are
+ * styled as secondary so Enter/Return never confirms a destructive action.
+ */
+function showConfirmDialog(opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'delete-dialog-overlay confirm-dialog-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    const box = document.createElement('div');
+    box.className = 'delete-dialog confirm-dialog';
+
+    const h = document.createElement('h3');
+    h.textContent = o.title || 'Are you sure?';
+    box.appendChild(h);
+
+    if (o.message) {
+      const p = document.createElement('p');
+      p.className = 'settings-desc';
+      p.textContent = o.message;
+      box.appendChild(p);
+    }
+    if (Array.isArray(o.items) && o.items.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'confirm-dialog-items';
+      o.items.forEach((it) => {
+        const li = document.createElement('li');
+        li.textContent = it;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+    if (o.note) {
+      const n = document.createElement('p');
+      n.className = 'confirm-dialog-note';
+      n.textContent = o.note;
+      box.appendChild(n);
+    }
+
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'delete-dialog-actions';
+    (o.actions || []).forEach((a) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `action-btn subtle${a.destructive ? ' confirm-dialog-destructive' : ''}`;
+      b.dataset.action = a.id;
+      b.textContent = a.label;
+      b.addEventListener('click', () => finish(a.id));
+      actionsEl.appendChild(b);
+    });
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'action-btn primary confirm-dialog-cancel';
+    cancelBtn.dataset.action = 'cancel';
+    cancelBtn.textContent = o.cancelLabel || 'Cancel';
+    cancelBtn.addEventListener('click', () => finish(null));
+    actionsEl.appendChild(cancelBtn);
+    box.appendChild(actionsEl);
+    overlay.appendChild(box);
+
+    let done = false;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+    };
+    function finish(result) {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      overlay.classList.remove('visible');
+      setTimeout(() => overlay.remove(), 300);
+      resolve(result);
+    }
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+    document.addEventListener('keydown', onKey, true);
+
+    document.body.appendChild(overlay);
+    overlay.offsetHeight;
+    overlay.classList.add('visible');
+    try { cancelBtn.focus(); } catch {}
+  });
+}
+
 function renderMarkdown(md) {
   // Process line by line for proper list nesting
   const lines = md.split('\n');
