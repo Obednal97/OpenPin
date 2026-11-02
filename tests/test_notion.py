@@ -465,3 +465,78 @@ def test_queue_drops_invalid_session_id(env, queue_state):
         _run_queue_once(queue_state)
     assert rf.call_args.kwargs["permanent"] is True
     assert queue_state.entries == {}
+
+
+# ---------------------------------------------------------------------------
+# Auth-error detection: only a real 401 pauses the queue
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "Could not find page 2e80f387-401a-4c3d-9e8f-0123456789ab",
+        "Could not find block 9401c2d3-aa1b-4c3d-9e8f-012345678401",
+        "object_not_found: 1d2e3f40-1234-4401-8abc-401def012345",
+        "rate limited until 2026-11-02T14:01:00Z (retry after 1401 ms)",
+        "Page 3401 of 4010",
+        "",
+    ],
+)
+def test_is_auth_error_ignores_401_digits_in_ids_and_dates(msg):
+    from app.utils.notion_queue import _is_auth_error
+
+    assert _is_auth_error(msg) is False
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "401 Client Error: Unauthorized for url: https://mcp.notion.com/mcp",
+        "HTTP 401",
+        "status 401: token revoked",
+        "invalid_token: The access token expired",
+        "Notion session expired, please reconnect in Settings",
+    ],
+)
+def test_is_auth_error_detects_real_auth_failures(msg):
+    from app.utils.notion_queue import _is_auth_error
+
+    assert _is_auth_error(msg) is True
+
+
+def test_is_auth_error_uses_http_status():
+    import requests
+
+    from app.utils.notion_queue import _is_auth_error
+
+    resp = requests.Response()
+    resp.status_code = 401
+    assert _is_auth_error(requests.HTTPError("boom", response=resp)) is True
+    resp.status_code = 404
+    assert _is_auth_error(requests.HTTPError("Not Found 4401", response=resp)) is False
+
+
+def _tool_error(text):
+    return {"jsonrpc": "2.0", "id": "1", "result": {"isError": True, "content": [{"type": "text", "text": text}]}}
+
+
+def test_queue_not_paused_by_uuid_containing_401(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(_tool_error("Could not find page 2e80f387-401a-4c3d-9e8f-0123456789ab")))
+    notion_queue.enqueue(SID)
+    _run_queue_once(queue_state)
+    assert queue_state.paused is False
+    assert queue_state.entries[SID]["attempts"] == 1
+
+
+def test_queue_paused_by_real_auth_error(env, mcp_http, queue_state):
+    from app.utils import notion_queue
+
+    _setup_existing_page(env)
+    mcp_http(_FakeResp(_tool_error("unauthorized: invalid_token")))
+    notion_queue.enqueue(SID)
+    _run_queue_once(queue_state)
+    assert queue_state.paused is True
