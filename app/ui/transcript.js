@@ -36,6 +36,8 @@ function openTranscript(sessionId, autoPlay = false) {
   titleEl.setAttribute('data-placeholder', rec.title ? 'Add a title...' : formatDate(rec.date));
 
   titleEl.onblur = async () => {
+    // Only ever rename the recording this title element is showing.
+    if (titleEl.dataset.sid !== sessionId || app.currentSessionId !== sessionId) return;
     const newTitle = titleEl.textContent.trim();
     if (newTitle !== (rec.title || '')) {
       try {
@@ -166,13 +168,16 @@ function openTranscript(sessionId, autoPlay = false) {
   // Actions bar
   const actionsBar = $('#transcript-actions');
   const hasSummary = t && t.summary;
+  const hasTranscriptText = !!(t && (t.text || (t.segments && t.segments.length > 0)));
+  const isTranscribing = app.processingIds.get(sessionId) === 'transcribing';
+  const transcribeLabel = hasTranscriptText ? 'Re-transcribe' : 'Transcribe';
   actionsBar.innerHTML = `
-    <button class="action-btn accent" id="retranscribe-btn" title="Re-run transcription from scratch">
+    <button class="action-btn subtle" id="retranscribe-btn" title="${hasTranscriptText ? 'Replace the transcript with a new transcription' : 'Transcribe this recording'}" ${isTranscribing ? 'disabled' : ''}>
       <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
         <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <span>Re-transcribe</span>
+      <span>${isTranscribing ? 'Transcribing…' : transcribeLabel}</span>
     </button>
     ${
       t && t.text
@@ -222,16 +227,36 @@ function openTranscript(sessionId, autoPlay = false) {
     </button>
   `;
 
-  // Re-transcribe
-  $('#retranscribe-btn').addEventListener('click', async () => {
-    if (t) {
-      try {
-        await window.plaud.deleteTranscript(sessionId);
-      } catch (err) {
-        if (err.name !== 'AbortError') console.warn('[transcript] deleteTranscript failed:', err);
+  // (Re-)transcribe. The backend merges a re-transcription into the existing
+  // transcript file and keeps the summary, so nothing is deleted up front.
+  const retxBtn = $('#retranscribe-btn');
+  retxBtn.addEventListener('click', async () => {
+    if (app.processingIds.get(sessionId) === 'transcribing') {
+      toast('Already transcribing this recording', 'info');
+      return;
+    }
+    if (hasTranscriptText) {
+      const choice = await showConfirmDialog({
+        title: 'Replace the transcript?',
+        message: 'Your edits to segments will be lost; the summary is kept.',
+        actions: [{ id: 'retranscribe', label: 'Re-transcribe', destructive: true }],
+      });
+      if (choice !== 'retranscribe') return;
+      // Another click may have started a job while the dialog was open
+      if (app.processingIds.get(sessionId) === 'transcribing') return;
+    }
+    retxBtn.disabled = true;
+    const label = retxBtn.querySelector('span');
+    if (label) label.textContent = 'Transcribing…';
+    try {
+      await transcribeRecording(rec.ogg_path, sessionId);
+    } finally {
+      // On success openTranscript() re-renders this bar; on failure restore it.
+      if (retxBtn.isConnected) {
+        retxBtn.disabled = false;
+        if (label) label.textContent = transcribeLabel;
       }
     }
-    await transcribeRecording(rec.ogg_path, sessionId);
   });
 
   // Copy
@@ -423,8 +448,12 @@ function openTranscript(sessionId, autoPlay = false) {
           }
           if (result.title && !rec.title) {
             rec.title = result.title;
-            titleEl.textContent = result.title;
-            titleEl.setAttribute('data-placeholder', 'Add a title...');
+            // The user may have opened another recording while this ran —
+            // never write this title into (and later rename) that one.
+            if (app.currentView === 'transcript' && app.currentSessionId === sessionId && titleEl.dataset.sid === sessionId) {
+              titleEl.textContent = result.title;
+              titleEl.setAttribute('data-placeholder', 'Add a title...');
+            }
           }
           await loadRecordings();
           // Only switch tab if user is still viewing this transcript
@@ -673,7 +702,7 @@ function renderTranscriptSegments(container, t, sessionId) {
   } else {
     container.innerHTML = `
       <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
-        <p>No transcript yet. Click <strong>Re-transcribe</strong> above to generate one.</p>
+        <p>No transcript yet. Click <strong>Transcribe</strong> above to generate one.</p>
       </div>
     `;
   }
@@ -1019,6 +1048,7 @@ function initAudioPlayer() {
    ============================================================ */
 
 let cropState = null;
+
 
 function initCropEditor(sessionId) {
   const cropBtn = $('#crop-audio-btn');
