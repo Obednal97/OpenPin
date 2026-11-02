@@ -44,10 +44,11 @@ Three parts in one macOS app bundle:
 | `lifecycle.rs` | Starts the backend on a background thread; startup status for the splash (`get_startup_status`, `retry_startup`); shutdown (BLE disconnect, then SIGTERM/SIGKILL) once, off the main thread; SIGTERM/SIGINT handling; the panic hook |
 | `python.rs` | Managed Python runtime and venv, lockfiles, port choice, per-launch API token, spawning `api_server.py`, `/health` polling, crash restarts (up to 3), orphan cleanup via a PID file |
 | `power.rs` | Sleep/wake: `NSWorkspace` notifications, plus a wall-clock fallback; sends one `system-wake` event per wake |
+| `paths.rs` | Where everything lives on disk: the data folder passed to Python as `PLAUD_DATA_DIR`, Application Support and log folders, and the separate dev-build folders |
 | `logging.rs` | `~/Library/Logs/Plaud V2/app.log` (rotates at 1 MB, one old file kept). Backend stdout/stderr lands here too. `RUST_LOG` overrides levels |
 | `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, the bug reporter and the diagnostics log |
 | `commands/report_scrub.rs` | Removes secrets and personal data from bug reports |
-| `commands/sha256.rs` | SHA-256 for update checksums and report IDs (no hashing crate in `Cargo.toml`) |
+| `commands/sha256.rs` | The shell's only SHA-256: update and Python-download checksums, the venv lockfile stamp, report IDs (no hashing crate in `Cargo.toml`) |
 
 ### Python backend
 
@@ -131,8 +132,9 @@ Details:
   disconnect, then SIGTERM, then SIGKILL.
 
 Environment variables passed to Python: `PLAUD_API_PORT`, `PLAUD_API_TOKEN`,
-`PLAUD_REQUIREMENTS_DIR`, `PLAUD_PYTHON_RUNTIME`, `PLAUD_APP_VERSION`. `PLAUD_DATA_DIR`, if set in
-the environment, overrides the data folder.
+`PLAUD_REQUIREMENTS_DIR`, `PLAUD_PYTHON_RUNTIME`, `PLAUD_APP_VERSION` and `PLAUD_DATA_DIR` (the
+data folder: the shell's own `PLAUD_DATA_DIR` if set, else `Plaud V2`, or `Plaud V2 (Dev)` in a
+debug build; see Data locations).
 
 ## Security model
 
@@ -171,10 +173,14 @@ Other rules:
 | `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
 | `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log` |
 | `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
+| `... Plaud V2 (Dev)/`, `com.plaud.v2.dev/`, `Logs/Plaud V2 (Dev)/` | The same, for debug builds (`tauri dev`). They share only `com.plaud.v2/python/` and `bin/` with the installed app |
 | `~/.cache/whisper/`, `~/.cache/huggingface/` | Local Whisper, diarization and DistilBART models (library defaults) |
 
-`DATA_DIR` is chosen in `app/utils/constants.py`: `PLAUD_DATA_DIR` if set, else the folder above
-when packaged, else (running from a git checkout) the repo root. Users can also pick another
+`DATA_DIR` is chosen in `app/utils/constants.py`: `PLAUD_DATA_DIR` if set, else
+`~/Library/Application Support/Plaud V2/`. The shell always sets `PLAUD_DATA_DIR`
+(`src-tauri/src/paths.rs`): the variable it was started with, if any, else `Plaud V2`, or
+`Plaud V2 (Dev)` for a debug build, and it reads the crash-report setting from the config in that
+same folder. The repo is never used as the data folder. Users can also pick another
 recordings folder; old folders stay listed.
 
 ## Device sync
