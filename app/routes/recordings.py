@@ -384,7 +384,10 @@ def rename_recording():
         except Exception:
             pass
 
-    return jsonify({"saved": True})
+    # Rename reaches Notion as a properties-only update (never raises).
+    from app.routes.notion import enqueue_property_sync
+
+    return jsonify({"saved": True, "notion_queued": enqueue_property_sync(session_id)})
 
 
 @bp.route("/recordings/export", methods=["POST"])

@@ -614,21 +614,19 @@ def summarize_transcript():
             "summarize", {"session_id": session_id, "title": title, "summary": summary_text, "provider": provider}
         )
 
-        # Auto-push to Notion if enabled
+        # Auto-push to Notion if enabled: handed to the persistent queue (same
+        # retry/backoff as other pushes), so a failure is retried, not lost,
+        # and this response doesn't wait on Notion.
         notion_url = ""
         notion_error = ""
+        notion_queued = False
         if config.get("notion_auto_push"):
-            try:
-                from app.routes.notion import push_to_notion
+            from app.routes.notion import enqueue_auto_push
 
-                result = push_to_notion(session_id, t_data=t_data, config=config)
-                if result.get("error"):
-                    notion_error = result["error"]
-                else:
-                    notion_url = result.get("url", "")
-            except Exception as e:
-                notion_error = f"Notion push failed: {e}"
-                logging.warning(f"Notion auto-push failed: {e}")
+            queued = enqueue_auto_push(session_id)
+            notion_url = queued["notion_url"]
+            notion_error = queued["notion_error"]
+            notion_queued = queued["notion_queued"]
 
         return jsonify(
             {
@@ -637,6 +635,7 @@ def summarize_transcript():
                 "provider": provider,
                 "notion_url": notion_url,
                 "notion_error": notion_error,
+                "notion_queued": notion_queued,
             }
         )
 
