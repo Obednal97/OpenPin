@@ -18,6 +18,7 @@ Code these docs describe:
 |---|---|
 | `app/state/device.py` | Scan, connect, handshake, `send_cmd()`, commands, BLE sync, completeness checks, auto-delete |
 | `app/utils/wifi_sync_worker.py` | WiFi sync process: its own BLE handshake, hotspot, WebSocket transfer, Mac network restore |
+| `app/utils/ble_proto.py` | Protocol pieces both of the above use: cmd 1 handshake verdict, cmd 4 time zone, file list parsing, SN-signature constants, reply matching |
 | `app/utils/audio.py` | File decryption, Opus checks, Ogg wrapping |
 | `app/utils/constants.py` | UUIDs, key path (`APP_KEY_PATH`), cloud domains |
 | `app/state/cloud.py` | Plaud Cloud sign-in, `/device/bind`, `/device/sn-sign`, import and upload |
@@ -78,21 +79,36 @@ answer them. Log lines to look for are in quotes.
 3. **Download start reply (cmd 28).** What does byte 7 mean, and is 0 always "accepted"? Check
    "cmd-28 reply status … (meaning unconfirmed — logged only)".
 4. **End marker.** Does the `0xFFFFFFFF` data packet always arrive, is its byte 9 an error code
-   (0 = OK), and which comes first, it or cmd 29?
+   (0 = OK), and which comes first, it or cmd 29? Does it (and cmd 29) always carry the session ID
+   that was requested? The app now ignores ones that don't ("ignored N packet(s) for other
+   sessions").
 5. **Size from the file list.** Does the byte count of a full download always equal it? Check for
    "size mismatch accepted". If it never happens, the `size_mismatch` path is dead weight; if it
    always happens, the size means something else.
 6. **File list entries (cmd 26).** What do entry bytes 8–9 and header bytes 3–6 mean? What selects
-   the 8-, 9- or 10-byte entry width?
-7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app doesn't check
-   the status byte.
-8. **Closing the hotspot.** Does `[1,10,0,0]` close it, or is cmd 13 needed? Watch whether the
-   `Plaud…` network disappears after a WiFi sync.
-9. **WiFi file list paging.** Can WiFi cmd 11 arrive in several messages for many files? The worker
-   restarts the current download when a second list message arrives.
+   the 8-, 9- or 10-byte entry width? The app checks the start index and drops a notification
+   whose entry bytes aren't a multiple of the width: check "file list: … not a multiple of the
+   entry width" and "file list incomplete" never appear.
+7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app logs both
+   replies ("Handshake replies: HS1=… HS2=…") and treats a non-zero status (byte 3) as a rejection
+   only when the device then answers neither cmd 4 nor cmd 3. Record the status a working device
+   sends, and what a wrong token produces (a non-zero status, or no reply at all).
+8. **Closing the hotspot.** Does `[1,10,0,0]` close it, or is cmd 13 needed? The worker now logs
+   the reply ("Hotspot close reply: cmd 10 status …" or "cmd 13 …", or "no reply"). Compare it
+   with whether the `Plaud…` network disappears after a WiFi sync.
+9. **WiFi file list paging.** Can WiFi cmd 11 arrive in several messages for many files? The
+   worker now merges a later list message into the queue without restarting the current download.
 10. **WebSocket port.** Does the device only try port 8081, or does it find 8082/8083 when the
     worker falls back?
-11. **Time zone (cmd 4).** The app always sends UTC. Does the device use the offset for anything?
+11. **Time zone (cmd 4).** The app now sends the Mac's UTC offset (hours and minutes, both signed,
+    DST included; for example UTC−3:30 is −3, −30). Does the device accept negative and
+    non-whole-hour offsets (check "Time sync reply: device time zone …"), does it use the offset for
+    anything, and do new session IDs change with it?
 12. **Smaller fields.** Firmware version width in cmd 2 (u24 assumed), units of the cmd 6 duration
     field, whether session IDs are recording start times, which files need the continuous
     keystream, and the `BIND_TOKEN` format and length.
+13. **Data packet offsets.** Are the offsets at bytes 5–8 byte offsets into the file, contiguous,
+    starting at 0? The app now drops retransmissions and ends a download as partial on a gap
+    ("data gap"). If hardware shows otherwise, set `ENFORCE_DATA_OFFSETS = False` in `device.py`.
+14. **Port version.** Which port version does the NotePin S report in the cmd 1 reply? Only the
+    ≥ 7 data-packet layout is implemented; a lower one is logged ("file transfer layout untested").
