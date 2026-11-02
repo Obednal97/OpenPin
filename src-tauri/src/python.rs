@@ -23,6 +23,9 @@ pub struct PythonServer {
     pub url: String,
     pub python_path: String,
     pub python_version: String,
+    /// "managed" (app-downloaded CPython 3.12) or "fallback" (Homebrew/system).
+    /// Either way `python_path` is the app venv's interpreter.
+    pub runtime: String,
     pub startup_error: Option<StartupError>,
     /// Per-launch secret the Python backend requires in the `X-Plaud-Token`
     /// header (passed to it as `PLAUD_API_TOKEN`). Generated once per app
@@ -50,6 +53,7 @@ pub fn get_server() -> &'static Mutex<PythonServer> {
             url: "http://127.0.0.1:5123".to_string(),
             python_path: String::new(),
             python_version: String::new(),
+            runtime: String::new(),
             startup_error: None,
             api_token: generate_api_token(),
         })
@@ -98,47 +102,166 @@ fn find_free_port(start: u16) -> Result<u16, String> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// App-managed Python runtime
+// ---------------------------------------------------------------------------
+//
+// The backend runs in a venv at ~/Library/Application Support/com.plaud.v2/venv
+// built on a pinned CPython 3.12 from python-build-standalone, which the app
+// downloads (SHA-256 checked against the hashes below) into .../com.plaud.v2/python.
+// Core packages come from app/requirements/core.txt (exact pins + hashes),
+// embedded in this binary. The venv records the lockfile's SHA-256, so an app
+// update that changes the lockfile re-syncs the venv on the next launch.
+//
+// Homebrew/system Python is only a fallback for when the download fails, and
+// even then the packages go into the app's venv, never --user site-packages
+// (a Homebrew upgrade used to empty those and features silently disappeared).
+
+/// python-build-standalone release and CPython version of the managed runtime.
+const STANDALONE_TAG: &str = "20261026";
+const STANDALONE_PY_VERSION: &str = "3.12.16";
+/// SHA-256 of `cpython-3.12.16+20261026-<arch>-apple-darwin-install_only_stripped.tar.gz`
+/// (GitHub release asset digests; the release's SHA256SUMS lists the same).
+/// Pinned here because newer releases no longer publish per-file .sha256 files,
+/// and a hash fetched from the same release would only catch corruption anyway.
+const STANDALONE_SHA256_AARCH64: &str =
+    "353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e";
+const STANDALONE_SHA256_X86_64: &str =
+    "37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734";
+
+/// Lockfiles (scripts/lock-python-deps.sh). Embedded so the packaged app doesn't
+/// depend on them being listed in tauri.conf.json's bundle resources; written to
+/// Application Support at launch and passed to Python in PLAUD_REQUIREMENTS_DIR
+/// (app/utils/system.py ensure_installed reads the extras from there).
+const CORE_LOCK: &str = include_str!("../../app/requirements/core.txt");
+const LOCKFILES: &[(&str, &str)] = &[
+    ("core.txt", CORE_LOCK),
+    (
+        "whisper.txt",
+        include_str!("../../app/requirements/whisper.txt"),
+    ),
+    (
+        "diarize.txt",
+        include_str!("../../app/requirements/diarize.txt"),
+    ),
+    (
+        "local-summary.txt",
+        include_str!("../../app/requirements/local-summary.txt"),
+    ),
+];
+
+/// Modules the backend can't start without. Checked after every sync, and on
+/// each launch (about 0.12 s warm) so a damaged venv gets repaired. anthropic is
+/// only located, not imported: importing it (pydantic) would add ~0.35 s per launch.
+const CORE_IMPORT_CHECK: &str = "import flask, requests, bleak, cryptography, websockets, \
+                                 objc, CoreBluetooth, CoreWLAN, Foundation, importlib.util; \
+                                 assert importlib.util.find_spec('anthropic'), 'anthropic missing'";
+
+/// Written into the venv after a successful sync.
+const VENV_STAMP_FILE: &str = ".plaud-runtime";
+
+/// Fallback interpreters, in order, when the managed runtime can't be downloaded.
 const PYTHON_CANDIDATES: &[&str] = &[
+    "/opt/homebrew/bin/python3.12",
+    "/opt/homebrew/bin/python3.13",
+    "/opt/homebrew/bin/python3.11",
+    "/usr/local/bin/python3.12",
+    "/usr/local/bin/python3.13",
+    "/usr/local/bin/python3.11",
     "/opt/homebrew/bin/python3",
     "/usr/local/bin/python3",
     "/usr/bin/python3",
     "python3",
 ];
 
-fn bundled_python_dir() -> PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/python")
+fn app_support_dir() -> PathBuf {
+    crate::home_dir().join("Library/Application Support/com.plaud.v2")
 }
 
-/// Find a working Python 3 binary, returns (path, version_string)
-fn find_python(full_path: &str) -> Option<(String, String)> {
-    let tauri_bundled = bundled_python_dir().join("bin/python3");
-    let mut candidates: Vec<String> = vec![];
-    if tauri_bundled.exists() {
-        candidates.push(tauri_bundled.to_string_lossy().to_string());
-    }
-    candidates.extend(PYTHON_CANDIDATES.iter().map(|s| s.to_string()));
+fn bundled_python_dir() -> PathBuf {
+    app_support_dir().join("python")
+}
 
-    for path in &candidates {
-        match Command::new(path)
-            .arg("--version")
-            .env("PATH", full_path)
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let version = if version.is_empty() {
-                    String::from_utf8_lossy(&output.stderr).trim().to_string()
-                } else {
-                    version
-                };
-                if version.contains("Python 3.") {
-                    return Some((path.clone(), version));
-                }
-            }
-            _ => continue,
+fn venv_dir() -> PathBuf {
+    app_support_dir().join("venv")
+}
+
+fn requirements_dir() -> PathBuf {
+    app_support_dir().join("requirements")
+}
+
+/// Which interpreter the venv is built on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeKind {
+    /// The pinned python-build-standalone CPython the app downloads.
+    Managed,
+    /// Homebrew/system Python, used only when the download failed.
+    Fallback,
+}
+
+impl RuntimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuntimeKind::Managed => "managed",
+            RuntimeKind::Fallback => "fallback",
         }
     }
-    None
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BasePython {
+    path: String,
+    /// `python3 --version` output, e.g. "Python 3.12.16".
+    version: String,
+    kind: RuntimeKind,
+}
+
+struct StandaloneAsset {
+    filename: String,
+    url: String,
+    sha256: &'static str,
+}
+
+/// Download details of the pinned standalone build for a CPU architecture
+/// (`std::env::consts::ARCH`: "aarch64" or "x86_64").
+fn standalone_asset(arch: &str) -> StandaloneAsset {
+    let (arch, sha256) = if arch == "aarch64" {
+        ("aarch64", STANDALONE_SHA256_AARCH64)
+    } else {
+        ("x86_64", STANDALONE_SHA256_X86_64)
+    };
+    let filename = format!(
+        "cpython-{STANDALONE_PY_VERSION}+{STANDALONE_TAG}-{arch}-apple-darwin-install_only_stripped.tar.gz"
+    );
+    let url = format!(
+        "https://github.com/astral-sh/python-build-standalone/releases/download/{STANDALONE_TAG}/{filename}"
+    );
+    StandaloneAsset {
+        filename,
+        url,
+        sha256,
+    }
+}
+
+/// Run `<path> --version`; returns (path, "Python 3.x.y") if it's a Python 3.
+fn probe_python(path: &str, full_path: &str) -> Option<(String, String)> {
+    let output = Command::new(path)
+        .arg("--version")
+        .env("PATH", full_path)
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        version = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
+    version
+        .contains("Python 3.")
+        .then(|| (path.to_string(), version))
 }
 
 /// Parse "Python 3.12.9" -> (3, 12, 9)
@@ -166,193 +289,490 @@ fn is_python_too_old(version: &str) -> bool {
     }
 }
 
-/// Strategy 1: Install Python via Homebrew
-fn try_homebrew_install(full_path: &str) -> bool {
-    if Command::new("which")
-        .arg("brew")
-        .env("PATH", full_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        log::info!("[Python] Attempting install via Homebrew...");
-        Command::new("brew")
-            .arg("install")
-            .arg("python3")
-            .env("PATH", full_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    } else {
-        false
+/// Preference among fallback interpreters (lower is better), None if unusable.
+/// 3.12 is what the lockfile is resolved for; brand-new minors come last because
+/// packages (onnxruntime, sentencepiece, pyobjc) ship wheels for them late.
+fn fallback_rank(version: &str) -> Option<u32> {
+    if is_python_too_old(version) {
+        return None;
     }
+    let (_, minor, _) = parse_python_version(version)?;
+    Some(match minor {
+        12 => 0,
+        13 => 1,
+        11 => 2,
+        10 => 3,
+        m => 10 + m,
+    })
 }
 
-/// Strategy 2: Download standalone Python from Astral
-fn try_download_standalone() -> bool {
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
+/// Runtime selection order: the managed standalone build (if present and new
+/// enough), else the best-ranked fallback (ties keep candidate order).
+fn choose_base_python(
+    managed: Option<(String, String)>,
+    fallbacks: Vec<(String, String)>,
+) -> Option<BasePython> {
+    if let Some((path, version)) = managed {
+        if !is_python_too_old(&version) {
+            return Some(BasePython {
+                path,
+                version,
+                kind: RuntimeKind::Managed,
+            });
+        }
+    }
+    fallbacks
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, (path, version))| fallback_rank(&version).map(|r| (r, i, path, version)))
+        .min_by_key(|(rank, i, _, _)| (*rank, *i))
+        .map(|(_, _, path, version)| BasePython {
+            path,
+            version,
+            kind: RuntimeKind::Fallback,
+        })
+}
+
+/// SHA-256 (FIPS 180-4) as lowercase hex. Used for the downloaded tarball and
+/// the lockfile stamp; Cargo.toml has no hashing crate.
+fn sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let full_blocks = data.len() / 64;
+    // Padding: the remaining bytes, 0x80, zeros, then the 64-bit length.
+    let rest = &data[full_blocks * 64..];
+    let mut tail = Vec::with_capacity(128);
+    tail.extend_from_slice(rest);
+    tail.push(0x80);
+    while tail.len() % 64 != 56 {
+        tail.push(0);
+    }
+    tail.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut compress = |block: &[u8]| {
+        let mut w = [0u32; 64];
+        for (i, word) in block.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (x, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *x = x.wrapping_add(v);
+        }
     };
-    let tag = "20250317";
-    let py_ver = "3.12.9";
-    let filename = format!("cpython-{py_ver}+{tag}-{arch}-apple-darwin-install_only.tar.gz");
-    let url = format!(
-        "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{filename}"
-    );
-
-    log::info!("[Python] Downloading standalone Python: {filename}");
-
-    let tmp_dir = std::env::temp_dir();
-    let tar_path = tmp_dir.join(&filename);
-    let sha_path = tmp_dir.join(format!("{filename}.sha256"));
-
-    // Download with curl
-    let dl = Command::new("curl")
-        .args(["-fSL", "--retry", "2", "-o"])
-        .arg(&tar_path)
-        .arg(&url)
-        .output();
-
-    if dl.is_err() || !dl.unwrap().status.success() {
-        log::error!("[Python] Download failed");
-        return false;
+    for block in data[..full_blocks * 64].chunks_exact(64) {
+        compress(block);
     }
-
-    // Download + verify SHA-256 sidecar file from the same release. Catches
-    // captive-portal MITM, mid-download corruption, and partial tampering
-    // where only the tarball is swapped. Does NOT defend against a fully
-    // compromised python-build-standalone release (both files would be).
-    let sha_dl = Command::new("curl")
-        .args(["-fSL", "--retry", "2", "-o"])
-        .arg(&sha_path)
-        .arg(format!("{url}.sha256"))
-        .output();
-    if sha_dl.is_err() || !sha_dl.unwrap().status.success() {
-        log::error!("[Python] SHA-256 sidecar download failed");
-        let _ = std::fs::remove_file(&tar_path);
-        return false;
+    for block in tail.chunks_exact(64) {
+        compress(block);
     }
-    let expected = std::fs::read_to_string(&sha_path)
-        .ok()
-        .and_then(|s| s.split_whitespace().next().map(|s| s.to_string()))
-        .unwrap_or_default();
-    let _ = std::fs::remove_file(&sha_path);
-    let actual = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(&tar_path)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .next()
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
-    if expected.is_empty() || expected != actual {
-        log::error!(
-            "[Python] Checksum mismatch — expected '{expected}', got '{actual}'. Discarding download."
-        );
-        let _ = std::fs::remove_file(&tar_path);
-        return false;
-    }
-    log::info!("[Python] Checksum verified ({})", &expected[..16.min(expected.len())]);
-
-    // Extract
-    let dest = bundled_python_dir();
-    let _ = std::fs::create_dir_all(&dest);
-    let extract = Command::new("tar")
-        .args(["-xzf"])
-        .arg(&tar_path)
-        .args(["--strip-components=1", "-C"])
-        .arg(&dest)
-        .output();
-
-    let _ = std::fs::remove_file(&tar_path);
-
-    if extract.is_err() || !extract.unwrap().status.success() {
-        log::error!("[Python] Extract failed");
-        return false;
-    }
-
-    // Verify
-    let bin = dest.join("bin/python3");
-    Command::new(&bin)
-        .arg("--version")
-        .output()
-        .map(|o| {
-            if o.status.success() {
-                log::info!(
-                    "[Python] Standalone installed: {}",
-                    String::from_utf8_lossy(&o.stdout).trim()
-                );
-                true
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false)
+    h.iter().map(|x| format!("{x:08x}")).collect()
 }
 
-fn ensure_python_deps(python_path: &str, full_path: &str) -> Result<(), String> {
-    let deps = ["flask", "requests", "bleak", "cryptography"];
-    let mut missing = vec![];
+/// What a venv was last synced from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VenvStamp {
+    lock_sha256: String,
+    base_python: String,
+    base_version: String,
+}
 
-    for dep in &deps {
-        let result = Command::new(python_path)
-            .args(["-c", &format!("import {dep}")])
-            .env("PATH", full_path)
-            .output();
-        if result.is_err() || !result.unwrap().status.success() {
-            missing.push(*dep);
+impl VenvStamp {
+    fn render(&self) -> String {
+        format!(
+            "lock_sha256={}\nbase_python={}\nbase_version={}\n",
+            self.lock_sha256, self.base_python, self.base_version
+        )
+    }
+
+    fn parse(s: &str) -> Option<VenvStamp> {
+        let mut lock_sha256 = None;
+        let mut base_python = None;
+        let mut base_version = None;
+        for line in s.lines() {
+            match line.split_once('=') {
+                Some(("lock_sha256", v)) => lock_sha256 = Some(v.trim().to_string()),
+                Some(("base_python", v)) => base_python = Some(v.trim().to_string()),
+                Some(("base_version", v)) => base_version = Some(v.trim().to_string()),
+                _ => {}
+            }
+        }
+        Some(VenvStamp {
+            lock_sha256: lock_sha256.filter(|s| !s.is_empty())?,
+            base_python: base_python.filter(|s| !s.is_empty())?,
+            base_version: base_version.filter(|s| !s.is_empty())?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VenvAction {
+    /// Venv matches the base interpreter and the bundled lockfile.
+    UpToDate,
+    /// Same interpreter, different lockfile (app update): pip install -r core.txt.
+    Sync,
+    /// Missing/broken venv, or a different base interpreter: recreate + install.
+    Rebuild,
+}
+
+fn minor_version(version: &str) -> Option<(u32, u32)> {
+    parse_python_version(version).map(|(major, minor, _)| (major, minor))
+}
+
+/// Decide what the venv needs. Patch updates of the managed build (same path,
+/// same 3.12) keep the venv: its symlinks point at the replaced interpreter.
+fn plan_venv(
+    stamp: Option<&VenvStamp>,
+    venv_python_runs: bool,
+    base: &BasePython,
+    lock_sha256: &str,
+) -> VenvAction {
+    let Some(stamp) = stamp else {
+        return VenvAction::Rebuild;
+    };
+    if !venv_python_runs
+        || stamp.base_python != base.path
+        || minor_version(&stamp.base_version).is_none()
+        || minor_version(&stamp.base_version) != minor_version(&base.version)
+    {
+        return VenvAction::Rebuild;
+    }
+    if stamp.lock_sha256 != lock_sha256 {
+        return VenvAction::Sync;
+    }
+    VenvAction::UpToDate
+}
+
+/// Last `max_lines` lines of a command's combined output, for error details.
+fn output_tail(output: &std::process::Output, max_lines: usize) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
+/// Download the pinned standalone CPython, check its SHA-256, and swap it into
+/// `bundled_python_dir()` (replacing an older managed build, if any).
+fn try_download_standalone() -> Result<(), String> {
+    let asset = standalone_asset(std::env::consts::ARCH);
+    log::info!("[Python] Downloading standalone Python: {}", asset.filename);
+
+    let support = app_support_dir();
+    let work = support.join("python-download");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| format!("create {}: {e}", work.display()))?;
+    let result = (|| {
+        let tar_path = work.join(&asset.filename);
+        let dl = Command::new("curl")
+            .args([
+                "-fsSL",
+                "--retry",
+                "2",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "900",
+                "-o",
+            ])
+            .arg(&tar_path)
+            .arg(&asset.url)
+            .output()
+            .map_err(|e| format!("curl: {e}"))?;
+        if !dl.status.success() {
+            return Err(format!("download failed: {}", output_tail(&dl, 5)));
+        }
+
+        let data = std::fs::read(&tar_path).map_err(|e| format!("read download: {e}"))?;
+        let actual = sha256_hex(&data);
+        drop(data);
+        if actual != asset.sha256 {
+            return Err(format!(
+                "checksum mismatch: expected {}, got {actual}. Discarding download.",
+                asset.sha256
+            ));
+        }
+        log::info!("[Python] Checksum verified ({})", &actual[..16]);
+
+        let staged = work.join("python");
+        std::fs::create_dir_all(&staged).map_err(|e| format!("create staging dir: {e}"))?;
+        let extract = Command::new("tar")
+            .arg("-xzf")
+            .arg(&tar_path)
+            .args(["--strip-components=1", "-C"])
+            .arg(&staged)
+            .output()
+            .map_err(|e| format!("tar: {e}"))?;
+        if !extract.status.success() {
+            return Err(format!("extract failed: {}", output_tail(&extract, 5)));
+        }
+        let staged_bin = staged.join("bin/python3");
+        let expected = format!("Python {STANDALONE_PY_VERSION}");
+        match probe_python(&staged_bin.to_string_lossy(), "/usr/bin:/bin") {
+            Some((_, v)) if v == expected => {}
+            other => {
+                return Err(format!(
+                    "extracted interpreter reports {:?}, expected {expected}",
+                    other.map(|(_, v)| v)
+                ))
+            }
+        }
+
+        // Swap in. The venv's symlinks point into this path, so it's replaced
+        // in place rather than versioned.
+        let dest = bundled_python_dir();
+        let old = work.join("python.old");
+        if dest.exists() {
+            std::fs::rename(&dest, &old).map_err(|e| format!("move old runtime aside: {e}"))?;
+        }
+        if let Err(e) = std::fs::rename(&staged, &dest) {
+            if old.exists() {
+                let _ = std::fs::rename(&old, &dest);
+            }
+            return Err(format!("install runtime: {e}"));
+        }
+        log::info!(
+            "[Python] Standalone installed: {expected} at {}",
+            dest.display()
+        );
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Pick the interpreter to build the venv on: the managed build (downloading
+/// or updating it first if needed), falling back to Homebrew/system Python.
+fn ensure_base_python(status: &dyn Fn(&str), full_path: &str) -> Option<BasePython> {
+    let managed_bin = bundled_python_dir().join("bin/python3");
+    let pinned = format!("Python {STANDALONE_PY_VERSION}");
+    let mut managed = probe_python(&managed_bin.to_string_lossy(), full_path);
+
+    if managed.as_ref().map(|(_, v)| v != &pinned).unwrap_or(true) {
+        status(&format!("Downloading Python {STANDALONE_PY_VERSION}..."));
+        match try_download_standalone() {
+            Ok(()) => managed = probe_python(&managed_bin.to_string_lossy(), full_path),
+            Err(e) => {
+                log::error!("[Python] Managed runtime download failed: {e}");
+                if let Some((_, ref v)) = managed {
+                    log::warn!("[Python] Keeping the existing managed runtime ({v})");
+                }
+            }
         }
     }
 
-    if missing.is_empty() {
-        return Ok(());
+    let fallbacks = if managed.is_some() {
+        vec![]
+    } else {
+        PYTHON_CANDIDATES
+            .iter()
+            .filter_map(|p| probe_python(p, full_path))
+            .collect()
+    };
+    let base = choose_base_python(managed, fallbacks)?;
+    match base.kind {
+        RuntimeKind::Managed => {
+            log::info!(
+                "[Python] Runtime: managed {} at {}",
+                base.version,
+                base.path
+            )
+        }
+        RuntimeKind::Fallback => {
+            log::warn!(
+                "[Python] !!! Runtime: FALLBACK {} at {}. The managed Python {STANDALONE_PY_VERSION} \
+                 couldn't be downloaded; packages may be missing wheels for this version. !!!",
+                base.version,
+                base.path
+            );
+            status(&format!(
+                "Couldn't download Python {STANDALONE_PY_VERSION}, using {}",
+                base.version
+            ));
+        }
     }
+    Some(base)
+}
 
-    log::info!("Installing missing Python deps: {:?}", missing);
+/// Write the embedded lockfiles to Application Support (only when changed).
+fn write_lockfiles() -> Result<PathBuf, String> {
+    let dir = requirements_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    for (name, content) in LOCKFILES {
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(*content) {
+            continue;
+        }
+        let tmp = dir.join(format!(".{name}.tmp"));
+        std::fs::write(&tmp, content)
+            .and_then(|_| std::fs::rename(&tmp, &path))
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(dir)
+}
 
-    // Try with --break-system-packages first (pip 23.1+)
-    let pip_args: Vec<&str> = ["-m", "pip", "install", "--break-system-packages", "--user", "-q"]
-        .iter()
-        .copied()
-        .chain(missing.iter().copied())
-        .collect();
+/// A command running a venv/base interpreter with a clean Python environment.
+fn python_command(python: &Path, full_path: &str) -> Command {
+    let mut cmd = Command::new(python);
+    cmd.env("PATH", full_path)
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env_remove("PIP_USER")
+        .env_remove("PIP_REQUIRE_HASHES");
+    cmd
+}
 
-    if let Ok(output) = Command::new(python_path)
-        .args(&pip_args)
-        .env("PATH", full_path)
+fn core_imports_ok(venv_python: &Path, full_path: &str) -> Result<(), String> {
+    let out = python_command(venv_python, full_path)
+        .args(["-c", CORE_IMPORT_CHECK])
         .output()
-    {
-        if output.status.success() {
-            return Ok(());
+        .map_err(|e| format!("run {}: {e}", venv_python.display()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(output_tail(&out, 15))
+    }
+}
+
+/// Make sure the app venv exists on `base` and matches the bundled core.txt.
+/// Returns (venv python path, its version string).
+fn ensure_venv(
+    status: &dyn Fn(&str),
+    base: &BasePython,
+    full_path: &str,
+) -> Result<(String, String), String> {
+    let req_dir = write_lockfiles()?;
+    let lock_sha = sha256_hex(CORE_LOCK.as_bytes());
+    let venv = venv_dir();
+    let venv_python = venv.join("bin/python3");
+    let stamp_path = venv.join(VENV_STAMP_FILE);
+    let stamp = std::fs::read_to_string(&stamp_path)
+        .ok()
+        .and_then(|s| VenvStamp::parse(&s));
+    let venv_probe = probe_python(&venv_python.to_string_lossy(), full_path);
+
+    let mut action = plan_venv(stamp.as_ref(), venv_probe.is_some(), base, &lock_sha);
+    log::info!("[Python] venv {}: {action:?}", venv.display());
+    if action == VenvAction::UpToDate {
+        match core_imports_ok(&venv_python, full_path) {
+            Ok(()) => return Ok(venv_probe.expect("probed above")),
+            Err(e) => {
+                log::warn!("[Python] venv is up to date but core imports fail, re-syncing:\n{e}");
+                action = VenvAction::Sync;
+            }
         }
     }
 
-    // Fallback without --break-system-packages
-    let pip_args: Vec<&str> = ["-m", "pip", "install", "--user", "-q"]
-        .iter()
-        .copied()
-        .chain(missing.iter().copied())
-        .collect();
-
-    match Command::new(python_path)
-        .args(&pip_args)
-        .env("PATH", full_path)
-        .output()
-    {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(format!(
-            "pip install failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )),
-        Err(e) => Err(format!("pip install error: {e}")),
+    if action == VenvAction::Rebuild {
+        status("Setting up Python environment...");
+        let _ = std::fs::remove_dir_all(&venv);
+        let out = python_command(Path::new(&base.path), full_path)
+            .args(["-m", "venv"])
+            .arg(&venv)
+            .output()
+            .map_err(|e| format!("run {} -m venv: {e}", base.path))?;
+        if !out.status.success() {
+            return Err(format!(
+                "Couldn't create the Python environment with {}:\n{}",
+                base.path,
+                output_tail(&out, 15)
+            ));
+        }
+        status("Installing dependencies (first launch can take a minute)...");
+    } else {
+        status("Updating dependencies...");
     }
+
+    let started = std::time::Instant::now();
+    let out = python_command(&venv_python, full_path)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--no-input",
+            "--require-hashes",
+            "--only-binary",
+            ":all:",
+            "-r",
+        ])
+        .arg(req_dir.join("core.txt"))
+        .output()
+        .map_err(|e| format!("run pip: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "pip install -r core.txt failed (Python {}):\n{}",
+            base.version,
+            output_tail(&out, 20)
+        ));
+    }
+    log::info!(
+        "[Python] Core dependencies synced in {:.1}s",
+        started.elapsed().as_secs_f32()
+    );
+    core_imports_ok(&venv_python, full_path)
+        .map_err(|e| format!("Dependencies installed but don't import:\n{e}"))?;
+
+    let new_stamp = VenvStamp {
+        lock_sha256: lock_sha,
+        base_python: base.path.clone(),
+        base_version: base.version.clone(),
+    };
+    let tmp = venv.join(format!("{VENV_STAMP_FILE}.tmp"));
+    if let Err(e) =
+        std::fs::write(&tmp, new_stamp.render()).and_then(|_| std::fs::rename(&tmp, &stamp_path))
+    {
+        // Not fatal: the next launch just re-syncs (a no-op for pip).
+        log::warn!("[Python] Couldn't write venv stamp: {e}");
+    }
+    probe_python(&venv_python.to_string_lossy(), full_path)
+        .ok_or_else(|| format!("{} doesn't run after setup", venv_python.display()))
 }
 
 const SERVER_READY_MAX_ATTEMPTS: u32 = 60;
@@ -442,8 +862,7 @@ fn build_path(app: &AppHandle) -> String {
     let bundled_bin = resource_path.join("bin");
 
     // App support bin/ — where FFmpeg gets downloaded on first use
-    let app_support_bin = crate::home_dir()
-        .join("Library/Application Support/com.plaud.v2/bin");
+    let app_support_bin = crate::home_dir().join("Library/Application Support/com.plaud.v2/bin");
 
     let extra_paths = vec![
         app_support_bin.to_string_lossy().to_string(),
@@ -536,70 +955,51 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     let full_path = build_path(app);
     let app_handle = app.clone();
 
-    // Find Python
+    let status = |msg: &str| emit_startup_status(app, msg);
+    // Find (or download) the base interpreter
     emit_startup_status(app, "Looking for Python...");
-    let mut python = find_python(&full_path);
+    let Some(base) = ensure_base_python(&status, &full_path) else {
+        let detail = format!(
+            "Couldn't download Python {STANDALONE_PY_VERSION} and no Python {}.{}+ is installed.",
+            MIN_PYTHON_VERSION.0, MIN_PYTHON_VERSION.1
+        );
+        set_startup_error(
+            "PYTHON_NOT_FOUND",
+            "Python 3 not found",
+            "Plaud V2 needs Python 3 to run and couldn't download it.",
+            "Check your internet connection and restart the app, or install Python 3.12 from python.org.",
+            &detail,
+        );
+        return Err(detail.into());
+    };
+    emit_startup_status(app, &format!("Found {}", base.version));
+    get_server().lock().unwrap().runtime = base.kind.as_str().to_string();
 
-    // Check version
-    if let Some((_, ref ver)) = python {
-        if is_python_too_old(ver) {
-            let reason = format!("{ver} is too old (need {}.{}+)", MIN_PYTHON_VERSION.0, MIN_PYTHON_VERSION.1);
-            emit_startup_status(app, &format!("Python {reason} — installing automatically..."));
-            python = None; // Force re-install
-        }
-    }
-
-    // Auto-install if missing or too old
-    if python.is_none() {
-        emit_startup_status(app, "Trying Homebrew install...");
-        if try_homebrew_install(&full_path) {
-            python = find_python(&full_path);
-            if python.as_ref().map(|(_, v)| is_python_too_old(v)).unwrap_or(true) {
-                python = None;
-            }
-        }
-        if python.is_none() {
-            emit_startup_status(app, "Downloading Python 3.12...");
-            if try_download_standalone() {
-                python = find_python(&full_path);
-            }
-        }
-        if python.is_none() {
-            let detail = "No suitable Python 3 found. Auto-install failed.";
+    // App venv with the pinned core packages
+    emit_startup_status(app, "Checking dependencies...");
+    let (python_path, python_version) = match ensure_venv(&status, &base, &full_path) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("[Python] Dependency setup failed: {e}");
             set_startup_error(
-                "PYTHON_NOT_FOUND",
-                "Python 3 not found",
-                "Plaud V2 needs Python 3 to run.",
-                "Install Python 3 from python.org or run: brew install python3",
-                detail,
+                "DEPS_FAILED",
+                "Missing dependencies",
+                "Plaud V2 couldn't install the Python packages it needs.",
+                "Check your internet connection and restart the app. If it keeps failing, delete \
+                 ~/Library/Application Support/com.plaud.v2/venv and restart.",
+                &e,
             );
-            return Err(detail.into());
+            return Err(e.into());
         }
-    }
+    };
 
-    let (python_path, python_version) = python.unwrap();
-    emit_startup_status(app, &format!("Found {python_version}"));
-
-    // Store Python info
+    // Store Python info (the venv interpreter, which restarts reuse)
     let api_token = {
         let mut server = get_server().lock().unwrap();
         server.python_path = python_path.clone();
         server.python_version = python_version.clone();
         server.api_token.clone()
     };
-
-    // Install missing deps
-    emit_startup_status(app, "Checking dependencies...");
-    if let Err(e) = ensure_python_deps(&python_path, &full_path) {
-        log::error!("Failed to install Python deps: {e}");
-        set_startup_error(
-            "DEPS_FAILED",
-            "Missing dependencies",
-            "Some required Python packages couldn't be installed.",
-            "Try running: pip3 install flask requests bleak cryptography",
-            &e,
-        );
-    }
 
     // Find free port
     let port = find_free_port(5123).map_err(|e| {
@@ -624,26 +1024,24 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     log::info!("Port: {port}");
 
     // Spawn with stdout/stderr capture
-    let mut child = Command::new(&python_path)
-        .arg(&server_script)
-        .current_dir(&cwd)
-        .env("PATH", &full_path)
-        .env("PYTHONUNBUFFERED", "1")
-        .env("PLAUD_API_PORT", port.to_string())
-        .env("PLAUD_API_TOKEN", &api_token)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            set_startup_error(
-                "SPAWN_FAILED",
-                "Couldn't start Python",
-                "The system couldn't launch the Python process.",
-                "Check that Python 3 is installed and accessible.",
-                &e.to_string(),
-            );
-            format!("Failed to spawn Python: {e}")
-        })?;
+    let mut child = spawn_backend(
+        &python_path,
+        &server_script,
+        &cwd,
+        &full_path,
+        port,
+        &api_token,
+    )
+    .map_err(|e| {
+        set_startup_error(
+            "SPAWN_FAILED",
+            "Couldn't start Python",
+            "The system couldn't launch the Python process.",
+            "Check that Python 3 is installed and accessible.",
+            &e.to_string(),
+        );
+        format!("Failed to spawn Python: {e}")
+    })?;
 
     // Record PID so the next launch can clean up if we crash before stop_python_server runs
     write_pid_file(child.id());
@@ -749,7 +1147,9 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                     // Silent break here would leave the user with a stale "ready"
                     // status forever. Log it and surface to the renderer so the
                     // user knows the watchdog has stopped monitoring.
-                    log::error!("[Python] Watchdog try_wait failed: {err} — stopping crash monitor");
+                    log::error!(
+                        "[Python] Watchdog try_wait failed: {err} — stopping crash monitor"
+                    );
                     SERVER_READY.store(false, Ordering::Release);
                     set_startup_error(
                         "WATCHDOG_DIED",
@@ -774,7 +1174,9 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                     restart_count += 1;
 
                     if restart_count <= MAX_RESTARTS {
-                        log::info!("[Python] Auto-restarting (attempt {restart_count}/{MAX_RESTARTS})...");
+                        log::info!(
+                            "[Python] Auto-restarting (attempt {restart_count}/{MAX_RESTARTS})..."
+                        );
                         // Re-spawn the Python server
                         if let Err(e) = restart_python_server(&app_handle) {
                             log::error!("[Python] Restart failed: {e}");
@@ -823,6 +1225,34 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     });
 
     Ok(())
+}
+
+/// Spawn api_server.py with the venv interpreter (first launch and restarts).
+fn spawn_backend(
+    python_path: &str,
+    server_script: &Path,
+    cwd: &Path,
+    full_path: &str,
+    port: u16,
+    api_token: &str,
+) -> std::io::Result<Child> {
+    let runtime = get_server().lock().unwrap().runtime.clone();
+    Command::new(python_path)
+        .arg(server_script)
+        .current_dir(cwd)
+        .env("PATH", full_path)
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONNOUSERSITE", "1")
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
+        .env("PLAUD_API_PORT", port.to_string())
+        .env("PLAUD_API_TOKEN", api_token)
+        // Lockfiles for ensure_installed(extra=...), and which runtime this is.
+        .env("PLAUD_REQUIREMENTS_DIR", requirements_dir())
+        .env("PLAUD_PYTHON_RUNTIME", runtime)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 /// Return the working directory to use when spawning the Python server.
@@ -877,17 +1307,15 @@ fn restart_python_server(app: &AppHandle) -> Result<(), String> {
     let server_script = find_server_script(app);
     let cwd = script_cwd(&server_script);
 
-    let mut child = Command::new(&python_path)
-        .arg(&server_script)
-        .current_dir(&cwd)
-        .env("PATH", &full_path)
-        .env("PYTHONUNBUFFERED", "1")
-        .env("PLAUD_API_PORT", port.to_string())
-        .env("PLAUD_API_TOKEN", &api_token)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Spawn failed: {e}"))?;
+    let mut child = spawn_backend(
+        &python_path,
+        &server_script,
+        &cwd,
+        &full_path,
+        port,
+        &api_token,
+    )
+    .map_err(|e| format!("Spawn failed: {e}"))?;
 
     // Capture output (stdout also watches for PLAUD_PORT_BOUND on restart)
     if let Some(stdout) = child.stdout.take() {
@@ -970,6 +1398,320 @@ pub fn stop_python_server() {
             server.process = None;
             SERVER_READY.store(false, Ordering::Release);
             delete_pid_file();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn sha256_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // Two-block message (padding spills into a second block).
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // Exactly one block of input (64 bytes) and a long input.
+        assert_eq!(
+            sha256_hex(&[b'a'; 64]),
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+        );
+        assert_eq!(
+            sha256_hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn sha256_matches_shasum_on_the_core_lockfile() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../app/requirements/core.txt");
+        let out = Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let expected = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(sha256_hex(CORE_LOCK.as_bytes()), expected);
+    }
+
+    #[test]
+    fn standalone_asset_is_pinned_312_stripped() {
+        let a = standalone_asset("aarch64");
+        assert_eq!(
+            a.filename,
+            "cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
+        );
+        assert!(a.url.starts_with(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+        ));
+        assert!(a.url.ends_with(&a.filename));
+        assert_eq!(a.sha256, STANDALONE_SHA256_AARCH64);
+        let x = standalone_asset("x86_64");
+        assert!(x.filename.contains("-x86_64-apple-darwin-"));
+        assert_eq!(x.sha256, STANDALONE_SHA256_X86_64);
+        for h in [a.sha256, x.sha256] {
+            assert_eq!(h.len(), 64);
+            assert!(h
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+        assert_eq!(
+            parse_python_version(STANDALONE_PY_VERSION).map(|v| (v.0, v.1)),
+            Some((3, 12))
+        );
+    }
+
+    #[test]
+    fn managed_runtime_wins_over_fallbacks() {
+        let base = choose_base_python(
+            Some((s("/app/python/bin/python3"), s("Python 3.12.16"))),
+            vec![(s("/opt/homebrew/bin/python3"), s("Python 3.12.1"))],
+        )
+        .unwrap();
+        assert_eq!(base.kind, RuntimeKind::Managed);
+        assert_eq!(base.path, "/app/python/bin/python3");
+    }
+
+    #[test]
+    fn older_managed_build_is_still_used() {
+        // A 3.12.9 build from an older app version, when the update download failed.
+        let base = choose_base_python(Some((s("/m/python3"), s("Python 3.12.9"))), vec![]).unwrap();
+        assert_eq!(base.kind, RuntimeKind::Managed);
+    }
+
+    #[test]
+    fn fallback_prefers_312_then_313_and_skips_too_old() {
+        let fallbacks = vec![
+            (s("/opt/homebrew/bin/python3"), s("Python 3.15.0")),
+            (s("/usr/bin/python3"), s("Python 3.9.6")),
+            (s("/usr/local/bin/python3.13"), s("Python 3.13.2")),
+            (s("/opt/homebrew/bin/python3.12"), s("Python 3.12.8")),
+        ];
+        let base = choose_base_python(None, fallbacks.clone()).unwrap();
+        assert_eq!(base.kind, RuntimeKind::Fallback);
+        assert_eq!(base.path, "/opt/homebrew/bin/python3.12");
+
+        let base = choose_base_python(None, fallbacks[..3].to_vec()).unwrap();
+        assert_eq!(base.path, "/usr/local/bin/python3.13");
+
+        // Only a brand-new minor: still usable, as a last resort.
+        let base = choose_base_python(None, fallbacks[..2].to_vec()).unwrap();
+        assert_eq!(base.path, "/opt/homebrew/bin/python3");
+
+        assert_eq!(choose_base_python(None, fallbacks[1..2].to_vec()), None);
+        assert_eq!(choose_base_python(None, vec![]), None);
+    }
+
+    #[test]
+    fn too_old_managed_falls_back() {
+        let base = choose_base_python(
+            Some((s("/m/python3"), s("Python 3.9.1"))),
+            vec![(s("/opt/homebrew/bin/python3.11"), s("Python 3.11.4"))],
+        )
+        .unwrap();
+        assert_eq!(base.kind, RuntimeKind::Fallback);
+    }
+
+    #[test]
+    fn fallback_ties_keep_candidate_order() {
+        let base = choose_base_python(
+            None,
+            vec![(s("/a"), s("Python 3.12.1")), (s("/b"), s("Python 3.12.9"))],
+        )
+        .unwrap();
+        assert_eq!(base.path, "/a");
+    }
+
+    #[test]
+    fn stamp_round_trips_and_rejects_partial() {
+        let stamp = VenvStamp {
+            lock_sha256: s("abc123"),
+            base_python: s("/Users/x/Library/Application Support/com.plaud.v2/python/bin/python3"),
+            base_version: s("Python 3.12.16"),
+        };
+        assert_eq!(VenvStamp::parse(&stamp.render()), Some(stamp));
+        assert_eq!(VenvStamp::parse("lock_sha256=abc\nbase_python=/p\n"), None);
+        assert_eq!(
+            VenvStamp::parse("lock_sha256=\nbase_python=/p\nbase_version=Python 3.12.1\n"),
+            None
+        );
+        assert_eq!(VenvStamp::parse(""), None);
+    }
+
+    fn managed(path: &str, version: &str) -> BasePython {
+        BasePython {
+            path: s(path),
+            version: s(version),
+            kind: RuntimeKind::Managed,
+        }
+    }
+
+    #[test]
+    fn venv_plan() {
+        let base = managed("/m/bin/python3", "Python 3.12.16");
+        let stamp = VenvStamp {
+            lock_sha256: s("lock1"),
+            base_python: s("/m/bin/python3"),
+            base_version: s("Python 3.12.16"),
+        };
+        assert_eq!(
+            plan_venv(Some(&stamp), true, &base, "lock1"),
+            VenvAction::UpToDate
+        );
+        // App update changed core.txt
+        assert_eq!(
+            plan_venv(Some(&stamp), true, &base, "lock2"),
+            VenvAction::Sync
+        );
+        // No venv / never finished a sync / venv interpreter broken
+        assert_eq!(plan_venv(None, true, &base, "lock1"), VenvAction::Rebuild);
+        assert_eq!(
+            plan_venv(Some(&stamp), false, &base, "lock1"),
+            VenvAction::Rebuild
+        );
+        // Managed patch update in place (3.12.9 -> 3.12.16): keep the venv
+        let old = VenvStamp {
+            base_version: s("Python 3.12.9"),
+            ..stamp.clone()
+        };
+        assert_eq!(
+            plan_venv(Some(&old), true, &base, "lock1"),
+            VenvAction::UpToDate
+        );
+        // Built on the fallback last time, managed now available
+        let from_brew = VenvStamp {
+            base_python: s("/opt/homebrew/bin/python3.12"),
+            ..stamp.clone()
+        };
+        assert_eq!(
+            plan_venv(Some(&from_brew), true, &base, "lock1"),
+            VenvAction::Rebuild
+        );
+        // Same path, new minor (Homebrew python3 3.14 -> 3.15)
+        let brew = BasePython {
+            path: s("/opt/homebrew/bin/python3"),
+            version: s("Python 3.15.0"),
+            kind: RuntimeKind::Fallback,
+        };
+        let brew_stamp = VenvStamp {
+            base_python: s("/opt/homebrew/bin/python3"),
+            base_version: s("Python 3.14.2"),
+            lock_sha256: s("lock1"),
+        };
+        assert_eq!(
+            plan_venv(Some(&brew_stamp), true, &brew, "lock1"),
+            VenvAction::Rebuild
+        );
+    }
+
+    #[test]
+    fn embedded_lockfiles_are_pinned() {
+        assert_eq!(LOCKFILES[0], ("core.txt", CORE_LOCK));
+        for (name, content) in LOCKFILES {
+            let pins: Vec<&str> = content
+                .lines()
+                .filter(|l| !l.starts_with(' ') && !l.starts_with('#') && !l.trim().is_empty())
+                .collect();
+            assert!(!pins.is_empty(), "{name} is empty");
+            for line in pins {
+                assert!(line.contains("=="), "{name}: unpinned line {line}");
+            }
+        }
+        for pkg in [
+            "flask==",
+            "bleak==",
+            "cryptography==",
+            "websockets==",
+            "pyobjc-framework-corewlan==",
+            "anthropic==2.3.0",
+        ] {
+            assert!(CORE_LOCK.contains(pkg), "core.txt lacks {pkg}");
+        }
+    }
+
+    /// End-to-end exercise of the real download + venv + pip path, against a
+    /// scratch HOME (never the user's Application Support). Network, ~30 s:
+    ///
+    /// PLAUD_RUNTIME_EXERCISE_HOME=/tmp/scratch cargo test --lib \
+    ///     python::tests::exercise_runtime_setup -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn exercise_runtime_setup() {
+        let Ok(home) = std::env::var("PLAUD_RUNTIME_EXERCISE_HOME") else {
+            eprintln!("PLAUD_RUNTIME_EXERCISE_HOME not set; skipping");
+            return;
+        };
+        let real_home = dirs::home_dir().unwrap();
+        assert!(
+            !home.is_empty() && Path::new(&home) != real_home,
+            "use a scratch HOME"
+        );
+        std::env::set_var("HOME", &home);
+        assert!(app_support_dir().starts_with(&home));
+
+        let full_path = "/usr/bin:/bin:/usr/sbin:/sbin";
+        let status = |m: &str| eprintln!("[status] {m}");
+        let time = |label: &str, t: std::time::Instant| {
+            eprintln!("[time] {label}: {:.1}s", t.elapsed().as_secs_f32())
+        };
+
+        let t = std::time::Instant::now();
+        let base = ensure_base_python(&status, full_path).expect("base python");
+        time("base python (download + verify + extract)", t);
+        assert_eq!(base.kind, RuntimeKind::Managed);
+        assert_eq!(base.version, format!("Python {STANDALONE_PY_VERSION}"));
+
+        let t = std::time::Instant::now();
+        let (py, ver) = ensure_venv(&status, &base, full_path).expect("venv");
+        time("venv create + pip install core.txt", t);
+        assert!(py.starts_with(&home), "{py}");
+        assert_eq!(ver, base.version);
+
+        let t = std::time::Instant::now();
+        ensure_venv(&status, &base, full_path).expect("warm venv");
+        time("warm launch (stamp + import check)", t);
+
+        // Simulate an app update that changed core.txt.
+        let stamp_path = venv_dir().join(VENV_STAMP_FILE);
+        let stamp = std::fs::read_to_string(&stamp_path).unwrap();
+        std::fs::write(
+            &stamp_path,
+            stamp.replace("lock_sha256=", "lock_sha256=old"),
+        )
+        .unwrap();
+        let t = std::time::Instant::now();
+        ensure_venv(&status, &base, full_path).expect("re-sync");
+        time("re-sync after lockfile change", t);
+        let stamp = VenvStamp::parse(&std::fs::read_to_string(&stamp_path).unwrap()).unwrap();
+        assert_eq!(stamp.lock_sha256, sha256_hex(CORE_LOCK.as_bytes()));
+
+        // Second launch with the managed build already there: no download.
+        let t = std::time::Instant::now();
+        let again = ensure_base_python(&status, full_path).unwrap();
+        time("base python, already installed", t);
+        assert_eq!(again, base);
+
+        for d in [bundled_python_dir(), venv_dir()] {
+            let out = Command::new("du").arg("-sh").arg(&d).output().unwrap();
+            eprintln!("[size] {}", String::from_utf8_lossy(&out.stdout).trim());
         }
     }
 }
