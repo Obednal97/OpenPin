@@ -212,6 +212,7 @@ async function apiCall(method, endpoint, body = null) {
     'went out of range',
     'already in progress',
     'powered off',
+    'invalid or has expired', // expired Plaud sign-in code: the user signs in again
   ];
   // 409 / busy = "a sync is already running" — expected, never a bug.
   const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));

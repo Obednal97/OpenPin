@@ -211,3 +211,34 @@ def test_connect_route_fills_serial_from_paired_address(monkeypatch, paired):
     with app.test_request_context("/device/connect", method="POST", json={"address": ADDR}):
         routes.connect()
     assert seen["sn"] == SN
+
+
+def test_missing_credentials_signed_out_explains_pairing(connect_env, monkeypatch):
+    """No SN signature on this Mac and not signed in: say where it comes from."""
+    monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: None)
+    notepin = FakeNotePin()
+    result = _connect(monkeypatch, notepin, ADDR)
+    assert result["connected"] is False
+    assert result["error"] == (
+        f"This Mac doesn't have the pairing credentials for this NotePin (serial ending {SN[-4:]}). "
+        "They come from Plaud once per device: sign in under Settings › Plaud Cloud, connect, "
+        "then you can sign out."
+    )
+    assert SN not in result["error"]  # last 4 only
+    assert notepin.client.is_connected is False
+
+
+def test_missing_credentials_signed_in_passes_on_plauds_reason(connect_env, monkeypatch):
+    monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: None)
+    monkeypatch.setattr("app.state.cloud.is_logged_in", lambda: True)
+    monkeypatch.setattr("app.state.cloud.bind_device", lambda sn: {"token": "T" * 32, "sn": sn})
+    monkeypatch.setattr(
+        "app.state.cloud.fetch_sn_signature",
+        lambda sn: {"error": "Plaud wouldn't sign this NotePin's serial (device not bound)"},
+    )
+    result = _connect(monkeypatch, FakeNotePin(), ADDR)
+    assert result["connected"] is False
+    error = result["error"]
+    assert f"serial ending {SN[-4:]}" in error and SN not in error
+    assert "Plaud wouldn't sign this NotePin's serial (device not bound)." in error
+    assert "T" * 32 not in error

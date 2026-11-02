@@ -14,6 +14,7 @@ def _error_json(base, exc):
     base["traceback"] = traceback.format_exc()
     return base
 
+
 bp = Blueprint("cloud", __name__, url_prefix="/cloud")
 
 
@@ -68,9 +69,11 @@ def login_token():
 
     try:
         result = cloud.login_with_token(token, region)
-        return jsonify(result)
     except Exception as e:
-        return jsonify({"error": f"Token validation failed: {e}"}), 401
+        return jsonify({"error": f"Couldn't check the token with Plaud: {e}"}), 502
+    if result.get("error"):
+        return jsonify(result), 401
+    return jsonify(result)
 
 
 @bp.route("/logout", methods=["POST"])
