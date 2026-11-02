@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import threading
 import traceback
 from pathlib import Path
@@ -12,8 +13,15 @@ from flask import Blueprint, jsonify, request
 from app.providers.summarize import summarize
 from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
 from app.providers.validate import validate_key as do_validate_key
-from app.utils.config import load_config, save_config
+from app.utils.config import load_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.paths import (
+    InvalidSessionIdError,
+    PathOutsideError,
+    is_auxiliary_stem,
+    resolve_inside,
+    validate_session_id,
+)
 from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
 
@@ -32,6 +40,7 @@ def _extract_spoken_tags(text):
     Returns list of tag strings, or empty list if no triggers found.
     """
     import re
+
     if not text:
         return []
     # Only scan the first ~500 chars (roughly first 30 seconds of speech)
@@ -61,25 +70,66 @@ def _apply_spoken_tags(session_id, text):
     tags = _extract_spoken_tags(text)
     if not tags:
         return []
-    config = load_config()
-    existing = config.get("recording_tags", {}).get(session_id, [])
-    # Merge — don't duplicate (case-insensitive comparison)
-    merged = list(existing)
-    existing_lower = {x.lower() for x in existing}
-    custom_tags = set(config.get("custom_tags", []))
-    for t in tags:
-        if t.lower() not in existing_lower:
-            merged.append(t)
-        # Auto-add to custom tags list if not already there (case-insensitive)
-        if t.lower() not in {x.lower() for x in custom_tags}:
-            custom_tags.add(t)
-    rec_tags = config.get("recording_tags", {})
-    rec_tags[session_id] = merged
-    config["recording_tags"] = rec_tags
-    config["custom_tags"] = sorted(custom_tags)
-    save_config(config)
+
+    def _apply(config):
+        existing = config.get("recording_tags", {}).get(session_id, [])
+        # Merge — don't duplicate (case-insensitive comparison)
+        merged = list(existing)
+        existing_lower = {x.lower() for x in existing}
+        custom_tags = set(config.get("custom_tags", []))
+        for t in tags:
+            if t.lower() not in existing_lower:
+                merged.append(t)
+            # Auto-add to custom tags list if not already there (case-insensitive)
+            if t.lower() not in {x.lower() for x in custom_tags}:
+                custom_tags.add(t)
+        config.setdefault("recording_tags", {})[session_id] = merged
+        config["custom_tags"] = sorted(custom_tags)
+
+    update_config(_apply)
     logging.info(f"Auto-tagged {session_id} with spoken tags: {tags}")
     return tags
+
+
+# Keys produced by a transcription run. Re-transcribing replaces these and
+# keeps everything else in the transcript JSON (summary, auto_title, tags,
+# custom_name, notion_page_url, ...).
+_TRANSCRIPTION_KEYS = ("text", "duration", "language", "segments", "provider", "speakers")
+
+
+def _write_text_atomic(path, text):
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
+    """Merge a fresh transcription into the existing transcript JSON.
+
+    Must be called WITHOUT holding the session's transcript lock (it takes
+    it). Replaces the transcription keys, preserves every other key, and sets
+    ``summary_stale: true`` if a summary exists and the text changed.
+    Returns the merged dict.
+    """
+    transcript_path = Path(transcript_path)
+    with get_transcript_lock(session_id):
+        existing = {}
+        if transcript_path.exists():
+            try:
+                loaded = json.loads(transcript_path.read_text())
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, ValueError) as e:
+                logging.warning("Existing transcript for %s unreadable, replacing: %s", session_id, e)
+        merged = {k: v for k, v in existing.items() if k not in _TRANSCRIPTION_KEYS}
+        merged.update(new_fields)
+        if existing.get("summary") and existing.get("text") != new_fields.get("text"):
+            merged["summary_stale"] = True
+        _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
+        if txt_text is not None:
+            _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
+    return merged
 
 
 def _error_json(base, exc):
@@ -87,6 +137,7 @@ def _error_json(base, exc):
     base["error"] = str(exc)
     base["traceback"] = traceback.format_exc()
     return base
+
 
 bp = Blueprint("transcribe", __name__)
 
@@ -102,16 +153,25 @@ def transcribe_file():
     # path on disk. Without containment, /transcribe is a primitive to ship
     # arbitrary readable files (e.g. ~/.ssh/id_rsa) to a cloud transcription
     # provider. Resolve symlinks + reject anything outside the known dirs.
-    try:
-        resolved = Path(path).resolve(strict=True)
-    except (FileNotFoundError, OSError):
-        return jsonify({"error": "File not found"}), 400
     from app.utils.constants import CLOUD_RECORDINGS_DIR, get_all_recordings_dirs
 
-    allowed_dirs = [d.resolve() for d in get_all_recordings_dirs()]
-    allowed_dirs.append(CLOUD_RECORDINGS_DIR.resolve())
-    if not any(resolved.is_relative_to(base) for base in allowed_dirs):
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        return jsonify({"error": "Path must be absolute"}), 400
+    allowed_dirs = [*get_all_recordings_dirs(), CLOUD_RECORDINGS_DIR]
+    try:
+        resolved = resolve_inside(allowed_dirs, path, must_exist=True)
+    except FileNotFoundError:
+        return jsonify({"error": "File not found"}), 400
+    except PathOutsideError:
         return jsonify({"error": "Path is outside the recordings directories"}), 400
+    if not resolved.is_file():
+        return jsonify({"error": "File not found"}), 400
+    try:
+        validate_session_id(resolved.stem)
+    except InvalidSessionIdError as e:
+        return jsonify({"error": str(e)}), 400
+    if is_auxiliary_stem(resolved.stem):
+        return jsonify({"error": "Not a recording (crop backup/temp file)"}), 400
     path = str(resolved)
 
     config = load_config()
@@ -168,7 +228,9 @@ def transcribe_file():
                     dg_keywords = list(vocab)
                     if profile.get("industry"):
                         dg_keywords.append(profile["industry"])
-                    result = transcribe_deepgram(path, key, deepgram_language or "en", diarize=diarize, keywords=dg_keywords or None)
+                    result = transcribe_deepgram(
+                        path, key, deepgram_language or "en", diarize=diarize, keywords=dg_keywords or None
+                    )
                     _cloud_has_speakers = bool(result.get("speakers"))
                 elif name == "groq":
                     result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
@@ -219,6 +281,7 @@ def transcribe_file():
             # (same logic used for local diarization — produces clean grouped output)
             if _cloud_has_speakers and segments:
                 from src.transcribe import Transcript, TranscriptSegment, _merge_speaker_segments
+
                 t_obj = Transcript(text=text, language=lang, duration=duration)
                 for s in segments:
                     t_obj.segments.append(
@@ -226,8 +289,7 @@ def transcribe_file():
                     )
                 t_obj.segments = _merge_speaker_segments(t_obj.segments)
                 segments = [
-                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
-                    for s in t_obj.segments
+                    {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t_obj.segments
                 ]
             prov = _cloud_provider
 
@@ -240,10 +302,7 @@ def transcribe_file():
             }
             if speakers:
                 t_data["speakers"] = speakers
-            with get_transcript_lock(session_id):
-                transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
-            txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
-            txt_path.write_text(text, encoding="utf-8")
+            _merge_transcript(session_id, transcript_path, t_data, txt_text=text)
 
             # Auto-detect spoken tags from the beginning of the transcript
             spoken_tags = _apply_spoken_tags(session_id, text)
@@ -373,10 +432,21 @@ def transcribe_file():
             raise
 
         if t.text:
-            with get_transcript_lock(session_id):
-                t.save(str(transcript_path))
-            txt_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
-            txt_path.write_text(t.formatted, encoding="utf-8")
+            # Same fields Transcript.save() writes, merged into the existing JSON
+            _merge_transcript(
+                session_id,
+                transcript_path,
+                {
+                    "text": t.text,
+                    "language": t.language,
+                    "duration": t.duration,
+                    "segments": [
+                        {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker} for s in t.segments
+                    ],
+                    "provider": "local",
+                },
+                txt_text=t.formatted,
+            )
 
             # Auto-detect spoken tags
             local_spoken_tags = _apply_spoken_tags(session_id, t.text)
@@ -426,6 +496,10 @@ def summarize_transcript():
     session_id = data.get("session_id", "")
     if not session_id:
         return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return jsonify({"error": str(e)}), 400
 
     transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
     if not transcript_path.exists():
@@ -438,6 +512,8 @@ def summarize_transcript():
         if not full_text or len(full_text.strip()) < 20:
             return jsonify({"error": "Transcript too short to summarize"}), 400
 
+        # Read-only snapshot for building the prompt. Never saved back: the AI
+        # call below can take minutes and other writers must not be undone.
         config = load_config()
 
         # Build user profile context
@@ -511,13 +587,20 @@ def summarize_transcript():
             t_data = json.loads(transcript_path.read_text())
             t_data["summary"] = summary_text
             t_data["auto_title"] = title
-            transcript_path.write_text(json.dumps(t_data, indent=2, ensure_ascii=False))
+            # Stale only if the transcript changed while the AI call ran.
+            if t_data.get("text", "") != full_text:
+                t_data["summary_stale"] = True
+            else:
+                t_data.pop("summary_stale", None)
+            _write_text_atomic(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
 
-        names = config.get("recording_names", {})
-        if not names.get(session_id):
-            names[session_id] = title
-            config["recording_names"] = names
-            save_config(config)
+        def _set_default_name(cfg):
+            names = cfg.setdefault("recording_names", {})
+            if not names.get(session_id):
+                names[session_id] = title
+
+        # Fresh, locked read-modify-write; also gives Notion the current config.
+        config = update_config(_set_default_name)
 
         fire_webhooks(
             "summarize", {"session_id": session_id, "title": title, "summary": summary_text, "provider": provider}
