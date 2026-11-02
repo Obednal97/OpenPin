@@ -294,6 +294,7 @@ window.plaud = {
   abortSync: () => apiCall('POST', '/device/abort-sync'),
   wifiSync: () => apiCall('POST', '/device/wifi-sync'),
   wifiSyncStatus: () => apiCall('GET', '/device/wifi-sync-status'),
+  ackWifiRestoreNotice: () => apiCall('POST', '/device/wifi-restore-notice/ack'),
 
   // Transcription
   transcribe: (path, model, diarize, language) =>
