@@ -785,7 +785,7 @@ def test_transfer_sigterm_cleans_up_in_order(mac, tmp_path, monkeypatch, capsys)
         async def disconnect(self):
             events.append("ble disconnect")
 
-    async def ble_cmd(name, pt):
+    async def ble_cmd(name, pt, **kw):
         events.append(name)
 
     async def fake_ble():
