@@ -1049,6 +1049,11 @@ function initAudioPlayer() {
 
 let cropState = null;
 
+// Append a cache-busting param to a URL that may already have a query string.
+function withCacheBust(url, stamp = Date.now()) {
+  const u = String(url);
+  return `${u}${u.includes('?') ? '&' : '?'}t=${stamp}`;
+}
 
 function initCropEditor(sessionId) {
   const cropBtn = $('#crop-audio-btn');
@@ -1210,12 +1215,18 @@ async function openCropEditor(sessionId) {
         toast(mode === 'new' ? 'Saved as new recording' : 'Audio cropped successfully', 'success');
         closeCropEditor();
         await loadRecordings();
-        // Reload audio for the active recording
         const targetId = result.session_id || sessionId;
-        audio.src = window.plaud.audioUrl(`${targetId}.ogg`) + '?t=' + Date.now();
-        audio.load();
         if (result.session_id && result.session_id !== sessionId) {
           openTranscript(result.session_id);
+        } else if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
+          // Overwrite removed the transcript — re-render so the view matches
+          openTranscript(sessionId);
+        }
+        // Reload audio, bypassing WebKit's cache. audioUrl() already carries
+        // query params (?format=m4a, &token=…), so append rather than add '?'.
+        if (app.currentSessionId === targetId) {
+          audio.src = withCacheBust(window.plaud.audioUrl(`${targetId}.ogg`));
+          audio.load();
         }
       }
     } catch (err) {
