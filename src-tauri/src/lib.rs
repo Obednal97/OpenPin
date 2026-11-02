@@ -4,7 +4,7 @@ mod python;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    Emitter, Listener, Manager,
+    Emitter, Manager,
 };
 
 /// Set the macOS dock icon based on system theme.
@@ -94,14 +94,12 @@ pub fn run() {
     }));
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_decorum::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.set_focus();
             }
         }))
-        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -115,13 +113,10 @@ pub fn run() {
             // Cache app version for bug reports (report_error doesn't have AppHandle)
             commands::set_app_version(app.package_info().version.to_string());
 
-            // macOS: traffic lights + themed dock icon
+            // macOS: themed dock icon. (Traffic lights: titleBarStyle Overlay +
+            // trafficLightPosition in tauri.conf.json.)
             #[cfg(target_os = "macos")]
             {
-                use tauri_plugin_decorum::WebviewWindowExt;
-                window.create_overlay_titlebar().unwrap();
-                window.set_traffic_lights_inset(16.0, 30.0).unwrap();
-
                 set_dock_icon_for_theme(is_system_dark_mode());
 
                 // Restore dock visibility preference
@@ -227,27 +222,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-
-            // Deep link: parse OAuth callbacks (plaud-v2://callback?auth_code=...)
-            let app_handle_dl = app.handle().clone();
-            app.listen("deep-link://new-url", move |event: tauri::Event| {
-                let url_str = event.payload();
-                if let Some(url_str) = url_str.strip_prefix('"').and_then(|s: &str| s.strip_suffix('"')) {
-                    if let Ok(parsed) = url::Url::parse(url_str) {
-                        let auth_code = parsed
-                            .query_pairs()
-                            .find(|(k, _)| k == "auth_code" || k == "code")
-                            .map(|(_, v)| v.to_string());
-                        if let Some(code) = auth_code {
-                            if let Some(w) = app_handle_dl.get_webview_window("main") {
-                                let _ = w.emit("oauth-callback", &code);
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
-                        }
-                    }
-                }
-            });
 
             // System wake detection — poll for sleep/wake transitions
             let app_handle_wake = app.handle().clone();
