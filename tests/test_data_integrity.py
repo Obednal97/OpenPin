@@ -252,7 +252,7 @@ def test_summarize_does_not_clobber_config_written_during_ai_call(env):
     sid = "1715000000"
     (env.trn / f"{sid}.json").write_text(json.dumps({"text": "A long enough transcript to summarise here."}))
 
-    def slow_summarize(text, config, extra):
+    def slow_summarize(text, config, extra, **kwargs):
         # While the "AI call" runs, another request writes to the config.
         from app.utils.config import update_config
 

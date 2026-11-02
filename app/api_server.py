@@ -153,20 +153,40 @@ def internal_error(e):
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
 
-# Startup housekeeping. Both helpers are called from the __main__ block below,
+# Startup housekeeping. These helpers are called from the __main__ block below,
 # never at import time: tests (and anything else that imports this module) must
 # not run networksetup or delete files in the real recordings folders.
 
 
 def _recover_wifi():
-    """Check if we're stuck on a Plaud hotspot from a crashed WiFi sync and restore internet."""
+    """Undo what a crashed or killed WiFi sync left behind, then restore internet.
+
+    If the worker's restore record exists (wifi_restore.json in the data dir),
+    restore from it: saved networks back in their original order, the hotspot
+    forgotten, WiFi power-cycled if still on the hotspot; the record is deleted
+    only after a verified restore, or given up (kept as wifi_restore.stuck.json,
+    shown once in the UI) after repeated or permanent failures. It's skipped
+    while a worker (e.g. from an app instance that's still running) holds the
+    sync lock. Without a record, fall back to checking for a Plaud hotspot by
+    name.
+
+    Slow (re-adding networks, power-cycling): run it via
+    _start_wifi_recovery() after the server is listening, not before.
+    """
     try:
         import subprocess
         import time
 
         # en0 on MacBooks, en1 on Mac mini / Studio / iMac (en0 is Ethernet there).
         # Lazy import: the worker module has no import-time side effects.
-        from app.utils.wifi_sync_worker import get_wifi_interface
+        from app.utils.constants import DATA_DIR
+        from app.utils.wifi_sync_worker import get_wifi_interface, recover_from_record
+
+        recovery = recover_from_record(DATA_DIR)
+        if recovery["status"] != "none":
+            log_fn = logging.info if recovery["status"] == "restored" else logging.warning
+            log_fn(f"[WiFi Recovery] From restore record: {recovery}")
+            return
 
         iface = get_wifi_interface()
         result = subprocess.run(
@@ -184,6 +204,18 @@ def _recover_wifi():
             logging.info("[WiFi Recovery] WiFi power-cycled, should reconnect to preferred network")
     except Exception as e:
         logging.error(f"[WiFi Recovery] Check failed: {e}")
+
+
+def _start_wifi_recovery():
+    """Run _recover_wifi on a background thread (returns at once).
+
+    Called once the server has bound its port, so a slow restore can't hold up
+    /health past the shell's startup budget. A WiFi sync requested meanwhile
+    waits for it (app.state.device.run_wifi_recovery_in_background).
+    """
+    from app.state import device as device_state
+
+    return device_state.run_wifi_recovery_in_background(_recover_wifi)
 
 
 # Clean up partial files from interrupted syncs
@@ -214,7 +246,12 @@ app.register_blueprint(settings.bp)
 if __name__ == "__main__":
     from werkzeug.serving import make_server
 
-    _recover_wifi()
+    from app.utils import parent_watch
+
+    # Exit if the Tauri shell that spawned us dies (SIGTERM/crash/force quit)
+    # instead of lingering on the old port with the old token.
+    parent_watch.start()
+
     _clean_partial_files()
 
     # Recover metadata from transcript files and start background workers
@@ -222,7 +259,13 @@ if __name__ == "__main__":
     # serve_forever opens the listening socket, and skips re-running these
     # side effects if api_server.py is ever imported from a test/REPL.
     recordings.init_recordings()
+    # Saved Plaud cloud token (+ background validation). Not done at import so
+    # tests and tooling that import the app make no network calls.
+    from app.state import cloud as _cloud_state
+
+    _cloud_state.init()
     from app.utils import notion_queue as _notion_queue
+
     _notion_queue.start_worker()
 
     start_port = int(os.environ.get("PLAUD_API_PORT", "5123"))
@@ -241,6 +284,8 @@ if __name__ == "__main__":
         print(f"PLAUD_PORT_BOUND: {candidate}", flush=True)
         print(f"Plaud V2 API server starting on http://127.0.0.1:{candidate}", flush=True)
         bound = True
+        # Listening now: WiFi recovery from a crashed sync runs in the background.
+        _start_wifi_recovery()
         try:
             server.serve_forever()
         finally:

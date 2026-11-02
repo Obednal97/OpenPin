@@ -1410,13 +1410,167 @@ async def _send_stop_sync():
         logging.debug(f"stop-sync (cmd 30) failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# WiFi sync (subprocess orchestration)
+# ---------------------------------------------------------------------------
+
+# The worker reports its own time budget (remaining_s in its progress lines,
+# from wifi_sync_worker.compute_budget). The parent waits that long plus a
+# margin, then SIGTERMs it (the worker restores WiFi on SIGTERM), waits for the
+# restore, and only SIGKILLs a worker that still won't exit. The sync slot is
+# never released while the worker runs.
+WIFI_BUDGET_MARGIN_S = 120
+WIFI_TERM_GRACE_S = 210  # the worker's RESTORE_BUDGET_S (180) + 30
+WIFI_KILL_WAIT_S = 10
+
+_wifi_sync_status.update({"active": False, "budget_s": None, "deadline": None})
+
+
+class _WifiDeadline:
+    """When the parent stops waiting for the worker (monotonic clock)."""
+
+    def __init__(self, remaining_s, clock=time.monotonic):
+        self._clock = clock
+        self.at = 0.0
+        self.extend(remaining_s)
+
+    def extend(self, remaining_s):
+        """The worker says it needs `remaining_s` more seconds from now."""
+        self.at = self._clock() + max(0, remaining_s) + WIFI_BUDGET_MARGIN_S
+
+    def expired(self):
+        return self._clock() > self.at
+
+    @classmethod
+    def now(cls, clock=time.monotonic):
+        """An already-expired deadline (stop the worker immediately)."""
+        d = cls(0, clock)
+        d.at = clock() - 1
+        return d
+
+    def wall_clock(self):
+        """The deadline as a UNIX timestamp (for the UI)."""
+        return time.time() + (self.at - self._clock())
+
+
+def _supervise_wifi_worker(proc, deadline, wlog, poll_s=1.0):
+    """Wait for the WiFi worker within its budget; stop it if it overruns.
+
+    Returns "exited" (finished by itself), "terminated" (exited after SIGTERM,
+    having run its WiFi restore) or "killed" (ignored SIGTERM for
+    WIFI_TERM_GRACE_S and was SIGKILLed; its restore record is left for
+    recovery). Doesn't return while the worker still runs, so the caller can't
+    release the sync slot under a live worker.
+    """
+    import subprocess as sp
+
+    while True:
+        try:
+            proc.wait(timeout=poll_s)
+            return "exited"
+        except sp.TimeoutExpired:
+            pass
+        if deadline.expired():
+            break
+    wlog(f"Worker PID {proc.pid} over its time budget; sending SIGTERM (it restores WiFi first)")
+    proc.terminate()
+    try:
+        proc.wait(timeout=WIFI_TERM_GRACE_S)
+        return "terminated"
+    except sp.TimeoutExpired:
+        pass
+    wlog(f"Worker PID {proc.pid} still running {WIFI_TERM_GRACE_S}s after SIGTERM; killing it")
+    proc.kill()
+    try:
+        proc.wait(timeout=WIFI_KILL_WAIT_S)
+    except sp.TimeoutExpired:
+        wlog(f"Worker PID {proc.pid} did not exit after SIGKILL")
+    return "killed"
+
+
+def _apply_wifi_progress(update, deadline):
+    """Apply one JSON progress line from the worker to the shared status."""
+    if "status" in update:
+        _wifi_sync_status["message"] = update["status"]
+        _wifi_sync_status["percent"] = update.get("percent", 0)
+    remaining = update.get("remaining_s")
+    if isinstance(remaining, (int, float)):
+        deadline.extend(remaining)
+        _wifi_sync_status["deadline"] = deadline.wall_clock()
+    if isinstance(update.get("budget_s"), (int, float)):
+        _wifi_sync_status["budget_s"] = update["budget_s"]
+
+
+def _recover_wifi_after_worker(wlog):
+    """Restore the Mac's WiFi from the worker's record (after it was stopped)."""
+    from app.utils.wifi_sync_worker import recover_from_record
+
+    try:
+        result = recover_from_record(DATA_DIR)
+    except Exception as e:
+        result = {"status": "error", "error": str(e)}
+    wlog(f"WiFi recovery from restore record: {result}")
+    return result
+
+
+# Startup WiFi recovery (api_server._recover_wifi) runs on a background thread
+# once the server is listening: re-adding networks and power-cycling can take
+# a minute, longer than the shell's startup health check allows. A WiFi sync
+# started meanwhile waits for it (it holds the worker lock, so the worker would
+# otherwise refuse with "already running").
+_wifi_recovery_idle = threading.Event()
+_wifi_recovery_idle.set()
+WIFI_RECOVERY_WAIT_S = 180  # the worker's RESTORE_BUDGET_S
+
+
+def run_wifi_recovery_in_background(recover):
+    """Run recover() on a daemon thread; do_wifi_sync_blocking waits for it."""
+    _wifi_recovery_idle.clear()
+
+    def go():
+        try:
+            recover()
+        except Exception as e:
+            logging.error(f"[WiFi Recovery] failed: {e}")
+        finally:
+            _wifi_recovery_idle.set()
+
+    t = threading.Thread(target=go, name="wifi-recovery", daemon=True)
+    try:
+        t.start()
+    except Exception:
+        _wifi_recovery_idle.set()
+        raise
+    return t
+
+
+def get_wifi_restore_notice():
+    """{"message", "networks", "since"} when saved networks couldn't be restored
+    and the UI hasn't acknowledged it yet, else None."""
+    from app.utils.wifi_sync_worker import restore_notice
+
+    try:
+        return restore_notice(DATA_DIR)
+    except Exception:
+        return None
+
+
+def acknowledge_wifi_restore_notice():
+    """The UI showed the notice; don't report it again. True if there was one."""
+    from app.utils.wifi_sync_worker import acknowledge_restore_notice
+
+    return acknowledge_restore_notice(DATA_DIR)
+
+
 def do_wifi_sync_blocking():
     """Run WiFi sync as a subprocess (user-initiated, blocking).
 
     Spawns wifi_sync_worker.py as a standalone process with its own clean
     asyncio event loop — identical to the test script that works reliably.
+    Keeps the Mac awake throughout (the Mac must not idle-sleep while it's on
+    the device's hotspot) and holds the sync slot until the worker has exited.
     """
-    global _syncing, _sync_abort
+    global _sync_abort
     if not _device_state.get("serial_number"):
         _wifi_sync_status.update({"message": "Device serial number unknown", "percent": 0})
         return {"error": "Device serial number unknown"}
@@ -1433,8 +1587,29 @@ def do_wifi_sync_blocking():
         return {"error": "BLE sync still running after 10s; WiFi sync aborted"}
     _sync_abort = False
 
+    if not _wifi_recovery_idle.is_set():
+        _wifi_sync_status.update({"message": "Restoring WiFi settings from an earlier transfer...", "percent": 2})
+        if not _wifi_recovery_idle.wait(WIFI_RECOVERY_WAIT_S):
+            _syncing.release()
+            _wifi_sync_status.update({"message": "Still restoring WiFi settings; try again shortly", "percent": 0})
+            return {"error": "Still restoring WiFi settings from an earlier transfer; try again shortly"}
+
+    from app.utils.wifi_sync_worker import compute_budget
+
+    deadline = _WifiDeadline(compute_budget(0)["total_s"])
+    _wifi_sync_status.update(
+        {"active": True, "budget_s": compute_budget(0)["total_s"], "deadline": deadline.wall_clock()}
+    )
+    try:
+        with _keep_awake("Plaud WiFi sync"):
+            return _do_wifi_sync_locked(deadline)
+    finally:
+        _wifi_sync_status["active"] = False
+        _syncing.release()
+
+
+def _do_wifi_sync_locked(deadline):
     sn = _device_state["serial_number"]
-    key, nonce, aad = _device_state["session_keys"]
 
     def _on_status(msg, pct):
         _wifi_sync_status["message"] = msg
@@ -1450,10 +1625,11 @@ def do_wifi_sync_blocking():
         if _wifi_log:
             try:
                 with open(_wifi_log, "a") as f:
-                    f.write(f"{__import__('datetime').datetime.now().isoformat()} {msg}\n")
+                    f.write(f"{datetime.now().isoformat()} {msg}\n")
             except Exception:
                 pass
 
+    proc = None
     try:
         # Disconnect BLE first — the worker needs to make its own connection.
         # The device invalidates crypto sessions when BLE drops, so the worker
@@ -1517,6 +1693,8 @@ def do_wifi_sync_blocking():
                 "dismissed": list(load_config().get("deleted_ids", [])),
                 "bind_token": device_token,
                 "sn_sig": device_sig,
+                # Lock file + WiFi restore record live here (survive a crash).
+                "state_dir": str(DATA_DIR),
             }
         )
 
@@ -1550,8 +1728,6 @@ def do_wifi_sync_blocking():
 
         # Read stdout and stderr in separate threads to avoid pipe deadlocks.
         # stderr carries JSON progress updates; stdout carries the final result.
-        import threading
-
         _worker_stderr = []
         _worker_stdout = []
 
@@ -1564,10 +1740,10 @@ def do_wifi_sync_blocking():
                 _worker_stderr.append(line)
                 try:
                     update = json.loads(line)
-                    if "status" in update:
-                        _on_status(update["status"], update.get("percent", 0))
                 except Exception:
-                    pass
+                    continue
+                if isinstance(update, dict):
+                    _apply_wifi_progress(update, deadline)
             _wlog("Worker stderr EOF")
 
         def _read_stdout():
@@ -1579,12 +1755,23 @@ def do_wifi_sync_blocking():
         stderr_thread.start()
         stdout_thread.start()
 
-        # Wait for process exit (up to 10 minutes)
+        # Wait within the worker's own budget (it grows once it knows the sizes).
         _wlog("Waiting for worker to finish...")
-        proc.wait(timeout=600)
-        _wlog(f"Worker exited with code {proc.returncode}")
+        outcome = _supervise_wifi_worker(proc, deadline, _wlog)
+        _wlog(f"Worker {outcome} with code {proc.returncode}")
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=5)
+
+        if outcome != "exited":
+            # A stopped worker may not have finished its restore; the record says.
+            _on_status("WiFi transfer took too long; restoring WiFi...", 95)
+            recovery = _recover_wifi_after_worker(_wlog)
+            _on_status("WiFi transfer took too long and was stopped", 0)
+            return {
+                "error": "WiFi transfer took too long and was stopped",
+                "timed_out": True,
+                "wifi_recovery": recovery,
+            }
 
         # Parse result from stdout
         stdout_bytes = _worker_stdout[0] if _worker_stdout else b""
@@ -1602,13 +1789,16 @@ def do_wifi_sync_blocking():
             }
 
         if stdout_str:
-            result = json.loads(stdout_str)
+            result = json.loads(stdout_str.splitlines()[-1])
             for f in result.get("files", []):
                 track_download_result(f)
                 if f.get("status") == "new" and f.get("session_id") is not None:
                     _finalize_redownload_backup(f["session_id"])
             done_count = sum(1 for f in result.get("files", []) if f.get("status") == "new")
-            _on_status(f"Complete: {done_count} file(s)", 100)
+            if result.get("error"):
+                _on_status(f"WiFi transfer failed: {result['error']}", 0)
+            else:
+                _on_status(f"Complete: {done_count} file(s)", 100)
             return result
         _on_status("WiFi transfer failed — no output", 0)
         return {"error": "WiFi worker produced no output"}
@@ -1621,7 +1811,11 @@ def do_wifi_sync_blocking():
         _on_status(f"WiFi transfer failed: {e}", 0)
         return {"error": str(e)}
     finally:
-        _syncing.release()
+        # Never leave a worker running once we stop tracking it (e.g. an
+        # exception above): stop it the same way as on a timeout.
+        if proc is not None and proc.poll() is None:
+            _supervise_wifi_worker(proc, _WifiDeadline.now(), _wlog, poll_s=0)
+            _recover_wifi_after_worker(_wlog)
 
 
 def _save_partial(sid, raw, expected, reason, rec_dir):
@@ -2063,7 +2257,9 @@ def abort_sync():
 
 
 def get_wifi_sync_status():
-    return dict(_wifi_sync_status)
+    """WiFi sync progress, plus restore_notice: saved networks that couldn't be
+    restored (show once, then acknowledge_wifi_restore_notice), or None."""
+    return {**_wifi_sync_status, "restore_notice": get_wifi_restore_notice()}
 
 
 def get_ble_sync_status():

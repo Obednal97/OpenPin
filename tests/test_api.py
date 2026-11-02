@@ -158,3 +158,18 @@ def test_notion_push_missing_transcript(flask_client):
     r = flask_client.post("/notion/push", json={"session_id": "nonexistent_12345"}, content_type="application/json")
     # Returns 401 (not connected), 400 (no database), or 404 (transcript not found)
     assert r.status_code in (400, 401, 404)
+
+
+def test_health_reports_version_from_shell_env(monkeypatch):
+    """The Rust shell passes PLAUD_APP_VERSION; /health must report it."""
+    import importlib
+
+    import app.routes.core as core
+
+    monkeypatch.setenv("PLAUD_APP_VERSION", "9.9.9")
+    try:
+        importlib.reload(core)
+        assert core._APP_VERSION == "9.9.9"
+    finally:
+        monkeypatch.delenv("PLAUD_APP_VERSION", raising=False)
+        importlib.reload(core)

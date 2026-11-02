@@ -1,0 +1,19 @@
+# Core runtime for the Plaud V2 backend, installed into the app-managed venv
+# at launch. Edit this, then run scripts/lock-python-deps.sh to regenerate
+# app/requirements/core.txt.
+flask
+requests
+# Official Anthropic SDK: summaries + API key validation
+anthropic==2.3.0
+# BLE (on macOS pulls pyobjc-core, -CoreBluetooth and -libdispatch)
+bleak
+# RSA file key + ChaCha20 audio decryption
+cryptography
+# WiFi sync worker (app/utils/wifi_sync_worker.py)
+websockets
+pyobjc-core
+pyobjc-framework-CoreBluetooth
+# WiFi sync: interface lookup, scan + join
+pyobjc-framework-CoreWLAN
+# Foundation: NSProcessInfo (App Nap), NSFileManager (Trash)
+pyobjc-framework-Cocoa

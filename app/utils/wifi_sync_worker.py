@@ -7,14 +7,50 @@ Outputs JSON result to stdout. Progress updates to stderr as JSON lines.
 The args were previously passed via argv but BIND_TOKEN + SN_SIG embedded in
 argv are visible to every process on the machine through `ps aux`; stdin keeps
 them out of the process table.
+
+Keeping the Mac's WiFi safe:
+- The saved ("preferred") networks are left alone by default: the worker joins
+  the hotspot directly and HotspotHold rejoins if macOS auto-joins away. Only
+  if auto-join keeps winning are they paused, and only when every one can be
+  put back exactly (WifiRun.isolate).
+- Before any network change a restore record is fsynced to
+  <state_dir>/wifi_restore.json; it's deleted only after a verified restore.
+  recover_from_record() replays it (startup, or after the parent kills an
+  over-time worker). If the record can't be fsynced, the saved networks are
+  never paused (HotspotHold just keeps rejoining).
+- isolate() and restore_networks() are serialised by WifiRun's lock, and once
+  a restore has begun no isolation can start; cleanup also waits for an
+  in-flight isolate() before restoring (cancelling its asyncio task doesn't
+  stop the thread).
+- A restore that keeps failing (MAX_RESTORE_ATTEMPTS, or every missing network
+  failing with a "not found / invalid" error, e.g. one the user has since
+  deleted) is given up: the record moves to wifi_restore.stuck.json for
+  diagnostics and restore_notice() tells the UI once which networks are gone.
+  Otherwise every sync would refuse and every launch would retry forever.
+- Passwords: restore re-adds each network by SSID + security type only and
+  passes NO password. That relies on macOS keeping the keychain items ("AirPort
+  network password", keyed by SSID) when -removeallpreferredwirelessnetworks
+  removes the profiles. That's expected (networksetup only edits the preferred
+  list) but NOT yet verified on real hardware for every macOS version: before
+  relying on isolation, check on a real Mac that a paused network rejoins
+  without a password prompt after the sync.
+- <state_dir>/wifi_sync.lock (flock) allows one worker at a time.
+- SIGTERM cancels the transfer; the restore always runs (run_guarded).
+- Progress lines carry budget_s / remaining_s (compute_budget) so the parent
+  and the UI know how long to wait.
 """
 
 import asyncio
+import fcntl
 import json
 import logging
+import math
+import os
+import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,15 +61,24 @@ WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
 
-def status(msg, pct):
-    """Send progress update to parent via stderr.
+_last_pct = 0
+
+
+def status(msg, pct=None, **extra):
+    """Send progress update to parent via stderr (pct None = keep the last one).
+
+    `extra` carries machine-readable fields, e.g. budget_s / remaining_s.
 
     Never raises: if the parent app died (closed pipe), a BrokenPipeError here
-    would abort the worker's `finally` before restore_internet() runs and leave
-    the Mac on the Plaud hotspot with its preferred networks removed.
+    would abort the worker's cleanup before the WiFi restore runs and leave the
+    Mac on the Plaud hotspot.
     """
+    global _last_pct
+    if pct is None:
+        pct = _last_pct
+    _last_pct = pct
     try:
-        print(json.dumps({"status": msg, "percent": pct}), file=sys.stderr, flush=True)
+        print(json.dumps({"status": msg, "percent": pct, **extra}), file=sys.stderr, flush=True)
     except (BrokenPipeError, OSError, ValueError):
         pass
 
@@ -131,7 +176,7 @@ def get_wifi_ip():
 
 
 def _get_current_ssid():
-    """Get the SSID we're actually connected to."""
+    """Get the SSID we're actually connected to (empty without Location permission)."""
     try:
         from CoreWLAN import CWWiFiClient
 
@@ -143,114 +188,761 @@ def _get_current_ssid():
     return ""
 
 
-def remove_preferred_networks():
-    """Remove all preferred WiFi networks. Returns list for later restore."""
-    saved = []
+# ── Durable state: one-worker lock + WiFi restore record ─────────────────────
+#
+# Everything needed to give the Mac its WiFi back is written to a JSON record in
+# the app's data dir, and fsynced, BEFORE each change to the network setup. It
+# is deleted only after a verified restore. If the worker is killed, the parent
+# (after its timeout) or the next app launch restores from it
+# (recover_from_record), and a new worker refuses to start until it has.
+
+RESTORE_RECORD_NAME = "wifi_restore.json"
+STUCK_RECORD_NAME = "wifi_restore.stuck.json"
+LOCK_NAME = "wifi_sync.lock"
+RECORD_VERSION = 1
+# Failed restores (in the run, at the next worker start, after a kill, at app
+# launch) before the leftover networks are given up on.
+MAX_RESTORE_ATTEMPTS = 3
+
+
+def _fsync_dir(path):
+    """fsync a directory (makes a rename/unlink durable). False if it failed."""
     try:
-        r = subprocess.run(
-            ["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        saved = [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip()]
-        if saved:
-            subprocess.run(
-                ["networksetup", "-removeallpreferredwirelessnetworks", get_wifi_interface()],
-                capture_output=True,
-                timeout=5,
-            )
-            status(f"Cleared {len(saved)} preferred networks", 15)
-    except Exception as e:
-        status(f"Could not clear preferred networks: {e}", 15)
-    return saved
-
-
-def restore_preferred_networks(saved):
-    """Restore previously saved preferred networks."""
-    if not saved:
-        return
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return False
     try:
-        for net_ssid in saved:
-            subprocess.run(
-                ["networksetup", "-addpreferredwirelessnetworkatindex", get_wifi_interface(), net_ssid, "0", "WPA2"],
-                capture_output=True,
-                timeout=5,
-            )
-        status(f"Restored {len(saved)} preferred networks", 15)
-    except Exception:
-        pass
+        os.fsync(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
-def connect_to_hotspot(ssid, password, original_ip, timeout=45):
-    """Connect to device hotspot via networksetup.
+def _write_json_durably(path, data, strict=False):
+    """Atomically replace `path` with JSON and fsync it. Raises OSError if the
+    file can't be written or fsynced (with strict, also if the directory can't)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(json.dumps(data, indent=2).encode("utf-8"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    if not _fsync_dir(path.parent) and strict:
+        raise OSError(f"could not fsync {path.parent}")
 
-    Caller must remove preferred networks BEFORE calling this, and restore
-    them AFTER the entire transfer is done (not just after connecting).
-    The Plaud hotspot gives IPs on 192.168.84.x — we verify this subnet.
+
+def write_restore_record(state_dir, record, strict=False):
+    """Atomically replace the restore record and fsync it (file + directory).
+
+    strict=True (used before pausing the saved networks) also raises when the
+    directory fsync fails, so the caller can refuse the change.
     """
-    from CoreWLAN import CWWiFiClient
+    _write_json_durably(Path(state_dir) / RESTORE_RECORD_NAME, record, strict)
 
-    iface = CWWiFiClient.sharedWiFiClient().interface()
-    if not iface:
-        status("No WiFi interface found", 15)
+
+def read_restore_record(state_dir):
+    """The leftover restore record, or None. A corrupt one is set aside, not trusted."""
+    path = Path(state_dir) / RESTORE_RECORD_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        logging.error(f"[WiFi] Unreadable restore record {path}: {e}; keeping it as {path.name}.corrupt")
+        try:
+            os.replace(path, path.with_name(path.name + ".corrupt"))
+        except OSError:
+            pass
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_restore_record(state_dir):
+    path = Path(state_dir) / RESTORE_RECORD_NAME
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_dir(path.parent)
+
+
+# -- giving up on a restore that can't succeed ------------------------------
+
+# networksetup / CoreWLAN errors meaning "this network can't be added back"
+# (e.g. the user deleted it, or its parameters aren't accepted). Retrying those
+# would only fail again.
+_PERMANENT_ADD_ERRORS = ("not found", "could not find", "does not exist", "invalid", "not valid", "unknown network")
+
+
+def is_permanent_add_error(err):
+    err = (err or "").lower()
+    return any(marker in err for marker in _PERMANENT_ADD_ERRORS)
+
+
+def _stuck_notice_message(networks):
+    return f"Some saved WiFi networks couldn't be restored: {', '.join(networks) if networks else 'unknown'}"
+
+
+def read_stuck_record(state_dir):
+    try:
+        data = json.loads((Path(state_dir) / STUCK_RECORD_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def note_failed_restore(state_dir, record, check, keep_record=False):
+    """Count one failed restore of `record`'s saved networks.
+
+    Gives up after MAX_RESTORE_ATTEMPTS, or straight away when every missing
+    network failed with a permanent error: a copy goes to
+    wifi_restore.stuck.json (for diagnostics and the UI's one-time notice) and
+    the active record is cleared, so syncs aren't refused and launches don't
+    retry forever. With keep_record (e.g. still on the hotspot) the record
+    stays, minus the saved networks, for the hotspot part of the recovery.
+
+    Returns "gave_up", or "incomplete" (record rewritten with the attempt count).
+    """
+    missing = list(check.get("missing") or [])
+    errors = dict(check.get("errors") or {})
+    attempts = int(record.get("restore_attempts") or 0) + 1
+    record = {**record, "restore_attempts": attempts, "last_missing": missing, "last_errors": errors}
+    permanent = bool(missing) and all(is_permanent_add_error(errors.get(s)) for s in missing)
+    if attempts < MAX_RESTORE_ATTEMPTS and not permanent:
+        write_restore_record(state_dir, record)
+        logging.warning(f"[WiFi] Restore attempt {attempts}/{MAX_RESTORE_ATTEMPTS} failed; missing {missing}")
+        return "incomplete"
+
+    previous = read_stuck_record(state_dir) or {}
+    networks = list(missing)
+    if not previous.get("acknowledged"):
+        networks += [s for s in previous.get("missing") or [] if s not in networks]
+    stuck = {
+        **record,
+        "gave_up_at": time.time(),
+        "reason": "permanent errors" if permanent else f"{attempts} failed attempts",
+        "missing": networks,
+        "acknowledged": False,
+    }
+    try:
+        _write_json_durably(Path(state_dir) / STUCK_RECORD_NAME, stuck)
+    except OSError as e:
+        logging.error(f"[WiFi] Could not write {STUCK_RECORD_NAME}: {e}")
+    if keep_record:
+        write_restore_record(state_dir, {**record, "isolated": False, "saved_networks": None})
+    else:
+        clear_restore_record(state_dir)
+    logging.error(
+        f"[WiFi] Gave up restoring saved networks {missing} after {attempts} attempt(s) "
+        f"({stuck['reason']}; errors: {errors}); kept as {STUCK_RECORD_NAME}"
+    )
+    status(_stuck_notice_message(missing), None)
+    return "gave_up"
+
+
+def restore_notice(state_dir):
+    """The one-time "couldn't restore" notice for the UI, or None (none, or acknowledged).
+
+    {"message": "Some saved WiFi networks couldn't be restored: A, B",
+     "networks": ["A", "B"], "since": <unix time>}
+    """
+    stuck = read_stuck_record(state_dir) if state_dir else None
+    if not stuck or stuck.get("acknowledged"):
+        return None
+    networks = list(stuck.get("missing") or [])
+    return {"message": _stuck_notice_message(networks), "networks": networks, "since": stuck.get("gave_up_at")}
+
+
+def acknowledge_restore_notice(state_dir):
+    """The UI has shown the notice: stop returning it (the file stays for diagnostics)."""
+    stuck = read_stuck_record(state_dir) if state_dir else None
+    if not stuck or stuck.get("acknowledged"):
+        return False
+    _write_json_durably(Path(state_dir) / STUCK_RECORD_NAME, {**stuck, "acknowledged": True})
+    return True
+
+
+class WorkerLock:
+    """Exclusive flock on <state_dir>/wifi_sync.lock, holding the owner's PID.
+
+    The kernel drops a flock when its process dies (even on SIGKILL), so a
+    crashed worker can never wedge it. The file is unlinked on release; acquire()
+    checks it locked the file that's still at the path, so a process that opened
+    the old file just before the unlink can't think it holds the lock too.
+    """
+
+    def __init__(self, state_dir):
+        self.path = Path(state_dir) / LOCK_NAME
+        self._fd = None
+
+    def acquire(self):
+        """Take the lock without blocking. False if another process holds it."""
+        while True:
+            fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                return False
+            try:
+                same = os.stat(self.path).st_ino == os.fstat(fd).st_ino
+            except FileNotFoundError:
+                same = False
+            if not same:
+                os.close(fd)
+                continue
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            self._fd = fd
+            return True
+
+    def release(self):
+        if self._fd is None:
+            return
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
+
+    def holder_pid(self):
+        try:
+            return int(self.path.read_text().strip() or 0) or None
+        except (OSError, ValueError):
+            return None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
+# ── The Mac's saved ("preferred") WiFi networks ──────────────────────────────
+
+# networksetup security names (`networksetup -help`) for CoreWLAN CWSecurity
+# values (CoreWLANTypes.h). Enterprise (802.1X credentials), WPA3-only, OWE and
+# unknown networks are missing on purpose: networksetup can't re-add them as
+# they were, so a list containing one is never removed.
+CW_SECURITY_TO_NETWORKSETUP = {
+    0: "OPEN",  # kCWSecurityNone
+    1: "WEP",  # kCWSecurityWEP
+    2: "WPA",  # kCWSecurityWPAPersonal
+    3: "WPA2",  # kCWSecurityWPAPersonalMixed (WPA/WPA2)
+    4: "WPA2",  # kCWSecurityWPA2Personal
+    5: "WPA2",  # kCWSecurityPersonal
+    13: "WPA2",  # kCWSecurityWPA3Transition (the AP also accepts WPA2)
+}
+
+
+def _networksetup(*args, timeout=10):
+    """Run networksetup; the CompletedProcess, or None if it couldn't run at all."""
+    try:
+        return subprocess.run(["networksetup", *args], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        logging.warning(f"[WiFi] networksetup {args[0] if args else ''} failed to run: {e}")
         return None
 
-    # Disassociate from current network
-    iface.disassociate()
-    for _ in range(10):
-        time.sleep(0.5)
-        if not get_wifi_ip():
-            break
 
-    deadline = time.time() + timeout
+def parse_preferred_networks(output):
+    """SSIDs from `networksetup -listpreferredwirelessnetworks` in auto-join order.
+
+    None when the output isn't a list (an error message) — never [] for an
+    error, so a failed read can't be mistaken for "no saved networks".
+    """
+    lines = output.splitlines()
+    if not lines:
+        return None
+    if not lines[0].startswith("Preferred networks on"):
+        return [] if "no preferred" in lines[0].lower() else None
+    # Entries are tab-indented; keep any other leading/trailing spaces, which
+    # are part of the SSID.
+    return [line[1:] if line.startswith("\t") else line.strip() for line in lines[1:] if line.strip()]
+
+
+def list_preferred_networks():
+    r = _networksetup("-listpreferredwirelessnetworks", get_wifi_interface())
+    if r is None or r.returncode != 0:
+        return None
+    return parse_preferred_networks(r.stdout or "")
+
+
+def _corewlan_profiles():
+    """[(ssid or None, CWSecurity int)] in auto-join order, or None if unavailable.
+
+    CWConfiguration.networkProfiles is "in the order in which the profiles
+    participate in the auto-join process" (Apple docs). The SSID is withheld
+    (None) when the app lacks Location Services permission.
+    """
+    try:
+        from CoreWLAN import CWWiFiClient
+
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+        cfg = iface.configuration() if iface else None
+        profiles = cfg.networkProfiles() if cfg else None
+        if profiles is None:
+            return None
+        out = []
+        for i in range(profiles.count()):
+            p = profiles.objectAtIndex_(i)
+            ssid = p.ssid()
+            out.append((str(ssid) if ssid else None, int(p.security())))
+        return out
+    except Exception:
+        return None
+
+
+def snapshot_preferred_networks():
+    """The saved networks in auto-join order with their security types, or None.
+
+    Names and order come from networksetup (it isn't redacted without Location
+    permission); security from CoreWLAN, matched by SSID, or by position when
+    CoreWLAN hides SSIDs but lists the same number of profiles. "security" is
+    None when it couldn't be determined or networksetup can't express it.
+    """
+    names = list_preferred_networks()
+    if names is None:
+        return None
+    profiles = _corewlan_profiles() or []
+    by_ssid = {ssid: sec for ssid, sec in profiles if ssid}
+    same_shape = len(profiles) == len(names)
+    snapshot = []
+    for i, name in enumerate(names):
+        cw = by_ssid.get(name)
+        if cw is None and same_shape and profiles[i][0] is None:
+            cw = profiles[i][1]
+        snapshot.append({"ssid": name, "cw_security": cw, "security": CW_SECURITY_TO_NETWORKSETUP.get(cw)})
+    return snapshot
+
+
+def can_isolate(snapshot):
+    """Only remove saved networks we can put back exactly as they were."""
+    return bool(snapshot) and all(n.get("security") for n in snapshot)
+
+
+def check_preferred_restored(expected, current):
+    """Compare a snapshot with the current list: which SSIDs are missing, and
+    whether the present ones are still in their original relative order."""
+    want = [n["ssid"] for n in expected]
+    missing = [s for s in want if s not in (current or [])]
+    present = [s for s in (current or []) if s in want]
+    order_ok = present == [s for s in want if s in present]
+    return {"verified": current is not None and not missing, "missing": missing, "order_ok": order_ok}
+
+
+def remove_all_preferred_networks():
+    r = _networksetup("-removeallpreferredwirelessnetworks", get_wifi_interface())
+    ok = r is not None and r.returncode == 0 and list_preferred_networks() == []
+    status("Paused saved WiFi networks for the transfer" if ok else "Could not pause saved WiFi networks", None)
+    return ok
+
+
+def _restore_via_corewlan(networks):
+    """Write the profiles back with CWMutableConfiguration + commitConfiguration.
+
+    Apple: the commit "requires the caller have root privileges or obtain
+    administrator privileges with the authorization parameter" — the app runs
+    as the user, so this usually fails and networksetup is used instead.
+    """
+    try:
+        from CoreWLAN import CWMutableConfiguration, CWMutableNetworkProfile, CWWiFiClient
+        from Foundation import NSData, NSOrderedSet
+
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+        if not iface or any(n.get("cw_security") is None for n in networks):
+            return False
+        cfg = CWMutableConfiguration.alloc().initWithConfiguration_(iface.configuration())
+        wanted = {n["ssid"] for n in networks}
+        profiles = []
+        for n in networks:
+            raw = n["ssid"].encode("utf-8")
+            p = CWMutableNetworkProfile.alloc().init()
+            p.setSsidData_(NSData.dataWithBytes_length_(raw, len(raw)))
+            p.setSecurity_(n["cw_security"])
+            profiles.append(p)
+        for p in cfg.networkProfiles() or []:
+            if p.ssid() and str(p.ssid()) not in wanted:
+                profiles.append(p)
+        cfg.setNetworkProfiles_(NSOrderedSet.orderedSetWithArray_(profiles))
+        ok, _err = iface.commitConfiguration_authorization_error_(cfg, None, None)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def restore_preferred_networks(networks):
+    """Put saved networks back in their ORIGINAL auto-join order and verify.
+
+    CoreWLAN first, then networksetup, adding each missing network at its
+    original index (ascending, so the order is rebuilt front to back) with its
+    recorded security type. No passwords are passed: macOS keeps them in the
+    keychain under the SSID, and removing a preferred network is expected to
+    leave that keychain item alone (unverified on real hardware: see the module
+    docstring). Returns check_preferred_restored()'s dict plus "errors"
+    ({ssid: error} for re-adds that failed).
+    """
+    if not networks:
+        return {"verified": True, "missing": [], "order_ok": True, "errors": {}}
+    if _restore_via_corewlan(networks):
+        result = check_preferred_restored(networks, list_preferred_networks())
+        if result["verified"]:
+            status(f"Restored {len(networks)} saved WiFi networks", None)
+            return {**result, "errors": {}}
+    current = list_preferred_networks() or []
+    iface = get_wifi_interface()
+    errors = {}
+    for index, net in enumerate(networks):
+        if net["ssid"] in current:
+            continue
+        security = net.get("security") or "WPA2"
+        r = _networksetup("-addpreferredwirelessnetworkatindex", iface, net["ssid"], str(index), security)
+        if r is None or r.returncode != 0:
+            err = ((r.stderr or r.stdout or "").strip() if r else "did not run")[:200]
+            errors[net["ssid"]] = err
+            logging.error(f"[WiFi] Could not re-add saved network #{index}: {err}")
+    result = {**check_preferred_restored(networks, list_preferred_networks()), "errors": errors}
+    if result["verified"]:
+        status(f"Restored {len(networks)} saved WiFi networks", None)
+        if not result["order_ok"]:
+            logging.warning("[WiFi] Saved networks restored, but not all in their original order")
+    else:
+        status(f"Could not restore {len(result['missing'])} saved WiFi network(s)", None)
+    return result
+
+
+def forget_network(ssid):
+    """Remove one network (the device hotspot) from the saved list."""
+    r = _networksetup("-removepreferredwirelessnetwork", get_wifi_interface(), ssid)
+    return r is not None and r.returncode == 0
+
+
+class WifiRun:
+    """What one WiFi sync changed on the Mac, mirrored to the restore record.
+
+    Default ("hold") mode changes nothing but joining the hotspot: the saved
+    networks stay, and HotspotHold rejoins if macOS auto-joins away. Only when
+    auto-join keeps pulling the Mac off the hotspot does isolate() pause the
+    saved networks, after first recording them durably.
+
+    isolate() runs on a worker thread (HotspotHold), so every method that
+    changes the networks or the record holds self._lock: a restore can't run
+    between isolate()'s record write and its removal (it would see every
+    network still present, report success, and finish() would clear the record
+    just before the removal). Once restore_networks() has started, isolate()
+    refuses.
+    """
+
+    def __init__(self, state_dir, hotspot_ssid, original_ip="", original_ssid=""):
+        self.state_dir = Path(state_dir) if state_dir else None
+        self.hotspot_ssid = hotspot_ssid
+        self.original_ip = original_ip
+        self.original_ssid = original_ssid
+        self.hotspot_ip = None
+        self.plaud_was_preferred = False
+        self.saved_networks = None
+        self.isolated = False
+        self.touched = False
+        self.restoring = False  # set by restore_networks(); no isolation after it
+        self.restore_attempts = 0
+        self.last_check = None  # restore_preferred_networks()'s result
+        self.gave_up = False  # the saved networks couldn't be restored (see note_failed_restore)
+        self.started = time.time()
+        self._lock = threading.Lock()
+
+    def record(self):
+        return {
+            "version": RECORD_VERSION,
+            "pid": os.getpid(),
+            "started": self.started,
+            "interface": get_wifi_interface(),
+            "hotspot_ssid": self.hotspot_ssid,
+            "hotspot_ip": self.hotspot_ip,
+            "original_ip": self.original_ip,
+            "original_ssid": self.original_ssid,
+            "plaud_was_preferred": self.plaud_was_preferred,
+            "isolated": self.isolated,
+            "saved_networks": self.saved_networks,
+            "restore_attempts": self.restore_attempts,
+        }
+
+    def _save(self, strict=False):
+        """Write the record. Caller holds self._lock."""
+        if self.state_dir is not None:
+            write_restore_record(self.state_dir, self.record(), strict=strict)
+
+    def begin(self):
+        """Call right before the first network change (joining the hotspot)."""
+        with self._lock:
+            names = list_preferred_networks()
+            self.plaud_was_preferred = bool(names) and self.hotspot_ssid in names
+            self.touched = True
+            self._save()
+
+    def set_hotspot_ip(self, ip):
+        with self._lock:
+            self.hotspot_ip = ip
+            self._save()
+
+    def isolate(self):
+        """Pause all saved networks so auto-join can't leave the hotspot. Last resort.
+
+        Refused (False, nothing removed) when the networks couldn't be put back
+        exactly, when there's nowhere durable to record them, when the record
+        can't be fsynced, or once a restore has started.
+        """
+        with self._lock:
+            if self.isolated:
+                return True
+            if self.restoring:
+                return False
+            if self.state_dir is None:
+                return False  # no restore record possible: never remove anything
+            snapshot = snapshot_preferred_networks()
+            if snapshot is not None:
+                # The hotspot itself (when it was saved before) is restored like any other.
+                snapshot = [n for n in snapshot if n["ssid"] != self.hotspot_ssid or self.plaud_was_preferred]
+            if not can_isolate(snapshot):
+                status("Keeping saved WiFi networks (they couldn't be restored exactly)", None)
+                return False
+            self.saved_networks = snapshot
+            self.isolated = True
+            try:
+                self._save(strict=True)  # durable BEFORE the removal
+            except OSError as e:
+                self.saved_networks = None
+                self.isolated = False
+                logging.error(f"[WiFi] Could not save the restore record ({e}); not pausing saved networks")
+                status("Keeping saved WiFi networks (couldn't save a restore record)", None)
+                return False
+            return remove_all_preferred_networks()
+
+    def _recorded_networks(self):
+        """The saved networks as the durable record has them (the source of truth
+        once isolation started), falling back to memory. Caller holds the lock."""
+        rec = read_restore_record(self.state_dir) if self.state_dir is not None else None
+        if rec and rec.get("isolated") and rec.get("saved_networks"):
+            return rec["saved_networks"]
+        return self.saved_networks
+
+    def restore_networks(self):
+        """Saved networks back (if paused) and the hotspot forgotten. True if verified.
+
+        Waits for an isolate() in progress (the lock) and stops any later one.
+        After isolation, the networks come from the restore record and are
+        verified against the list as it is now, after the removal finished.
+        """
+        with self._lock:
+            self.restoring = True
+            ok = True
+            self.last_check = None
+            if self.isolated:
+                self.last_check = restore_preferred_networks(self._recorded_networks())
+                ok = self.last_check["verified"]
+            if not self.plaud_was_preferred:
+                forget_network(self.hotspot_ssid)
+            return ok
+
+    def finish(self, networks_ok):
+        """Delete the record once the saved networks are verified and we're off the hotspot.
+
+        A failed network restore counts as an attempt (note_failed_restore);
+        after MAX_RESTORE_ATTEMPTS, or permanent errors, it's given up.
+        """
+        with self._lock:
+            if self.state_dir is None or not self.touched:
+                return True
+            on_hotspot = bool(self.hotspot_ip) and get_wifi_ip() == self.hotspot_ip
+            if networks_ok and not on_hotspot:
+                clear_restore_record(self.state_dir)
+                return True
+            if not networks_ok and self.isolated:
+                check = self.last_check or {"missing": [n["ssid"] for n in self.saved_networks or []]}
+                outcome = note_failed_restore(self.state_dir, self.record(), check, keep_record=on_hotspot)
+                self.restore_attempts += 1
+                if outcome == "gave_up":
+                    self.gave_up = True
+                    self.isolated = False
+                    self.saved_networks = None
+                    if not on_hotspot:
+                        return False
+            status("WiFi settings not fully restored — the app will retry when it next starts", None)
+            return False
+
+
+# ── Joining and holding the device hotspot ───────────────────────────────────
+
+
+def hotspot_ip_ok(ip, original_ip):
+    """The Plaud hotspot hands out 192.168.84.x; anything else (e.g. an iPhone
+    hotspot's 172.20.10.x, or the network we were on) isn't it."""
+    return bool(ip) and ip != original_ip and ip.startswith("192.168.")
+
+
+def _corewlan_join(ssid, password):
+    """Directed scan for the hotspot + associateToNetwork:password:error:.
+
+    Leaves the saved networks alone. Without Location permission scan results
+    have no SSID, so nothing matches and networksetup is used instead (we never
+    associate to a network we can't identify).
+    """
+    try:
+        from CoreWLAN import CWWiFiClient
+
+        iface = CWWiFiClient.sharedWiFiClient().interface()
+        if not iface:
+            return False
+        networks, _err = iface.scanForNetworksWithName_error_(ssid, None)
+        best = None
+        for net in networks or []:
+            if net.ssid() and str(net.ssid()) == ssid and (best is None or net.rssiValue() > best.rssiValue()):
+                best = net
+        if best is None:
+            return False
+        ok, _err = iface.associateToNetwork_password_error_(best, password, None)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _join_once(ssid, password):
+    """One join attempt (blocking). Returns (ok, detail)."""
+    if _corewlan_join(ssid, password):
+        return True, "CoreWLAN"
+    try:
+        r = subprocess.run(
+            ["networksetup", "-setairportnetwork", get_wifi_interface(), ssid, password],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "networksetup timed out"
+    except Exception as e:
+        return False, str(e)
+    # networksetup prints errors on stdout with exit code 0 on some macOS versions.
+    out = (r.stderr or "").strip() or (r.stdout or "").strip()
+    if r.returncode == 0 and not out:
+        return True, "networksetup"
+    return False, out or f"networksetup exit {r.returncode}"
+
+
+_pending_join = None  # in-flight blocking join; cleanup waits for it before restoring
+
+
+async def connect_to_hotspot(ssid, password, original_ip, timeout=45):
+    """Join the device hotspot and wait for an IP on it. Returns the IP or None.
+
+    Doesn't disassociate first: joining switches networks directly, and
+    disassociating puts macOS in a "user disconnected" state that later stops
+    it auto-joining the user's network again.
+    """
+    global _pending_join
+    deadline = time.monotonic() + timeout
     attempt = 0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         attempt += 1
         status(f"WiFi join attempt {attempt} for {ssid}...", 15)
-
-        try:
-            r = subprocess.run(
-                ["networksetup", "-setairportnetwork", get_wifi_interface(), ssid, password],
-                capture_output=True,
-                text=True,
-                timeout=20,
-            )
-        except subprocess.TimeoutExpired:
-            continue
-
-        if r.returncode == 0:
-            # Wait for IP on the hotspot subnet (192.168.84.x)
-            # Reject IPs from other networks (e.g. 172.20.10.x = iPhone hotspot)
-            for wait in range(15):
-                time.sleep(1)
+        _pending_join = asyncio.ensure_future(asyncio.to_thread(_join_once, ssid, password))
+        # shield: a SIGTERM cancels us, not the thread; cleanup waits for it.
+        ok, detail = await asyncio.shield(_pending_join)
+        _pending_join = None
+        if ok:
+            for _ in range(15):
+                await asyncio.sleep(1)
                 ip = get_wifi_ip()
-                if ip and ip != original_ip and ip.startswith("192.168."):
+                if hotspot_ip_ok(ip, original_ip):
                     status(f"Connected to {ssid} ({ip})", 20)
                     return ip
                 if ip and ip != original_ip:
                     status(f"Got IP {ip} but not on hotspot subnet, waiting...", 15)
             status("No hotspot IP after 15s, retrying...", 15)
-            iface.disassociate()
-            time.sleep(1)
         else:
-            status(f"networksetup error: {r.stderr.strip()}", 15)
-            time.sleep(2)
-
+            status(f"Join failed: {detail}", 15)
+            await asyncio.sleep(2)
     return None
 
 
-def get_preferred_networks(exclude):
-    try:
-        r = subprocess.run(
-            ["networksetup", "-listpreferredwirelessnetworks", get_wifi_interface()],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return [n.strip() for n in r.stdout.strip().split("\n")[1:] if n.strip() and n.strip() != exclude]
-    except Exception:
-        return []
+async def wait_for_pending_join(timeout=30):
+    """Let a join that was running when we were cancelled finish before restoring."""
+    global _pending_join
+    fut, _pending_join = _pending_join, None
+    if fut is not None and not fut.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except BaseException:
+            pass
+
+
+class HotspotHold:
+    """Keeps the Mac on the device hotspot for the whole transfer.
+
+    Polls the WiFi IP; if macOS auto-joins a saved network (the IP leaves the
+    hotspot for two polls in a row) it rejoins. If that happens again, auto-join
+    is fighting us and the saved networks are paused (WifiRun.isolate) — only
+    if they can be restored exactly. Gives up after max_rejoins.
+    """
+
+    def __init__(self, run, ssid, password, poll_s=3.0, max_rejoins=3, rejoin_timeout=30):
+        self.run = run
+        self.ssid = ssid
+        self.password = password
+        self.poll_s = poll_s
+        self.max_rejoins = max_rejoins
+        self.rejoin_timeout = rejoin_timeout
+        self.drifts = 0
+        self.rejoining = False
+        self.failed = None  # reason string once it gives up
+        self._isolation = None  # in-flight run.isolate() (a thread; cancelling us doesn't stop it)
+
+    async def wait_isolation(self):
+        """Wait for an isolate() that's still running on its thread (cleanup calls
+        this before restoring). Each networksetup call in it has a timeout."""
+        fut = self._isolation
+        if fut is not None and not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except BaseException:
+                pass
+
+    async def watch(self):
+        misses = 0
+        while self.failed is None:
+            await asyncio.sleep(self.poll_s)
+            ip = await asyncio.to_thread(get_wifi_ip)
+            if ip and ip == self.run.hotspot_ip:
+                misses = 0
+                continue
+            misses += 1
+            if misses < 2:
+                continue
+            misses = 0
+            self.drifts += 1
+            if self.drifts > self.max_rejoins:
+                self.failed = "The Mac kept leaving the device hotspot"
+                status(self.failed, None)
+                return
+            self.rejoining = True
+            try:
+                status(f"Mac left the device hotspot (WiFi now {ip or 'disconnected'}), rejoining...", None)
+                if self.drifts >= 2:
+                    # Refused (False) if it isn't safe; we then just rejoin again.
+                    self._isolation = asyncio.ensure_future(asyncio.to_thread(self.run.isolate))
+                    await asyncio.shield(self._isolation)
+                new_ip = await connect_to_hotspot(self.ssid, self.password, self.run.original_ip, self.rejoin_timeout)
+                if not new_ip:
+                    self.failed = "Could not rejoin the device hotspot"
+                    status(self.failed, None)
+                    return
+                self.run.set_hotspot_ip(new_ip)
+            finally:
+                self.rejoining = False
 
 
 async def _on_target_network(original_ssid, hotspot_ip, timeout_s=12):
@@ -274,23 +966,29 @@ async def _on_target_network(original_ssid, hotspot_ip, timeout_s=12):
 
 
 async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
-    """Restore internet after Plaud hotspot.
+    """Get the Mac back online after the Plaud hotspot.
 
-    Strategy (ordered by least disruption first):
-    1. Remove Plaud hotspot from preferred, try networksetup rejoin (uses keychain password)
-    2. If that fails, power-cycle WiFi (10s off) + CoreWLAN scan + associate
-    3. Second power-cycle (5s off) + networksetup again
+    The caller has already restored the saved networks, forgotten the hotspot
+    and closed it over BLE. Strategy (least disruptive first):
+    0. Wait for macOS to auto-join a saved network on its own
+    1. networksetup rejoin of the original SSID (keychain password)
+    2-3. Power-cycle WiFi + rejoin / CoreWLAN scan + associate
     4. If all fail, open WiFi settings for manual reconnection
     """
-    # Step 0: Remove Plaud hotspot from preferred networks
-    subprocess.run(["networksetup", "-removepreferredwirelessnetwork", get_wifi_interface(), ssid], capture_output=True)
-
     try:
         from CoreWLAN import CWWiFiClient
 
         iface = CWWiFiClient.sharedWiFiClient().interface()
     except Exception:
         iface = None
+
+    # Step 0: the hotspot is gone and the saved networks are intact, so
+    # auto-join usually reconnects within a few seconds.
+    status("Reconnecting to your WiFi...", 91)
+    ip, current_ssid = await _on_target_network("", hotspot_ip, timeout_s=15)
+    if ip:
+        status(f"Restored to {current_ssid or 'network'} ({ip})", 98)
+        return {"restored": True, "ssid": current_ssid, "ip": ip}
 
     # Step 1: Try networksetup first (uses saved keychain password, no power-cycle needed).
     # macOS can take 8–12s to settle after setairportnetwork, so poll rather than
@@ -382,6 +1080,104 @@ async def restore_internet(ssid, hotspot_ip, original_ip="", original_ssid=""):
     msg = f"Please reconnect to {original_ssid}" if original_ssid else "Please reconnect to your WiFi"
     status(msg, 97)
     return {"restored": False, "need_manual": True, "ssid": original_ssid, "message": msg}
+
+
+# ── Recovery from a leftover record (killed worker, crash, startup) ──────────
+
+
+def _power_cycle_wifi(off_s=3):
+    iface = get_wifi_interface()
+    _networksetup("-setairportpower", iface, "off", timeout=5)
+    time.sleep(off_s)
+    _networksetup("-setairportpower", iface, "on", timeout=5)
+
+
+def _stuck_on_hotspot(record):
+    ip = get_wifi_ip()
+    if ip and record.get("hotspot_ip") and ip == record["hotspot_ip"]:
+        return True
+    r = _networksetup("-getairportnetwork", get_wifi_interface(), timeout=5)
+    out = (r.stdout or "") if r else ""
+    current = out.strip().split(": ", 1)[-1] if ": " in out else ""
+    hotspot = record.get("hotspot_ssid") or ""
+    return bool(current) and (current == hotspot or current.startswith(("Plaud", "PLAUD")))
+
+
+def recover_locked(state_dir, record):
+    """Undo what a dead worker left behind, from its record. Caller holds the lock.
+
+    Restores the saved networks in their original order, forgets the hotspot,
+    power-cycles WiFi if the Mac is still on the hotspot (macOS then auto-joins
+    a saved network), and deletes the record only once the networks verify.
+
+    A failed restore is counted in the record; after MAX_RESTORE_ATTEMPTS (or
+    when only networks that fail permanently are missing) it's given up
+    ("gave_up": the record is cleared and wifi_restore.stuck.json kept), so a
+    network the user deleted can't block WiFi sync forever.
+    """
+    networks = record.get("saved_networks") if record.get("isolated") else None
+    check = restore_preferred_networks(networks) if networks else {"verified": True, "missing": [], "errors": {}}
+    if record.get("hotspot_ssid") and not record.get("plaud_was_preferred"):
+        forget_network(record["hotspot_ssid"])
+    if _stuck_on_hotspot(record):
+        logging.warning("[WiFi Recovery] Still on the device hotspot; power-cycling WiFi")
+        _power_cycle_wifi()
+    if check["verified"]:
+        clear_restore_record(state_dir)
+        return {"status": "restored", "networks": len(networks or [])}
+    outcome = note_failed_restore(state_dir, record, check)
+    return {
+        "status": outcome,
+        "missing": check["missing"],
+        "attempts": int(record.get("restore_attempts") or 0) + 1,
+    }
+
+
+def recover_from_record(state_dir):
+    """Restore the Mac's WiFi from a leftover record (startup, or after the parent
+    killed an over-time worker). Never runs while a live worker holds the lock.
+
+    Returns {"status": "none" | "busy" | "restored" | "incomplete" | "gave_up", ...}.
+    """
+    if read_restore_record(state_dir) is None:
+        return {"status": "none"}
+    lock = WorkerLock(state_dir)
+    if not lock.acquire():
+        return {"status": "busy", "pid": lock.holder_pid()}
+    try:
+        record = read_restore_record(state_dir)  # re-read under the lock
+        if record is None:
+            return {"status": "none"}
+        result = recover_locked(state_dir, record)
+        logging.warning(f"[WiFi Recovery] Restore record from PID {record.get('pid')}: {result}")
+        return result
+    finally:
+        lock.release()
+
+
+# ── Time budget ──────────────────────────────────────────────────────────────
+
+# Worst cases: BLE scan (up to 10 x 5 s) + handshake ~80 s, hotspot join 45 s,
+# WS handshake 30 s, file list 15 s.
+SETUP_BUDGET_S = 240
+# Rejoining the hotspot if macOS auto-joins away (HotspotHold, up to 3 x ~45 s).
+HOLD_BUDGET_S = 150
+# Closing the hotspot + restore_internet's worst case (auto-join wait, rejoin,
+# two power-cycles, opening Settings) + re-adding saved networks.
+RESTORE_BUDGET_S = 180
+MIN_TRANSFER_RATE_BPS = 50_000  # conservative WiFi throughput (B/s)
+MIN_DOWNLOAD_BUDGET_S = 60
+RECONNECT_GRACE_S = 20  # how long to wait for the device to reconnect its WebSocket
+
+
+def compute_budget(total_bytes):
+    """Seconds the worker may take: download_s for the transfer itself, total_s
+    for a whole run (the parent's timeout and the UI's wait derive from it)."""
+    download_s = max(math.ceil(max(total_bytes, 0) / MIN_TRANSFER_RATE_BPS), MIN_DOWNLOAD_BUDGET_S)
+    return {
+        "download_s": download_s,
+        "total_s": SETUP_BUDGET_S + HOLD_BUDGET_S + download_s + RESTORE_BUDGET_S,
+    }
 
 
 def _atomic_write(path, data):
@@ -657,33 +1453,316 @@ async def ble_connect_and_setup():
     return cl, key, nonce, aad, cipher, cmd
 
 
-async def main():
-    global BIND_TOKEN, SN_SIG
-    # Read args from stdin (parent writes JSON + closes pipe). Keeps the
-    # per-device BIND_TOKEN and SN_SIG out of argv → out of `ps aux` output.
-    args = json.loads(sys.stdin.read())
-    sn = args["sn"]
+class WifiSession:
+    """The device↔Mac WebSocket protocol for one transfer; survives reconnects.
+
+    - Only one connection at a time, and only from the hotspot (admit()).
+    - Each connection has its own message counter (the old shared ws_seq was
+      reset by ANY new connection, breaking the live one).
+    - The file list is merged by session id, so a reconnect that re-sends it
+      doesn't duplicate files, and files already handled aren't fetched again.
+    """
+
+    def __init__(self, cipher, nonce, aad, bind_token, recordings_dir, dismissed, app_rsa_key, original_ip=""):
+        self.cipher = cipher
+        self.nonce = nonce
+        self.aad = aad
+        self.bind_token = bind_token
+        self.recordings_dir = Path(recordings_dir)
+        self.dismissed = dismissed
+        self.app_rsa_key = app_rsa_key
+        self.original_ip = original_ip
+        self.handshake_done = asyncio.Event()
+        self.file_list_received = asyncio.Event()
+        self.all_done = asyncio.Event()
+        self.wifi_files = []
+        self.new_files = []
+        self.active = None
+        self.lost_at = None
+
+    # -- bookkeeping --------------------------------------------------------
+
+    def merge_file_list(self, entries):
+        known = {f["session_id"] for f in self.wifi_files}
+        for e in entries:
+            if e["session_id"] not in known:
+                known.add(e["session_id"])
+                self.wifi_files.append(e)
+
+    def pending_files(self):
+        handled = {e["session_id"] for e in self.new_files}
+        return [f for f in self.wifi_files if f["session_id"] not in handled]
+
+    def bytes_to_download(self):
+        return sum(
+            f["size"]
+            for f in self.pending_files()
+            if str(f["session_id"]) not in self.dismissed
+            and not (self.recordings_dir / f"{f['session_id']}.ogg").exists()
+        )
+
+    def lost_for(self, now=None):
+        """Seconds since the device's connection dropped (0 while connected)."""
+        if self.active is not None or self.lost_at is None:
+            return 0.0
+        return (time.monotonic() if now is None else now) - self.lost_at
+
+    def admit(self, local_ip, remote_ip, wifi_ip):
+        """Accept a connection only over the hotspot, and only one at a time.
+
+        The server listens before the Mac joins the hotspot (the device connects
+        as soon as it has a client, and an early server was what made transfers
+        reliable), so the check is per connection: it must arrive on the WiFi
+        interface's current address, that address must be a hotspot address, and
+        the peer must be on the same /24. Other hosts on the user's LAN (or via
+        Ethernet) are refused.
+        """
+        if self.active is not None:
+            return False, "another device connection is active"
+        if not hotspot_ip_ok(wifi_ip, self.original_ip):
+            return False, "not on the device hotspot"
+        if local_ip != wifi_ip:
+            return False, "not via the WiFi interface"
+        if not remote_ip or remote_ip.rsplit(".", 1)[0] != wifi_ip.rsplit(".", 1)[0]:
+            return False, "peer is not on the hotspot subnet"
+        return True, ""
+
+    # -- protocol -----------------------------------------------------------
+
+    async def handler(self, websocket):
+        local_ip = (getattr(websocket, "local_address", None) or ("",))[0]
+        remote_ip = (getattr(websocket, "remote_address", None) or ("",))[0]
+        ok, why = self.admit(local_ip, remote_ip, await asyncio.to_thread(get_wifi_ip))
+        if not ok:
+            status(f"Refused WebSocket connection from {remote_ip}: {why}", None)
+            try:
+                await websocket.close(1008, why)
+            except Exception:
+                pass
+            return
+        self.active = websocket
+        self.lost_at = None
+        seq = 0
+        cipher, nonce, aad = self.cipher, self.nonce, self.aad
+
+        def encrypt(payload):
+            nonlocal seq
+            seq += 1
+            return cipher.encrypt(nonce, struct.pack("<I", seq) + payload, aad)
+
+        download_buf = bytearray()
+        current = {"sid": 0, "size": 0}
+        queue = []
+
+        async def download_next():
+            download_buf.clear()
+            f = next_wifi_download(queue, self.recordings_dir, self.dismissed, self.new_files)
+            if f is not None:
+                current["sid"], current["size"] = f["session_id"], f["size"]
+                req = build_wifi_packet(12, {"session": f["session_id"], "scene": 0, "start": 0, "end": f["size"]})
+                await websocket.send(encrypt(req))
+                status(f"Downloading session {f['session_id']}...", 40)
+                return True
+            self.all_done.set()
+            return False
+
+        try:
+            async for message in websocket:
+                if not isinstance(message, bytes):
+                    continue
+                try:
+                    decrypted = cipher.decrypt(nonce, message, aad)[4:]
+                except Exception:
+                    continue
+
+                cmd_id, json_data = parse_wifi_packet(decrypted)
+                info = json_data if isinstance(json_data, dict) else {}
+
+                if cmd_id == 2:
+                    response = build_wifi_packet(1, {"token": self.bind_token, "stamp": int(time.time())})
+                    await websocket.send(encrypt(response))
+
+                elif cmd_id == 1:
+                    self.handshake_done.set()
+                    await asyncio.sleep(0.3)
+                    fl_req = build_wifi_packet(11, {"uid": int(time.time()), "start": 0, "single": 0})
+                    await websocket.send(encrypt(fl_req))
+
+                elif cmd_id == 11:
+                    if info.get("status", -1) == 0 and info.get("count", 0) > 0:
+                        json_len_val = struct.unpack_from("<H", decrypted, 6)[0]
+                        bin_data = decrypted[8 + json_len_val :]
+                        entries = []
+                        for i in range(0, len(bin_data) - 9, 10):
+                            sid = struct.unpack_from("<I", bin_data, i)[0]
+                            fsize = struct.unpack_from("<I", bin_data, i + 4)[0]
+                            codec = struct.unpack_from("<H", bin_data, i + 8)[0]
+                            entries.append({"session_id": sid, "size": fsize, "codec": codec})
+                        self.merge_file_list(entries)
+                    queue[:] = self.pending_files()
+                    self.file_list_received.set()
+                    status(f"{len(self.wifi_files)} file(s) found", 35)
+                    await download_next()
+
+                elif cmd_id == 13:
+                    json_len_c = struct.unpack_from("<H", decrypted, 6)[0]
+                    chunk = decrypted[8 + json_len_c :]
+                    if chunk:
+                        download_buf.extend(chunk)
+                    if info.get("last", 0):
+                        # Same fail-safe rule as BLE: exact size → saved; a size
+                        # mismatch is kept only if it decrypts, else partial.
+                        entry = save_wifi_download(
+                            self.recordings_dir, current["sid"], bytes(download_buf), current["size"], self.app_rsa_key
+                        )
+                        self.new_files.append(entry)
+                        done = sum(1 for f in self.new_files if f["status"] == "new")
+                        total = len(self.wifi_files)
+                        status(f"Downloaded {done}/{total}", 35 + int(55 * done / max(total, 1)))
+                        await download_next()
+
+                elif cmd_id == 3:
+                    await websocket.send(encrypt(build_wifi_packet(16, {})))
+
+        except Exception:
+            pass
+        finally:
+            self.active = None
+            if not self.all_done.is_set():
+                self.lost_at = time.monotonic()
+                status("Device connection dropped, waiting for it to reconnect...", None)
+
+
+async def run_guarded(body, cleanup):
+    """Run body(); SIGTERM cancels it, and cleanup() ALWAYS runs afterwards.
+
+    cleanup runs exactly once and a second SIGTERM can't interrupt it (the
+    WiFi restore must finish). Returns body's result, or None if terminated.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    state = {"cleaning": False, "terminated": False}
+
+    def on_term():
+        state["terminated"] = True
+        if not state["cleaning"]:
+            status("Stop requested, restoring WiFi before exiting...", None)
+            task.cancel()
+
+    installed = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, on_term)
+        installed = True
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+    try:
+        try:
+            return await body()
+        finally:
+            state["cleaning"] = True
+            await cleanup()
+    except asyncio.CancelledError:
+        if not state["terminated"]:
+            raise
+        return None
+    finally:
+        if installed:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
+class _KeepAwake:
+    """NSProcessInfo activity (as app/state/device.py's _keep_awake): no App Nap
+    and no idle system sleep while the Mac is on the hotspot. No-op without pyobjc."""
+
+    _OPTIONS = 0x00FFFFFF  # NSActivityUserInitiated
+
+    def __init__(self, reason):
+        self._reason = reason
+        self._token = None
+
+    def __enter__(self):
+        try:
+            from Foundation import NSProcessInfo
+
+            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
+        except Exception:
+            self._token = None
+        return self
+
+    def __exit__(self, *exc):
+        if self._token is not None:
+            try:
+                from Foundation import NSProcessInfo
+
+                NSProcessInfo.processInfo().endActivity_(self._token)
+            except Exception:
+                pass
+            self._token = None
+        return False
+
+
+def _emit_result(result):
+    """Final JSON result on stdout; never raises (the parent may be gone)."""
+    try:
+        print(json.dumps(result), flush=True)
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+
+async def _close_hotspot(cl, ble_cmd, timeout=15):
+    """Tell the device to close its hotspot over BLE (bounded; failures ignored)."""
+
+    async def go():
+        await cl.start_notify(N, lambda s, d: None)
+        await ble_cmd("WiFi_Close", bytes([1, 10, 0, 0]))
+        await cl.stop_notify(N)
+
+    try:
+        await asyncio.wait_for(go(), timeout)
+    except BaseException as e:
+        if isinstance(e, (KeyboardInterrupt, SystemExit)):
+            raise
+        status("Could not close the device hotspot over Bluetooth", None)
+
+
+async def _start_ws_server(session):
+    import websockets.asyncio.server
+
+    last_err = None
+    for port in WS_PORT_CANDIDATES:
+        try:
+            # Listens on all interfaces BEFORE the hotspot is joined (the device
+            # connects straight away); session.admit() refuses anything that
+            # doesn't arrive over the hotspot.
+            return await websockets.asyncio.server.serve(session.handler, "0.0.0.0", port)
+        except OSError as e:
+            last_err = e
+            status(f"Port {port} in use, trying next...", 5)
+    raise OSError(f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use") from last_err
+
+
+async def transfer(args):
+    """BLE handshake → device hotspot → WebSocket download → WiFi restored."""
     recordings_dir = Path(args["recordings_dir"])
     app_key_path = Path(args["app_key_path"])
     dismissed = set(args.get("dismissed", []))
-    BIND_TOKEN = args.get("bind_token")
-    SN_SIG = args.get("sn_sig")
-    if not BIND_TOKEN:
-        print(json.dumps({"error": "No BIND_TOKEN — user must log into Plaud cloud first"}))
-        return
-    if not SN_SIG:
-        print(json.dumps({"error": "No SN_SIG — user must log into Plaud cloud first"}))
-        return
+    sn = args["sn"]
+    started = time.monotonic()
+
+    def report_budget(total_bytes, msg, pct):
+        b = compute_budget(total_bytes)
+        remaining = b["total_s"] - SETUP_BUDGET_S + max(0, SETUP_BUDGET_S - (time.monotonic() - started))
+        status(msg, pct, budget_s=b["total_s"], remaining_s=math.ceil(remaining))
+
+    report_budget(0, "Connecting to the device over Bluetooth...", 2)
 
     # Do our own BLE connection (device invalidates sessions when BLE drops)
     try:
         ble = await ble_connect_and_setup()
     except ValueError as e:
-        print(json.dumps({"error": f"BLE handshake failed: {e}"}))
-        return
+        return {"error": f"BLE handshake failed: {e}"}
     if not ble:
-        print(json.dumps({"error": "BLE connection failed"}))
-        return
+        return {"error": "BLE connection failed"}
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
     app_rsa_key = load_pem_private_key(app_key_path.read_bytes(), password=None)
@@ -695,156 +1774,22 @@ async def main():
     wifi_ssid = f"Plaud{sn[-4:]}"
     wifi_pass = sn[-8:]
     original_ip = get_wifi_ip()
+    # Needs Location permission; empty otherwise (restore then accepts any network).
+    original_ssid = _get_current_ssid()
+    if original_ssid:
+        status(f"Current network: {original_ssid}", 3)
 
-    # Save current SSID before transfer (requires Location permission)
-    original_ssid = ""
-    try:
-        from CoreWLAN import CWWiFiClient
+    run = WifiRun(args.get("state_dir"), wifi_ssid, original_ip, original_ssid)
+    session = WifiSession(cipher, nonce, aad, BIND_TOKEN, recordings_dir, dismissed, app_rsa_key, original_ip)
+    hold = HotspotHold(run, wifi_ssid, wifi_pass)
+    ctx = {"server": None, "hold_task": None, "hotspot_opened": False, "wifi_restore": None}
 
-        _iface = CWWiFiClient.sharedWiFiClient().interface()
-        if _iface and _iface.ssid():
-            original_ssid = str(_iface.ssid())
-            status(f"Current network: {original_ssid}", 3)
-    except Exception:
-        pass
-
-    ws_seq = 0
-    handshake_done = asyncio.Event()
-    file_list_received = asyncio.Event()
-    all_downloads_done = asyncio.Event()
-    wifi_files = []
-    new_files = []
-
-    def ws_encrypt(payload):
-        nonlocal ws_seq
-        ws_seq += 1
-        return cipher.encrypt(nonce, struct.pack("<I", ws_seq) + payload, aad)
-
-    def ws_decrypt(data):
-        return cipher.decrypt(nonce, data, aad)[4:]
-
-    import websockets.asyncio.server
-
-    async def ws_handler(websocket):
-        nonlocal ws_seq
-        ws_seq = 0
-        download_buf = bytearray()
-        current_sid = 0
-        current_expected_size = 0
-        file_queue = []
-
-        async def download_next():
-            nonlocal current_sid, current_expected_size
-            download_buf.clear()
-            f = next_wifi_download(file_queue, recordings_dir, dismissed, new_files)
-            if f is not None:
-                sid = f["session_id"]
-                current_sid = sid
-                current_expected_size = f["size"]
-                dl_req = build_wifi_packet(12, {"session": sid, "scene": 0, "start": 0, "end": f["size"]})
-                await websocket.send(ws_encrypt(dl_req))
-                status(f"Downloading session {sid}...", 40)
-                return True
-            all_downloads_done.set()
-            return False
-
-        try:
-            async for message in websocket:
-                if not isinstance(message, bytes):
-                    continue
-                try:
-                    decrypted = ws_decrypt(message)
-                except Exception:
-                    continue
-
-                cmd_id, json_data = parse_wifi_packet(decrypted)
-
-                if cmd_id == 2:
-                    stamp = int(time.time())
-                    response = build_wifi_packet(1, {"token": BIND_TOKEN, "stamp": stamp})
-                    await websocket.send(ws_encrypt(response))
-
-                elif cmd_id == 1:
-                    handshake_done.set()
-                    await asyncio.sleep(0.3)
-                    uid = int(time.time())
-                    fl_req = build_wifi_packet(11, {"uid": uid, "start": 0, "single": 0})
-                    await websocket.send(ws_encrypt(fl_req))
-
-                elif cmd_id == 11:
-                    count = json_data.get("count", 0) if isinstance(json_data, dict) else 0
-                    s = json_data.get("status", -1) if isinstance(json_data, dict) else -1
-                    if s == 0 and count > 0:
-                        json_len_val = struct.unpack_from("<H", decrypted, 6)[0]
-                        bin_data = decrypted[8 + json_len_val :]
-                        for i in range(0, len(bin_data) - 9, 10):
-                            sid = struct.unpack_from("<I", bin_data, i)[0]
-                            fsize = struct.unpack_from("<I", bin_data, i + 4)[0]
-                            codec = struct.unpack_from("<H", bin_data, i + 8)[0]
-                            wifi_files.append({"session_id": sid, "size": fsize, "codec": codec})
-                    file_list_received.set()
-                    file_queue = list(wifi_files)
-                    status(f"{len(wifi_files)} file(s) found", 35)
-                    if not file_queue:
-                        all_downloads_done.set()
-                    else:
-                        await download_next()
-
-                elif cmd_id == 12:
-                    pass
-
-                elif cmd_id == 13:
-                    json_len_c = struct.unpack_from("<H", decrypted, 6)[0]
-                    chunk = decrypted[8 + json_len_c :]
-                    if chunk:
-                        download_buf.extend(chunk)
-                    is_last = json_data.get("last", 0) if isinstance(json_data, dict) else 0
-                    if is_last:
-                        # Same fail-safe rule as BLE: exact size → saved; a size
-                        # mismatch is kept only if it decrypts, else partial.
-                        entry = save_wifi_download(
-                            recordings_dir, current_sid, bytes(download_buf), current_expected_size, app_rsa_key
-                        )
-                        new_files.append(entry)
-                        done = sum(1 for f in new_files if f["status"] == "new")
-                        total = len(wifi_files)
-                        pct = 35 + int(55 * done / max(total, 1))
-                        status(f"Downloaded {done}/{total}", pct)
-                        await download_next()
-
-                elif cmd_id == 3:
-                    pong = build_wifi_packet(16, {})
-                    await websocket.send(ws_encrypt(pong))
-
-        except Exception:
-            if not all_downloads_done.is_set():
-                all_downloads_done.set()
-
-    # ── Execute ──
-    hotspot_ip = None
-    server = None
-    restore_result = None
-    saved_networks = []
-    try:
-        # Remove preferred networks for the ENTIRE transfer duration —
-        # if restored too early, macOS auto-rejoins a known network mid-transfer.
-        # NOTE: must be the first statement inside this try so the finally
-        # always runs restore_preferred_networks() if the remove ran.
-        saved_networks = remove_preferred_networks()
+    async def body():
         status("Starting WebSocket server...", 5)
-        server = None
-        last_bind_err = None
-        for _port in WS_PORT_CANDIDATES:
-            try:
-                server = await websockets.asyncio.server.serve(ws_handler, "0.0.0.0", _port)
-                break
-            except OSError as _e:
-                last_bind_err = _e
-                status(f"Port {_port} in use, trying next...", 5)
-        if server is None:
-            raise OSError(f"WiFi WebSocket server: all ports {WS_PORT_CANDIDATES} are in use") from last_bind_err
+        ctx["server"] = await _start_ws_server(session)
 
         status("Opening device hotspot...", 10)
+        ctx["hotspot_opened"] = True
         await ble_cmd("WiFi_Open", bytes([1, 10, 0]))
 
         # Stop BLE notifications — they conflict with WiFi
@@ -854,59 +1799,133 @@ async def main():
             pass
 
         status(f"Connecting to {wifi_ssid}...", 15)
-        hotspot_ip = connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=45)
+        run.begin()  # restore record on disk BEFORE the first network change
+        hotspot_ip = await connect_to_hotspot(wifi_ssid, wifi_pass, original_ip, timeout=45)
         if not hotspot_ip:
-            print(json.dumps({"error": "Could not connect to hotspot", "files": new_files}))
-            return
+            return {"error": "Could not connect to hotspot", "files": session.new_files}
+        run.set_hotspot_ip(hotspot_ip)
+        ctx["hold_task"] = asyncio.create_task(hold.watch())
 
         status("Waiting for handshake...", 25)
-        if not await wait_event(handshake_done, 30):
-            print(json.dumps({"error": "Handshake timed out", "files": new_files}))
-            return
+        if not await wait_event(session.handshake_done, 30):
+            return {"error": hold.failed or "Handshake timed out", "files": session.new_files}
 
         status("Getting file list...", 30)
-        if not await wait_event(file_list_received, 15):
-            print(json.dumps({"error": "File list timed out", "files": new_files}))
-            return
+        if not await wait_event(session.file_list_received, 15):
+            return {"error": hold.failed or "File list timed out", "files": session.new_files}
 
-        total_size = sum(f["size"] for f in wifi_files)
-        dl_timeout = max(total_size / 50000, 60)
-        if not await wait_event(all_downloads_done, dl_timeout):
-            done_so_far = sum(1 for f in new_files if f["status"] == "new")
-            total_expected = len(wifi_files)
-            status(f"Download timed out: got {done_so_far}/{total_expected} files", 88)
+        total_bytes = session.bytes_to_download()
+        dl_budget = compute_budget(total_bytes)["download_s"]
+        report_budget(total_bytes, f"{len(session.wifi_files)} file(s) found", 35)
+        deadline = time.monotonic() + dl_budget
+        error = None
+        while not await wait_event(session.all_done, 0.5):
+            if hold.failed:
+                error = hold.failed
+                break
+            if not hold.rejoining and session.lost_for() > RECONNECT_GRACE_S:
+                error = "The device's WiFi connection dropped"
+                break
+            if time.monotonic() > deadline:
+                done_so_far = sum(1 for f in session.new_files if f["status"] == "new")
+                status(f"Download timed out: got {done_so_far}/{len(session.wifi_files)} files", 88)
+                break
 
-        done_count = sum(1 for f in new_files if f["status"] == "new")
+        done_count = sum(1 for f in session.new_files if f["status"] == "new")
         status(f"Download complete: {done_count} file(s)", 90)
+        result = {"files": session.new_files, "method": "wifi"}
+        if error and not done_count:
+            result["error"] = error
+        return result
 
+    async def cleanup():
+        if ctx["hold_task"] is not None:
+            ctx["hold_task"].cancel()
+            try:
+                await ctx["hold_task"]
+            except BaseException:
+                pass
+        # Cancelling the watcher doesn't stop an isolate() on its thread: let it
+        # finish (restore_networks also waits on WifiRun's lock) so the restore
+        # below works from the record it wrote.
+        await hold.wait_isolation()
+        await wait_for_pending_join()
+        if ctx["server"] is not None:
+            await asyncio.sleep(1)  # let the last frames flush
+            ctx["server"].close()
+        networks_ok = True
+        if run.touched:
+            # Saved networks back (if paused) and the hotspot forgotten BEFORE
+            # leaving it, so macOS rejoins the user's network, not the hotspot.
+            networks_ok = await asyncio.to_thread(run.restore_networks)
+        if ctx["hotspot_opened"]:
+            # Closing the hotspot first lets macOS auto-join a saved network.
+            await _close_hotspot(cl, ble_cmd)
+        if run.touched:
+            ctx["wifi_restore"] = await restore_internet(wifi_ssid, run.hotspot_ip or "", original_ip, original_ssid)
+            await asyncio.to_thread(run.finish, networks_ok)
+        try:
+            await asyncio.wait_for(cl.disconnect(), 10)
+        except BaseException:
+            pass
+
+    result = await run_guarded(body, cleanup)
+    if result is None:
+        result = {"error": "WiFi transfer stopped before it finished", "terminated": True, "files": session.new_files}
+    if ctx["wifi_restore"]:
+        result["wifi_restore"] = ctx["wifi_restore"]
+    if run.gave_up:
+        result["wifi_restore_notice"] = restore_notice(run.state_dir)
+    return result
+
+
+async def main():
+    global BIND_TOKEN, SN_SIG
+    # Read args from stdin (parent writes JSON + closes pipe). Keeps the
+    # per-device BIND_TOKEN and SN_SIG out of argv → out of `ps aux` output.
+    args = json.loads(sys.stdin.read())
+    BIND_TOKEN = args.get("bind_token")
+    SN_SIG = args.get("sn_sig")
+    if not BIND_TOKEN:
+        _emit_result({"error": "No BIND_TOKEN — user must log into Plaud cloud first"})
+        return
+    if not SN_SIG:
+        _emit_result({"error": "No SN_SIG — user must log into Plaud cloud first"})
+        return
+
+    # One worker at a time, machine-wide (the parent's lock is per app process).
+    state_dir = args.get("state_dir")
+    lock = WorkerLock(state_dir) if state_dir else None
+    if lock is not None and not lock.acquire():
+        _emit_result({"error": "Another WiFi transfer is already running", "busy": True})
+        return
+    try:
+        if state_dir:
+            leftover = read_restore_record(state_dir)
+            if leftover is not None:
+                status("Restoring WiFi settings from an interrupted transfer...", 2)
+                outcome = await asyncio.to_thread(recover_locked, state_dir, leftover)
+                # "gave_up": the record is cleared and the UI gets restore_notice();
+                # the sync goes ahead.
+                if outcome["status"] not in ("restored", "gave_up"):
+                    _emit_result(
+                        {
+                            "error": "WiFi settings from an interrupted transfer couldn't be fully restored "
+                            f"(missing: {', '.join(outcome.get('missing', []))}). Check your WiFi settings.",
+                            "wifi_restore_pending": True,
+                        }
+                    )
+                    return
+        with _KeepAwake("Plaud WiFi sync"):
+            try:
+                result = await transfer(args)
+            except Exception as e:  # the restore already ran (run_guarded's cleanup)
+                logging.exception("[WiFi] transfer failed")
+                result = {"error": f"WiFi transfer failed: {e}"}
+        _emit_result(result)
     finally:
-        if server:
-            await asyncio.sleep(1)
-            server.close()
-
-        # Restore preferred networks BEFORE internet restore — restore_internet
-        # needs them to reconnect to the original network
-        restore_preferred_networks(saved_networks)
-
-        if hotspot_ip:
-            restore_result = await restore_internet(wifi_ssid, hotspot_ip, original_ip, original_ssid)
-
-        # Close hotspot + disconnect BLE
-        try:
-            await cl.start_notify(N, lambda s, d: None)
-            await ble_cmd("WiFi_Close", bytes([1, 10, 0, 0]))
-            await cl.stop_notify(N)
-        except Exception:
-            pass
-        try:
-            await cl.disconnect()
-        except Exception:
-            pass
-
-    result = {"files": new_files, "method": "wifi"}
-    if restore_result:
-        result["wifi_restore"] = restore_result
-    print(json.dumps(result))
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

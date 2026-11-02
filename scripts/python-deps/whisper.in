@@ -1,0 +1,3 @@
+# Optional extra: local Whisper transcription (src/transcribe.py).
+openai-whisper
+torch
