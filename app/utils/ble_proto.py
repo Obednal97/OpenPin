@@ -50,10 +50,13 @@ def reply_matches(reply, expected):
 # -- cmd 1: handshake (BIND_TOKEN) ----------------------------------------------
 
 HANDSHAKE_REJECTED_ERROR = "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device"
-HANDSHAKE_NO_REPLY_ERROR = (
-    "The NotePin didn't answer the pairing handshake. Move it closer and reconnect; "
-    "if this keeps happening, re-pair the device in Settings › Device"
-)
+
+# How long to wait for each reply during bind_handshake(). At most
+# HANDSHAKE_MAX_REPLY_WAITS replies are awaited (cmd 1 twice, cmd 4, the cmd 3
+# probe), so a device that answers none of them adds at most 4 x 1.5 = 6 s to a
+# connect. BLE replies normally take well under a second.
+HANDSHAKE_REPLY_TIMEOUT_S = 1.5
+HANDSHAKE_MAX_REPLY_WAITS = 4
 
 
 def handshake_request(token32, flag):
@@ -99,8 +102,10 @@ def handshake_verdict(replies, device_answers):
     "later commands just get no reply", so:
 
       device answers                    -> ok (a non-zero status is only logged)
-      no answer + a non-zero status     -> rejected
-      no answer + no handshake reply    -> no_reply
+      no answer + a non-zero status     -> rejected (the only verdict that fails a connect)
+      no answer + no handshake reply    -> no_reply (logged; the connect continues,
+                                           as in v2.4.0: whether the NotePin S
+                                           answers cmd 1 at all is unverified)
       no answer + status 0              -> ok (weak link; same as before)
     """
     parsed = [r for r in replies if r is not None]
@@ -117,11 +122,14 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
     """Send cmd 1 twice (flag 0, then 1), then cmd 4, and judge the result.
 
     `send(pt)` is an async function that writes one encrypted command and
-    returns its matching reply, or None on timeout. Used by both device.py and
-    the WiFi worker so they behave the same.
+    returns its matching reply, or None on timeout (callers use
+    HANDSHAKE_REPLY_TIMEOUT_S, so at most HANDSHAKE_MAX_REPLY_WAITS timeouts
+    add up). Used by both device.py and the WiFi worker so they behave the same.
 
     Returns (verdict, info): info has the parsed replies ("hs"), the port
-    version if the device reported one, and the cmd 4 reply.
+    version if the device reported one, and the cmd 4 reply. Only
+    HANDSHAKE_REJECTED should fail the connect; HANDSHAKE_NO_REPLY is logged
+    here as a warning and the caller carries on.
     """
     log = log or logging.info
     r1 = await send(handshake_request(token32, 0))
@@ -146,6 +154,13 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
             f"[BLE] Handshake status {statuses} but the device answers commands — treating as accepted "
             "(status meaning unconfirmed)"
         )
+    elif verdict == HANDSHAKE_NO_REPLY:
+        logging.warning(
+            "[BLE] Handshake: no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect "
+            "(whether the device answers cmd 1 is unverified; later commands decide)"
+        )
+    elif verdict == HANDSHAKE_REJECTED:
+        logging.warning(f"[BLE] Handshake rejected: status {statuses}, no reply to cmd 4 or cmd 3")
     port_version = next((h["port_version"] for h in reversed(hs) if h and "port_version" in h), None)
     return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4}
 
