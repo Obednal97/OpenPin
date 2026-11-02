@@ -222,13 +222,18 @@ Each data notification seen in captures is 190 bytes on the wire, which is 10 he
 For port version < 7 the SDK uses an older layout without `sessionId`: offset at 1–4, length at 5,
 data from 6 (**APK**).
 
-The app keeps the session ID it asked for (`file_meta["sid"]`). Data packets, the end packet, the
-cmd 28 reply and the cmd 29 tail with any other `sessionId` are ignored and counted ("ignored N
-packet(s) for other sessions"), so a late packet from an earlier or stalled file can't be appended
-to, or end, the current one. Offsets must be contiguous (**Implemented**, `ENFORCE_DATA_OFFSETS`):
-a packet at an offset already received is a retransmission and is dropped (any bytes past the end
-are kept); a packet past the end leaves a gap, which stops the download (cmd 30) and makes it
-`partial`.
+The app keeps the session ID it asked for (`file_meta["sid"]`). Data packets, the end packet and
+the cmd 29 tail with any other `sessionId` are ignored and counted ("ignored N packet(s) for other
+sessions"), so a late packet from an earlier or stalled file can't be appended to, or end, the
+current one. Offsets must be contiguous: a packet at an offset already received is a
+retransmission and is dropped (any bytes past the end are kept); a packet past the end leaves a
+gap, which stops the download (cmd 30) and makes it `partial`.
+
+Both checks are **Implemented** but unconfirmed, and they adapt per download (`"auto"`, the
+default of `FILTER_DATA_SESSIONS` and `ENFORCE_DATA_OFFSETS`): session filtering applies only if
+the first data packet carries the requested ID, and offset checks only once the first two packets
+are at offset 0 and right after it. Otherwise the app logs a warning and accepts every packet for
+that download, as v2.2.x did. The cmd 28 reply is kept whatever its session ID.
 
 ### 7.3 Completeness rules (`evaluate_download()`)
 

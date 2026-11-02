@@ -78,18 +78,20 @@ class FakeDevice:
 
     async def stream(self, sid, mode):
         data = self.files[sid]
-        full = ("complete", "end_only", "error_end", "duplicate", "gap")
+        full = ("complete", "end_only", "error_end", "duplicate", "gap", "other_sid", "index_offsets")
         cut = len(data) if mode in full else int(len(data) * 0.4)
         if mode == "refuse":
             self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 1)]))
             return
         self.reply(28, struct.pack("<I", sid) + bytes([self.start_status.get(sid, 0)]))
+        psid = sid + 1000 if mode == "other_sid" else sid  # a device that tags data with another id
         for n, off in enumerate(range(0, cut, CHUNK)):
             chunk = data[off : min(off + CHUNK, cut)]
-            pkt = bytes([2]) + struct.pack("<II", sid, off) + bytes([len(chunk)]) + chunk
+            poff = n if mode == "index_offsets" else off  # offsets counted in packets, not bytes
+            pkt = bytes([2]) + struct.pack("<II", psid, poff) + bytes([len(chunk)]) + chunk
             if not (mode == "gap" and n == 2):
                 self.notify(pkt)
-            if mode == "duplicate":
+            if mode == "duplicate" and n >= 1:
                 self.notify(pkt)
             if n == 1:
                 for extra in self.inject.get(sid, []):
@@ -102,10 +104,10 @@ class FakeDevice:
             dev._on_disconnect(self.client)  # what bleak's disconnected_callback does
             return
         err = 3 if mode == "error_end" else 0
-        self.notify(bytes([2]) + struct.pack("<II", sid, 0xFFFFFFFF) + bytes([err]))
-        if mode in ("complete", "error_end", "duplicate", "gap"):
+        self.notify(bytes([2]) + struct.pack("<II", psid, 0xFFFFFFFF) + bytes([err]))
+        if mode in ("complete", "error_end", "duplicate", "gap", "other_sid", "index_offsets"):
             crc = dev.crc16_variants(data)["XMODEM"]
-            self.reply(29, struct.pack("<IH", sid, crc))
+            self.reply(29, struct.pack("<IH", psid, crc))
 
     def on_write(self, ct):
         pt = self.cipher.decrypt(self.nonce, bytes(ct), self.aad)[4:]
@@ -376,8 +378,71 @@ def test_gap_in_offsets_is_partial_not_concatenated(env, app_key):
     assert 31 not in device.sent
 
 
-def test_handler_offset_rules():
-    """Unit check of the data-packet rules on the real handler."""
+def test_device_with_other_session_ids_still_syncs(env, app_key, caplog):
+    """If the device's data packets don't carry the requested id, session
+    filtering falls back to the old behaviour for that download (with a warning)."""
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1501: data}, {1501: "other_sid"})
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(1501, len(data))])
+    e = entry(result, 1501)
+    assert e["status"] == "new" and "size_mismatch" not in e
+    assert "data packets carry session id 2501, requested 1501 — session filtering disabled" in caplog.text
+    assert caplog.text.count("session filtering disabled") == 1
+
+
+def test_index_style_offsets_still_sync(env, app_key, caplog):
+    """Offsets that count packets instead of bytes: offset checks fall back to
+    accepting every packet for that download (with a warning)."""
+    data = make_plaud_file(app_key)
+    device = FakeDevice({1601: data}, {1601: "index_offsets"})
+    with caplog.at_level("WARNING"):
+        result = run_sync(device, [(1601, len(data))])
+    e = entry(result, 1601)
+    assert e["status"] == "new" and "size_mismatch" not in e
+    assert result["deleted_from_device"] == [1601]
+    assert "offsets don't look like contiguous byte offsets (offset, bytes so far: [(0, 0), (1, 240)])" in caplog.text
+    assert caplog.text.count("offset checks disabled") == 1
+
+
+def test_auto_checks_are_decided_per_download(env, app_key, caplog):
+    """A fallback for one download doesn't carry over: the next one with byte
+    offsets is checked again (and its gap caught)."""
+    a, b = make_plaud_file(app_key), make_plaud_file(app_key)
+    device = FakeDevice({1701: a, 1702: b}, {1701: "index_offsets", 1702: "gap"})
+    result = run_sync(device, [(1701, len(a)), (1702, len(b))])
+    assert entry(result, 1701)["status"] == "new"
+    assert entry(result, 1702)["status"] == "partial"
+    assert entry(result, 1702)["reason"].startswith("data gap")
+
+
+def test_first_offset_not_zero_falls_back(caplog):
+    file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
+    with caplog.at_level("WARNING"):
+        dev._on_file_data(_data_pkt(7, 512, b"abc"), file_data, file_done, meta)
+        dev._on_file_data(_data_pkt(7, 900, b"def"), file_data, file_done, meta)
+    assert bytes(file_data) == b"abcdef" and meta["offset_check"] is False
+    assert not file_done.is_set() and "gap" not in meta
+    assert "(512, 0)" in caplog.text
+
+
+@pytest.mark.parametrize("forced", [True, False])
+def test_offset_and_session_checks_can_be_forced(monkeypatch, forced):
+    monkeypatch.setattr(dev, "ENFORCE_DATA_OFFSETS", forced)
+    monkeypatch.setattr(dev, "FILTER_DATA_SESSIONS", forced)
+    file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
+    dev._on_file_data(_data_pkt(8, 0, b"zz"), file_data, file_done, meta)  # other session first
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)
+    dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)  # retransmit
+    if forced:
+        assert bytes(file_data) == b"abc" and meta["stray"] == 1 and meta["duplicates"] == 1
+    else:
+        assert bytes(file_data) == b"zzabcabc"
+
+
+def test_handler_offset_rules(monkeypatch):
+    """Unit check of the enforced data-packet rules on the real handler."""
+    monkeypatch.setattr(dev, "ENFORCE_DATA_OFFSETS", True)
     file_data, file_done, meta = bytearray(), asyncio.Event(), {"sid": 7}
     dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)
     dev._on_file_data(_data_pkt(7, 0, b"abc"), file_data, file_done, meta)  # retransmit

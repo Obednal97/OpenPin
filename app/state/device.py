@@ -156,12 +156,25 @@ async def _disconnect_quietly(cl, timeout=5):
 
 
 _END_OFFSET = 0xFFFFFFFF
-# Data packets (portVersion >= 7 layout): byte offsets must be contiguous. A
-# packet at an offset already received is a retransmission and is dropped; one
-# past the end leaves a gap, which ends the download as partial. Set False to go
-# back to appending every packet in arrival order (diagnostics only) if hardware
-# ever shows the offset field means something else.
-ENFORCE_DATA_OFFSETS = True
+
+# Both checks below are unconfirmed on hardware (README open questions 4 and 13),
+# and v2.2.x synced fine without them, so by default ("auto") each download
+# first checks that the device's packets fit the assumption and falls back to
+# the old accept-everything behaviour (with a warning) when they don't. True
+# forces a check on, False turns it off.
+#
+# Session filtering: data packets, end markers and cmd-29 tails for another
+# session are ignored. "auto": enforced for a download whose FIRST data packet
+# carries the requested session id; otherwise disabled for that download.
+FILTER_DATA_SESSIONS = "auto"
+# Offsets: byte offsets must be contiguous. A packet at an offset already
+# received is a retransmission and is dropped; one past the end leaves a gap,
+# which ends the download as partial. "auto": enforced once the first
+# _OFFSET_PROBE_PACKETS packets start at 0 and are contiguous; any other
+# pattern (first offset != 0, packet-index-like offsets) disables it for that
+# download.
+ENFORCE_DATA_OFFSETS = "auto"
+_OFFSET_PROBE_PACKETS = 2
 
 
 def _count_stray(file_meta, what):
@@ -169,15 +182,59 @@ def _count_stray(file_meta, what):
     logging.debug(f"[BLE] ignored {what} (downloading {file_meta.get('sid')})")
 
 
+def _session_ok(psid, want, file_meta, first_data):
+    """Does a data packet / end marker / tail with session id `psid` count?
+
+    `first_data`: this is a (non-end-marker) data packet, which may decide the
+    "auto" mode for the download.
+    """
+    if FILTER_DATA_SESSIONS is False or psid == want and want is not None:
+        if first_data and "sid_filter" not in file_meta:
+            file_meta["sid_filter"] = True
+        return True
+    if want is None or FILTER_DATA_SESSIONS is True:
+        return False
+    state = file_meta.get("sid_filter")
+    if state is None and first_data:
+        file_meta["sid_filter"] = state = False
+        logging.warning(
+            f"[BLE] data packets carry session id {psid}, requested {want} — session filtering disabled "
+            "for this download; please report"
+        )
+    return state is False
+
+
+def _offsets_checked(off, have, file_meta):
+    """Whether offset rules apply to this packet (see ENFORCE_DATA_OFFSETS)."""
+    if ENFORCE_DATA_OFFSETS is True or ENFORCE_DATA_OFFSETS is False:
+        return ENFORCE_DATA_OFFSETS
+    state = file_meta.get("offset_check")
+    if state is not None:
+        return state
+    samples = file_meta.setdefault("offset_samples", [])
+    samples.append((off, have))
+    if off != have:
+        file_meta["offset_check"] = False
+        logging.warning(
+            f"[BLE] session {file_meta.get('sid')}: data offsets don't look like contiguous byte offsets "
+            f"(offset, bytes so far: {samples}) — offset checks disabled for this download; please report"
+        )
+    elif len(samples) >= _OFFSET_PROBE_PACKETS:
+        file_meta["offset_check"] = True
+    return False  # probe packets are appended as they come (they fit so far)
+
+
 def _on_file_data(dd, file_data, file_done, file_meta):
     """One type-2 data packet: [2][sessionId u32][offset u32][len u8][bytes].
 
     Only packets for the session being downloaded (file_meta["sid"]) count; a
-    late packet from an earlier or stalled file is ignored and counted.
+    late packet from an earlier or stalled file is ignored and counted. Both
+    that and the offset rules adapt per download (FILTER_DATA_SESSIONS,
+    ENFORCE_DATA_OFFSETS).
     """
     psid, off = struct.unpack_from("<II", dd, 1)
     want = file_meta.get("sid")
-    if want is None or psid != want:
+    if not _session_ok(psid, want, file_meta, first_data=off != _END_OFFSET):
         _count_stray(file_meta, f"data packet for session {psid} at offset {off:#x}")
         return
     if off == _END_OFFSET:
@@ -192,7 +249,7 @@ def _on_file_data(dd, file_data, file_done, file_meta):
     have = len(file_data)
     if off != have and "offset_mismatch" not in file_meta:
         file_meta["offset_mismatch"] = (off, have)
-    if not ENFORCE_DATA_OFFSETS or off == have:
+    if not _offsets_checked(off, have, file_meta) or off == have:
         file_data.extend(payload)
     elif off < have:
         # Retransmission: drop what we already have; keep any new bytes past the end.
@@ -210,9 +267,12 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
 
     File transfer bookkeeping goes into `file_meta` (reset by the sync loop per
     file, which then sets "sid" to the session it requests) so the sync can
-    decide whether a download really completed. Data packets, the end marker,
-    the cmd-28 reply and the cmd-29 tail only count when their session id is
-    "sid"; others are ignored and counted in "stray".
+    decide whether a download really completed. Data packets, the end marker
+    and the cmd-29 tail only count when their session id is "sid" (unless
+    session filtering fell back for this download: "sid_filter" False); others
+    are ignored and counted in "stray".
+      - "sid_filter" / "offset_check": per-download outcome of the "auto"
+        checks (True enforced, False fell back to accepting everything).
       - "end" / "end_error": data packet with offset 0xFFFFFFFF; byte 9 is the
         device's error code for the transfer (0 = OK).
       - "tail" / "tail_sid" / "tail_crc": cmd 29 SyncFileTail (sessionId@3-6,
@@ -242,7 +302,7 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
             logging.debug(f"[BLE] cmd response: cmd_id={cid}, len={len(dd)}")
             if cid == 29:
                 tail_sid = struct.unpack_from("<I", dd, 3)[0] if len(dd) >= 7 else None
-                if tail_sid is None or tail_sid != file_meta.get("sid"):
+                if not _session_ok(tail_sid, file_meta.get("sid"), file_meta, first_data=False):
                     _count_stray(file_meta, f"cmd-29 tail for session {tail_sid}")
                 else:
                     file_meta["tail"] = True
@@ -251,10 +311,10 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
                         file_meta["tail_crc"] = struct.unpack_from("<H", dd, 7)[0]
                     file_done.set()
             elif cid == 28 and len(dd) >= 8:
-                if struct.unpack_from("<I", dd, 3)[0] == file_meta.get("sid"):
-                    file_meta["start_status"] = dd[7]
-                else:
-                    _count_stray(file_meta, "cmd-28 reply for another session")
+                # It's the reply to the request just sent, so it's kept even if
+                # its session id differs (as before); the id is kept for the logs.
+                file_meta["start_status"] = dd[7]
+                file_meta["start_sid"] = struct.unpack_from("<I", dd, 3)[0]
             # cmd_id 26 = file list response (may span multiple packets)
             if cid == 26:
                 _device_state.setdefault("file_list_packets", []).append(bytes(dd))

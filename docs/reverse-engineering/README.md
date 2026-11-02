@@ -81,7 +81,9 @@ answer them. Log lines to look for are in quotes.
 4. **End marker.** Does the `0xFFFFFFFF` data packet always arrive, is its byte 9 an error code
    (0 = OK), and which comes first, it or cmd 29? Does it (and cmd 29) always carry the session ID
    that was requested? The app now ignores ones that don't ("ignored N packet(s) for other
-   sessions").
+   sessions"), unless the first data packet of a download already carries another ID: then it logs
+   "data packets carry session id X, requested Y — session filtering disabled" and accepts
+   everything for that download, as before. If that warning ever appears, report it.
 5. **Size from the file list.** Does the byte count of a full download always equal it? Check for
    "size mismatch accepted". If it never happens, the `size_mismatch` path is dead weight; if it
    always happens, the size means something else.
@@ -108,7 +110,11 @@ answer them. Log lines to look for are in quotes.
     field, whether session IDs are recording start times, which files need the continuous
     keystream, and the `BIND_TOKEN` format and length.
 13. **Data packet offsets.** Are the offsets at bytes 5–8 byte offsets into the file, contiguous,
-    starting at 0? The app now drops retransmissions and ends a download as partial on a gap
-    ("data gap"). If hardware shows otherwise, set `ENFORCE_DATA_OFFSETS = False` in `device.py`.
+    starting at 0? Per download, once the first two packets are at 0 and right after it, the app
+    drops retransmissions and ends the download as partial on a gap ("data gap"). Any other start
+    logs "data offsets don't look like contiguous byte offsets" with sample values and accepts
+    everything for that download, as before. Report that warning if it appears.
+    `ENFORCE_DATA_OFFSETS` and `FILTER_DATA_SESSIONS` in `device.py` force either check on (`True`)
+    or off (`False`); the default is `"auto"`.
 14. **Port version.** Which port version does the NotePin S report in the cmd 1 reply? Only the
     ≥ 7 data-packet layout is implemented; a lower one is logged ("file transfer layout untested").
