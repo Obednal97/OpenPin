@@ -113,10 +113,14 @@ unanswered, so (**Implemented**):
 |---|---|---|
 | any | yes | connected (a non-zero status is logged as a warning) |
 | non-zero in either | no | rejected: "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device" |
-| no reply to either | no | fails: "didn't answer the pairing handshake" |
+| no reply to either | no | connected, as in v2.4.0, with a warning ("no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect"); later commands decide |
 | 0 | no | connected, as before (weak link) |
 
-A failed handshake disconnects and never marks the device connected.
+Only a rejection fails the connect: it disconnects and never marks the device connected. Whether
+the NotePin S answers cmd 1 at all is **Unverified** (iOS captures show a 36-byte reply), so silence
+alone isn't treated as a failure. Each reply is waited for at most 1.5 s
+(`ble_proto.HANDSHAKE_REPLY_TIMEOUT_S`) and at most four are awaited (cmd 1 twice, cmd 4, the cmd 3
+probe), so a silent device adds at most 6 s to a connect.
 
 ### cmd 2 — Get SSN
 

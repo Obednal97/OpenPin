@@ -93,7 +93,8 @@ answer them. Log lines to look for are in quotes.
    last …" and "file list incomplete" never appear.
 7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app logs both
    replies ("Handshake replies: HS1=… HS2=…") and treats a non-zero status (byte 3) as a rejection
-   only when the device then answers neither cmd 4 nor cmd 3. Record the status a working device
+   only when the device then answers neither cmd 4 nor cmd 3. No reply at all only logs "no reply
+   to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect". Record the status a working device
    sends, and what a wrong token produces (a non-zero status, or no reply at all).
 8. **Closing the hotspot.** Does `[1,10,0,0]` close it, or is cmd 13 needed? The worker now logs
    the reply ("Hotspot close reply: cmd 10 status …" or "cmd 13 …", or "no reply"). Compare it

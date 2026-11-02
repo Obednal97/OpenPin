@@ -19,10 +19,9 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
-    HANDSHAKE_NO_REPLY,
-    HANDSHAKE_NO_REPLY_ERROR,
     HANDSHAKE_REJECTED,
     HANDSHAKE_REJECTED_ERROR,
+    HANDSHAKE_REPLY_TIMEOUT_S,
     SN_SIG_REPLY_WAIT_S,
     SN_SIG_SEND_REPEATS,
     FileListAssembler,
@@ -78,7 +77,7 @@ _RECV_POLL_S = 2  # how often the receive loop checks abort / disconnect / stall
 _STALL_TIMEOUT_S = 60  # no new bytes for this long = stalled transfer
 _TAIL_WAIT_S = 1.5  # after the end packet, how long to wait for the cmd-29 tail (CRC)
 _DELETE_REPLY_TIMEOUT_S = 5  # cmd 31: no reply within this = not deleted
-_HANDSHAKE_REPLY_TIMEOUT_S = 5  # cmd 1 / cmd 4 / cmd 3 replies during connect
+_HANDSHAKE_REPLY_TIMEOUT_S = HANDSHAKE_REPLY_TIMEOUT_S  # cmd 1 / 4 / 3 replies during connect (<= 6 s total)
 # cmd-28 reply with a non-zero status and still no data after this long = the
 # device refused the download; fail fast instead of waiting out the stall window.
 _REFUSED_GRACE_S = 5
@@ -840,14 +839,13 @@ async def connect_device(address=None):
         raise
     # cmd 1 twice, then cmd 4 (time sync with this Mac's time zone); the replies
     # say whether the device accepted the token (ble_proto.handshake_verdict).
+    # Only a rejection fails the connect; "no reply at all" is logged by
+    # bind_handshake() and the connect carries on, as in v2.4.0.
     verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
-    if verdict in (HANDSHAKE_REJECTED, HANDSHAKE_NO_REPLY):
-        logging.warning(f"[BLE] Handshake {verdict}: replies {[h and h['raw'] for h in hs_info['hs']]}")
+    if verdict == HANDSHAKE_REJECTED:
         await _disconnect_quietly(cl)
         _reset_state()
-        if verdict == HANDSHAKE_REJECTED:
-            return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
-        return {"connected": False, "error": HANDSHAKE_NO_REPLY_ERROR}
+        return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
     _device_state["port_version"] = hs_info["port_version"]
     if hs_info["port_version"] is not None and hs_info["port_version"] < 7:
         # BLE data packets and the file list use an older layout below port
