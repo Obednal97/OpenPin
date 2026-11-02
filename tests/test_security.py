@@ -67,7 +67,7 @@ def test_preflight_from_hostile_origin_gets_no_cors_header(flask_client):
 
 
 def test_preflight_does_not_run_the_view(flask_client):
-    with patch("app.routes.settings.save_config") as save:
+    with patch("app.routes.settings.update_config") as save:
         flask_client.options("/settings", headers={"Origin": TAURI_ORIGIN})
     save.assert_not_called()
 
@@ -113,7 +113,7 @@ def test_wrong_token_rejected(flask_client):
 
 
 def test_wrong_token_rejected_on_post(flask_client):
-    with patch("app.routes.settings.save_config") as save:
+    with patch("app.routes.settings.update_config") as save:
         r = flask_client.post("/settings", json={"language": "fr"}, headers={"X-Plaud-Token": "nope"})
     assert r.status_code == 401
     save.assert_not_called()
