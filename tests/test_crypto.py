@@ -2,7 +2,6 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -44,8 +43,9 @@ class TestRSAKeySelection:
 
     def test_load_rsa_private_key_returns_e2ee(self):
         """load_rsa_private_key() default should load e2ee key."""
-        from src.crypto import load_rsa_private_key, PRIVATE_KEY_PATH
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        from src.crypto import PRIVATE_KEY_PATH, load_rsa_private_key
 
         loaded = load_rsa_private_key()
         direct = load_pem_private_key(PRIVATE_KEY_PATH.read_bytes(), password=None)
@@ -54,7 +54,7 @@ class TestRSAKeySelection:
 
     def test_get_public_key_full_pem_returns_e2ee(self):
         """get_public_key_full_pem() must return e2ee public key."""
-        from src.crypto import get_public_key_full_pem, PUBLIC_KEY_PATH
+        from src.crypto import PUBLIC_KEY_PATH, get_public_key_full_pem
         pem = get_public_key_full_pem()
         expected = PUBLIC_KEY_PATH.read_text().strip()
         assert pem == expected
@@ -89,7 +89,7 @@ class TestRSAKeySelection:
         # Decrypt with app private key — PKCS1v15 may not throw
         # but OAEP would. This proves why we must use the right key.
         from cryptography.hazmat.primitives import hashes
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             app_key.decrypt(ciphertext, padding.OAEP(
                 mgf=padding.MGF1(algorithm=hashes.SHA256()),
                 algorithm=hashes.SHA256(),

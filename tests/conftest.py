@@ -8,9 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Isolate the suite from real user data BEFORE anything imports app.*:
-# app/utils/constants.py resolves DATA_DIR at import time, and in a git checkout
-# it would otherwise be the repo root (real recordings, config and cloud token).
-# Always overridden, even if the developer has PLAUD_DATA_DIR set for dev runs.
+# app/utils/constants.py resolves DATA_DIR at import time, and without
+# PLAUD_DATA_DIR it would be the installed app's folder (real recordings, config
+# and cloud token). Always overridden, even if the developer has PLAUD_DATA_DIR
+# set for dev runs.
 TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="plaud-test-data-")).resolve()
 os.environ["PLAUD_DATA_DIR"] = str(TEST_DATA_DIR)
 
@@ -22,9 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def pytest_configure(config):
-    config.addinivalue_line(
-        "markers", "slow: network/minutes-long test, skipped unless PLAUD_SLOW_TESTS=1"
-    )
+    # (The `slow` marker is registered in pyproject.toml.)
     # Something imported app.utils.constants before this conftest ran, so its
     # DATA_DIR may point at real data. Stop rather than risk it.
     constants = sys.modules.get("app.utils.constants")

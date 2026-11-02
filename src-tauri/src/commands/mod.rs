@@ -245,7 +245,7 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 // a secret, so it can be rotated without an app release.
 
 mod report_scrub;
-mod sha256;
+pub(crate) mod sha256;
 
 /// Base URL of the update / bug-report Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://plaud-v2-updates.leave-hacker-feedback.workers.dev";
@@ -404,11 +404,11 @@ fn pending_update() -> &'static std::sync::Mutex<Option<PendingUpdate>> {
 }
 
 fn updates_dir() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/updates")
+    crate::paths::app_support_dir().join("updates")
 }
 
 fn update_log_path() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Logs/Plaud V2/update.log")
+    crate::paths::log_dir().join("update.log")
 }
 
 fn running_app_path() -> String {
@@ -1041,9 +1041,10 @@ fn report_fingerprint(scrubbed_message: &str) -> String {
 
 /// Has the user left "Send anonymous crash reports" on? Read from the backend
 /// config (`crash_reports_enabled`, default true) so the Rust panic hook,
-/// which has no frontend, respects it too.
+/// which has no frontend, respects it too. Same data folder as the backend:
+/// `PLAUD_DATA_DIR` if set, else the dev or release folder (`paths::data_dir`).
 fn crash_reports_enabled() -> bool {
-    let path = crate::home_dir().join("Library/Application Support/Plaud V2/.plaud_v2_config.json");
+    let path = crate::paths::config_path();
     crash_reports_enabled_in(std::fs::read_to_string(path).ok().as_deref())
 }
 
@@ -1207,7 +1208,7 @@ const DIAGNOSTICS_MAX_BYTES: u64 = 1024 * 1024;
 static DIAG_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn diagnostics_log_path() -> std::path::PathBuf {
-    crate::home_dir().join("Library/Application Support/com.plaud.v2/diagnostics.log")
+    crate::paths::app_support_dir().join("diagnostics.log")
 }
 
 fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {
