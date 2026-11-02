@@ -1,4 +1,5 @@
 mod commands;
+mod lifecycle;
 mod power;
 mod python;
 
@@ -7,6 +8,8 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager,
 };
+
+pub use lifecycle::{quit_app, shutdown_backend};
 
 /// Set the macOS dock icon based on system theme.
 ///
@@ -77,22 +80,9 @@ fn save_prefs(prefs: &serde_json::Value) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Catch Rust panics and report to GitHub Issues
-    std::panic::set_hook(Box::new(|info| {
-        let message = format!("{info}");
-        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-        log::error!("[Rust Panic] {message}\n{backtrace}");
-        // Fire-and-forget report
-        std::thread::spawn(move || {
-            commands::report_error(
-                format!("[PANIC] {message}"),
-                Some(backtrace),
-                Some("rust-panic".to_string()),
-            );
-            // Give the HTTP request time to complete
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        });
-    }));
+    // Report Rust panics (see lifecycle::install_panic_hook for the ordering).
+    lifecycle::install_panic_hook();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -113,6 +103,10 @@ pub fn run() {
 
             // Cache app version for bug reports (report_error doesn't have AppHandle)
             commands::set_app_version(app.package_info().version.to_string());
+
+            // Keep the latest startup message for the page to poll: the first
+            // ones are emitted before the page has loaded.
+            lifecycle::track_startup_messages(app.handle());
 
             // macOS: themed dock icon. (Traffic lights: titleBarStyle Overlay +
             // trafficLightPosition in tauri.conf.json.)
@@ -215,10 +209,8 @@ pub fn run() {
                             let _ = w.emit("tray-sync", ());
                         }
                     }
-                    "quit" => {
-                        python::stop_python_server();
-                        app.exit(0);
-                    }
+                    // Hides the window, stops the backend off the main thread, then exits.
+                    "quit" => lifecycle::quit_app(app, 0),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -231,15 +223,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Start the Python Flask backend
-            let app_handle = app.handle().clone();
-            if let Err(e) = python::start_python_server(&app_handle) {
-                log::error!("Failed to start Python server: {e}");
-                let err = python::get_server().lock().unwrap().startup_error.clone();
-                if let Some(e) = err {
-                    let _ = window.emit("startup-error", e);
-                }
-            }
+            // Show the window before the backend is up: the page's splash
+            // (health-gate.js) polls get_startup_status and shows progress. A
+            // first launch can spend minutes finding or installing Python.
+            let _ = window.show();
+
+            // Start the Python Flask backend on a background thread.
+            lifecycle::spawn_backend_startup(app.handle(), false);
 
             // Periodic update checks — 5s after launch, then every 4 hours
             let app_handle_upd = app.handle().clone();
@@ -252,11 +242,12 @@ pub fn run() {
                 }
             });
 
-            let _ = window.show();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_api_info,
+            lifecycle::get_startup_status,
+            lifecycle::retry_startup,
             commands::get_theme,
             commands::cycle_theme,
             commands::get_app_version,
@@ -303,9 +294,20 @@ pub fn run() {
                         }
                     }
                 }
-                // Clean shutdown: disconnect BLE + kill Python
-                tauri::RunEvent::ExitRequested { .. } => {
-                    python::stop_python_server();
+                // app.exit() (tray Quit, install_update): hold the exit, stop the
+                // backend (BLE disconnect + kill Python) once, off the main
+                // thread, then exit for real.
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    if !lifecycle::shutdown_done() {
+                        api.prevent_exit();
+                        lifecycle::quit_app(app, code.unwrap_or(0));
+                    }
+                }
+                // Cmd+Q (NSApp terminate:) skips ExitRequested and the process
+                // ends right after this event, so stop the backend here,
+                // synchronously. No-op if it was already stopped.
+                tauri::RunEvent::Exit => {
+                    lifecycle::shutdown_backend();
                 }
                 _ => {}
             }
