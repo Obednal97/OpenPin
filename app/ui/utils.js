@@ -37,6 +37,8 @@ const app = {
   searchQuery: '',
   activeTagFilters: new Set(),
   syncing: false,
+  syncKind: null, // 'ble' | 'wifi' while app.syncing
+  syncGen: 0, // bumped by each sync flow; see _claimSync() in renderer.js
   processingIds: new Map(),
   cloudState: { logged_in: false, user: null },
   notionState: { connected: false, database_id: null, database_name: null },
@@ -268,6 +270,30 @@ function showConfirmDialog(opts) {
   });
 }
 
+// Backend answers 409 {"busy": true} (or {connected:true, busy:true} from
+// /device/verify) while a device sync holds the BLE link. That's not an error:
+// callers should treat it as "already syncing" and stay quiet.
+function isDeviceBusyResponse(res) {
+  return !!(res && typeof res === 'object' && res.busy === true);
+}
+
+// Sync results may list files that only partly transferred. They're kept and
+// resumed on the next sync, so tell the user without alarming them.
+function toastPartialSync(result) {
+  if (!result || typeof result !== 'object') return 0;
+  let n = 0;
+  if (Array.isArray(result.partial)) n = result.partial.length;
+  else if (Array.isArray(result.files)) n = result.files.filter((f) => f && (f.status === 'partial' || f.partial === true)).length;
+  if (n > 0) {
+    toast(
+      n === 1
+        ? "1 recording didn't finish transferring — it will retry next sync"
+        : `${n} recordings didn't finish transferring — they will retry next sync`,
+      'info',
+    );
+  }
+  return n;
+}
 
 function renderMarkdown(md) {
   // Process line by line for proper list nesting
