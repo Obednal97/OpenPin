@@ -1,0 +1,3 @@
+# Optional extra: local speaker diarization, tier 1 of the cascade in
+# src/transcribe.py (CPU, ONNX, no HuggingFace token needed).
+diarize
