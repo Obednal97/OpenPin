@@ -353,3 +353,100 @@ def test_startup_without_record_falls_back_to_hotspot_check(startup_mac):
         ["networksetup", "-setairportpower", "en1", "off"],
         ["networksetup", "-setairportpower", "en1", "on"],
     ]
+
+
+def test_startup_recovery_gives_up_after_repeated_failures(startup_mac, tmp_path):
+    from app import api_server
+
+    worker.write_restore_record(tmp_path, {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED})
+    startup_mac.fail_add = {"Office"}
+    for _ in range(worker.MAX_RESTORE_ATTEMPTS - 1):
+        api_server._recover_wifi()
+        assert worker.read_restore_record(tmp_path) is not None
+    api_server._recover_wifi()
+    assert worker.read_restore_record(tmp_path) is None  # no more retries at every launch
+    assert worker.read_stuck_record(tmp_path)["saved_networks"] == SAVED
+    calls = len(startup_mac.calls)
+    api_server._recover_wifi()  # next launch: only the cheap hotspot-by-name check
+    assert not [c for c in startup_mac.calls[calls:] if c[1] == "-addpreferredwirelessnetworkatindex"]
+
+
+def test_startup_recovery_runs_in_background_after_bind():
+    """_recover_wifi must not run before the server listens (a slow restore
+    blew the shell's startup health budget)."""
+    import inspect
+
+    from app import api_server
+
+    src = inspect.getsource(api_server)
+    main = src[src.index('if __name__ == "__main__":') :]
+    assert "_recover_wifi()" not in main
+    assert main.index("make_server(") < main.index("_start_wifi_recovery()") < main.index("serve_forever()")
+
+
+def test_start_wifi_recovery_returns_immediately(monkeypatch):
+    from app import api_server
+
+    release, ran = threading.Event(), threading.Event()
+
+    def slow_recover():
+        ran.set()
+        release.wait(5)
+
+    monkeypatch.setattr(api_server, "_recover_wifi", slow_recover)
+    t0 = time.monotonic()
+    thread = api_server._start_wifi_recovery()
+    assert time.monotonic() - t0 < 1
+    assert ran.wait(5)
+    assert not dev._wifi_recovery_idle.is_set()
+    release.set()
+    thread.join(5)
+    assert dev._wifi_recovery_idle.is_set()
+
+
+def test_wifi_sync_waits_for_startup_recovery(parent, monkeypatch):
+    release = threading.Event()
+
+    def slow_recover():
+        release.wait(5)
+        parent.append("startup recovery done")
+
+    thread = dev.run_wifi_recovery_in_background(slow_recover)
+    threading.Timer(0.1, release.set).start()
+    out = {"files": [], "method": "wifi"}
+
+    def popen(*a, **k):
+        parent.append("worker spawned")
+        return FakeProc(parent, exits_after=0, stdout=json.dumps(out).encode())
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    assert dev.do_wifi_sync_blocking() == out
+    thread.join(5)
+    assert parent.index("startup recovery done") < parent.index("worker spawned")
+
+
+def test_wifi_sync_gives_up_waiting_for_a_hung_recovery(parent, monkeypatch):
+    release = threading.Event()
+    thread = dev.run_wifi_recovery_in_background(lambda: release.wait(5))
+    monkeypatch.setattr(dev, "WIFI_RECOVERY_WAIT_S", 0.05)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("no worker while recovery runs"))
+    try:
+        assert "Still restoring WiFi" in dev.do_wifi_sync_blocking()["error"]
+    finally:
+        release.set()
+        thread.join(5)
+    assert parent[-1] == "sync slot released"
+
+
+def test_status_reports_restore_notice_until_acknowledged(parent, tmp_path):
+    assert dev.get_wifi_sync_status()["restore_notice"] is None
+    worker.note_failed_restore(
+        tmp_path,
+        {"hotspot_ssid": "PlaudXXXX", "isolated": True, "saved_networks": SAVED},
+        {"missing": ["Office"], "errors": {"Office": "Network not found"}},
+    )
+    notice = dev.get_wifi_sync_status()["restore_notice"]
+    assert notice["message"] == "Some saved WiFi networks couldn't be restored: Office"
+    assert notice["networks"] == ["Office"]
+    assert dev.acknowledge_wifi_restore_notice() is True
+    assert dev.get_wifi_sync_status()["restore_notice"] is None
