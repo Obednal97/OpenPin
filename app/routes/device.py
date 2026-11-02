@@ -8,6 +8,7 @@ import traceback
 from flask import Blueprint, jsonify, request
 
 from app.state import device as dev
+from app.utils import pairing_file, pairing_store
 from app.utils.config import load_config
 from app.utils.constants import get_all_recordings_dirs
 
@@ -429,3 +430,55 @@ def wifi_restore_notice_ack():
 def sync_status():
     """Poll BLE sync progress so the UI updates per-file during a transfer."""
     return jsonify(dev.get_ble_sync_status())
+
+
+# --- Pairing backup (Settings › Device) -------------------------------------
+# Responses never carry credentials: device names and serial tails only.
+
+
+@bp.route("/pairing")
+def pairing_status():
+    """Paired devices that can be exported, and which are backed up in the Keychain."""
+    devices = pairing_file.exportable_devices()
+    in_keychain = set(pairing_store.list_serials()) if devices else set()
+    summary = pairing_file.summary(devices)
+    for row, device in zip(summary, devices, strict=True):
+        row["in_keychain"] = device["serial"] in in_keychain
+    return jsonify(
+        {
+            "devices": summary,
+            "exportable": bool(devices),
+            "keychain_available": pairing_store.available(),
+        }
+    )
+
+
+def _pairing_path_arg():
+    body = request.get_json(silent=True)
+    return body.get("path") if isinstance(body, dict) else None
+
+
+def _pairing_failure(action, exc):
+    if isinstance(exc, pairing_file.PairingFileError):
+        return jsonify({"error": str(exc)}), 400
+    detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else type(exc).__name__
+    logging.warning("[Pairing] %s failed: %s", action, detail)
+    return jsonify({"error": f"{action} failed: {detail}"}), 500
+
+
+@bp.route("/pairing/export", methods=["POST"])
+def pairing_export():
+    """Write the paired devices' credentials to a JSON file the user chose (mode 0600)."""
+    try:
+        return jsonify(pairing_file.export_to(_pairing_path_arg()))
+    except Exception as e:
+        return _pairing_failure("Export", e)
+
+
+@bp.route("/pairing/import", methods=["POST"])
+def pairing_import():
+    """Read a pairing export, validate it, and save it to the config and the Keychain."""
+    try:
+        return jsonify(pairing_file.import_from(_pairing_path_arg()))
+    except Exception as e:
+        return _pairing_failure("Import", e)

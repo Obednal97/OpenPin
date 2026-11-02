@@ -879,6 +879,125 @@ function renderDeviceManager() {
     dmDisconnected.classList.remove('hidden');
     dmConnected.classList.add('hidden');
   }
+  // Connecting adds a paired device; Erase & Disconnect removes them all.
+  const pairingConnected = !!(app.deviceStateCache && app.deviceStateCache.connected);
+  if (pairingConnected !== _pairingBackupLastConnected) {
+    _pairingBackupLastConnected = pairingConnected;
+    refreshPairingBackupSection();
+  }
+}
+
+// ---- Pairing backup (export / import) ----
+
+let _pairingBackupLastConnected = null;
+let _pairingBackupBusy = false;
+
+function _pairingSerialTails(devices) {
+  return (devices || []).map((d) => `ending ${d.serial_tail}`).join(', ');
+}
+
+async function refreshPairingBackupSection() {
+  const exportBtn = $('#pairing-export-btn');
+  const hint = $('#pairing-backup-hint');
+  if (!exportBtn || !hint) return;
+  try {
+    const status = await window.plaud.pairingStatus();
+    const devices = (status && status.devices) || [];
+    if (!_pairingBackupBusy) exportBtn.disabled = !(status && status.exportable);
+    if (devices.length) {
+      const names = devices.map((d) => `${d.name || 'NotePin'} (serial ${_pairingSerialTails([d])})`).join(', ');
+      hint.textContent = devices.every((d) => d.in_keychain)
+        ? `Paired: ${names}. Backed up in your login Keychain.`
+        : `Paired: ${names}. Not backed up in your Keychain yet, so consider exporting the pairing.`;
+    } else {
+      hint.textContent = 'Connect your NotePin to export its pairing.';
+    }
+  } catch {
+    if (!_pairingBackupBusy) exportBtn.disabled = true;
+  }
+}
+
+/** The dialog plugin returns a path string (or a list for multi-select). */
+function _pairingDialogPath(picked) {
+  const p = Array.isArray(picked) ? picked[0] : picked;
+  if (typeof p !== 'string' || !p) return null;
+  return p.startsWith('file://') ? decodeURIComponent(p.slice('file://'.length)) : p;
+}
+
+async function exportPairingFile() {
+  const choice = await showConfirmDialog({
+    title: 'Export pairing?',
+    message:
+      "The file holds your NotePin's pairing keys. Anyone who has it can connect to your NotePin and download its recordings.",
+    note: 'Store it somewhere safe, such as a password manager, and delete other copies.',
+    actions: [{ id: 'export', label: 'Choose where to save…' }],
+  });
+  if (choice !== 'export') return;
+  let path;
+  try {
+    path = _pairingDialogPath(await window.plaud.choosePairingExportPath('Plaud V2 pairing.json'));
+  } catch (err) {
+    toast(`Couldn't open the save panel: ${err && err.message ? err.message : err}`, 'error');
+    return;
+  }
+  if (!path) return;
+  const btn = $('#pairing-export-btn');
+  _pairingBackupBusy = true;
+  setLoading(btn, true);
+  try {
+    const result = await window.plaud.exportPairing(path);
+    if (result && result.error) {
+      toast(`Export failed: ${result.error}`, 'error');
+    } else {
+      toast(`Exported the pairing for serial ${_pairingSerialTails(result.devices)}. Keep the file somewhere safe.`, 'success');
+    }
+  } catch (err) {
+    toast(`Export failed: ${err.message}`, 'error');
+  } finally {
+    _pairingBackupBusy = false;
+    setLoading(btn, false);
+    refreshPairingBackupSection();
+  }
+}
+
+async function importPairingFile() {
+  let path;
+  try {
+    path = _pairingDialogPath(await window.plaud.choosePairingImportFile());
+  } catch (err) {
+    toast(`Couldn't open the file panel: ${err && err.message ? err.message : err}`, 'error');
+    return;
+  }
+  if (!path) return;
+  const btn = $('#pairing-import-btn');
+  setLoading(btn, true);
+  try {
+    const result = await window.plaud.importPairing(path);
+    if (result && result.error) {
+      toast(`Import failed: ${result.error}`, 'error');
+      return;
+    }
+    const imported = (result && result.imported) || [];
+    const keychainNote =
+      result.keychain_available && result.keychain_saved < imported.length
+        ? " Couldn't save it to the Keychain, so keep the file."
+        : '';
+    toast(`Imported the pairing for serial ${_pairingSerialTails(imported)}.${keychainNote}`, 'success');
+  } catch (err) {
+    toast(`Import failed: ${err.message}`, 'error');
+  } finally {
+    setLoading(btn, false);
+    refreshPairingBackupSection();
+  }
+}
+
+function initPairingBackupEvents() {
+  const exportBtn = $('#pairing-export-btn');
+  const importBtn = $('#pairing-import-btn');
+  if (!exportBtn || !importBtn) return;
+  exportBtn.addEventListener('click', exportPairingFile);
+  importBtn.addEventListener('click', importPairingFile);
+  refreshPairingBackupSection();
 }
 
 let _deviceInfoFetching = false;
@@ -1815,6 +1934,8 @@ function initSettingsEvents() {
       setLoading(btn, false);
     }
   });
+
+  initPairingBackupEvents();
 }
 
 // ---- Storage Settings ----
