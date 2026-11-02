@@ -28,7 +28,9 @@ use crate::{commands, python};
 
 /// Event python.rs emits with human-readable progress ("Looking for Python...").
 const STARTUP_STATUS_EVENT: &str = "startup-status";
-/// Startup error codes that don't stop the server from starting.
+/// Startup error codes that don't stop the server from starting when
+/// start_python_server still returns Ok (older python.rs set DEPS_FAILED and
+/// carried on). Whenever start_python_server returns Err, any code is fatal.
 const NON_FATAL_ERROR_CODES: &[&str] = &["DEPS_FAILED"];
 
 /// True while a `start_python_server` call is in progress.
@@ -371,6 +373,8 @@ mod tests {
     fn failed_start_is_error() {
         assert_eq!(decide_phase(false, false, Some(&Err("no python".into())), Some("PYTHON_NOT_FOUND")), "error");
         assert_eq!(decide_phase(false, false, Some(&Err("x".into())), None), "error");
+        // python.rs returns Err for a failed pip install: a real error.
+        assert_eq!(decide_phase(false, false, Some(&Err("pip".into())), Some("DEPS_FAILED")), "error");
     }
 
     #[test]
