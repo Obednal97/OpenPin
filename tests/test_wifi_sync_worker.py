@@ -18,6 +18,7 @@ from tests.plaud_fakes import make_plaud_file
 def app_key():
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
+
 MAC_MINI_PORTS = """
 Hardware Port: Ethernet
 Device: en0
@@ -52,7 +53,13 @@ Device: en1
 
 @pytest.mark.parametrize(
     ("text", "expected"),
-    [(MAC_MINI_PORTS, "en1"), (MACBOOK_PORTS, "en0"), (OLD_MACOS_PORTS, "en1"), ("Hardware Port: Ethernet\nDevice: en0\n", None), ("", None)],
+    [
+        (MAC_MINI_PORTS, "en1"),
+        (MACBOOK_PORTS, "en0"),
+        (OLD_MACOS_PORTS, "en1"),
+        ("Hardware Port: Ethernet\nDevice: en0\n", None),
+        ("", None),
+    ],
 )
 def test_parse_wifi_device(text, expected):
     assert worker.parse_wifi_device(text) == expected
