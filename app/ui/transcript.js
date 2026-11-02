@@ -233,6 +233,9 @@ function openTranscript(sessionId, autoPlay = false) {
       <img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;">
       <span>Notion</span>
     </button>
+    <button class="action-btn subtle hidden" id="notion-update-btn" title="Update title, tags and the Plaud V2 section of the Notion page. Your own notes in Notion are kept.">
+      <span>Update in Notion</span>
+    </button>
     `
         : ''
     }
@@ -468,8 +471,9 @@ function openTranscript(sessionId, autoPlay = false) {
           toast(`Summary failed: ${result.error}`, 'error');
         } else {
           toast('Summary generated', 'success');
-          if (result.notion_url) {
-            toast('Pushed to Notion', 'success');
+          if (result.notion_queued) {
+            // Auto-push runs in the background queue (retried on failure).
+            toast('Sending to Notion in the background', 'info');
           } else if (result.notion_error) {
             toast(`Notion: ${result.notion_error}`, 'error');
           }
@@ -507,17 +511,48 @@ function openTranscript(sessionId, autoPlay = false) {
 
   // Notion push / open
   const notionBtn = $('#notion-push-btn');
+  const notionUpdateBtn = $('#notion-update-btn');
+  // Once a page exists: the main button opens it, and "Update in Notion"
+  // re-sends title, tags and the app's own section (user notes are kept).
+  const showNotionPageLinked = (url) => {
+    notionBtn.innerHTML = `<img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;"><span>Open in Notion</span>`;
+    notionBtn.dataset.notionUrl = url;
+    if (notionUpdateBtn) notionUpdateBtn.classList.remove('hidden');
+  };
+  const reportNotionPush = (result) => {
+    if (result.error) {
+      toast(`Notion push failed: ${result.error}`, 'error');
+      return;
+    }
+    if (result.queued) {
+      toast(result.message || 'Sending to Notion in the background', 'info');
+      return;
+    }
+    toast(result.updated ? 'Updated in Notion' : 'Pushed to Notion!', 'success');
+    if (result.content_note) toast(result.content_note, 'info');
+    if (result.url) showNotionPageLinked(result.url);
+  };
   if (notionBtn) {
     // Check if this recording already has a Notion page
     (async () => {
       try {
         const pageInfo = await window.plaud.notionPageUrl(sessionId);
-        if (pageInfo.has_page) {
-          notionBtn.innerHTML = `<img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;"><span>Open in Notion</span>`;
-          notionBtn.dataset.notionUrl = pageInfo.url;
-        }
+        if (pageInfo.has_page) showNotionPageLinked(pageInfo.url);
       } catch {}
     })();
+
+    if (notionUpdateBtn) {
+      notionUpdateBtn.addEventListener('click', async () => {
+        setLoading(notionUpdateBtn, true);
+        try {
+          reportNotionPush(await window.plaud.notionPush(sessionId));
+        } catch (err) {
+          toast(`Error: ${err.message}`, 'error');
+        } finally {
+          setLoading(notionUpdateBtn, false);
+        }
+      });
+    }
 
     notionBtn.addEventListener('click', async () => {
       // If page exists, open it
@@ -576,17 +611,7 @@ function openTranscript(sessionId, autoPlay = false) {
 
       setLoading(notionBtn, true);
       try {
-        const result = await window.plaud.notionPush(sessionId);
-        if (result.error) {
-          toast(`Notion push failed: ${result.error}`, 'error');
-        } else {
-          const verb = result.updated ? 'Updated in' : 'Pushed to';
-          toast(`${verb} Notion!`, 'success');
-          if (result.url) {
-            notionBtn.innerHTML = `<img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;"><span>Open in Notion</span>`;
-            notionBtn.dataset.notionUrl = result.url;
-          }
-        }
+        reportNotionPush(await window.plaud.notionPush(sessionId));
       } catch (err) {
         toast(`Error: ${err.message}`, 'error');
       } finally {
