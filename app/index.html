@@ -584,9 +584,9 @@
             <label class="proc-label" for="transcription-provider">Provider</label>
             <select id="transcription-provider" class="proc-select">
               <option value="deepgram">Deepgram Nova-3</option>
-              <option value="groq">Groq Whisper</option>
-              <option value="openai">OpenAI Whisper</option>
-              <option value="local">Local Whisper</option>
+              <option value="groq">Groq Whisper Large v3</option>
+              <option value="openai">OpenAI GPT-Transcribe</option>
+              <option value="local">Local Whisper (on this Mac)</option>
             </select>
             <span class="proc-recommended" id="transcription-rec">Recommended</span>
           </div>
@@ -640,10 +640,10 @@
           <div class="proc-provider-row">
             <label class="proc-label" for="summarization-provider">Provider</label>
             <select id="summarization-provider" class="proc-select">
-              <option value="anthropic">Anthropic Claude</option>
-              <option value="openai">OpenAI GPT</option>
+              <option value="anthropic">Anthropic Claude Sonnet</option>
+              <option value="openai">OpenAI GPT-6 Luna</option>
               <option value="openrouter">OpenRouter</option>
-              <option value="local">Local DistilBART</option>
+              <option value="local">Local (Ollama if running, else DistilBART)</option>
             </select>
             <span class="proc-recommended" id="summarization-rec">Recommended</span>
           </div>

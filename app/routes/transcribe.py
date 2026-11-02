@@ -94,7 +94,7 @@ def _apply_spoken_tags(session_id, text):
 # Keys produced by a transcription run. Re-transcribing replaces these and
 # keeps everything else in the transcript JSON (summary, auto_title, tags,
 # custom_name, notion_page_url, ...).
-_TRANSCRIPTION_KEYS = ("text", "duration", "language", "segments", "provider", "speakers")
+_TRANSCRIPTION_KEYS = ("text", "duration", "language", "segments", "provider", "speakers", "timestamps_estimated")
 
 
 def _write_text_atomic(path, text):
@@ -177,7 +177,9 @@ def transcribe_file():
     config = load_config()
     model = data.get("model", config.get("whisper_model", "small"))
     diarize = data.get("diarize", config.get("diarize", False))
-    language = data.get("language", config.get("language", "en"))
+    # "auto" (the Settings default) and empty mean auto-detect: None is passed
+    # to every provider so none of them forces English.
+    language = data.get("language") or config.get("language") or "auto"
     if language == "auto":
         language = None
     # For Deepgram: use regional variant (en-GB vs en-US) when language is English
@@ -229,13 +231,15 @@ def transcribe_file():
                     if profile.get("industry"):
                         dg_keywords.append(profile["industry"])
                     result = transcribe_deepgram(
-                        path, key, deepgram_language or "en", diarize=diarize, keywords=dg_keywords or None
+                        path, key, deepgram_language, diarize=diarize, keywords=dg_keywords or None
                     )
                     _cloud_has_speakers = bool(result.get("speakers"))
                 elif name == "groq":
-                    result = transcribe_groq(path, key, language or "en", vocab_prompt=vocab_prompt)
+                    result = transcribe_groq(path, key, language, vocab_prompt=vocab_prompt)
                 elif name == "openai":
-                    result = transcribe_openai(path, key, language or "en", vocab_prompt=vocab_prompt)
+                    result = transcribe_openai(
+                        path, key, language, vocab_prompt=vocab_prompt, keywords=list(vocab) or None
+                    )
                 _used_cloud = True
                 _cloud_provider = name
                 return True
@@ -274,7 +278,7 @@ def transcribe_file():
                     }
                 )
             duration = result.get("duration", 0)
-            lang = result.get("language", language or "en")
+            lang = result.get("language") or language or ""
             speakers = result.get("speakers", [])
 
             # Merge/group segments by speaker + sentence boundaries
@@ -302,6 +306,8 @@ def transcribe_file():
             }
             if speakers:
                 t_data["speakers"] = speakers
+            if result.get("timestamps_estimated"):
+                t_data["timestamps_estimated"] = True
             _merge_transcript(session_id, transcript_path, t_data, txt_text=text)
 
             # Auto-detect spoken tags from the beginning of the transcript
@@ -557,7 +563,9 @@ def summarize_transcript():
             )
 
         extra_context = profile_context + tag_context
-        summary_text, title, provider, errors = summarize(full_text, config, extra_context)
+        summary_text, title, provider, errors = summarize(
+            full_text, config, extra_context, segments=t_data.get("segments")
+        )
 
         if summary_text is None:
             error_detail = " → ".join(errors) if errors else "Unknown error"

@@ -85,12 +85,22 @@ PLAUD_API_DOMAINS = {
 }
 PLAUD_WEB_HOST = "https://web.plaud.ai"
 
-# Whisper models
+# Local Whisper models (openai-whisper), smallest download first.
+# size / download_mb: checkpoint download size (Content-Length of the .pt files
+# listed in whisper/__init__.py). ram_gb: "Required VRAM" from the Whisper
+# README (https://github.com/openai/whisper#available-models-and-languages).
+# The JSON response sorts keys alphabetically, so the UI orders by download_mb.
 WHISPER_MODELS = {
-    "base": {"ram_gb": 1, "size": "74 MB", "speed": "Fast", "accuracy": "Good enough for clear speech"},
-    "small": {"ram_gb": 2, "size": "244 MB", "speed": "Moderate", "accuracy": "Good - recommended default"},
-    "medium": {"ram_gb": 5, "size": "769 MB", "speed": "Slower", "accuracy": "Very good - handles accents well"},
-    "large": {"ram_gb": 10, "size": "1.5 GB", "speed": "Slowest", "accuracy": "Best available"},
+    "base": {"ram_gb": 1, "size": "145 MB", "download_mb": 145, "params": "74M",
+             "speed": "Fast", "accuracy": "Good enough for clear speech"},
+    "small": {"ram_gb": 2, "size": "484 MB", "download_mb": 484, "params": "244M",
+              "speed": "Moderate", "accuracy": "Good - recommended default"},
+    "medium": {"ram_gb": 5, "size": "1.5 GB", "download_mb": 1528, "params": "769M",
+               "speed": "Slower", "accuracy": "Very good - handles accents well"},
+    "turbo": {"ram_gb": 6, "size": "1.6 GB", "download_mb": 1618, "params": "809M",
+              "speed": "Moderate", "accuracy": "Near-best (large-v3-turbo) - best speed/accuracy balance"},
+    "large": {"ram_gb": 10, "size": "3.1 GB", "download_mb": 3087, "params": "1550M",
+              "speed": "Slowest", "accuracy": "Best available (large-v3)"},
 }
 
 # Notion MCP
