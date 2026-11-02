@@ -1041,9 +1041,10 @@ fn report_fingerprint(scrubbed_message: &str) -> String {
 
 /// Has the user left "Send anonymous crash reports" on? Read from the backend
 /// config (`crash_reports_enabled`, default true) so the Rust panic hook,
-/// which has no frontend, respects it too.
+/// which has no frontend, respects it too. Same data folder as the backend:
+/// `PLAUD_DATA_DIR` if set, else the dev or release folder (`paths::data_dir`).
 fn crash_reports_enabled() -> bool {
-    let path = crate::home_dir().join("Library/Application Support/Plaud V2/.plaud_v2_config.json");
+    let path = crate::paths::config_path();
     crash_reports_enabled_in(std::fs::read_to_string(path).ok().as_deref())
 }
 
