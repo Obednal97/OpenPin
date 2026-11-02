@@ -417,9 +417,18 @@ class TestDeviceCredentials:
         assert result["status"] == -3900
         assert cloud.get_device_bind_token("SN_ABC") is None
 
-    def test_bind_status_zero_without_token_is_an_error(self, signed_in):
+    def test_bind_status_zero_without_resolvable_user_id_is_an_error(self, signed_in):
+        # FAKE_TOKEN isn't a JWT, so the id comes from /user/me, which has none here.
         signed_in.on("POST", f"{EU}/device/bind", {"status": 0, "data": None})
-        assert "no device token" in cloud.bind_device("SN_ABC")["error"]
+        signed_in.on("GET", f"{EU}/user/me", {"status": 0, "data_user": {}})
+        assert "account id couldn't be read" in cloud.bind_device("SN_ABC")["error"]
+        assert cloud.get_device_bind_token("SN_ABC") is None
+
+    def test_bind_falls_back_to_user_me_for_the_user_id(self, signed_in):
+        signed_in.on("POST", f"{EU}/device/bind", {"status": 0, "data": None})
+        signed_in.on("GET", f"{EU}/user/me", {"status": 0, "data_user": {"id": "a1b2c3d4" * 4}})
+        assert cloud.bind_device("SN_ABC")["token"] == "a1b2c3d4" * 4
+        assert cloud.get_device_bind_token("SN_ABC") == "a1b2c3d4" * 4
 
     def test_sn_sign_non_zero_status_surfaces_plauds_message(self, signed_in):
         signed_in.on("POST", f"{EU}/device/sn-sign", {"status": -7, "msg": "device not bound"})

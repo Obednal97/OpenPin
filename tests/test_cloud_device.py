@@ -74,12 +74,10 @@ class TestCloudDeviceCredentials:
         assert get_device_sn_signature("TEST_SN_123") == "base64sigdata=="
 
     def test_bind_device_stores_token(self, tmp_config):
-        """bind_device should store the access_token in config."""
-        mock_response = {
-            "status": 0,
-            "data": {"access_token": "new_device_token_123", "sn": "SN_ABC"}
-        }
+        """bind_device should store the resolved user id (bind reply has no token) in config."""
+        mock_response = {"status": 0, "data": {}}
         with patch("app.state.cloud.cloud_api", return_value=mock_response), \
+             patch("app.state.cloud._resolve_bind_token", return_value="new_device_token_123"), \
              patch("app.state.cloud._cloud_state", {"logged_in": True, "token": "user_token"}):
             from app.state.cloud import bind_device, get_device_bind_token
             result = bind_device("SN_ABC")

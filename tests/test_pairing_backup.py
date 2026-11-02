@@ -368,13 +368,16 @@ class TestRestore:
 
 class TestBackupWriteSites:
     def _cloud_logged_in(self):
-        return patch.dict("app.state.cloud._cloud_state", {"logged_in": True, "token": "t", "api_domain": "https://x"})
+        # The bind token is the login JWT's `sub` claim, so no /user/me call is needed.
+        part = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()  # noqa: E731
+        jwt = f"{part({'alg': 'none'})}.{part({'sub': TOKEN})}.sig"
+        return patch.dict("app.state.cloud._cloud_state", {"logged_in": True, "token": jwt, "api_domain": "https://x"})
 
     def test_bind_then_sign_backs_up_once_both_exist(self, kc):
         from app.state import cloud
 
         with self._cloud_logged_in(), patch.object(cloud, "cloud_api") as api:
-            api.return_value = {"status": 0, "data": {"access_token": TOKEN}}
+            api.return_value = {"status": 0, "data": {}}
             assert cloud.bind_device(SN, name="Desk NotePin")["token"] == TOKEN
             pairing_store.flush(timeout=5)
             assert kc.device_item(SN) is None  # no signature yet
