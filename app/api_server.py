@@ -46,7 +46,8 @@ log.setLevel(logging.WARNING)
 #    which blocks DNS rebinding (attacker.example resolving to 127.0.0.1).
 # 3. Token: the Rust shell generates a random token per launch and passes it in
 #    PLAUD_API_TOKEN. Every request must send it in the X-Plaud-Token header
-#    (GET /audio may use ?token= instead, since <audio src> can't set headers).
+#    (GET /audio and POST /device/disconnect may use ?token= instead, since
+#    <audio src> and navigator.sendBeacon can't set headers).
 #    /health and CORS preflights are exempt.
 #
 # If PLAUD_API_TOKEN is unset (tests, or running api_server.py by hand) the
@@ -71,6 +72,23 @@ if not _expected_token():
         "!!! PLAUD_API_TOKEN is not set: API token auth is DISABLED. "
         "Only acceptable in tests or when running api_server.py by hand. !!!"
     )
+
+
+def _query_token_allowed(method: str, path: str) -> bool:
+    """Where ``?token=`` may stand in for the X-Plaud-Token header.
+
+    - GET /audio/<file>: <audio src> can't set headers.
+    - POST /device/disconnect: sent with navigator.sendBeacon on page unload
+      (Cmd+R). A beacon can't set headers either, and a header would force a
+      CORS preflight that WKWebView may drop while the page unloads.
+
+    Werkzeug's access log is silenced (WARNING), so these URLs aren't logged.
+
+    Every other route requires the header.
+    """
+    if method == "GET" and path.startswith("/audio/"):
+        return True
+    return method == "POST" and path == "/device/disconnect"
 
 
 def _host_allowed(host: str) -> bool:
@@ -100,7 +118,7 @@ def _enforce_request_security():
         return None
 
     supplied = request.headers.get(API_TOKEN_HEADER, "")
-    if not supplied and request.method == "GET" and request.path.startswith("/audio/"):
+    if not supplied and _query_token_allowed(request.method, request.path):
         supplied = request.args.get("token", "")
     if not hmac.compare_digest(supplied.encode(), expected.encode()):
         return jsonify({"error": "Unauthorized"}), 401

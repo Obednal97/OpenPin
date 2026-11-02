@@ -14,17 +14,27 @@ const { listen } = window.__TAURI__.event;
 
 // --- BLE disconnect on page reload (Cmd+R) to prevent stale connections ---
 window.addEventListener('beforeunload', () => {
-  if (_apiUrl) {
-    // keepalive fetch (not sendBeacon): beacons can't carry the X-Plaud-Token
-    // header the backend requires, so they'd be rejected with 401.
-    const url = `${_apiUrl}/device/disconnect`;
-    fetch(url, {
-      method: 'POST',
-      headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
-      body: '{}',
-      keepalive: true,
-    }).catch(() => {});
+  if (!_apiUrl) return;
+  const url = `${_apiUrl}/device/disconnect`;
+  // sendBeacon with a text/plain body is a CORS "simple request": no preflight,
+  // which WKWebView may drop while the page unloads. A beacon can't set the
+  // X-Plaud-Token header, so the token goes in ?token= (the backend accepts the
+  // query form only for GET /audio and POST /device/disconnect).
+  const beaconUrl = _bridgeApiToken ? `${url}?token=${encodeURIComponent(_bridgeApiToken)}` : url;
+  let sent = false;
+  try {
+    if (navigator.sendBeacon) sent = navigator.sendBeacon(beaconUrl, new Blob(['{}'], { type: 'text/plain' }));
+  } catch {
+    sent = false;
   }
+  if (sent) return;
+  // Fallback: keepalive fetch with the header (needs a preflight).
+  fetch(url, {
+    method: 'POST',
+    headers: _bridgeHeaders({ 'Content-Type': 'application/json' }),
+    body: '{}',
+    keepalive: true,
+  }).catch(() => {});
 });
 
 // --- Dynamic API URL + per-launch API token (resolved from Rust backend) ---
