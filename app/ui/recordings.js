@@ -122,7 +122,7 @@ function renderRecordingsList() {
         badgeText = 'Waiting for re-download';
       } else if (processing) {
         badgeClass = 'badge-processing';
-        badgeText = processing === 'transcribing' ? 'Transcribing' : 'Summarizing';
+        badgeText = { transcribing: 'Transcribing', summarizing: 'Summarizing', queued: 'Queued' }[processing] || 'Processing';
       } else if (hasTranscript) {
         badgeClass = 'badge-transcribed';
         badgeText = 'Transcribed';
@@ -613,6 +613,19 @@ function showMoveDialog(ids, onMoved) {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
 }
 
+/** Queue the selected recordings that have no transcript yet (select bar). */
+function transcribeSelected() {
+  if (app.selectedIds.size === 0) return;
+  const todo = app.recordings.filter(
+    (rec) => app.selectedIds.has(rec.session_id) && rec.ogg_path && !rec.partial && !app.transcripts[rec.session_id],
+  );
+  if (todo.length === 0) {
+    toast('The selected recordings are already transcribed', 'info');
+    return;
+  }
+  queueAutoProcess(todo, { always: true });
+}
+
 async function moveSelected() {
   if (app.selectedIds.size === 0) return;
   showMoveDialog(Array.from(app.selectedIds));
@@ -732,4 +745,85 @@ function _showContextMenu(x, y, sessionId) {
   setTimeout(() => {
     document.addEventListener('click', _removeContextMenu, { once: true });
   }, 10);
+}
+
+// ---- Background processing of new recordings ----
+// A sync ends once the files are on disk: the list refreshes straight away and
+// new recordings are transcribed (and summarised, if that's on) here, one at a
+// time, with a "Transcribing" / "Summarizing" badge on each. Before v2.5.1 every
+// sync waited for all of this, so 47 recordings on local Whisper kept the sync
+// window open, the list empty and "Syncing" showing for hours.
+const _autoProcessQueue = [];
+let _autoProcessRunning = false;
+
+function _autoProcessSessionId(f) {
+  return String(f.session_id || String(f.ogg_path).split('/').pop().replace('.ogg', ''));
+}
+
+/**
+ * Queue newly synced recordings ({session_id, ogg_path}) for transcription.
+ * Honours "Auto-transcribe" unless opts.always; opts.language overrides the
+ * language setting. Recordings already queued are skipped.
+ */
+function queueAutoProcess(files, opts = {}) {
+  if (!opts.always && app.settings.auto_transcribe === false) return 0;
+  let added = 0;
+  for (const f of files || []) {
+    if (!f || !f.ogg_path) continue;
+    const sid = _autoProcessSessionId(f);
+    if (_autoProcessQueue.some((q) => q.sid === sid)) continue;
+    _autoProcessQueue.push({ sid, oggPath: f.ogg_path, language: opts.language });
+    app.processingIds.set(sid, 'queued');
+    added++;
+  }
+  if (added > 0) {
+    toast(`Transcribing ${added} new recording(s) in the background`, 'info');
+    renderRecordingsList();
+    _runAutoProcessQueue();
+  }
+  return added;
+}
+
+async function _runAutoProcessQueue() {
+  if (_autoProcessRunning) return;
+  _autoProcessRunning = true;
+  let done = 0;
+  let failed = 0;
+  try {
+    while (_autoProcessQueue.length > 0) {
+      const item = _autoProcessQueue[0];
+      try {
+        // Already transcribed meanwhile (e.g. by hand): only summarise.
+        if (!app.transcripts[item.sid]) {
+          app.processingIds.set(item.sid, 'transcribing');
+          renderRecordingsList();
+          const result = await window.plaud.transcribe(
+            item.oggPath,
+            app.settings.model || 'small',
+            app.settings.diarize || false,
+            item.language || app.settings.language || 'auto',
+          );
+          if (result && result.error) throw new Error(result.error);
+        }
+        if (app.settings.auto_summarise) {
+          app.processingIds.set(item.sid, 'summarizing');
+          renderRecordingsList();
+          await window.plaud.summarize(item.sid);
+        }
+        done++;
+      } catch (err) {
+        failed++;
+        console.error(`Background processing failed for ${item.sid}:`, err);
+      } finally {
+        app.processingIds.delete(item.sid);
+        _autoProcessQueue.shift();
+      }
+      await loadRecordings();
+      if (app.currentView === 'transcript' && app.currentSessionId === item.sid) openTranscript(item.sid);
+    }
+  } finally {
+    _autoProcessRunning = false;
+  }
+  if (done > 0) toast(`Finished processing ${done} new recording(s)`, 'success');
+  if (failed > 0) toast(`${failed} recording(s) couldn't be transcribed; open one to try again`, 'error');
 }
