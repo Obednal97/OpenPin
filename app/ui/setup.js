@@ -143,7 +143,7 @@ function _showCloudLogin() {
         window._setupOAuthHandler = async (authCode) => {
           if (!authCode) return;
           try {
-            const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
+            const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '', 'link');
             if (res.logged_in) {
               app.cloudState = { logged_in: true, user: res.user };
               toast('Plaud account connected!', 'success');

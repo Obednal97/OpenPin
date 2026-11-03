@@ -434,7 +434,7 @@ window.plaud.onOAuthCallback(async (authCode) => {
   // Normal settings flow
   toast('Received Plaud sign-in link, signing in...', 'info');
   try {
-    const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '');
+    const res = await window.plaud.cloudExchangeToken(authCode, app.pendingDesktopUuid || '', 'link');
     finishCloudSignIn(res);
   } catch (err) {
     app.cloudLoginPending = false;
