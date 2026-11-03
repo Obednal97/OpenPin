@@ -290,6 +290,13 @@ class TestTauriBridgeAPISurface:
         assert "beforeunload" in self.bridge_src
         assert "/device/disconnect" in self.bridge_src
 
+    def test_bridge_does_not_report_environmental_errors(self):
+        """Issues #92 and #94, and 'Fetch is aborted': none of these are bugs."""
+        for marker in ("'turned off'", "'powered_off'", "'not connected'"):
+            assert marker in self.bridge_src
+        assert "err.name === 'AbortError'" in self.bridge_src
+        assert "REPORT_ENDPOINTS.has(endpoint) && !aborted" in self.bridge_src
+
     def test_bridge_report_endpoints_set(self):
         """REPORT_ENDPOINTS set should include critical operations."""
         critical = ["/device/connect", "/transcribe", "/cloud/sync"]

@@ -189,7 +189,10 @@ async function apiCall(method, endpoint, body = null) {
         throw err; // Same URL, genuinely unreachable
       }
     } catch {
-      if (REPORT_ENDPOINTS.has(endpoint)) {
+      // An abort is this page giving up on its own request (the timeout above,
+      // or a reconnect replacing it), not a backend failure.
+      const aborted = (err && err.name === 'AbortError') || /\babort/i.test(String(err && err.message));
+      if (REPORT_ENDPOINTS.has(endpoint) && !aborted) {
         invoke('report_error', {
           message: `API fetch failed: ${endpoint} — ${_bridgeShortError(err && err.message)}`,
           stack: '',
@@ -212,6 +215,9 @@ async function apiCall(method, endpoint, body = null) {
     'went out of range',
     'already in progress',
     'powered off',
+    'powered_off', // bleak's BleakBluetoothNotAvailableReason.POWERED_OFF
+    'turned off', // "Bluetooth device is turned off"
+    'not connected', // the renderer re-checks the link and retries once
     'invalid or has expired', // expired Plaud sign-in code: the user signs in again
     'ignored a plaud sign-in link', // a plaud:// link nobody asked for
   ];
