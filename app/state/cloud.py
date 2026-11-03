@@ -38,6 +38,8 @@ _cloud_state = {
     "desktop_uuid": None,
     "device_id": None,  # stable per-install x-device-id (lazy, see _client_device_id)
     "timezone": None,  # system IANA timezone (lazy, see _system_timezone)
+    "ut": None,  # pld_ut user token (~24h): what sn-sign wants. See refresh_user_token
+    "urt": None,  # pld_urt refresh token (~30 days)
 }
 _cloud_state_lock = threading.Lock()
 
@@ -134,6 +136,38 @@ def _json_or_empty(response):
     except Exception:
         return {}
     return body if isinstance(body, dict) else {}
+
+
+def _cookies_from_response(response):
+    """Last non-empty ``pld_ut`` / ``pld_urt`` in a response's Set-Cookie headers.
+
+    Plaud sends several Set-Cookie lines for pld_ut (Max-Age=0 "clearer"
+    cookies first, the real token last), and requests' ``headers`` collapses
+    repeats, so read urllib3's raw headers. Falls back to ``response.cookies``.
+    Returns ``{"ut": str|None, "urt": str|None}``.
+    """
+    found = {"pld_ut": None, "pld_urt": None}
+    lines = []
+    try:
+        raw_headers = response.raw.headers
+        getter = getattr(raw_headers, "getlist", None) or getattr(raw_headers, "get_all", None)
+        lines = list(getter("Set-Cookie") or []) if getter else []
+    except Exception:
+        lines = []
+    for line in lines:
+        name, sep, rest = str(line).strip().partition("=")
+        name = name.strip().lower()
+        if sep and name in found:
+            value = rest.split(";", 1)[0].strip().strip('"')
+            if value:
+                found[name] = value  # later lines win
+    if not lines:
+        for name in found:
+            try:
+                found[name] = response.cookies.get(name) or None
+            except Exception:
+                pass
+    return {"ut": found["pld_ut"], "urt": found["pld_urt"]}
 
 
 def _plaud_msg(body):
@@ -296,6 +330,8 @@ def load_cloud_token():
                 with _cloud_state_lock:
                     _cloud_state["token"] = token
                     _cloud_state["api_domain"] = api_domain
+                    _cloud_state["ut"] = data.get("ut") or None
+                    _cloud_state["urt"] = data.get("urt") or None
                     _cloud_state["logged_in"] = True
                 # Validate in background — update user info if token is still valid
                 threading.Thread(
@@ -327,14 +363,25 @@ def load_cloud_token():
     return False
 
 
-def save_cloud_token(token, api_domain=None):
-    """Save Plaud cloud token atomically via a temp-file rename."""
+def save_cloud_token(token, api_domain=None, ut=None, urt=None):
+    """Save Plaud cloud token atomically via a temp-file rename.
+
+    ``ut`` / ``urt`` (pld_ut / pld_urt, see refresh_user_token) are optional;
+    when omitted the ones already held in state are kept, so re-saving after a
+    region switch doesn't drop them. Old files without them still load.
+    """
     with _cloud_state_lock:
         if api_domain:
             _cloud_state["api_domain"] = api_domain
+        ut = ut or _cloud_state.get("ut")
+        urt = urt or _cloud_state.get("urt")
     data = {"token": token}
     if api_domain:
         data["api_domain"] = api_domain
+    if ut:
+        data["ut"] = ut
+    if urt:
+        data["urt"] = urt
     # Write atomically: write to a sibling temp file then rename so a crash
     # mid-write cannot leave a partial config file.
     tmp_path = PLAUD_CONFIG_PATH.with_suffix(".tmp")
@@ -464,14 +511,16 @@ def _auth_code_error(body, http_status):
     return f"Plaud didn't return a token for this sign-in code (HTTP {http_status})."
 
 
-def _sign_in(token, api_domain, user):
-    """Make a checked token the active login and save it."""
+def _sign_in(token, api_domain, user, ut=None, urt=None):
+    """Make a checked token the active login and save it (with pld_ut/pld_urt if known)."""
     with _cloud_state_lock:
+        _cloud_state["ut"] = ut or None
+        _cloud_state["urt"] = urt or None
         _cloud_state["token"] = token
         _cloud_state["api_domain"] = api_domain
         _cloud_state["logged_in"] = True
         _cloud_state["user"] = user
-    save_cloud_token(token, api_domain)
+    save_cloud_token(token, api_domain, ut=ut, urt=urt)
     return {"logged_in": True, "user": user}
 
 
@@ -510,7 +559,8 @@ def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None):
         user, domain = _try_token(token, domain)
     except PlaudAuthError as e:
         return {"error": str(e)}
-    return _sign_in(token, domain, user)
+    cookies = _cookies_from_response(r)  # best effort: not every sign-in sets them
+    return _sign_in(token, domain, user, ut=cookies["ut"], urt=cookies["urt"])
 
 
 def login_with_token(token, region="eu"):
@@ -541,6 +591,8 @@ def logout():
         _cloud_state["logged_in"] = False
         _cloud_state["token"] = None
         _cloud_state["user"] = None
+        _cloud_state["ut"] = None
+        _cloud_state["urt"] = None
     if PLAUD_CONFIG_PATH.exists():
         PLAUD_CONFIG_PATH.unlink()
     return {"logged_out": True}
