@@ -277,7 +277,10 @@ def scan_known():
         known_sns = dev.get_paired_serials()
         if not known_sns:
             return jsonify({"found": False, "reason": "never_paired"})
-        devices = dev.run_async(dev.scan_devices_with_retry(attempts=2, scan_duration=4))
+        devices = dev.run_async(dev.scan_unless_connected(attempts=2, scan_duration=4))
+        if devices is None:
+            # Connected while this request waited for Bluetooth: nothing to find.
+            return jsonify({"found": False, "reason": "already_connected", "connected": True})
         for d in devices:
             sn = d.get("serial_number") or dev.paired_serial_for_address(d["address"])
             if sn and sn in known_sns:
