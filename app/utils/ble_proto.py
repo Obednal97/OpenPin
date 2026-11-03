@@ -65,6 +65,14 @@ FAIL_ON_HANDSHAKE_REJECTED = False
 HANDSHAKE_REPLY_TIMEOUT_S = 1.5
 HANDSHAKE_MAX_REPLY_WAITS = 4
 
+# Plaud's app (kwb.java, built in c03.j()) sends the BIND_TOKEN as 32 bytes from
+# port version 9 and as its first 16 below that. The app sends 32; a rejected
+# handshake from a device reporting an older port version is retried with 16
+# (bind_handshake). That retry only happens when the device answered cmd 1, so
+# it can't add to the silent-device worst case above.
+SHORT_TOKEN_BELOW_PORT_VERSION = 9
+SHORT_TOKEN_LEN = 16
+
 
 def handshake_request(token32, flag):
     """cmd 1 request: [1,1,0][version 2][audio channel 0][flag] + 32-byte BIND_TOKEN."""
@@ -134,27 +142,64 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
     add up). Used by both device.py and the WiFi worker so they behave the same.
 
     Returns (verdict, info): info has the parsed replies ("hs"), the port
-    version if the device reported one, and the cmd 4 reply. Only
-    HANDSHAKE_REJECTED should fail the connect; HANDSHAKE_NO_REPLY is logged
-    here as a warning and the caller carries on.
+    version if the device reported one, the cmd 4 reply and the token length
+    that was used ("token_len"). Only HANDSHAKE_REJECTED should fail the
+    connect; HANDSHAKE_NO_REPLY is logged here as a warning and the caller
+    carries on.
+
+    `log` defaults to logging.warning so the replies reach the app log (the
+    backend's log level is WARNING): they are what README open questions 7
+    and 14 need from real hardware.
+
+    If the token looks rejected and the device reports a port version below
+    SHORT_TOKEN_BELOW_PORT_VERSION, the handshake is tried once more with the
+    token cut to SHORT_TOKEN_LEN bytes, as Plaud's own app does for those
+    versions (it sends 32 bytes only from port version 9).
     """
-    log = log or logging.info
-    r1 = await send(handshake_request(token32, 0))
-    r2 = await send(handshake_request(token32, 1))
-    hs = [parse_handshake_reply(r1), parse_handshake_reply(r2)]
-    log("[BLE] Handshake replies: " + ", ".join(f"HS{i + 1}={h['raw'] if h else 'none'}" for i, h in enumerate(hs)))
-    r4 = await send(time_sync_request(now, utc_offset_minutes))
-    answers = r4 is not None
-    if r4 is not None:
-        tz = parse_time_sync_reply(r4)
-        if tz is not None:
-            log(f"[BLE] Time sync reply: device time zone {tz['tz_hours']}h")
-    clean = all(h is not None and h["status"] == 0 for h in hs)
-    if not answers and not clean:
-        # Something looked off and cmd 4 got no reply: one more probe (cmd 3,
-        # get state) before deciding, so a single lost reply doesn't fail it.
-        answers = await send(bytes([1, 3, 0])) is not None
-    verdict = handshake_verdict(hs, answers)
+    log = log or logging.warning
+
+    async def attempt(token):
+        r1 = await send(handshake_request(token, 0))
+        r2 = await send(handshake_request(token, 1))
+        hs = [parse_handshake_reply(r1), parse_handshake_reply(r2)]
+        port = next((h["port_version"] for h in reversed(hs) if h and "port_version" in h), None)
+        log(
+            "[BLE] Handshake replies: "
+            + ", ".join(f"HS{i + 1}={h['raw'] if h else 'none'}" for i, h in enumerate(hs))
+            + f" (port version {port if port is not None else 'unknown'}, {len(token)}-byte token)"
+        )
+        r4 = await send(time_sync_request(now, utc_offset_minutes))
+        answers = r4 is not None
+        if r4 is not None:
+            tz = parse_time_sync_reply(r4)
+            if tz is not None:
+                log(f"[BLE] Time sync reply: device time zone {tz['tz_hours']}h")
+        clean = all(h is not None and h["status"] == 0 for h in hs)
+        if not answers and not clean:
+            # Something looked off and cmd 4 got no reply: one more probe (cmd 3,
+            # get state) before deciding, so a single lost reply doesn't fail it.
+            answers = await send(bytes([1, 3, 0])) is not None
+        return handshake_verdict(hs, answers), hs, port, r4
+
+    token = token32
+    verdict, hs, port_version, r4 = await attempt(token)
+    if (
+        verdict == HANDSHAKE_REJECTED
+        and port_version is not None
+        and port_version < SHORT_TOKEN_BELOW_PORT_VERSION
+        and len(token32) > SHORT_TOKEN_LEN
+    ):
+        logging.warning(
+            f"[BLE] Handshake rejected on port version {port_version}: retrying with a "
+            f"{SHORT_TOKEN_LEN}-byte token (Plaud's app sends 32 bytes only from port version "
+            f"{SHORT_TOKEN_BELOW_PORT_VERSION})"
+        )
+        token = token32[:SHORT_TOKEN_LEN]
+        verdict, hs, port_version, r4 = await attempt(token)
+        logging.warning(
+            f"[BLE] {SHORT_TOKEN_LEN}-byte token "
+            + ("accepted" if verdict == HANDSHAKE_OK else f"didn't help either ({verdict})")
+        )
     statuses = [h["status"] for h in hs if h is not None]
     if verdict == HANDSHAKE_OK and any(s != 0 for s in statuses):
         logging.warning(
@@ -175,8 +220,7 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
                 else " — continuing anyway (FAIL_ON_HANDSHAKE_REJECTED is off); please report"
             )
         )
-    port_version = next((h["port_version"] for h in reversed(hs) if h and "port_version" in h), None)
-    return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4}
+    return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4, "token_len": len(token)}
 
 
 # -- cmd 4: time sync ---------------------------------------------------------------

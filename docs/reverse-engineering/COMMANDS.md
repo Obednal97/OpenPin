@@ -105,7 +105,9 @@ Reply (APK):
 | len−3 | 3 | Version (u24) |
 
 The app (`ble_proto.parse_handshake_reply()`, `handshake_verdict()`, both `device.py` and the
-worker) logs both replies' raw bytes and reads the status and port version. The status byte's
+worker) logs both replies' raw bytes, the port version and the token length it sent ("Handshake
+replies: HS1=… HS2=… (port version N, 32-byte token)", at WARNING since v2.4.5 so it reaches the
+app log) and reads the status and port version. The status byte's
 meaning is **Unverified**, and the docs only say a rejected token makes later commands go
 unanswered, so (**Implemented**):
 
@@ -121,6 +123,13 @@ the NotePin S answers cmd 1 at all is **Unverified** (iOS captures show a 36-byt
 alone isn't treated as a failure. Each reply is waited for at most 1.5 s
 (`ble_proto.HANDSHAKE_REPLY_TIMEOUT_S`) and at most four are awaited (cmd 1 twice, cmd 4, the cmd 3
 probe), so a silent device adds at most 6 s to a connect.
+
+**Token length (Implemented, v2.4.5).** Plaud's app sends the `BIND_TOKEN` as 32 bytes from port
+version 9 and as its first 16 bytes below that (`kwb.java`: `n = portVersion >= 9 ? 32 : 16`). The
+app always sends 32 first; if that looks rejected and the reply reports a port version below 9, it
+repeats the handshake once with 16 bytes ("retrying with a 16-byte token", then "16-byte token
+accepted" or "didn't help either"). The device has to answer cmd 1 for this to happen, so it never
+adds to the silent-device worst case.
 
 ### cmd 2 — Get SSN
 
