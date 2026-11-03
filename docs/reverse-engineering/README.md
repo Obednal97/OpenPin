@@ -122,3 +122,8 @@ answer them. Log lines to look for are in quotes.
     or off (`False`); the default is `"auto"`.
 14. **Port version.** Which port version does the NotePin S report in the cmd 1 reply? Only the
     ≥ 7 data-packet layout is implemented; a lower one is logged ("file transfer layout untested").
+    Since v2.4.5 every connect logs it ("Handshake replies: … (port version N, …)").
+    **Hardware report, 3 November 2026 (v2.4.3–v2.4.4):** the owner's NotePin S answered both cmd 1
+    replies with status 1 and then ignored cmd 4 and cmd 3 on every connect, and dropped the link
+    about 2 minutes later. The raw replies and port version weren't logged then (they went out at
+    INFO). If the port version is below 9, the 16-byte retry (COMMANDS.md, cmd 1) is the likely fix.
