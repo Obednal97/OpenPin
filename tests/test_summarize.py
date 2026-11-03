@@ -181,7 +181,7 @@ def test_openai_request_construction(mock_post):
     summary, title = S.summarize_openai(transcript, "sk-x", "\n\nThis recording is tagged as: 1:1.")
     assert title == "Ship decision"
     body = mock_post.call_args.kwargs["json"]
-    assert body["model"] == OPENAI_SUMMARIZE == "gpt-6-luna"
+    assert body["model"] == OPENAI_SUMMARIZE == "gpt-6.1-sol"
     assert body["reasoning_effort"] == "low"
     assert body["max_completion_tokens"] >= 16000
     assert "temperature" not in body
@@ -207,7 +207,7 @@ def test_openrouter_request_construction(mock_post):
     assert body["model"] == "anthropic/claude-sonnet-5.5"
     assert body["response_format"]["type"] == "json_schema"
     assert body["provider"] == {"require_parameters": True}
-    assert OPENROUTER_OPENAI_SUMMARIZE == "openai/gpt-6-luna"
+    assert OPENROUTER_OPENAI_SUMMARIZE == "openai/gpt-6.1-sol"
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +237,28 @@ def test_pick_ollama_model():
     assert S.pick_ollama_model(["foo:7b"], preferred="foo") == "foo:7b"
     assert S.pick_ollama_model([]) is None
     assert S.pick_ollama_model(["nomic-embed-text"]) is None
+
+
+def test_pick_ollama_model_prefers_newer_families_and_bigger_sizes():
+    # qwen3 must not catch a tiny qwen3 over a newer, bigger family
+    assert S.pick_ollama_model(["qwen3:0.6b", "qwen3.8:27b"]) == "qwen3.8:27b"
+    assert S.pick_ollama_model(["llama3.3:70b", "gemma4:e4b"]) == "gemma4:e4b"
+    assert S.pick_ollama_model(["qwen3.5:2b", "qwen3.5:27b", "qwen3.5:9b"]) == "qwen3.5:27b"
+    assert S.pick_ollama_model(["qwen3:0.6b", "qwen3:latest"]) == "qwen3:latest"  # latest = 8b
+    assert S.pick_ollama_model(["gpt-oss:20b", "mistral:7b"]) == "gpt-oss:20b"
+
+
+def test_pick_ollama_model_never_auto_picks_a_cloud_tag():
+    # "-cloud" tags run on Ollama's servers: the transcript would leave the Mac
+    assert S.pick_ollama_model(["gemma4:31b-cloud", "llama3.2:3b"]) == "llama3.2:3b"
+    assert S.pick_ollama_model(["gpt-oss:120b-cloud"]) is None
+    assert S.pick_ollama_model(["gpt-oss:120b-cloud"], preferred="gpt-oss:120b-cloud") == "gpt-oss:120b-cloud"
+
+
+def test_ollama_hint_suggests_a_current_model(monkeypatch):
+    monkeypatch.setattr(S, "ollama_models", lambda: [])
+    with pytest.raises(S.SummaryError, match=r"ollama pull qwen3\.5:9b"):
+        S.summarize_ollama("hello")
 
 
 @patch("app.providers.summarize.http_requests.get")
