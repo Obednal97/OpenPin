@@ -247,7 +247,7 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 mod report_scrub;
 pub(crate) mod sha256;
 
-/// Base URL of the update / bug-report Worker (infra/update-worker/).
+/// Base URL of the update Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://plaud-v2-updates.leave-hacker-feedback.workers.dev";
 
 /// Bundle identity the installer insists on before swapping the app.
@@ -806,42 +806,9 @@ pub fn install_update(app: tauri::AppHandle) -> UpdateResult {
     UpdateResult { installing: true, error: None }
 }
 
-// ---- Bug-report transport (via the Worker) ----
-
-/// What the Worker said about a report.
-struct ReportOutcome {
-    issue_number: Option<u64>,
-    url: Option<String>,
-    action: String,
-}
-
-fn post_report(payload: &serde_json::Value) -> Result<ReportOutcome, String> {
-    let resp = worker_client()
-        .post(format!("{WORKER_BASE}/v1/report"))
-        .header("User-Agent", worker_user_agent())
-        .json(payload)
-        .send()
-        .map_err(|e| format!("Couldn't reach the report server: {e}"))?;
-    let status = resp.status();
-    let data = resp.json::<serde_json::Value>().unwrap_or(serde_json::Value::Null);
-    if !status.is_success() || data["ok"].as_bool() != Some(true) {
-        let detail = data["error"].as_str().unwrap_or("").to_string();
-        return Err(if detail.is_empty() {
-            format!("Report server returned HTTP {}", status.as_u16())
-        } else {
-            format!("Report server returned HTTP {}: {detail}", status.as_u16())
-        });
-    }
-    Ok(ReportOutcome {
-        issue_number: data["issue_number"].as_u64(),
-        url: data["url"].as_str().map(String::from),
-        action: data["action"].as_str().unwrap_or("").to_string(),
-    })
-}
-
 // ---- System Info for Bug Reports ----
 
-/// The Mac's IOPlatformUUID. Never sent anywhere: it's hashed into
+/// The Mac's IOPlatformUUID. Never written anywhere: it's hashed into
 /// `device_id()` and used as the secret salt for identifier hashes in reports.
 fn platform_uuid() -> Option<String> {
     static UUID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -868,27 +835,7 @@ fn device_id() -> String {
 
 // ---- Report scrubbing ----
 
-/// Truncate to at most `max` characters (never splits a UTF-8 character).
-fn truncate_chars(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((idx, _)) => format!("{}…", &s[..idx]),
-        None => s.to_string(),
-    }
-}
-
-/// Truncate to at most `max_bytes` bytes on a character boundary.
-fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-/// Keep only the last `max_lines` lines of a traceback.
+/// Keep only the last `max_lines` lines of a log or traceback.
 fn tail_lines(s: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = s.trim_end().lines().collect();
     if lines.len() <= max_lines {
@@ -899,8 +846,9 @@ fn tail_lines(s: &str, max_lines: usize) -> String {
 }
 
 /// Salted 8-hex-char tag for an identifier (serial number, BLE UUID). The salt
-/// is this Mac's hardware UUID, which is never sent, so the tag can't be
-/// brute-forced back to the serial but still groups reports from one device.
+/// is this Mac's hardware UUID, which is never written to a report, so the tag
+/// can't be brute-forced back to the serial but still groups reports from one
+/// device.
 fn id_tag(salt: &str, value: &str) -> String {
     let mut h = sha256::Sha256::new();
     h.update(b"plaud-v2-report-id:");
@@ -1008,7 +956,7 @@ fn scrub_identifiers(s: &str, salt: &str) -> String {
     out
 }
 
-/// Everything that leaves the machine in a bug report goes through this:
+/// Everything that goes into an exported bug report goes through this:
 /// home / user paths, then secrets and personal data (URLs' queries,
 /// Notion/Drive links, credentials, API keys, e-mails, long tokens — see
 /// `report_scrub`), then device identifiers.
@@ -1027,32 +975,6 @@ fn scrub_for_report(s: &str) -> String {
     let home = crate::home_dir().to_string_lossy().to_string();
     let salt = platform_uuid().unwrap_or_else(|| "no-platform-uuid".to_string());
     scrub_report_text(s, &home, &salt)
-}
-
-/// Stable fingerprint of an error message: normalise the variable parts
-/// (see `error_fingerprint`), SHA-256, first 16 hex chars. Identical across
-/// machines and launches for the same kind of error.
-fn report_fingerprint(scrubbed_message: &str) -> String {
-    sha256::hex_digest(error_fingerprint(scrubbed_message).as_bytes())
-        .chars()
-        .take(16)
-        .collect()
-}
-
-/// Has the user left "Send anonymous crash reports" on? Read from the backend
-/// config (`crash_reports_enabled`, default true) so the Rust panic hook,
-/// which has no frontend, respects it too. Same data folder as the backend:
-/// `PLAUD_DATA_DIR` if set, else the dev or release folder (`paths::data_dir`).
-fn crash_reports_enabled() -> bool {
-    let path = crate::paths::config_path();
-    crash_reports_enabled_in(std::fs::read_to_string(path).ok().as_deref())
-}
-
-fn crash_reports_enabled_in(config_json: Option<&str>) -> bool {
-    config_json
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v| v.get("crash_reports_enabled").and_then(|b| b.as_bool()))
-        .unwrap_or(true)
 }
 
 /// Cached app version (set once during startup so report_error can use it without AppHandle)
@@ -1184,7 +1106,7 @@ fn system_info_block(version: &str, include_python_env: bool) -> String {
     let py_env = if include_python_env {
         python_env_info()
     } else {
-        "_(skipped for crash reports)_".to_string()
+        "_(skipped)_".to_string()
     };
 
     format!(
@@ -1251,16 +1173,6 @@ fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &st
 fn is_abort_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("aborted") || lower.contains("aborterror") || lower.contains("signal is aborted")
-}
-
-// ---- Error/Bug Reporting ----
-
-/// Deduplicate errors within a session
-static REPORTED_ERRORS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::OnceLock::new();
-
-fn reported_errors() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    REPORTED_ERRORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 // ---- Backend Health State ----
@@ -1330,205 +1242,401 @@ fn error_fingerprint(message: &str) -> String {
     result.chars().take(100).collect()
 }
 
-/// Most of a message that goes into a report (the full text stays in the
-/// local diagnostics log). Applied before and after scrubbing.
-const REPORT_MESSAGE_MAX_CHARS: usize = 1000;
-/// Traceback lines kept in a report (the innermost frames).
-const REPORT_STACK_MAX_LINES: usize = 15;
-/// The Worker rejects bodies over 20 KB; stay under it.
-const REPORT_BODY_MAX_BYTES: usize = 19 * 1024;
-const REPORT_TITLE_MAX_CHARS: usize = 190;
+// ---- Error logging ----
+//
+// Errors are only logged: to the app log and the local diagnostics log.
+// Nothing is sent anywhere. To report a bug, people export a bug report
+// (`export_bug_report`) and attach it to a GitHub issue themselves.
 
-fn macos_version_short() -> String {
-    let v = macos_name();
-    if v.is_empty() {
-        "unknown".to_string()
-    } else {
-        truncate_chars(&v, 60)
-    }
-}
-
-/// Build the auto-bug payload sent to the Worker. Everything user- or
-/// machine-specific is scrubbed (home paths, user names, serials, BLE UUIDs);
-/// only the error message, its context, the last few traceback lines and
-/// system info go out — never recording, transcript or summary text.
-fn build_auto_report(
-    message: &str,
-    stack: &str,
-    ctx: &str,
-    sys_info: &str,
-    version: &str,
-    is_dev: bool,
-    scrub: impl Fn(&str) -> String,
-) -> serde_json::Value {
-    // Scrub a generous slice, then cap: cutting first could split a secret
-    // so its remains no longer match a pattern.
-    let msg = truncate_chars(&scrub(&truncate_chars(message, REPORT_MESSAGE_MAX_CHARS * 4)), REPORT_MESSAGE_MAX_CHARS);
-    let fingerprint = report_fingerprint(&msg);
-    let dev_tag = if is_dev { "[DEV] " } else { "" };
-    let title = truncate_chars(&format!("[Auto] {dev_tag}{}", msg.replace(['\r', '\n'], " ")), REPORT_TITLE_MAX_CHARS);
-    let stack_block = if stack.trim().is_empty() {
-        String::new()
-    } else {
-        format!("### Stack trace (last {REPORT_STACK_MAX_LINES} lines)\n```\n{}\n```\n", scrub(&tail_lines(stack, REPORT_STACK_MAX_LINES)))
-    };
-    let body = format!(
-        "## Auto-generated bug report{}\n\n### System\n{}\n\n### Error\n**Context:** `{}`\n```\n{msg}\n```\n\n{stack_block}",
-        if is_dev { " (DEV)" } else { "" },
-        scrub(sys_info),
-        scrub(&truncate_chars(ctx, 200)),
-    );
-    serde_json::json!({
-        "kind": "auto",
-        "fingerprint": fingerprint,
-        "title": title,
-        "body": truncate_bytes(&body, REPORT_BODY_MAX_BYTES),
-        "app_version": version,
-        "os": macos_version_short(),
-    })
-}
-
-/// Log locally, apply the filters, and if the error should be reported, send
-/// it on a new thread. Returns a receiver that gets `()` once the send has
-/// finished (success or failure), or `None` if nothing is being sent.
-fn spawn_error_report(
-    message: String,
-    stack: Option<String>,
-    context: Option<String>,
-    include_python_env: bool,
-) -> Option<std::sync::mpsc::Receiver<()>> {
-    let ctx = context.unwrap_or_else(|| "unknown".to_string());
+fn record_error_locally(message: &str, stack: Option<&str>, context: Option<&str>) {
+    let ctx = context.unwrap_or("unknown");
     log::error!("[BugReporter] {ctx}: {message}");
-
-    let fingerprint = error_fingerprint(&message);
-    let stack_str = stack.unwrap_or_default();
-
-    // Always capture locally before deciding whether to escalate
-    append_diagnostic(&ctx, &message, &stack_str, &fingerprint);
-
-    // FILTER: legitimate aborts — log only
-    if is_abort_error(&message) {
-        return None;
-    }
-
-    // FILTER: backend is known to be down — log only.
-    // (Locks tolerate poisoning: this also runs from the panic hook.)
-    if backend_health().lock().unwrap_or_else(|e| e.into_inner()).as_str() == "down" {
-        return None;
-    }
-
-    // FILTER: the user turned off "Send anonymous crash reports"
-    if !crash_reports_enabled() {
-        return None;
-    }
-
-    // Existing dedupe (per session)
-    {
-        let mut set = reported_errors().lock().unwrap_or_else(|e| e.into_inner());
-        if set.contains(&fingerprint) {
-            return None;
-        }
-        set.insert(fingerprint);
-    }
-
-    let version = app_version();
-    let is_dev = is_dev_mode();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-    // Send to the Worker in the background; it dedupes into GitHub issues.
-    std::thread::spawn(move || {
-        let sys_info = system_info_block(&version, include_python_env);
-        let payload = build_auto_report(&message, &stack_str, &ctx, &sys_info, &version, is_dev, scrub_for_report);
-        match post_report(&payload) {
-            Ok(o) => log::info!("[BugReporter] Report {} (issue #{})", o.action, o.issue_number.unwrap_or(0)),
-            Err(e) => log::warn!("[BugReporter] Failed: {e}"),
-        }
-        let _ = done_tx.send(());
-    });
-    Some(done_rx)
+    let fingerprint = error_fingerprint(message);
+    append_diagnostic(ctx, message, stack.unwrap_or_default(), &fingerprint);
 }
 
-/// Fire-and-forget: returns immediately; the report is sent on its own thread.
+/// Log an error and append it to the local diagnostics log. Sends nothing.
 /// (Signature relied on by the frontend IPC and by the panic hook.)
 #[tauri::command]
 pub fn report_error(message: String, stack: Option<String>, context: Option<String>) {
-    let _ = spawn_error_report(message, stack, context, true);
+    record_error_locally(&message, stack.as_deref(), context.as_deref());
 }
 
-/// For the panic hook: same filters and payload as `report_error`, minus the
-/// slow `pip` environment listing, but waits up to `timeout` for the send to
-/// finish. Returns true if the report was sent (or there was nothing to send:
-/// filtered, disabled or a duplicate) within the timeout, false if it timed
-/// out or the sending thread died.
+/// For the panic hook: same as `report_error`. It used to wait up to
+/// `timeout` for a network send; the signature is kept, and it always
+/// returns true now that there is nothing to wait for.
 pub fn report_error_blocking(
     message: String,
     stack: Option<String>,
     context: Option<String>,
-    timeout: std::time::Duration,
+    _timeout: std::time::Duration,
 ) -> bool {
-    match spawn_error_report(message, stack, context, false) {
-        None => true,
-        Some(done) => done.recv_timeout(timeout).is_ok(),
+    record_error_locally(&message, stack.as_deref(), context.as_deref());
+    true
+}
+
+// ---- Bug report export ----
+//
+// "Report a bug" saves a zip to ~/Downloads: the user's answers, system info,
+// the backend's checks (GET /diagnostics) and recent logs, all run through
+// `scrub_for_report`. The user looks through it and attaches it to a GitHub
+// issue themselves.
+
+/// Lines of each log copied into an exported report.
+const EXPORT_APP_LOG_LINES: usize = 3000;
+const EXPORT_DIAGNOSTICS_LINES: usize = 500;
+const EXPORT_UPDATE_LOG_LINES: usize = 500;
+const EXPORT_WIFI_LOG_LINES: usize = 1000;
+/// Diagnostics log entries listed under "Recent errors" in report.md.
+const EXPORT_RECENT_ERRORS: usize = 50;
+/// The backend's WiFi sync log, in its data folder (`WIFI_LOG_NAME` in app/state/device.py).
+const WIFI_SYNC_LOG_NAME: &str = "wifi_sync.log";
+
+#[derive(Serialize)]
+pub struct ExportResult {
+    path: String,
+    file_name: String,
+}
+
+/// Everything that goes into an exported report, before scrubbing.
+#[derive(Default)]
+struct ReportInputs {
+    version: String,
+    is_dev: bool,
+    backend_health: String,
+    expected: Option<String>,
+    actual: Option<String>,
+    steps: Option<String>,
+    checks: Option<serde_json::Value>,
+    sys_info: String,
+    diagnostics_log: Option<String>,
+    app_log: Option<String>,
+    app_log_previous: Option<String>,
+    update_log: Option<String>,
+    wifi_log: Option<String>,
+}
+
+fn read_lossy(path: &std::path::Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+fn downloads_dir() -> std::path::PathBuf {
+    crate::home_dir().join("Downloads")
+}
+
+/// Collect the report's contents: system info, then the log files.
+fn gather_report_inputs(
+    version: String,
+    expected: Option<String>,
+    actual: Option<String>,
+    steps: Option<String>,
+    checks: Option<serde_json::Value>,
+) -> ReportInputs {
+    let log_dir = crate::paths::log_dir();
+    ReportInputs {
+        sys_info: system_info_block(&version, true),
+        version,
+        is_dev: is_dev_mode(),
+        backend_health: backend_health()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
+        expected,
+        actual,
+        steps,
+        checks,
+        diagnostics_log: read_lossy(&diagnostics_log_path()),
+        app_log: read_lossy(&crate::logging::log_path()),
+        app_log_previous: read_lossy(&log_dir.join("app.log.1")),
+        update_log: read_lossy(&update_log_path()),
+        wifi_log: read_lossy(&crate::paths::data_dir().join(WIFI_SYNC_LOG_NAME)),
     }
 }
 
-#[derive(Serialize)]
-pub struct BugReportResult {
-    success: bool,
-    number: Option<u32>,
-    url: Option<String>,
-    error: Option<String>,
+/// The checks JSON (from GET /diagnostics) as a markdown list. Nested objects
+/// and arrays are flattened into `- path.to.key: value` lines.
+fn render_checks(checks: &serde_json::Value) -> String {
+    let mut lines = Vec::new();
+    flatten_checks("", checks, &mut lines);
+    if lines.is_empty() {
+        "_None_".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
+fn flatten_checks(path: &str, value: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    let text = match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (key, child) in map {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                flatten_checks(&child_path, child, out);
+            }
+            return;
+        }
+        Value::Array(items) if !items.is_empty() => {
+            for (i, child) in items.iter().enumerate() {
+                flatten_checks(&format!("{path}[{i}]"), child, out);
+            }
+            return;
+        }
+        Value::Object(_) | Value::Array(_) => {
+            if path.is_empty() {
+                return;
+            }
+            "(none)".to_string()
+        }
+        Value::Null => "none".to_string(),
+        Value::String(s) if s.trim().is_empty() => "(empty)".to_string(),
+        Value::String(s) => s.replace(['\r', '\n'], " "),
+        other => other.to_string(),
+    };
+    out.push(if path.is_empty() {
+        format!("- {text}")
+    } else {
+        format!("- {path}: {text}")
+    });
+}
+
+/// The last `n` diagnostics log entries as a fenced block, leaving out
+/// aborted requests (the page cancelling its own fetch, not a bug). The full
+/// log is in logs/diagnostics.log.
+fn recent_errors(diagnostics: &str, n: usize) -> String {
+    let lines: Vec<&str> = diagnostics
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| {
+            let message = serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v["message"].as_str().map(String::from));
+            !message.is_some_and(|m| is_abort_error(&m))
+        })
+        .collect();
+    if lines.is_empty() {
+        return "_None_".to_string();
+    }
+    let start = lines.len().saturating_sub(n);
+    format!("```\n{}\n```", lines[start..].join("\n"))
+}
+
+fn answer_or_placeholder(answer: &Option<String>) -> &str {
+    match answer.as_deref().map(str::trim) {
+        Some(a) if !a.is_empty() => a,
+        _ => "_Not provided_",
+    }
+}
+
+fn build_report_md(inp: &ReportInputs) -> String {
+    let checks = match &inp.checks {
+        Some(v) => render_checks(v),
+        None => "_Not available_".to_string(),
+    };
+    format!(
+        "# Plaud V2 bug report\n\n\
+         ## What did you expect to happen?\n{expected}\n\n\
+         ## What actually happened?\n{actual}\n\n\
+         ## Steps to reproduce\n{steps}\n\n\
+         ## System\n\
+         - **Build:** {build}\n\
+         - **Backend (as the app last saw it):** {health}\n\
+         {sys_info}\n\n\
+         ## Checks\n{checks}\n\n\
+         ## Recent errors\n{errors}\n\n\
+         ---\n\
+         _Exported from Plaud V2 {version}. Personal details (home folder, user name, serial numbers, \
+         email addresses, tokens) were removed. Look through the files before you share them._\n",
+        expected = answer_or_placeholder(&inp.expected),
+        actual = answer_or_placeholder(&inp.actual),
+        steps = answer_or_placeholder(&inp.steps),
+        build = if inp.is_dev { "dev" } else { "release" },
+        health = inp.backend_health,
+        sys_info = inp.sys_info,
+        errors = recent_errors(inp.diagnostics_log.as_deref().unwrap_or(""), EXPORT_RECENT_ERRORS),
+        version = inp.version,
+    )
+}
+
+/// The report's files (path inside the report folder, contents), every one
+/// run through `scrub`.
+fn report_files(inp: &ReportInputs, scrub: impl Fn(&str) -> String) -> Vec<(&'static str, String)> {
+    let tail = |text: &str, n: usize| format!("{}\n", tail_lines(text, n));
+    let mut files = vec![("report.md", scrub(&build_report_md(inp)))];
+    let app_log_lines = inp
+        .app_log
+        .as_deref()
+        .map(|s| s.trim_end().lines().count())
+        .unwrap_or(0);
+    if let Some(log) = &inp.app_log {
+        files.push(("logs/app.log", scrub(&tail(log, EXPORT_APP_LOG_LINES))));
+    }
+    // app.log was rotated recently: top up from the previous file.
+    if app_log_lines < EXPORT_APP_LOG_LINES {
+        if let Some(log) = &inp.app_log_previous {
+            files.push((
+                "logs/app.log.1",
+                scrub(&tail(log, EXPORT_APP_LOG_LINES - app_log_lines)),
+            ));
+        }
+    }
+    for (name, log, lines) in [
+        (
+            "logs/diagnostics.log",
+            &inp.diagnostics_log,
+            EXPORT_DIAGNOSTICS_LINES,
+        ),
+        ("logs/update.log", &inp.update_log, EXPORT_UPDATE_LOG_LINES),
+        ("logs/wifi_sync.log", &inp.wifi_log, EXPORT_WIFI_LOG_LINES),
+    ] {
+        if let Some(log) = log {
+            files.push((name, scrub(&tail(log, lines))));
+        }
+    }
+    files
+}
+
+fn bug_report_name(now: chrono::DateTime<chrono::Local>) -> String {
+    format!("Plaud V2 bug report {}", now.format("%Y-%m-%d %H%M"))
+}
+
+/// `<dir>/<base>.zip`, or `<base> 2.zip`, `<base> 3.zip`… if that's taken.
+fn unique_zip_path(dir: &std::path::Path, base: &str) -> std::path::PathBuf {
+    let taken = |p: &std::path::Path| p.symlink_metadata().is_ok();
+    let first = dir.join(format!("{base}.zip"));
+    if !taken(&first) {
+        return first;
+    }
+    (2u32..)
+        .map(|n| dir.join(format!("{base} {n}.zip")))
+        .find(|p| !taken(p))
+        .expect("some numbered name is free")
+}
+
+/// Write `files` into `<temp_root>/<unique>/<name>/`, zip that folder into
+/// `dest_dir` with macOS's `ditto`, then delete the temp folder. Returns the zip.
+fn write_bug_report_zip(
+    files: &[(&str, String)],
+    name: &str,
+    temp_root: &std::path::Path,
+    dest_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = format!(
+        "plaud-v2-bug-report-{}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let work = temp_root.join(unique);
+    let folder = work.join(name);
+    let result = (|| {
+        for (rel, contents) in files {
+            let path = folder.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Couldn't create the report folder: {e}"))?;
+            }
+            std::fs::write(&path, contents).map_err(|e| format!("Couldn't write {rel}: {e}"))?;
+        }
+        std::fs::create_dir_all(dest_dir)
+            .map_err(|e| format!("Couldn't open your Downloads folder: {e}"))?;
+        let zip = unique_zip_path(dest_dir, name);
+        let out = std::process::Command::new("/usr/bin/ditto")
+            .args(["-c", "-k", "--sequesterRsrc", "--keepParent"])
+            .arg(&folder)
+            .arg(&zip)
+            .output()
+            .map_err(|e| format!("Couldn't run ditto: {e}"))?;
+        if !out.status.success() {
+            let _ = std::fs::remove_file(&zip);
+            return Err(format!(
+                "Couldn't create the zip: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(zip)
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Build the report from `inputs`, scrub it and zip it into `dest_dir`.
+fn export_report(
+    inputs: &ReportInputs,
+    now: chrono::DateTime<chrono::Local>,
+    temp_root: &std::path::Path,
+    dest_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let files = report_files(inputs, scrub_for_report);
+    write_bug_report_zip(&files, &bug_report_name(now), temp_root, dest_dir)
+}
+
+/// Save a bug report zip to ~/Downloads. Nothing is sent anywhere.
 #[tauri::command]
-pub async fn report_bug(
+pub async fn export_bug_report(
     app: tauri::AppHandle,
     expected: Option<String>,
     actual: Option<String>,
     steps: Option<String>,
-) -> BugReportResult {
-    // Off-load the work: system_info_block spawns several subprocesses (pip,
-    // sw_vers, ioreg, sysctl) before the POST. Running it on the command's
-    // worker thread blocks the renderer's submit button for several seconds —
-    // spawn_blocking keeps the IPC pool responsive.
+    checks: Option<serde_json::Value>,
+) -> Result<ExportResult, String> {
+    // system_info_block spawns subprocesses (pip, sw_vers, ioreg, sysctl) and
+    // the logs are up to a few MB: keep it off the IPC worker thread.
     let version = app.package_info().version.to_string();
     tokio::task::spawn_blocking(move || {
-        let title_text = actual.as_deref().or(expected.as_deref()).unwrap_or("Bug report");
-        let title = truncate_chars(
-            &format!("[User Report] {}", scrub_for_report(&truncate_chars(title_text, 80)).replace(['\r', '\n'], " ")),
-            REPORT_TITLE_MAX_CHARS,
-        );
-        let sys_info = system_info_block(&version, true);
-        let body = scrub_for_report(&format!(
-            "## User Bug Report\n\n### Expected behaviour\n{}\n\n### Actual behaviour\n{}\n\n{}\n### System\n{sys_info}\n\n---\n*Submitted via in-app bug reporter.*",
-            expected.as_deref().unwrap_or("_Not provided_"),
-            actual.as_deref().unwrap_or("_Not provided_"),
-            steps.map(|s| format!("### Steps to reproduce\n{s}\n\n")).unwrap_or_default(),
-        ));
-        let payload = serde_json::json!({
-            "kind": "user",
-            "title": title,
-            "body": truncate_bytes(&body, REPORT_BODY_MAX_BYTES),
-            "app_version": version,
-            "os": macos_version_short(),
-        });
-
-        match post_report(&payload) {
-            Ok(o) => {
-                let number = o.issue_number.map(|n| n as u32);
-                log::info!("[BugReporter] User report created: #{}", number.unwrap_or(0));
-                BugReportResult { success: true, number, url: o.url, error: None }
-            }
-            Err(e) => BugReportResult { success: false, number: None, url: None, error: Some(e) },
-        }
+        let inputs = gather_report_inputs(version, expected, actual, steps, checks);
+        let zip = export_report(
+            &inputs,
+            chrono::Local::now(),
+            &std::env::temp_dir(),
+            &downloads_dir(),
+        )?;
+        let file_name = zip
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        log::info!("[BugReport] Saved {file_name} to Downloads");
+        Ok(ExportResult {
+            path: zip.to_string_lossy().into_owned(),
+            file_name,
+        })
     })
     .await
-    .unwrap_or_else(|e| BugReportResult {
-        success: false,
-        number: None,
-        url: None,
-        error: Some(format!("Background task panicked: {e}")),
-    })
+    .map_err(|e| format!("Background task failed: {e}"))?
+}
+
+/// True if `path` exists and is inside `dir` (symlinks resolved first).
+fn is_inside_dir(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    match (path.canonicalize(), dir.canonicalize()) {
+        (Ok(p), Ok(d)) => p != d && p.starts_with(&d),
+        _ => false,
+    }
+}
+
+/// Show a file in Finder. Only files inside ~/Downloads (an exported bug report).
+#[tauri::command]
+pub fn reveal_in_finder(path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(&path);
+    if !is_inside_dir(&target, &downloads_dir()) {
+        return Err("Only files in your Downloads folder can be shown in Finder".to_string());
+    }
+    let resolved = target.canonicalize().map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(&resolved)
+        .status()
+        .map_err(|e| format!("Couldn't open Finder: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Couldn't open Finder".to_string())
+    }
 }
 
 // ---- Notifications ----
@@ -1647,17 +1755,6 @@ mod tests {
         assert!(!cached_download_matches(&f, &asset(4, Some(sha))));
         assert!(!cached_download_matches(&dir.join("missing.dmg"), &asset(3, None)));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn truncation_is_char_safe() {
-        let s = "é".repeat(100); // 2 bytes each
-        assert_eq!(truncate_chars(&s, 80).chars().count(), 81); // 80 + ellipsis
-        assert_eq!(truncate_chars("short", 80), "short");
-        assert_eq!(truncate_chars("ab🎙cd", 3), "ab🎙…");
-        assert_eq!(truncate_bytes(&s, 3), "é");
-        assert_eq!(truncate_bytes("abc", 10), "abc");
-        assert_eq!(truncate_bytes("日本語", 4), "日");
     }
 
     #[test]
@@ -1780,65 +1877,6 @@ mod tests {
             assert!(!s.contains(leaked), "{leaked} leaked: {s}");
         }
         assert!(s.starts_with("Notion push failed for [email]: 401 at https://api.notion.com/[redacted]"), "{s}");
-
-        // The message cap holds after scrubbing, and a secret straddling the
-        // pre-scrub cut can't leave a recognisable fragment.
-        // (Cutting at 1000 first would leave "sk-ant-api03-AbCd", too short to match.)
-        let long = format!("{} sk-ant-api03-AbCdEfGhIjKlMnOpQrSt {}", "x".repeat(982), "y ".repeat(2000));
-        let p = build_auto_report(&long, "", "ctx", "", "2.3.0", false, |s| scrub_report_text(s, "/Users/ollie", SALT));
-        let body = p["body"].as_str().unwrap();
-        assert!(!body.contains("AbCd") && !p["title"].as_str().unwrap().contains("AbCd"));
-        let fenced = body.split("```\n").nth(1).unwrap_or("");
-        assert!(fenced.trim_end_matches(['`', '\n']).chars().count() <= REPORT_MESSAGE_MAX_CHARS + 1, "{}", fenced.len());
-    }
-
-    #[test]
-    fn fingerprint_is_stable_hex() {
-        let a = report_fingerprint("API error: /device/sync — timeout after 30s (attempt 2)");
-        let b = report_fingerprint("API error: /device/sync — timeout after 45s (attempt 7)");
-        let c = report_fingerprint("API error: /device/scan — Bluetooth off");
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert_eq!(a.len(), 16);
-        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
-        // Pinned: changing the normalisation would split existing GitHub issues.
-        assert_eq!(report_fingerprint("x"), sha256::hex_digest(b"x")[..16]);
-    }
-
-    #[test]
-    fn auto_report_payload() {
-        let long_msg = format!("boom in /Users/ollie/a.py [SN: 8810A00012345678] {}", "é".repeat(3000));
-        let stack: String = (1..=50).map(|i| format!("frame {i}\n")).collect();
-        let p = build_auto_report(
-            &long_msg,
-            &stack,
-            "api:/device/sync",
-            "- **Python path:** `/Users/ollie/.venv/bin/python`",
-            "2.3.0",
-            false,
-            |s| scrub_report_text(s, "/Users/ollie", SALT),
-        );
-        let title = p["title"].as_str().unwrap();
-        let body = p["body"].as_str().unwrap();
-        assert!(title.starts_with("[Auto] boom in ~/a.py"), "{title}");
-        assert!(title.chars().count() <= 200);
-        assert!(body.len() <= 20 * 1024);
-        assert!(!body.contains("/Users/ollie"));
-        assert!(!body.contains("8810A00012345678"));
-        assert!(body.contains("frame 50") && !body.contains("frame 35\n"));
-        assert_eq!(p["kind"], "auto");
-        assert_eq!(p["app_version"], "2.3.0");
-        let fp = p["fingerprint"].as_str().unwrap();
-        assert!(fp.len() <= 64 && fp.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn crash_report_setting() {
-        assert!(crash_reports_enabled_in(None));
-        assert!(crash_reports_enabled_in(Some("not json")));
-        assert!(crash_reports_enabled_in(Some("{}")));
-        assert!(crash_reports_enabled_in(Some(r#"{"crash_reports_enabled": true}"#)));
-        assert!(!crash_reports_enabled_in(Some(r#"{"crash_reports_enabled": false}"#)));
     }
 
     /// Hits the deployed Worker: `cargo test --lib -- --ignored live_worker`.
@@ -1881,6 +1919,322 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn checks_render_as_a_flat_markdown_list() {
+        let checks = serde_json::json!({
+            "cloud": { "signed_in": true, "region": "api-euc1.plaud.ai" },
+            "devices": [
+                { "serial_last4": "5678", "has_bind_token": false, "name": "NotePin\nS" },
+                { "serial_last4": "0001", "name": "" }
+            ],
+            "connection": { "port_version": null, "last_handshake": { "statuses": [0, 1] } },
+            "integrations": {},
+            "storage": { "recordings": 12, "free_gb": 41.5 }
+        });
+        let md = render_checks(&checks);
+        let expected = "\
+- cloud.region: api-euc1.plaud.ai
+- cloud.signed_in: true
+- connection.last_handshake.statuses[0]: 0
+- connection.last_handshake.statuses[1]: 1
+- connection.port_version: none
+- devices[0].has_bind_token: false
+- devices[0].name: NotePin S
+- devices[0].serial_last4: 5678
+- devices[1].name: (empty)
+- devices[1].serial_last4: 0001
+- integrations: (none)
+- storage.free_gb: 41.5
+- storage.recordings: 12";
+        assert_eq!(md, expected);
+        assert_eq!(render_checks(&serde_json::json!({})), "_None_");
+        assert_eq!(
+            render_checks(&serde_json::json!({ "backend": "not running" })),
+            "- backend: not running"
+        );
+        assert_eq!(render_checks(&serde_json::json!("x")), "- x");
+    }
+
+    #[test]
+    fn recent_errors_skip_aborts_and_keep_the_last_ones() {
+        let line = |m: &str| serde_json::json!({ "message": m, "context": "api" }).to_string();
+        let log = [
+            line("one"),
+            line("Fetch is aborted"),
+            String::new(),
+            line("two"),
+            line("three"),
+        ]
+        .join("\n");
+        let block = recent_errors(&log, 2);
+        assert!(
+            block.starts_with("```\n") && block.ends_with("\n```"),
+            "{block}"
+        );
+        assert!(block.contains("\"two\"") && block.contains("\"three\""));
+        assert!(!block.contains("\"one\"") && !block.contains("aborted"));
+        assert_eq!(recent_errors("", 50), "_None_");
+    }
+
+    #[test]
+    fn report_md_has_every_section() {
+        let inp = ReportInputs {
+            version: "2.4.6".into(),
+            backend_health: "up".into(),
+            actual: Some("  It crashed  ".into()),
+            steps: Some("   ".into()),
+            sys_info: "- **Version:** 2.4.6".into(),
+            checks: Some(serde_json::json!({ "cloud": { "signed_in": false } })),
+            ..Default::default()
+        };
+        let md = build_report_md(&inp);
+        assert!(md.starts_with("# Plaud V2 bug report\n"));
+        assert!(
+            md.contains("## What did you expect to happen?\n_Not provided_\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("## What actually happened?\nIt crashed\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("## Steps to reproduce\n_Not provided_\n"),
+            "{md}"
+        );
+        assert!(md.contains("## System\n- **Build:** release\n- **Backend (as the app last saw it):** up\n- **Version:** 2.4.6"));
+        assert!(md.contains("## Checks\n- cloud.signed_in: false\n"));
+        assert!(md.contains("## Recent errors\n_None_\n"));
+        assert!(md.contains("Exported from Plaud V2 2.4.6."));
+        assert!(md.contains("Look through the files before you share them."));
+        let no_checks = build_report_md(&ReportInputs::default());
+        assert!(no_checks.contains("## Checks\n_Not available_\n"));
+    }
+
+    /// Personal details planted in every input of a report.
+    fn planted_inputs() -> ReportInputs {
+        let pii =
+            "user /Users/jsmith/Library/x.log, mail jane.doe@example.com, serial 8820A00012345678";
+        ReportInputs {
+            version: "2.4.6".into(),
+            backend_health: "up".into(),
+            expected: Some(format!("expected {pii}")),
+            actual: Some(format!("actual {pii}")),
+            steps: Some(format!("steps {pii}")),
+            checks: Some(serde_json::json!({ "note": pii, "nested": [{ "x": pii }] })),
+            sys_info: format!("- **Python path:** `/Users/jsmith/.venv/bin/python` {pii}"),
+            diagnostics_log: Some(serde_json::json!({ "message": pii }).to_string()),
+            app_log: Some(format!("[INFO] {pii}\n")),
+            app_log_previous: Some(format!("[INFO] old {pii}\n")),
+            update_log: Some(format!("update {pii}\n")),
+            wifi_log: Some(format!("wifi {pii}\n")),
+            ..Default::default()
+        }
+    }
+
+    fn assert_no_planted_details(name: &str, text: &str) {
+        for leaked in [
+            "jsmith",
+            "jane.doe@example.com",
+            "example.com",
+            "8820A00012345678",
+        ] {
+            assert!(
+                !text.contains(leaked),
+                "{leaked} leaked into {name}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_report_file_is_scrubbed() {
+        let files = report_files(&planted_inputs(), |s| {
+            scrub_report_text(s, "/Users/ollie", SALT)
+        });
+        let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "report.md",
+                "logs/app.log",
+                "logs/app.log.1",
+                "logs/diagnostics.log",
+                "logs/update.log",
+                "logs/wifi_sync.log"
+            ]
+        );
+        for (name, text) in &files {
+            assert_no_planted_details(name, text);
+            assert!(
+                text.contains("/Users/~/") && text.contains("[email]") && text.contains("sn-"),
+                "{name}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn previous_app_log_only_tops_up_a_short_one() {
+        let long: String = (0..EXPORT_APP_LOG_LINES + 5)
+            .map(|i| format!("line {i}\n"))
+            .collect();
+        let inp = ReportInputs {
+            app_log: Some(long),
+            app_log_previous: Some("old\n".into()),
+            ..Default::default()
+        };
+        let files = report_files(&inp, |s| s.to_string());
+        assert!(!files.iter().any(|(n, _)| *n == "logs/app.log.1"));
+        let app = &files.iter().find(|(n, _)| *n == "logs/app.log").unwrap().1;
+        assert!(
+            app.starts_with("… (5 earlier lines omitted)\nline 5\n"),
+            "{}",
+            &app[..60]
+        );
+
+        let inp = ReportInputs {
+            app_log: Some("a\nb\n".into()),
+            app_log_previous: Some(
+                (0..EXPORT_APP_LOG_LINES)
+                    .map(|i| format!("old {i}\n"))
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let files = report_files(&inp, |s| s.to_string());
+        let prev = &files
+            .iter()
+            .find(|(n, _)| *n == "logs/app.log.1")
+            .unwrap()
+            .1;
+        assert_eq!(
+            prev.trim_end().lines().count(),
+            EXPORT_APP_LOG_LINES - 2 + 1
+        ); // + the "omitted" line
+        assert!(prev
+            .trim_end()
+            .ends_with(&format!("old {}", EXPORT_APP_LOG_LINES - 1)));
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "plaud-v2-{tag}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn zip_names_get_a_number_when_taken() {
+        let dir = scratch_dir("zipname");
+        let base = "Plaud V2 bug report 2026-11-03 1430";
+        assert_eq!(unique_zip_path(&dir, base), dir.join(format!("{base}.zip")));
+        std::fs::write(dir.join(format!("{base}.zip")), b"x").unwrap();
+        assert_eq!(
+            unique_zip_path(&dir, base),
+            dir.join(format!("{base} 2.zip"))
+        );
+        std::fs::write(dir.join(format!("{base} 2.zip")), b"x").unwrap();
+        assert_eq!(
+            unique_zip_path(&dir, base),
+            dir.join(format!("{base} 3.zip"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        use chrono::TimeZone;
+        let when = chrono::Local
+            .with_ymd_and_hms(2026, 11, 3, 9, 5, 0)
+            .unwrap();
+        assert_eq!(bug_report_name(when), "Plaud V2 bug report 2026-11-03 0905");
+    }
+
+    #[test]
+    fn export_writes_a_scrubbed_zip_and_cleans_up() {
+        let root = scratch_dir("export");
+        let temp_root = root.join("tmp");
+        let dest = root.join("Downloads");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        use chrono::TimeZone;
+        let when = chrono::Local
+            .with_ymd_and_hms(2026, 11, 3, 14, 30, 0)
+            .unwrap();
+
+        // The real scrubber (this Mac's home folder and salt).
+        let home_file = format!("{}/Library/Logs/x.log", crate::home_dir().display());
+        let mut inputs = planted_inputs();
+        inputs.actual = Some(format!("{} and {home_file}", inputs.actual.unwrap()));
+        let zip = export_report(&inputs, when, &temp_root, &dest).expect("export");
+        assert_eq!(zip, dest.join("Plaud V2 bug report 2026-11-03 1430.zip"));
+        let second = export_report(&inputs, when, &temp_root, &dest).expect("second export");
+        assert_eq!(
+            second,
+            dest.join("Plaud V2 bug report 2026-11-03 1430 2.zip")
+        );
+        assert_eq!(
+            std::fs::read_dir(&temp_root).unwrap().count(),
+            0,
+            "temp folder left behind"
+        );
+
+        let out = root.join("out");
+        let status = std::process::Command::new("/usr/bin/ditto")
+            .args(["-x", "-k"])
+            .arg(&zip)
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let folder = out.join("Plaud V2 bug report 2026-11-03 1430");
+        for rel in [
+            "report.md",
+            "logs/app.log",
+            "logs/app.log.1",
+            "logs/diagnostics.log",
+            "logs/update.log",
+            "logs/wifi_sync.log",
+        ] {
+            let text =
+                std::fs::read_to_string(folder.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            assert_no_planted_details(rel, &text);
+            assert!(!text.contains(&home_file), "home folder leaked into {rel}");
+        }
+        let report = std::fs::read_to_string(folder.join("report.md")).unwrap();
+        assert!(report.contains("~/Library/Logs/x.log"), "{report}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reveal_only_inside_the_folder() {
+        let root = scratch_dir("reveal");
+        let downloads = root.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let inside = downloads.join("report.zip");
+        std::fs::write(&inside, b"x").unwrap();
+        let outside = root.join("other.zip");
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(is_inside_dir(&inside, &downloads));
+        assert!(!is_inside_dir(&outside, &downloads));
+        assert!(!is_inside_dir(&downloads.join("../other.zip"), &downloads));
+        assert!(!is_inside_dir(&downloads, &downloads));
+        assert!(!is_inside_dir(&downloads.join("missing.zip"), &downloads));
+        #[cfg(unix)]
+        {
+            let link = downloads.join("link.zip");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(
+                !is_inside_dir(&link, &downloads),
+                "symlink out of the folder"
+            );
+        }
+        assert!(reveal_in_finder(outside.to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wifi_log_name_matches_the_backend() {
+        let device = include_str!("../../../app/state/device.py");
+        assert!(device.contains(&format!("WIFI_LOG_NAME = \"{WIFI_SYNC_LOG_NAME}\"")));
+    }
     #[test]
     fn worker_base_is_https() {
         assert!(WORKER_BASE.starts_with("https://plaud-v2-updates."));

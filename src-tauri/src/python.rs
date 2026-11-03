@@ -1399,8 +1399,8 @@ fn spawn_backend(
         .env("PLAUD_PYTHON_RUNTIME", runtime)
         // /health reports it (the plaud-v2 package itself isn't installed in the venv).
         .env("PLAUD_APP_VERSION", env!("CARGO_PKG_VERSION"))
-        // Always explicit, so the backend and the Rust side (crash-report
-        // setting) agree: PLAUD_DATA_DIR if the shell got one, else
+        // Always explicit, so the backend and the Rust side (the bug
+        // report's wifi_sync.log) agree: PLAUD_DATA_DIR if the shell got one, else
         // "Plaud V2 (Dev)" for debug builds and "Plaud V2" for release.
         .env(crate::paths::DATA_DIR_ENV, crate::paths::data_dir())
         .stdout(Stdio::piped())

@@ -7,7 +7,8 @@ with v2.4.0 on a headless Mac mini.
 >
 > - The fine-grained token the Worker used (`GH_TOKEN`) was **revoked on 2026-11-02**. Until a new
 >   one is set, `/v1/latest`, `/v1/download` and `/v1/report` fail once the Worker's 5-minute
->   cache expires, so no install can update or send reports. Create a new token and set it as in
+>   cache expires, so no install can update. (The app no longer calls `/v1/report`; see
+>   [Bug reports](#bug-reports).) Create a new token and set it as in
 >   [Rotating the Worker's GitHub token](#rotating-the-workers-github-token).
 > - The GitHub token embedded in **v2.3.0 and older** has been revoked too. Those builds can't
 >   update themselves any more: install the latest DMG by hand.
@@ -20,7 +21,7 @@ with v2.4.0 on a headless Mac mini.
 - [Verify before publishing](#verify-before-publishing)
 - [Publish](#publish)
 - [Rotating the Worker's GitHub token](#rotating-the-workers-github-token)
-- [Crash reports](#crash-reports)
+- [Bug reports](#bug-reports)
 - [Troubleshooting](#troubleshooting)
 
 ## How updates reach users
@@ -192,31 +193,30 @@ release is needed.
 Deploying the Worker, its endpoints, limits and smoke tests:
 [infra/update-worker/README.md](../infra/update-worker/README.md).
 
-## Crash reports
+## Bug reports
 
-Unhandled errors are reported to GitHub Issues through the Worker (`POST /v1/report`).
+The app files no GitHub issues: no crash reports, no in-app submission. Errors only go
+to the app log and `~/Library/Application Support/com.plaud.v2/diagnostics.log` (rotates at 1 MB),
+Rust panics included. The Worker's `/v1/report` endpoint is unused and will be retired separately.
 
-- **Opt-out:** Settings › General › System › **Send anonymous crash reports** (on by default,
-  `crash_reports_enabled` in the config). Off means nothing is sent, Rust panics included; errors
-  still go to the local diagnostics log.
-- **What's sent:** the error message (up to 1,000 characters), context, the last 15 traceback
-  lines, app and macOS version, architecture, RAM, Python and package versions, and an anonymous
-  device ID (8 hex characters of a hash of the Mac's hardware UUID).
-- **Scrubbed first:** the home folder becomes `~`, any `/Users/<name>` becomes `/Users/~`, device
-  serials and BLE UUIDs become salted 8-character tags, and `report_scrub.rs` removes URL query
-  strings, Notion and Google Drive paths, bearer tokens, `key=value` secrets, prefixed API keys,
-  e-mail addresses and long hex or base64 tokens. Recording, transcript and summary text is never
-  part of a report.
-- **Dedupe:** the fingerprint is a SHA-256 (first 16 hex characters) of the normalised message.
-  The Worker comments on the open `auto-bug` issue it created for that fingerprint, or opens one.
-  The app sends each fingerprint once per session.
-- **Not sent:** `AbortError`s, and anything while the backend is down. Both go to
-  `~/Library/Application Support/com.plaud.v2/diagnostics.log` (rotates at 1 MB).
-- **User reports** (the **Report a bug** button) are sent with `kind: "user"` and label
-  `user-report`, even with crash reports off.
-- **Limits** are enforced by the Worker (per IP and global, per minute, hour and day); see its
-  README.
-- Reporting is fire-and-forget and never crashes the app.
+**Report a bug › Export bug report** (`export_bug_report` in `src-tauri/src/commands/mod.rs`)
+saves `Plaud V2 bug report <date> <time>.zip` to `~/Downloads` (" 2", " 3"… if the name is taken).
+People look through it and attach it to an issue made from `.github/ISSUE_TEMPLATE/bug_report.yml`.
+
+- **`report.md`:** the user's three answers, system info (app and macOS version, architecture,
+  RAM, Python and package versions, an anonymous device ID), the backend's checks from
+  `GET /diagnostics` (signed in, user token present, API host, paired devices by the last four
+  characters of their serial with token and signature present or not, the last NotePin handshake,
+  providers and which keys are set, Notion and Drive connected, recording count, free disk space)
+  and the last 50 diagnostics log entries, aborted requests left out.
+- **`logs/`:** the last 3,000 lines of `app.log` (topped up from `app.log.1` after a rotation),
+  500 of `diagnostics.log`, 500 of `update.log` and 1,000 of `wifi_sync.log`, each if it exists.
+- **Scrubbed:** every file goes through `scrub_for_report`: the home folder becomes `~`, any
+  `/Users/<name>` becomes `/Users/~`, device serials and BLE UUIDs become salted 8-character tags,
+  and `report_scrub.rs` removes URL query strings, Notion and Google Drive paths, bearer tokens,
+  `key=value` secrets, prefixed API keys, e-mail addresses and long hex or base64 tokens.
+  Recording, transcript and summary text is never part of a report.
+- If the backend isn't running, the report says so under Checks and is still exported.
 
 ## Troubleshooting
 

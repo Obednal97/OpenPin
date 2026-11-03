@@ -108,7 +108,11 @@ def _finalize_redownload_backup(sid):
 
 
 def _reset_state():
-    """Reset all connection state to disconnected defaults."""
+    """Reset all connection state to disconnected defaults.
+
+    Leaves "last_handshake" alone: GET /diagnostics reports the last
+    handshake even after the device has disconnected.
+    """
     _device_state["connected"] = False
     _device_state["handshaking"] = False
     _device_state["port_version"] = None
@@ -327,6 +331,27 @@ def _make_notify_handler(cipher, nonce, aad, cmd_evt, cmd_resp, file_data, file_
                 cmd_evt.set()
 
     return handler
+
+
+def _record_handshake(verdict, hs_info):
+    """Remember the last BIND_TOKEN handshake's outcome for GET /diagnostics.
+
+    Only the verdict, the reply status bytes (None = no reply), the port
+    version and the token's length: never the token or the raw replies.
+    """
+    _device_state["last_handshake"] = {
+        "verdict": verdict,
+        "statuses": [h["status"] if h else None for h in hs_info.get("hs") or []],
+        "port_version": hs_info.get("port_version"),
+        "token_len": hs_info.get("token_len"),
+        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def get_last_handshake():
+    """A copy of the last handshake record (see _record_handshake), or None."""
+    last = _device_state.get("last_handshake")
+    return dict(last) if last else None
 
 
 def get_state():
@@ -616,6 +641,21 @@ async def _address_visible(address):
         return await BleakScanner.find_device_by_address(address, timeout=ADDRESS_CHECK_S) is not None
     except Exception:
         return True
+
+
+def _remember_bind_token(sn, token_bytes):
+    """Save the token the NotePin accepted (a fallback in bind_handshake) as its
+    BIND_TOKEN, in the config and the Keychain backup, so the next connect and
+    an exported pairing file use it."""
+    try:
+        token = token_bytes.rstrip(b"\x00").decode("ascii")
+    except UnicodeDecodeError:
+        return
+    from app.utils import pairing_store
+
+    update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
+    pairing_store.backup_serial_async(sn)  # Keychain copy, off the BLE loop
+    logging.warning(f"[BLE] Saved the token this NotePin accepted (serial ending {sn[-4:]})")
 
 
 async def connect_device(address=None):
@@ -955,6 +995,9 @@ async def connect_device(address=None):
     # Only a rejection fails the connect; "no reply at all" is logged by
     # bind_handshake() and the connect carries on, as in v2.4.0.
     verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
+    _record_handshake(verdict, hs_info)
+    if hs_info.get("accepted_token") and sn:
+        _remember_bind_token(sn, hs_info["accepted_token"])
     if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
         await _disconnect_quietly(cl)
         _reset_state()
