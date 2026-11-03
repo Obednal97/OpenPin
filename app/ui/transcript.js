@@ -525,11 +525,13 @@ function openTranscript(sessionId, autoPlay = false) {
     const box = $('#notion-review');
     if (box) box.remove();
   };
-  const showNotionReview = (candidates) => {
+  // `message` is shown when there are no candidate pages (Notion couldn't be
+  // checked for older pages, so nothing was created).
+  const showNotionReview = (candidates, message) => {
     hideNotionReview();
     const pages = (candidates || []).filter((c) => c && c.url);
     // Only while this recording is still the one shown.
-    if (!pages.length || app.currentSessionId !== sessionId || (notionBtn && !notionBtn.isConnected)) return;
+    if ((!pages.length && !message) || app.currentSessionId !== sessionId || (notionBtn && !notionBtn.isConnected)) return;
     const box = document.createElement('div');
     box.id = 'notion-review';
     box.className = 'redownload-notice';
@@ -568,7 +570,10 @@ function openTranscript(sessionId, autoPlay = false) {
       b.addEventListener('click', () => choose(b, opts));
       return b;
     };
-    if (pages.length === 1) {
+    if (!pages.length) {
+      text.textContent = `${message} Try again later, or create a new page if it isn't in Notion yet.`;
+      box.append(text);
+    } else if (pages.length === 1) {
       text.append('Looks like this recording is already in Notion: ', pageLink(pages[0]), '.');
       box.append(text, button('Use that page', { link_url: pages[0].url }));
     } else {
@@ -590,7 +595,7 @@ function openTranscript(sessionId, autoPlay = false) {
       return;
     }
     if (result.needs_review) {
-      showNotionReview(result.candidates);
+      showNotionReview(result.candidates, result.message);
       return;
     }
     if (result.queued) {
@@ -610,7 +615,7 @@ function openTranscript(sessionId, autoPlay = false) {
       try {
         const pageInfo = await window.plaud.notionPageUrl(sessionId);
         if (pageInfo.has_page) showNotionPageLinked(pageInfo.url);
-        else if (pageInfo.needs_review) showNotionReview(pageInfo.candidates);
+        else if (pageInfo.needs_review) showNotionReview(pageInfo.candidates, pageInfo.message);
       } catch {}
     })();
 
