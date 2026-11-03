@@ -52,7 +52,7 @@ def _registered_commands() -> set[str]:
 class TestBlueprintRegistration:
     """All route blueprints must be registered on the Flask app."""
 
-    EXPECTED_BLUEPRINTS = {"core", "device", "cloud", "notion", "recordings", "transcribe", "settings"}
+    EXPECTED_BLUEPRINTS = {"core", "device", "cloud", "notion", "recordings", "transcribe", "settings", "diagnostics"}
 
     def test_all_blueprints_registered(self, flask_client):
         """Every expected blueprint is present in app.blueprints."""
@@ -137,6 +137,7 @@ class TestTauriBridgeAPISurface:
         "/cloud/trash",
         # Health
         "/health",
+        "/diagnostics",
         # Audio
         "/audio/",
         # Notion
@@ -171,7 +172,8 @@ class TestTauriBridgeAPISurface:
         "install_update",
         "check_for_updates",
         "get_app_version",
-        "report_bug",
+        "export_bug_report",
+        "reveal_in_finder",
     ]
 
     def test_bridge_invokes_all_ipc_commands(self):
@@ -239,7 +241,9 @@ class TestTauriBridgeAPISurface:
         "checkForUpdates",
         "getAppVersion",
         "reportError",
-        "reportBug",
+        "exportBugReport",
+        "revealInFinder",
+        "getDiagnostics",
         "notionStatus",
         "notionConnect",
         "notionDisconnect",
@@ -340,7 +344,6 @@ class TestEndpointJSONShapes:
             "auto_summarise",
             "notion_auto_push",
             "auto_prefer_wifi",
-            "crash_reports_enabled",
             "transcription_provider",
             "hf_token_set",
             "summarization_provider",
@@ -532,14 +535,14 @@ class TestSettingsRoundTrip:
         assert data["auto_prefer_wifi"] is True
         assert data["notion_auto_push"] is True
 
-    def test_crash_reports_enabled_defaults_on_and_roundtrips(self, flask_client, tmp_path):
-        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
-        flask_client.post("/settings", json={"crash_reports_enabled": False}, content_type="application/json")
-        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is False
-        # Rust reads the raw config file and only treats a JSON `false` as off.
-        assert json.loads((tmp_path / ".plaud_v2_config.json").read_text())["crash_reports_enabled"] is False
+    def test_retired_crash_reports_setting_is_ignored(self, flask_client, tmp_path):
+        """The app no longer files issues, so the old toggle is gone: not read, not saved."""
+        config_path = tmp_path / ".plaud_v2_config.json"
+        config_path.write_text(json.dumps({"crash_reports_enabled": False}))
+        assert "crash_reports_enabled" not in flask_client.get("/settings").get_json()
         flask_client.post("/settings", json={"crash_reports_enabled": True}, content_type="application/json")
-        assert flask_client.get("/settings").get_json()["crash_reports_enabled"] is True
+        assert json.loads(config_path.read_text())["crash_reports_enabled"] is False
+        assert "crash_reports_enabled" not in flask_client.get("/settings").get_json()
 
     def test_setup_dismissed_roundtrip(self, flask_client):
         flask_client.post("/settings", json={"setup_dismissed": True}, content_type="application/json")

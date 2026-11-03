@@ -5,7 +5,7 @@
 //! is checked against the NIST test vectors below. The only SHA-256 in the
 //! shell: verifies downloaded update DMGs and the managed Python tarball,
 //! stamps the venv with the lockfile's hash (`python.rs`) and hashes
-//! identifiers in bug reports.
+//! identifiers in exported bug reports.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

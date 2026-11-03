@@ -9,8 +9,8 @@
 //! * Shutdown: stopping the backend (BLE disconnect + SIGTERM/SIGKILL) takes
 //!   2-5 s. It runs once, off the main thread where possible, and the app exits
 //!   when it's done.
-//! * Panics: the panic hook files a crash report and, for a panic on the main
-//!   thread (which aborts the process), waits for it to be sent.
+//! * Panics: the panic hook records them in the app log and the local
+//!   diagnostics log (nothing is sent anywhere).
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -376,21 +376,19 @@ pub fn handle_termination_signals(app: &AppHandle) {
 // Panic hook
 // ---------------------------------------------------------------------------
 
-/// Set while a panic report is being filed, so a burst of follow-on panics
+/// Set while a panic is being recorded, so a burst of follow-on panics
 /// (e.g. threads hitting a poisoned mutex) only logs.
 static PANIC_REPORT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// How long a fatal (main-thread) panic waits for its report to be sent.
+/// Passed to `report_error_blocking`, which no longer waits for anything
+/// (nothing is sent over the network; see commands::report_error).
 const PANIC_REPORT_GRACE: Duration = Duration::from_secs(3);
 
-/// Report Rust panics.
+/// Record Rust panics in the app log and the local diagnostics log.
 ///
-/// `report_error` writes the local diagnostic synchronously, then posts the
-/// report from its own background thread. A panic on the main thread aborts
-/// the process when the hook returns (it unwinds into AppKit's Objective-C
-/// frames), which killed that thread before it could send anything. So the
-/// hook files the report directly (no extra thread) and, on the main thread,
-/// blocks for a short grace period before letting the abort happen. Panics on
-/// other threads only end that thread, so they don't wait.
+/// Nothing is sent anywhere: a panic shows up in an exported bug report
+/// (Report a bug › Export bug report). On the main thread a panic aborts the
+/// process when the hook returns, so the hook writes the record directly
+/// (`report_error_blocking`, no extra thread) before returning.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let message = format!("{info}");
@@ -406,8 +404,8 @@ pub fn install_panic_hook() {
         let msg = format!("[PANIC] {message}");
         let ctx = Some("rust-panic".to_string());
         if thread_name == "main" {
-            // A main-thread panic takes the process down: wait (bounded) for
-            // the report to actually be sent instead of sleeping blindly.
+            // A main-thread panic takes the process down: write the record
+            // before returning.
             let _ = commands::report_error_blocking(msg, Some(backtrace), ctx, PANIC_REPORT_GRACE);
         } else {
             commands::report_error(msg, Some(backtrace), ctx);

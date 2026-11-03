@@ -109,7 +109,7 @@ pub fn run() {
             let window = app.get_webview_window("main")
                 .expect("Main window must exist — check tauri.conf.json windows config");
 
-            // Cache app version for bug reports (report_error doesn't have AppHandle)
+            // Cache app version for the diagnostics log (report_error doesn't have AppHandle)
             commands::set_app_version(app.package_info().version.to_string());
 
             // Keep the latest startup message for the page to poll: the first
@@ -279,7 +279,8 @@ pub fn run() {
             commands::get_app_version,
             commands::open_external,
             commands::report_error,
-            commands::report_bug,
+            commands::export_bug_report,
+            commands::reveal_in_finder,
             commands::set_backend_health,
             commands::open_diagnostics_log,
             commands::get_login_item,
