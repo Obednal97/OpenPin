@@ -76,19 +76,19 @@
         </button>
       </div>
       <div class="modal-body" id="bug-report-form">
+        <p class="settings-desc">Export saves a bug report to your Downloads folder: what you write below, app and Mac details, a few checks, and recent logs. Your home folder, user name, serial numbers, email addresses and tokens are removed. You can look inside before attaching it to a GitHub issue.</p>
         <div class="modal-field">
           <label class="settings-label" for="bug-expected">What did you expect to happen? (optional)</label>
-          <textarea id="bug-expected" class="settings-input modal-textarea" placeholder="Describe what you expected..." rows="3"></textarea>
+          <textarea id="bug-expected" class="settings-input modal-textarea" placeholder="Describe what you expected…" rows="3"></textarea>
         </div>
         <div class="modal-field">
           <label class="settings-label" for="bug-actual">What actually happened? (optional)</label>
-          <textarea id="bug-actual" class="settings-input modal-textarea" placeholder="Describe what went wrong..." rows="3"></textarea>
+          <textarea id="bug-actual" class="settings-input modal-textarea" placeholder="Describe what went wrong…" rows="3"></textarea>
         </div>
         <div class="modal-field">
           <label class="settings-label" for="bug-steps">Steps to reproduce (optional)</label>
-          <textarea id="bug-steps" class="settings-input modal-textarea" placeholder="1. Go to...\n2. Click on...\n3. See error..." rows="3"></textarea>
+          <textarea id="bug-steps" class="settings-input modal-textarea" placeholder="1. Go to…&#10;2. Click on…&#10;3. See error…" rows="3"></textarea>
         </div>
-        <p class="settings-hint">Export saves a bug report to your Downloads folder: what you wrote above, app and Mac details, a few checks, and recent logs. Your home folder, user name, serial numbers, email addresses and tokens are removed. You can look inside before attaching it to a GitHub issue.</p>
       </div>
       <div class="modal-body hidden" id="bug-report-done">
         <p class="settings-desc mb-0">Saved to Downloads as <strong id="bug-report-file-name"></strong>.</p>
@@ -110,7 +110,7 @@
   <div id="wifi-confirm-overlay" class="modal-overlay hidden">
     <div class="modal-panel" style="width: 380px;">
       <div class="modal-header">
-        <h2>WiFi Transfer</h2>
+        <h2>Wi-Fi transfer</h2>
         <button id="wifi-confirm-close" class="icon-btn" title="Close">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
             <path d="M4.5 4.5l9 9M13.5 4.5l-9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -119,7 +119,7 @@
       </div>
       <div class="modal-body">
         <p style="font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary);">
-          WiFi transfer downloads recordings <strong>~50x faster</strong> than Bluetooth by connecting directly to your Plaud device's hotspot.
+          Wi-Fi transfer downloads recordings <strong>about 50 times faster</strong> than Bluetooth by connecting directly to your Plaud device's hotspot.
         </p>
         <p style="font-size: var(--text-sm); line-height: 1.6; color: var(--text-secondary); margin-top: var(--sp-3);">
           Your internet will be <strong>temporarily disconnected</strong> during transfer and will auto-reconnect afterwards (~15 seconds).
@@ -131,7 +131,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="margin-right: 4px;">
             <path d="M5 12.55a11 11 0 0114 0M8.53 16.11a6 6 0 016.95 0M12 20h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          Start WiFi Transfer
+          Start Wi-Fi transfer
         </button>
       </div>
     </div>
@@ -140,7 +140,7 @@
   <!-- Update Banner -->
   <div id="update-banner" class="update-banner hidden">
     <span id="update-message">A new version is available</span>
-    <button id="update-action" class="update-action-btn">Restart to Update</button>
+    <button id="update-action" class="update-action-btn">Restart to update</button>
     <button id="update-dismiss" class="update-dismiss-btn" title="Dismiss">&times;</button>
   </div>
 
@@ -185,7 +185,7 @@
               <path d="M4.7 6.7L8 3.3l3.3 3.4M8 3.3V11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
-          <button id="delete-selected-btn" class="icon-btn" title="Delete selected" class="text-destructive">
+          <button id="delete-selected-btn" class="icon-btn text-destructive" title="Delete selected">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M2 4h12M5.3 4V2.7a1.3 1.3 0 011.3-1.3h2.8a1.3 1.3 0 011.3 1.3V4M6.7 7.3v4M9.3 7.3v4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
               <path d="M3.3 4h9.4l-.7 9.3a1.3 1.3 0 01-1.3 1.2H5.3a1.3 1.3 0 01-1.3-1.2L3.3 4z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -209,10 +209,12 @@
         Back to recordings
       </button>
       <div class="transcript-header">
-        <div class="transcript-title-editable" id="transcript-title" contenteditable="true" spellcheck="false" data-placeholder="Add a title..."></div>
-        <div id="transcript-date" class="transcript-date"></div>
+        <div class="transcript-title-editable" id="transcript-title" contenteditable="true" spellcheck="false" data-placeholder="Add a title…"></div>
+        <div class="transcript-subline">
+          <span id="transcript-date" class="transcript-date"></span>
+          <span id="transcript-meta" class="transcript-meta"></span>
+        </div>
         <div id="transcript-tags" class="tag-picker"></div>
-        <div id="transcript-meta" class="transcript-meta"></div>
       </div>
       <div id="audio-player" class="audio-player">
         <audio id="audio-element"></audio>
@@ -305,21 +307,22 @@
           <path d="M13.5 9a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" stroke="currentColor" stroke-width="1.5"/>
           <path d="M15.75 2.25L13 5M2.25 15.75L5 13M15.75 15.75L13 13M2.25 2.25L5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
-        <span>Scan for Device</span>
+        <span>Scan for device</span>
       </button>
       <button id="sync-btn" class="action-btn accent hidden">
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
           <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <span>Sync Recordings</span>
+        <span>Sync recordings</span>
       </button>
-      <button id="switch-wifi-btn" class="action-btn subtle hidden" title="Stop the Bluetooth transfer and continue over WiFi (asks first; temporarily disconnects internet)">
-        <span>Switch to WiFi</span>
+      <button id="switch-wifi-btn" class="action-btn subtle hidden" title="Stop the Bluetooth transfer and continue over Wi-Fi (asks first; temporarily disconnects the internet)">
+        <span>Switch to Wi-Fi</span>
       </button>
       <button id="disconnect-btn" class="action-btn subtle hidden">
         <span>Disconnect</span>
       </button>
+      <span id="progress-text" class="progress-text" aria-live="polite"></span>
     </div>
     <div class="action-bar-right" id="action-bar-right">
       <div id="search-bar" class="search-bar-inline">
@@ -327,7 +330,7 @@
           <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/>
           <path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
-        <input type="text" id="search-input" class="search-input" placeholder="Search...">
+        <input type="text" id="search-input" class="search-input" placeholder="Search…">
         <button id="search-clear" class="search-clear hidden">
           <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
             <path d="M10 4L4 10M4 4l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -337,7 +340,6 @@
     </div>
     <div id="progress-bar" class="progress-bar hidden">
       <div id="progress-fill" class="progress-fill"></div>
-      <span id="progress-text" class="progress-text"></span>
     </div>
   </footer>
 

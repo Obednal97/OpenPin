@@ -81,11 +81,17 @@ const dom = {
   playerDuration: $('#player-duration'),
 };
 
-function formatTime(seconds) {
-  if (!seconds || isNaN(seconds)) return '00:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+/**
+ * "MM:SS", or "H:MM:SS" from an hour on. Pass withHours to keep a column of
+ * times the same width (e.g. every segment of a recording longer than an hour).
+ */
+function formatTime(seconds, withHours = false) {
+  const total = !seconds || isNaN(seconds) || seconds < 0 ? 0 : Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mmss = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return h > 0 || withHours ? `${h}:${mmss}` : mmss;
 }
 
 function formatDate(isoString) {
@@ -116,19 +122,53 @@ function formatDuration(seconds) {
   return `${h}h ${rm}m`;
 }
 
-function toast(message, type = 'info') {
+// Toasts: errors stay until closed; the rest leave after a few seconds (longer
+// messages stay longer). Every toast has a close button.
+const _TOAST_MAX = 5;
+
+function _toastDismiss(el) {
+  if (!el || el._leaving) return;
+  el._leaving = true;
+  clearTimeout(el._timer);
+  el.classList.add('toast-leaving');
+  setTimeout(() => el.remove(), 300);
+}
+
+function _toastMount(el, durationMs) {
   const container = $('#toast-container');
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.title = 'Dismiss';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.textContent = '\u00D7';
+  close.addEventListener('click', () => _toastDismiss(el));
+  el.appendChild(close);
+  container.appendChild(el);
+  // Keep the stack short: drop the oldest ones first.
+  const live = [...container.children].filter((t) => !t._leaving);
+  live.slice(0, Math.max(0, live.length - _TOAST_MAX)).forEach(_toastDismiss);
+  if (durationMs > 0) el._timer = setTimeout(() => _toastDismiss(el), durationMs);
+  return el;
+}
+
+function toast(message, type = 'info') {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
-  el.textContent = message;
-  container.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  const text = document.createElement('span');
+  text.className = 'toast-message';
+  text.textContent = message;
+  el.appendChild(text);
+  const len = String(message || '').length;
+  const duration = type === 'error' ? 0 : Math.min(8000, 3000 + len * 40);
+  return _toastMount(el, duration);
 }
 
 function toastAction(message, actionLabel, onAction, duration = 10000) {
-  const container = $('#toast-container');
   const el = document.createElement('div');
   el.className = 'toast toast-info toast-with-action';
+  el.setAttribute('role', 'status');
   el.innerHTML = `
     <div class="toast-content">
       <span class="toast-message">${escapeHtml(message)}</span>
@@ -137,13 +177,22 @@ function toastAction(message, actionLabel, onAction, duration = 10000) {
   `;
   const btn = el.querySelector('.toast-action-btn');
   btn.addEventListener('click', () => {
-    el.remove();
+    _toastDismiss(el);
     onAction();
   });
-  container.appendChild(el);
-  const timer = setTimeout(() => el.remove(), duration);
-  el._timer = timer;
-  return el;
+  return _toastMount(el, duration);
+}
+
+/** "PLAUD_NOTEPIN_S" (the Bluetooth name) → "Plaud NotePin S". Other names are kept. */
+function prettyDeviceName(name) {
+  const raw = String(name || '').trim();
+  if (!/^plaud[_\s-]/i.test(raw)) return raw;
+  const words = { PLAUD: 'Plaud', NOTEPIN: 'NotePin', NOTE: 'Note', PIN: 'Pin', PRO: 'Pro' };
+  return raw
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((w) => words[w.toUpperCase()] || (w.length <= 2 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()))
+    .join(' ');
 }
 
 function showProgress(text, pct) {
@@ -344,87 +393,170 @@ function toastPartialSync(result) {
   return n;
 }
 
-function renderMarkdown(md) {
-  // Process line by line for proper list nesting
-  const lines = md.split('\n');
-  const output = [];
-  let inList = false;
-  let listDepth = 0;
+// ---- Summary markdown ----
+// A small renderer for the summaries the AI writes: headings, paragraphs,
+// bullet / numbered / to-do lists (nested by indentation), GFM tables, quotes,
+// rules and inline bold / italic / code. Every line is HTML-escaped first; the
+// renderer only ever adds its own fixed tags, so model output can't inject HTML.
 
-  function closeList() {
-    while (listDepth > 0) { output.push('</ul>'); listDepth--; }
-    inList = false;
+/** Inline formatting on text that is already escaped. */
+function _mdInline(escaped) {
+  const codes = [];
+  let s = escaped.replace(/`([^`]+)`/g, (_, c) => {
+    codes.push(c);
+    return `\u0000${codes.length - 1}\u0000`;
+  });
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*(?!\s)(.+?)\*(?!\*)/g, '$1<em>$2</em>');
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[Number(i)]}</code>`);
+}
+
+/** Cells of a table row ("| a | b |" or "a | b"); "\|" stays a literal pipe. */
+function _mdTableCells(line) {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+  const cells = [];
+  let cur = '';
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === '\\' && t[k + 1] === '|') {
+      cur += '|';
+      k++;
+    } else if (t[k] === '|') {
+      cells.push(cur.trim());
+      cur = '';
+    } else {
+      cur += t[k];
+    }
   }
+  cells.push(cur.trim());
+  return cells;
+}
 
-  for (const raw of lines) {
-    let line = escapeHtml(raw);
+function _mdIsTableSeparator(line) {
+  if (!line || !line.includes('-')) return false;
+  const cells = _mdTableCells(line);
+  return cells.length > 0 && cells.every((c) => /^:?-{1,}:?$/.test(c));
+}
 
-    // Headings
-    if (/^### (.+)$/.test(line)) { closeList(); output.push(line.replace(/^### (.+)$/, '<h3>$1</h3>')); continue; }
-    if (/^## (.+)$/.test(line)) { closeList(); output.push(line.replace(/^## (.+)$/, '<h2>$1</h2>')); continue; }
-    if (/^# (.+)$/.test(line)) { closeList(); output.push(line.replace(/^# (.+)$/, '<h1>$1</h1>')); continue; }
+function renderMarkdown(md) {
+  const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+  const output = [];
+  // Open lists, innermost last: { tag: 'ul' | 'ol', indent, liOpen }
+  const lists = [];
 
-    // Horizontal rule
-    if (/^---$/.test(line)) { closeList(); output.push('<hr>'); continue; }
+  const closeItem = (list) => {
+    if (list.liOpen) {
+      output.push('</li>');
+      list.liOpen = false;
+    }
+  };
+  const closeLists = (depth = 0) => {
+    while (lists.length > depth) {
+      const list = lists.pop();
+      closeItem(list);
+      output.push(`</${list.tag}>`);
+    }
+  };
 
-    // Blockquote
-    if (/^&gt; (.+)$/.test(line)) { closeList(); output.push(line.replace(/^&gt; (.+)$/, '<blockquote>$1</blockquote>')); continue; }
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
 
-    // List items (with nesting support)
-    const listMatch = line.match(/^(\s*)-\s+(.+)$/);
-    if (listMatch) {
-      const indent = Math.floor(listMatch[1].length / 2) + 1; // 0 spaces = depth 1, 2 spaces = depth 2
-      let content = listMatch[2];
-
-      // Checkbox: - [ ] or - [x]
-      content = content.replace(/^\[ \]\s*/, '<input type="checkbox" disabled> ');
-      content = content.replace(/^\[x\]\s*/i, '<input type="checkbox" checked disabled> ');
-
-      if (!inList) { inList = true; listDepth = 0; }
-      while (listDepth < indent) { output.push('<ul>'); listDepth++; }
-      while (listDepth > indent) { output.push('</ul>'); listDepth--; }
-      // Inline formatting
-      content = content.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-      content = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      content = content.replace(/\*(.+?)\*/g, '<em>$1</em>');
-      content = content.replace(/`([^`]+)`/g, '<code>$1</code>');
-      output.push(`<li>${content}</li>`);
+    // GFM table: a header row followed by a |---|:---:| separator row
+    if (raw.includes('|') && _mdIsTableSeparator(lines[i + 1])) {
+      closeLists();
+      const head = _mdTableCells(raw);
+      const align = _mdTableCells(lines[i + 1]).map((c) => {
+        if (c.startsWith(':') && c.endsWith(':')) return 'center';
+        if (c.endsWith(':')) return 'right';
+        return '';
+      });
+      const cell = (tag, text, col) => {
+        const a = align[col] ? ` style="text-align:${align[col]}"` : '';
+        return `<${tag}${a}>${_mdInline(escapeHtml(text))}</${tag}>`;
+      };
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        const cells = _mdTableCells(lines[i]);
+        rows.push(`<tr>${head.map((_, c) => cell('td', cells[c] || '', c)).join('')}</tr>`);
+        i++;
+      }
+      i--;
+      output.push(
+        `<div class="md-table-wrap"><table><thead><tr>${head.map((h, c) => cell('th', h, c)).join('')}</tr></thead>`
+          + `<tbody>${rows.join('')}</tbody></table></div>`,
+      );
       continue;
     }
 
-    // Bullet with * syntax
-    const starMatch = line.match(/^(\s*)\*\s+(.+)$/);
-    if (starMatch && !line.match(/^\*[^*]+\*$/)) { // Don't match *italic*
-      const indent = Math.floor(starMatch[1].length / 2) + 1;
-      let content = starMatch[2];
-      content = content.replace(/^\[ \]\s*/, '<input type="checkbox" disabled> ');
-      content = content.replace(/^\[x\]\s*/i, '<input type="checkbox" checked disabled> ');
-      if (!inList) { inList = true; listDepth = 0; }
-      while (listDepth < indent) { output.push('<ul>'); listDepth++; }
-      while (listDepth > indent) { output.push('</ul>'); listDepth--; }
-      content = content.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-      content = content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      content = content.replace(/`([^`]+)`/g, '<code>$1</code>');
-      output.push(`<li>${content}</li>`);
+    const line = escapeHtml(raw.replace(/\t/g, '    '));
+
+    // List item: "-", "*" or "+" bullets, "1." / "1)" numbers, "- [ ]" to-dos
+    const item = line.match(/^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/);
+    if (item) {
+      const indent = item[1].length;
+      const tag = /\d/.test(item[2]) ? 'ol' : 'ul';
+      while (lists.length && lists[lists.length - 1].indent > indent) closeLists(lists.length - 1);
+      let top = lists[lists.length - 1];
+      if (top && top.indent === indent && top.tag !== tag) {
+        closeLists(lists.length - 1);
+        top = lists[lists.length - 1];
+      }
+      if (!top || indent > top.indent) {
+        const start = tag === 'ol' ? parseInt(item[2], 10) : 1;
+        output.push(tag === 'ol' && start !== 1 ? `<ol start="${start}">` : `<${tag}>`);
+        lists.push({ tag, indent, liOpen: false });
+      } else {
+        closeItem(top);
+      }
+      let content = item[3];
+      let cls = '';
+      const task = content.match(/^\[( |x|X)\]\s*(.*)$/);
+      if (task) {
+        cls = ' class="md-task"';
+        content = `<input type="checkbox" disabled${task[1] === ' ' ? '' : ' checked'}> ${_mdInline(task[2])}`;
+      } else {
+        content = _mdInline(content);
+      }
+      output.push(`<li${cls}>${content}`);
+      lists[lists.length - 1].liOpen = true;
       continue;
     }
 
-    // Not a list item — close any open list
-    closeList();
-
-    // Empty line
+    // Blank lines don't end a list ("1. a", "", "2. b" stays one list)
     if (!line.trim()) continue;
 
-    // Inline formatting for paragraphs
-    line = line.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-    line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    line = line.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    line = line.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Indented text under a list item continues that item
+    if (lists.length && /^\s+\S/.test(line)) {
+      output.push(`<br>${_mdInline(line.trim())}`);
+      continue;
+    }
 
-    output.push(`<p>${line}</p>`);
+    closeLists();
+
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 3);
+      output.push(`<h${level}>${_mdInline(heading[2])}</h${level}>`);
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      output.push('<hr>');
+      continue;
+    }
+    const quote = line.match(/^&gt;\s?(.*)$/);
+    if (quote) {
+      output.push(`<blockquote>${_mdInline(quote[1])}</blockquote>`);
+      continue;
+    }
+    output.push(`<p>${_mdInline(line)}</p>`);
   }
 
-  closeList();
+  closeLists();
   return output.join('\n');
 }
 
