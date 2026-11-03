@@ -68,31 +68,40 @@
   <div id="bug-report-overlay" class="modal-overlay hidden">
     <div id="bug-report-modal" class="modal-panel">
       <div class="modal-header">
-        <h2>Report a Bug</h2>
+        <h2>Report a bug</h2>
         <button id="bug-report-close" class="icon-btn" title="Close">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
             <path d="M4.5 4.5l9 9M13.5 4.5l-9 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
       </div>
-      <div class="modal-body">
+      <div class="modal-body" id="bug-report-form">
         <div class="modal-field">
-          <label class="settings-label" for="bug-expected">What did you expect to happen?</label>
+          <label class="settings-label" for="bug-expected">What did you expect to happen? (optional)</label>
           <textarea id="bug-expected" class="settings-input modal-textarea" placeholder="Describe what you expected..." rows="3"></textarea>
         </div>
         <div class="modal-field">
-          <label class="settings-label" for="bug-actual">What actually happened?</label>
+          <label class="settings-label" for="bug-actual">What actually happened? (optional)</label>
           <textarea id="bug-actual" class="settings-input modal-textarea" placeholder="Describe what went wrong..." rows="3"></textarea>
         </div>
         <div class="modal-field">
           <label class="settings-label" for="bug-steps">Steps to reproduce (optional)</label>
           <textarea id="bug-steps" class="settings-input modal-textarea" placeholder="1. Go to...\n2. Click on...\n3. See error..." rows="3"></textarea>
         </div>
-        <p class="settings-hint">System info (version, OS, memory, etc.) will be attached automatically.</p>
+        <p class="settings-hint">Export saves a bug report to your Downloads folder: what you wrote above, app and Mac details, a few checks, and recent logs. Your home folder, user name, serial numbers, email addresses and tokens are removed. You can look inside before attaching it to a GitHub issue.</p>
       </div>
-      <div class="modal-footer">
+      <div class="modal-body hidden" id="bug-report-done">
+        <p class="settings-desc mb-0">Saved to Downloads as <strong id="bug-report-file-name"></strong>.</p>
+        <p class="settings-hint mt-2">Look through it, then attach it to a new GitHub issue.</p>
+      </div>
+      <div class="modal-footer" id="bug-report-form-footer">
         <button id="bug-report-cancel" class="action-btn subtle">Cancel</button>
-        <button id="bug-report-submit" class="action-btn primary">Submit Report</button>
+        <button id="bug-report-submit" class="action-btn primary">Export bug report</button>
+      </div>
+      <div class="modal-footer hidden" id="bug-report-done-footer">
+        <button id="bug-report-reveal" class="action-btn subtle">Show in Finder</button>
+        <button id="bug-report-github" class="action-btn subtle">Open GitHub issue</button>
+        <button id="bug-report-done-btn" class="action-btn primary">Done</button>
       </div>
     </div>
   </div>
@@ -421,13 +430,9 @@
               <span class="toggle-switch"></span>
               <span>Show icon in Dock</span>
             </label>
-            <label class="toggle-label auto-step">
-              <input type="checkbox" id="crash-reports-toggle" class="toggle-input" checked>
-              <span class="toggle-switch"></span>
-              <span>Send anonymous crash reports</span>
-            </label>
           </div>
-          <p class="settings-hint mt-2">Crash reports contain the error message, app and macOS version, and an anonymous device ID. Your name, device serial number, recordings and transcripts are never included.</p>
+          <p class="settings-desc mt-3 mb-2">Something not working? Export a bug report to attach to a GitHub issue.</p>
+          <button id="settings-export-bug-report-btn" class="action-btn subtle">Export bug report</button>
         </div>
         <div class="settings-section">
           <h3>Storage</h3>

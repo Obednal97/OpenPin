@@ -35,8 +35,31 @@ $('#theme-toggle-btn').addEventListener('click', async () => {
 });
 
 // ---- Bug Report Modal ----
+// "Export bug report" saves a zip to ~/Downloads (Rust: export_bug_report);
+// nothing is sent anywhere. The user attaches it to a GitHub issue.
+const BUG_REPORT_ISSUE_URL = 'https://github.com/Obednal97/Plaud-V2/issues/new?template=bug_report.yml';
+let _bugReportSavedPath = '';
+
+function _bugReportShowForm() {
+  _bugReportSavedPath = '';
+  $('#bug-report-form').classList.remove('hidden');
+  $('#bug-report-form-footer').classList.remove('hidden');
+  $('#bug-report-done').classList.add('hidden');
+  $('#bug-report-done-footer').classList.add('hidden');
+}
+
+function _bugReportShowDone(fileName) {
+  $('#bug-report-file-name').textContent = fileName;
+  $('#bug-report-form').classList.add('hidden');
+  $('#bug-report-form-footer').classList.add('hidden');
+  $('#bug-report-done').classList.remove('hidden');
+  $('#bug-report-done-footer').classList.remove('hidden');
+  $('#bug-report-done-btn').focus();
+}
+
 function openBugReport() {
   const overlay = $('#bug-report-overlay');
+  _bugReportShowForm();
   overlay.classList.remove('hidden');
   overlay.offsetHeight; // force reflow
   overlay.classList.add('visible');
@@ -59,38 +82,52 @@ function closeBugReport() {
 }
 
 $('#bug-report-btn').addEventListener('click', openBugReport);
+$('#settings-export-bug-report-btn')?.addEventListener('click', openBugReport);
 $('#bug-report-close').addEventListener('click', closeBugReport);
 $('#bug-report-cancel').addEventListener('click', closeBugReport);
+$('#bug-report-done-btn').addEventListener('click', closeBugReport);
 $('#bug-report-overlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeBugReport();
 });
 
 $('#bug-report-submit').addEventListener('click', async () => {
+  // All three answers are optional.
   const expected = $('#bug-expected').value.trim();
   const actual = $('#bug-actual').value.trim();
   const steps = $('#bug-steps').value.trim();
-
-  if (!expected && !actual) {
-    toast('Please describe what you expected or what happened', 'error');
-    return;
-  }
 
   const btn = $('#bug-report-submit');
   setLoading(btn, true);
 
   try {
-    const result = await window.plaud.reportBug(expected, actual, steps);
-    if (result.success) {
-      toast(`Bug report submitted (#${result.number})`, 'success');
-      closeBugReport();
-    } else {
-      toast(`Failed to submit: ${result.error}`, 'error');
+    // Checks from the backend; still export if it isn't running.
+    let checks;
+    try {
+      checks = await window.plaud.getDiagnostics();
+    } catch {
+      checks = { backend: 'not running' };
     }
+    const result = await window.plaud.exportBugReport(expected || null, actual || null, steps || null, checks);
+    _bugReportSavedPath = result.path;
+    _bugReportShowDone(result.file_name);
   } catch (err) {
-    toast(`Failed to submit: ${err.message}`, 'error');
+    toast(`Couldn't export the bug report: ${err?.message || err}`, 'error');
   } finally {
     setLoading(btn, false);
   }
+});
+
+$('#bug-report-reveal').addEventListener('click', async () => {
+  if (!_bugReportSavedPath) return;
+  try {
+    await window.plaud.revealInFinder(_bugReportSavedPath);
+  } catch (err) {
+    toast(`Couldn't show it in Finder: ${err?.message || err}`, 'error');
+  }
+});
+
+$('#bug-report-github').addEventListener('click', () => {
+  window.plaud.openExternal(BUG_REPORT_ISSUE_URL);
 });
 
 // ---- Settings Open/Close ----

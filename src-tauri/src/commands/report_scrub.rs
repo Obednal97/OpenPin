@@ -1,6 +1,6 @@
-//! Secret and personal-data scrubbing for bug reports (on top of the path /
-//! serial / UUID scrubbing in `mod.rs`). Everything that leaves the machine in
-//! a report goes through `scrub_secrets` via `scrub_report_text`.
+//! Secret and personal-data scrubbing for exported bug reports (on top of the
+//! path / serial / UUID scrubbing in `mod.rs`). Everything written into a
+//! report goes through `scrub_secrets` via `scrub_report_text`.
 //!
 //! Removes: URL query strings and fragments (and user:pass@), whole paths of
 //! Notion and Google Drive/Docs URLs, `Bearer`/`Basic` credentials,
