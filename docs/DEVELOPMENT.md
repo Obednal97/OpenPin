@@ -1,7 +1,9 @@
 # Development
 
-Running Plaud V2 from source, testing, linting and the gotchas. Read
-[ARCHITECTURE.md](ARCHITECTURE.md) first for how the pieces fit.
+Running Open Pin from source, testing, linting and the gotchas. Read
+[ARCHITECTURE.md](ARCHITECTURE.md) first for how the pieces fit. Folders, the bundle ID, the
+crate and some config names still say Plaud V2, the app's old name; keep them (see
+[ARCHITECTURE.md](ARCHITECTURE.md#names)).
 
 ## Prerequisites
 
@@ -17,7 +19,8 @@ Running Plaud V2 from source, testing, linting and the gotchas. Read
 [reverse-engineering/](reverse-engineering/README.md)); every Plaud client ships the same ones.
 The app needs them to talk to the device and decrypt audio, the Tauri build bundles them (it fails
 with `glob pattern ../keys/* path not found` without them), and `tests/test_crypto.py` reads them.
-Copy them from an existing checkout; they aren't in the repo.
+They aren't in the repo: copy them from an existing checkout, or extract them from Plaud's
+Android app as described in the reverse-engineering notes.
 
 ## Project layout
 
@@ -61,7 +64,7 @@ npx --yes @tauri-apps/cli@2.12 dev
 - **Dev builds keep their own data.** A debug build (`tauri dev`, `cargo build`) passes
   `PLAUD_DATA_DIR=~/Library/Application Support/Plaud V2 (Dev)` to the backend, so it never reads
   or writes the installed app's recordings, config or tokens. Set `PLAUD_DATA_DIR` yourself to use
-  another folder; it wins in debug and release builds. Don't point it into `~/projects` or the repo:
+  another folder; it wins in debug and release builds. Don't point it into the repo or any synced folder:
   the folder holds API keys and device tokens, and synced folders would copy them.
 - Debug builds also keep their own shell state in `~/Library/Application Support/com.plaud.v2.dev/`
   (venv, lockfiles, `server.pid`, `tauri-prefs.json`, `updates/`, `diagnostics.log`) and log to

@@ -1,11 +1,14 @@
 # Security
 
-Plaud V2 is a personal project in a private repository, used by its owner and a few friends.
+Open Pin (formerly Plaud V2) is a small open-source project maintained in spare time. There is no
+bug bounty.
 
 ## Reporting a problem
 
-Tell the repository owner (Obednal97 on GitHub) directly, or open an issue in this repository
-(it's private). Don't paste API keys, tokens or recordings into the report.
+Report security problems privately through GitHub's **Report a vulnerability** button on the
+repository's Security tab. If that isn't available, open an issue that says you have a security
+problem to report, without the details, and the maintainer will get in touch. Don't paste API
+keys, tokens or recordings into any report.
 
 ## What the app protects against
 
@@ -19,7 +22,7 @@ Mac, other machines on the network, and a tampered update.
 | Losing recordings to a bug or a bad request | Deletes go to the macOS Trash; re-downloads back up the old files first; incomplete downloads are never saved as recordings |
 | Other users on the Mac | Config files are written with mode `0600` |
 | Credentials in the process list | The WiFi-sync worker gets its credentials on stdin, not in `argv` |
-| A tampered or broken update | Downloaded through the Worker; size and SHA-256 checked; the install script refuses any bundle that isn't `com.plaud.v2` at the expected version, signed by team 4SN93PWF7Z, and accepted by Gatekeeper |
+| A tampered or broken update | Downloaded through the Worker; size and SHA-256 checked; the install script refuses any bundle that isn't `com.plaud.v2` at the expected version, signed by the expected Apple team (the official releases' team unless the build set `APPLE_TEAM_ID`), and accepted by Gatekeeper |
 | Personal data in bug reports | The app sends no crash or bug reports. **Export bug report** saves a zip to `~/Downloads` that the user reviews and attaches to an issue themselves. Every file in it is scrubbed first (home folder, user names, serials, BLE IDs, keys, tokens, e-mail addresses, Notion and Drive links); `GET /diagnostics` returns only booleans, counts, the API host and the last four characters of serials. Recordings, transcripts and summaries are never included |
 
 Not in scope: malware running as the same user. It can read the config (API keys and device
@@ -50,7 +53,7 @@ connect from its hotspot; the traffic is encrypted with the Bluetooth session ke
 `app/utils/constants.py` holds the client ID and secret of a Google "desktop app" OAuth client,
 used for Google Drive. Google treats desktop client secrets as not confidential: they can't be
 hidden in a shipped binary and grant nothing without the user's consent. Anyone could copy them
-and start a sign-in that presents itself as "Plaud V2", which only matters to people who already
+and start a sign-in that presents itself as "Open Pin", which only matters to people who already
 trust that name. If Google revokes the client, create a new one in Google Cloud Console and
 update the constants.
 
