@@ -341,6 +341,20 @@ def _validate_token_async(token, api_domain, *, save_on_success=False):
     try:
         user, domain = _try_token(token, api_domain)
     except PlaudAuthError as e:
+        # The saved token is often just the ~24h pld_ut gone stale overnight:
+        # the ~30 day pld_urt can renew it, so try that before signing out
+        # (signing out deletes the saved file, refresh token included).
+        with _cloud_state_lock:
+            can_refresh = _cloud_state.get("token") == token and bool(_cloud_state.get("urt"))
+        if can_refresh:
+            refreshed = refresh_user_token()
+            if refreshed.get("refreshed"):
+                logging.info("[Cloud] Saved token had expired; renewed it with the refresh token")
+                return
+            if not refreshed.get("auth_failed"):
+                # Network trouble or an odd reply: keep the login, try again later.
+                logging.warning("[Cloud] Saved token rejected and refresh failed: %s", refreshed.get("error"))
+                return
         with _cloud_state_lock:
             # Only sign out if this token is still the active one
             if _cloud_state.get("token") == token:
@@ -490,7 +504,9 @@ def refresh_user_token():
     The new token is checked on /user/me, then stored as ``ut`` and promoted to
     the primary token (the REST path accepts it) and saved.
 
-    Returns ``{"refreshed": True, "user": ...}`` or ``{"refreshed": False, "error": ...}``.
+    Returns ``{"refreshed": True, "user": ...}`` or ``{"refreshed": False, "error": ...}``;
+    a failure also has ``auth_failed: True`` when Plaud itself refused (as
+    opposed to network trouble).
     """
     with _cloud_state_lock:
         ut = _cloud_state.get("ut")
@@ -511,10 +527,15 @@ def refresh_user_token():
             body = _decode_body(getattr(r, "content", b"") or b"")
             reason = _plaud_msg(body) or f"HTTP {r.status_code}"
             logging.warning("[Cloud] Token refresh gave no new token (%s)", reason)
-            return {"refreshed": False, "error": f"Plaud didn't issue a new token ({reason})"}
+            return {
+                "refreshed": False,
+                "error": f"Plaud didn't issue a new token ({reason})",
+                # Plaud answered and said no (vs. a server error we can retry later)
+                "auth_failed": r.status_code < 500,
+            }
         user, domain = _try_token(new_ut, domain)
     except PlaudAuthError as e:
-        return {"refreshed": False, "error": str(e)}
+        return {"refreshed": False, "error": str(e), "auth_failed": True}
     except Exception as e:
         logging.warning("[Cloud] Token refresh failed: %s", e)
         return {"refreshed": False, "error": _cloud_call_error(e)}
