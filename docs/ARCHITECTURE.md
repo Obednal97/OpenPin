@@ -293,6 +293,11 @@ Notion auto-push runs if enabled.
 Google Drive signs in with OAuth through a callback on `localhost:5125`, using the app's own
 Google OAuth client (see [SECURITY.md](../SECURITY.md)), and uploads recordings to a chosen folder.
 
+Both callback servers answer with the page in `app/utils/oauth_page.py` (connected, cancelled, out
+of date, failed). It is self-contained: no outside fonts, images or scripts, a strict CSP with a
+per-response nonce, `Referrer-Policy: no-referrer` and `no-store`, and its one script removes the
+one-time code from the address bar.
+
 ## Updates and crash reports
 
 The app has no GitHub token. It talks only to the `plaud-v2-updates` Cloudflare Worker
