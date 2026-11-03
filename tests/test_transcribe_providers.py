@@ -245,3 +245,48 @@ def test_whisper_models_include_turbo_and_are_sorted_by_size():
     # "size" is a download size, not a parameter count
     assert WHISPER_MODELS["base"]["size"] == "145 MB"
     assert WHISPER_MODELS["large"]["size"] == "3.1 GB"
+
+
+# ---------------------------------------------------------------------------
+# Provider limits: file size, Groq prompt, Deepgram keyterms
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fn, label", [(T.transcribe_openai, "OpenAI"), (T.transcribe_groq, "Groq")])
+@patch("app.providers.transcribe.http_requests.post")
+def test_too_big_recording_is_refused_before_upload(mock_post, fn, label, tmp_path):
+    big = tmp_path / "long.ogg"
+    with open(big, "wb") as f:
+        f.truncate(26_000_000)  # sparse file, 26 MB
+    with pytest.raises(T.AudioTooLargeError, match=f"26 MB and {label} accepts up to 25 MB"):
+        fn(str(big), "sk")
+    mock_post.assert_not_called()
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_groq_prompt_is_clipped_at_a_separator(mock_post, ogg):
+    mock_post.return_value = _resp({"text": "", "segments": []})
+    vocab = ", ".join(f"Term{i:03d}" for i in range(200))  # ~1,600 chars
+    T.transcribe_groq(str(ogg), "sk", vocab_prompt=vocab)
+    prompt = mock_post.call_args.kwargs["data"]["prompt"]
+    assert len(prompt) <= T.GROQ_PROMPT_MAX_CHARS
+    assert prompt.startswith("Term000, Term001") and prompt.endswith(tuple(f"{i}" for i in range(10)))
+    assert not prompt.endswith(",")
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_short_groq_prompt_is_unchanged(mock_post, ogg):
+    mock_post.return_value = _resp({"text": "", "segments": []})
+    T.transcribe_groq(str(ogg), "sk", vocab_prompt="Acme, Plaud")
+    assert mock_post.call_args.kwargs["data"]["prompt"] == "Acme, Plaud"
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_keyterms_are_capped_and_deduped(mock_post, ogg):
+    mock_post.return_value = _resp({"results": {"channels": [{"alternatives": [{"transcript": ""}]}]}})
+    words = ["Acme", "Acme", " ", "Plaud V2"] + [f"term{i}" for i in range(100)]
+    T.transcribe_deepgram(str(ogg), "dg", keywords=words)
+    url = mock_post.call_args.args[0]
+    terms = [p.split("=", 1)[1] for p in url.split("?", 1)[1].split("&") if p.startswith("keyterm=")]
+    assert terms[:2] == ["Acme", "Plaud%20V2"]
+    assert len(terms) == T.DEEPGRAM_MAX_KEYTERMS
