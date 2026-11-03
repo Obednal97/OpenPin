@@ -125,6 +125,24 @@ def test_anthropic_long_transcript_not_truncated():
     assert "sentence number 2999" in calls[0]["messages"][0]["content"]
 
 
+def test_anthropic_joins_text_after_a_mid_stream_fallback():
+    # The fallback model continues the partial text; a marker block sits between.
+    head, tail = GOOD_JSON[:20], GOOD_JSON[20:]
+    message = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[
+            SimpleNamespace(type="text", text=head),
+            SimpleNamespace(type="fallback"),
+            SimpleNamespace(type="text", text=tail),
+        ],
+    )
+    client = MagicMock()
+    client.beta.messages.stream.side_effect = lambda **kw: _FakeStream(message, [], kw)
+    with patch.object(S, "_anthropic_client", return_value=client):
+        summary, title = S.summarize_anthropic(S.format_transcript(SEGMENTS), "sk-ant-x")
+    assert (summary, title) == ("## Core Synopsis\nShipped.", "Ship decision")
+
+
 @pytest.mark.parametrize("stop_reason", ["max_tokens", "refusal"])
 def test_anthropic_incomplete_response_raises(stop_reason):
     client, _ = _fake_anthropic_client(text='{"title": "x", "summ', stop_reason=stop_reason)

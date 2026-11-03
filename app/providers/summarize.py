@@ -247,7 +247,9 @@ def _anthropic_call(client):
             raise SummaryError("Claude declined to summarize this transcript")
         if message.stop_reason == "max_tokens":
             raise SummaryError("summary was cut off at the output limit")
-        text = next((b.text for b in message.content if b.type == "text"), "")
+        # All text blocks: after a mid-stream decline the fallback model's text
+        # continues the partial text, with a fallback marker block in between.
+        text = "".join(b.text for b in message.content if b.type == "text")
         return _parse_summary(text)
 
     return call
