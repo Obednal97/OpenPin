@@ -13,7 +13,7 @@ import shlex
 import stat
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -381,8 +381,10 @@ class TestBackupWriteSites:
             assert cloud.bind_device(SN, name="Desk NotePin")["token"] == TOKEN
             pairing_store.flush(timeout=5)
             assert kc.device_item(SN) is None  # no signature yet
-            api.return_value = {"status": 0, "data": {"signature": {SN: SIG}}}
-            assert cloud.fetch_sn_signature(SN)["signature"] == SIG
+            # sn-sign no longer goes through cloud_api (Android headers, direct POST)
+            sign_reply = Mock(status_code=200, content=json.dumps({"status": 0, "data": {"signature": {SN: SIG}}}).encode())
+            with patch.object(cloud.http_requests, "post", return_value=sign_reply):
+                assert cloud.fetch_sn_signature(SN)["signature"] == SIG
             pairing_store.flush(timeout=5)
         item = kc.device_item(SN)
         assert item["sn_signature"] == SIG and item["bind_token"] == TOKEN
