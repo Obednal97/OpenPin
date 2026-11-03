@@ -124,6 +124,8 @@ def _no_real_bluetooth_address_check(monkeypatch):
         return True
 
     monkeypatch.setattr(dev, "_address_visible", visible)
+    # Scanned BLEDevices are remembered module-wide: none leak between tests.
+    monkeypatch.setattr(dev, "_recent_ble_devices", {})
 
 
 @pytest.fixture(autouse=True)
