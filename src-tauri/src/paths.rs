@@ -10,7 +10,7 @@
 //!
 //! `PLAUD_DATA_DIR`, when set, overrides the data folder in both builds. The
 //! shell always passes the resolved folder to Python in `PLAUD_DATA_DIR`, so
-//! the backend and the Rust side (crash-report setting) read the same config.
+//! the backend and the Rust side (the bug report's `wifi_sync.log`) agree.
 //! Dev data never defaults to the repo: `~/projects` is synced with other
 //! machines and the data folder holds API keys and device tokens.
 
@@ -19,9 +19,6 @@ use std::path::{Path, PathBuf};
 /// Environment variable that overrides the data folder (also read by
 /// `app/utils/constants.py`).
 pub const DATA_DIR_ENV: &str = "PLAUD_DATA_DIR";
-
-/// Backend config file inside the data folder (`CONFIG_PATH` in constants.py).
-pub const CONFIG_FILE: &str = ".plaud_v2_config.json";
 
 const RELEASE_DATA_DIR: &str = "Plaud V2";
 const DEV_DATA_DIR: &str = "Plaud V2 (Dev)";
@@ -61,11 +58,6 @@ pub fn data_dir() -> PathBuf {
     let env = std::env::var(DATA_DIR_ENV).ok();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     resolve_data_dir(env.as_deref(), &crate::home_dir(), &cwd, IS_DEV)
-}
-
-/// The backend config file the Rust side reads settings from.
-pub fn config_path() -> PathBuf {
-    data_dir().join(CONFIG_FILE)
 }
 
 fn support_dir_for(library: &Path, dev: bool) -> PathBuf {
@@ -176,12 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn config_file_name_matches_the_backend() {
+    fn data_dir_env_matches_the_backend() {
         let constants = include_str!("../../app/utils/constants.py");
-        assert!(
-            constants.contains(&format!("\"{CONFIG_FILE}\"")),
-            "constants.py CONFIG_PATH no longer uses {CONFIG_FILE}"
-        );
         assert!(constants.contains(&format!("\"{DATA_DIR_ENV}\"")));
     }
 }

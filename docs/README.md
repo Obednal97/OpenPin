@@ -7,7 +7,7 @@ the logs are. Then, in reading order:
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Understand how the app works: modules, startup, security model, data locations, device sync, AI pipeline, Notion, updates |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Run it from source, run the tests and linters, avoid the known gotchas, change Python dependencies |
-| [RELEASING.md](RELEASING.md) | Build, sign, notarise and publish a release; rotate the update server's token; crash-report details |
+| [RELEASING.md](RELEASING.md) | Build, sign, notarise and publish a release; rotate the update server's token; what an exported bug report contains |
 | [../SECURITY.md](../SECURITY.md) | Report a problem; threat model; secrets policy; accepted risks |
 | [../infra/update-worker/README.md](../infra/update-worker/README.md) | The `plaud-v2-updates` Cloudflare Worker: endpoints, limits, deploy, smoke tests |
 | [../scripts/README.md](../scripts/README.md) | Build scripts and the legacy device scripts |

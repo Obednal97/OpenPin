@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in Plaud V2 isn't working.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. In Plaud V2, click the bug button in the header (or Settings › General › System) and choose **Export bug report**. It saves a zip to your Downloads folder with app and Mac details, a few checks and recent logs.
+
+        Plaud V2 removes your home folder, user name, serial numbers, email addresses and tokens from the zip, but please **look through the files before you attach them**. Delete anything you don't want to share.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong? Include any error message you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we make it happen again?
+      placeholder: |
+        1. Go to ...
+        2. Click ...
+        3. See the error
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Settings › General › About shows it, for example 2.4.5.
+      placeholder: "2.4.5"
+    validations:
+      required: true
+  - type: checkboxes
+    id: bug-report-zip
+    attributes:
+      label: Bug report zip
+      options:
+        - label: I attached the bug report zip from Report a bug › Export bug report (or explained why not)
+          required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else?
+      description: Screenshots, your NotePin's firmware version, or anything else that might help. Drag the bug report zip in here too.
+    validations:
+      required: false

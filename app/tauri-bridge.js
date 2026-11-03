@@ -107,11 +107,11 @@ async function _fetchWithTimeout(url, opts, endpoint) {
   }
 }
 
-// --- Bug-report text from API errors ---
+// --- Error text from API errors (local diagnostics log) ---
 // /transcribe, /summarize and /notion/* errors can quote transcript or Notion
 // page content (raw_error, traceback), so for those only the endpoint, HTTP
-// status and a short first line go out. Rust scrubs every report again
-// (src-tauri/src/commands/report_scrub.rs); this is a simplified mirror.
+// status and a short first line are logged. Rust scrubs exported bug reports
+// again (src-tauri/src/commands/report_scrub.rs); this is a simplified mirror.
 
 const _BRIDGE_REPORT_SHORT_CHARS = 120;
 
@@ -204,7 +204,7 @@ async function apiCall(method, endpoint, body = null) {
   }
   const data = await res.json();
   const errMsg = (data.raw_error || data.error || '').toLowerCase();
-  // Transient / environmental errors — not worth auto-reporting to GitHub.
+  // Transient / environmental errors — not worth logging as errors.
   const TRANSIENT_MARKERS = [
     'not found',
     'not in range',
@@ -505,9 +505,17 @@ window.plaud = {
   getAppVersion: () => invoke('get_app_version'),
   onUpdateStatus: (callback) => addListener('update-status', callback),
 
-  // Bug reporter — IPC to Rust
+  // Errors — IPC to Rust, which only writes the app log and the local
+  // diagnostics log. Nothing is sent anywhere.
   reportError: (message, stack, context) => invoke('report_error', { message, stack, context }),
-  reportBug: (expected, actual, steps) => invoke('report_bug', { expected, actual, steps }),
+  // Report a bug: Rust saves a zip to ~/Downloads (scrubbed of personal
+  // details) for the user to attach to a GitHub issue themselves.
+  exportBugReport: (expected, actual, steps, checks) =>
+    invoke('export_bug_report', { expected, actual, steps, checks }),
+  // Only files inside ~/Downloads (Rust refuses anything else).
+  revealInFinder: (path) => invoke('reveal_in_finder', { path }),
+  // Checks for the bug report: booleans and counts, never secrets.
+  getDiagnostics: () => apiCall('GET', '/diagnostics'),
   setBackendHealth: (state) => invoke('set_backend_health', { state }),
   openDiagnosticsLog: () => invoke('open_diagnostics_log'),
 };

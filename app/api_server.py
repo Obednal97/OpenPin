@@ -25,7 +25,7 @@ ensure_installed("requests", required=True)
 
 from flask import Flask, jsonify, request
 
-from app.routes import cloud, core, device, gdrive, notion, recordings, settings, transcribe
+from app.routes import cloud, core, device, diagnostics, gdrive, notion, recordings, settings, transcribe
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -242,6 +242,7 @@ app.register_blueprint(gdrive.bp)
 app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
+app.register_blueprint(diagnostics.bp)
 
 if __name__ == "__main__":
     from werkzeug.serving import make_server
