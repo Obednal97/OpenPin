@@ -1,5 +1,6 @@
 //! Rust-side log file: `~/Library/Logs/Plaud V2/app.log` (`Plaud V2 (Dev)` for
-//! debug builds, see `paths`), rotated at ~1 MB with one old file kept
+//! debug builds, see `paths`; the folder keeps the app's old name on purpose),
+//! rotated at ~1 MB with one old file kept
 //! (`app.log.1`), plus stderr in debug builds.
 //!
 //! Levels: `info` for this crate (`plaud_v2::*`) and the backend's output
@@ -208,7 +209,7 @@ pub fn init() {
     if log::set_logger(logger).is_ok() {
         log::set_max_level(max);
         log::info!(
-            "Plaud V2 {} starting; logging to {}",
+            "Open Pin {} starting; logging to {}",
             env!("CARGO_PKG_VERSION"),
             path.display()
         );
@@ -218,6 +219,12 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_file_stays_in_the_legacy_folder() {
+        // `cargo test` is a debug build; release uses `Logs/Plaud V2`.
+        assert!(log_path().ends_with("Library/Logs/Plaud V2 (Dev)/app.log"));
+    }
 
     #[test]
     fn default_filter_is_info_for_us_warn_for_deps() {
