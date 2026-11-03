@@ -29,6 +29,11 @@ CLAUDE_SUMMARIZE_EFFORT = "low"
 # request is streamed, so a large cap doesn't risk an HTTP timeout.
 CLAUDE_SUMMARIZE_MAX_TOKENS = 64000
 
+# Titles for transcripts that aren't summarised (generate_title): a short,
+# cheap call, so the smallest current Claude model.
+CLAUDE_TITLE = "claude-haiku-5-5"
+CLAUDE_TITLE_MAX_TOKENS = 100
+
 OPENAI_SUMMARIZE = "gpt-6.1-sol"
 # GPT-6.1 Sol is a reasoning model (default effort "medium"); reasoning tokens
 # are billed as output and count against max_completion_tokens.

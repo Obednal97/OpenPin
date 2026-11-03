@@ -1138,3 +1138,47 @@ class TestSyncDoesNotWaitForTranscription:
         assert 'id="transcribe-selected-btn"' in html
         assert "addEventListener('click', transcribeSelected)" in src["renderer.js"]
         assert "function transcribeSelected()" in src["recordings.js"]
+
+
+_RANGE_SELECT_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const ctx = { console, window: { getSelection: () => ({ removeAllRanges() {} }) } };
+ctx.app = { recordings: ['a','b','c','d','e','f'].map((s) => ({ session_id: s, partial: s === 'd' })),
+  selectedIds: new Set(), activeTagFilters: new Set(), searchQuery: '', transcripts: {}, selectMode: true };
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + '\nrenderRecordingsList = () => {};', ctx);
+const run = (code) => vm.runInContext(code, ctx);
+const out = {};
+run("toggleSelection('b')"); out.down = [run("selectRangeTo('f')"), [...ctx.app.selectedIds]];
+run("app.selectedIds.clear(); toggleSelection('e')"); out.up = [run("selectRangeTo('a')"), [...ctx.app.selectedIds]];
+run("enterSelectMode()"); out.noAnchor = run("selectRangeTo('c')");
+console.log(JSON.stringify(out));
+"""
+
+
+class TestShiftClickRangeSelect:
+    """Shift-click in select mode selects every recording between the two clicks
+    (it used to select only the two clicked and highlight the text between)."""
+
+    def test_range_selection(self):
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node not installed")
+        out = subprocess.run(
+            [node, "-e", _RANGE_SELECT_JS, str(PROJECT_ROOT / "app" / "ui" / "recordings.js")],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        result = json.loads(out)
+        assert result["down"] == [True, ["b", "c", "e", "f"]]  # "d" is incomplete: not selectable
+        assert result["up"] == [True, ["e", "a", "b", "c"]]
+        assert result["noAnchor"] is False
+
+    def test_shift_mousedown_does_not_select_text(self):
+        src = (PROJECT_ROOT / "app" / "ui" / "recordings.js").read_text()
+        assert "if (app.selectMode && e.shiftKey) e.preventDefault();" in src

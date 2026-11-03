@@ -176,19 +176,21 @@ function renderRecordingsList() {
 
   // Bind click handlers
   dom.recordingsList.querySelectorAll('.recording-card').forEach((card) => {
+    // Shift-click extends the selection: stop the browser selecting the text
+    // between the two clicks instead.
+    card.addEventListener('mousedown', (e) => {
+      if (app.selectMode && e.shiftKey) e.preventDefault();
+    });
     card.addEventListener('click', (e) => {
       if (card.classList.contains('recording-partial')) return;
       if (e.target.closest('.recording-play-btn')) return;
-      if (e.target.closest('.select-checkbox')) {
-        toggleSelection(card.dataset.sid);
+      const sid = card.dataset.sid;
+      if (e.target.closest('.select-checkbox') || app.selectMode) {
+        if (e.shiftKey && selectRangeTo(sid)) return;
+        toggleSelection(sid);
         return;
       }
-      const sid = card.dataset.sid;
-      if (app.selectMode) {
-        toggleSelection(sid);
-      } else {
-        openTranscript(sid);
-      }
+      openTranscript(sid);
     });
 
     // Right-click context menu
@@ -214,24 +216,48 @@ function renderRecordingsList() {
   updateSelectBar();
 }
 
+// The recording a Shift-click range starts from: the last one clicked without
+// Shift (as in Finder).
+let _selectAnchorSid = null;
+
 function toggleSelection(sid) {
   if (app.selectedIds.has(sid)) {
     app.selectedIds.delete(sid);
   } else {
     app.selectedIds.add(sid);
   }
+  _selectAnchorSid = sid;
   renderRecordingsList();
+}
+
+/**
+ * Shift-click: select every visible, selectable recording from the anchor to
+ * `sid`, both included, in list order. Returns false (so the caller toggles
+ * instead) when there's no anchor in the current list.
+ */
+function selectRangeTo(sid) {
+  const ids = _selectableVisibleIds();
+  const from = ids.indexOf(_selectAnchorSid);
+  const to = ids.indexOf(sid);
+  if (from === -1 || to === -1) return false;
+  const [lo, hi] = from < to ? [from, to] : [to, from];
+  for (const id of ids.slice(lo, hi + 1)) app.selectedIds.add(id);
+  window.getSelection()?.removeAllRanges();
+  renderRecordingsList();
+  return true;
 }
 
 function enterSelectMode() {
   app.selectMode = true;
   app.selectedIds.clear();
+  _selectAnchorSid = null;
   renderRecordingsList();
 }
 
 function exitSelectMode() {
   app.selectMode = false;
   app.selectedIds.clear();
+  _selectAnchorSid = null;
   renderRecordingsList();
 }
 
