@@ -22,7 +22,7 @@ reference code.
 | `sync_and_transcribe.py` | Command-line sync: BLE connect, download new recordings, decrypt, transcribe with local Whisper | No completeness checks. Writes `recordings/`, `transcripts/` and `sessions/` in the current folder |
 | `sync_device.py` | Connect, **record** for N seconds (argument, default 5), download over BLE, stay paired | Saves the downloads undecrypted (`recordings/ble_<id>.opus`) and a log in `sessions/`, in the current folder |
 | `session_manager.py` | Connect, log every key and response to `sessions/`, then **depair** the device | Depairing means pairing again in the app afterwards. Writes session keys to disk |
-| `download_all.py` | Download every recording from Plaud Cloud and wrap it as Ogg | Reads the Plaud token from `.plaud_config.json` in the current folder (the app keeps it in `~/Library/Application Support/Plaud V2/`); EU API only. The app's Plaud Cloud sync replaces it |
+| `download_all.py` | Download every recording from Plaud Cloud and wrap it as Ogg | Reads the Plaud token from `.plaud_config.json` in the current folder (Open Pin keeps it in `~/Library/Application Support/Plaud V2/`, a folder that keeps the app's old name); EU API only. The app's Plaud Cloud sync replaces it |
 
 ### Running them
 

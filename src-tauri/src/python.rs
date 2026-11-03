@@ -580,11 +580,18 @@ fn write_lockfiles() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Where Python keeps bytecode caches (PYTHONPYCACHEPREFIX): never inside the
+/// signed app bundle.
+pub(crate) fn pycache_dir() -> PathBuf {
+    crate::paths::app_support_dir().join("pycache")
+}
+
 /// A command running a venv/base interpreter with a clean Python environment.
 fn python_command(python: &Path, full_path: &str) -> Command {
     let mut cmd = Command::new(python);
     cmd.env("PATH", full_path)
         .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPYCACHEPREFIX", pycache_dir())
         .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
@@ -834,6 +841,10 @@ fn parse_port_bound(line: &str) -> Option<u16> {
 }
 
 /// Send BLE disconnect request to the Python backend (fire-and-forget)
+/// Ask the backend to disconnect the NotePin and wait (up to
+/// BLE_DISCONNECT_WAIT) for its answer: /device/disconnect only answers once
+/// the teardown is done, and at once when nothing is connected. (It used to
+/// fire and forget, and the caller slept 2 s every time.)
 pub fn send_ble_disconnect() {
     let server = get_server().lock().unwrap();
     let port = server.port;
@@ -845,12 +856,21 @@ pub fn send_ble_disconnect() {
             .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5123))),
         Duration::from_secs(2),
     ) {
-        let _ = write!(
+        if write!(
             s,
             "POST /device/disconnect HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{API_TOKEN_HEADER}: {token}\r\nContent-Length: 0\r\n\r\n"
-        );
+        )
+        .is_ok()
+        {
+            let _ = s.set_read_timeout(Some(BLE_DISCONNECT_WAIT));
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut sink);
+        }
     }
 }
+
+/// Longest wait for the backend's answer to /device/disconnect on quit.
+const BLE_DISCONNECT_WAIT: Duration = Duration::from_millis(2500);
 
 fn set_startup_error(code: &str, title: &str, friendly: &str, hint: &str, detail: &str) {
     let err = StartupError {
@@ -985,15 +1005,15 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
 
     if std::env::consts::ARCH != SUPPORTED_ARCH {
         let detail = format!(
-            "This copy of Plaud V2 runs as {}; its Python packages are built for Apple Silicon (arm64) only.",
+            "This copy of Open Pin runs as {}; its Python packages are built for Apple Silicon (arm64) only.",
             std::env::consts::ARCH
         );
         log::error!("[Python] {detail}");
         set_startup_error(
             "UNSUPPORTED_MAC",
             "Intel Macs aren't supported",
-            "This build of Plaud V2 needs a Mac with Apple Silicon (M1 or later); Intel Macs aren't supported.",
-            "On an Apple Silicon Mac, make sure Plaud V2 isn't set to open using Rosetta \
+            "This build of Open Pin needs a Mac with Apple Silicon (M1 or later); Intel Macs aren't supported.",
+            "On an Apple Silicon Mac, make sure Open Pin isn't set to open using Rosetta \
              (Finder › Get Info).",
             &detail,
         );
@@ -1015,7 +1035,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         set_startup_error(
             "PYTHON_NOT_FOUND",
             "Python 3.12 not available",
-            "Plaud V2 needs Python 3.12; couldn't download it.",
+            "Open Pin needs Python 3.12; couldn't download it.",
             "Check your internet connection and click Retry. Or install Python 3.12 \
              (python.org, or `brew install python@3.12`) and click Retry.",
             &detail,
@@ -1041,7 +1061,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                      failing, delete ~/Library/Application Support/com.plaud.v2/venv and click Retry."
                     .to_string(),
                 RuntimeKind::Fallback => format!(
-                    "Plaud V2 needs Python 3.12; couldn't download it, so it used {} at {}. \
+                    "Open Pin needs Python 3.12; couldn't download it, so it used {} at {}. \
                      Check your internet connection and click Retry.",
                     base.version, base.path
                 ),
@@ -1049,7 +1069,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
             set_startup_error(
                 "DEPS_FAILED",
                 "Missing dependencies",
-                "Plaud V2 couldn't install the Python packages it needs.",
+                "Open Pin couldn't install the Python packages it needs.",
                 &hint,
                 &e,
             );
@@ -1194,7 +1214,7 @@ fn monitor_backend(app: AppHandle, mut generation: u64, budget: Duration) {
                             "SERVER_TIMEOUT",
                             "Server not responding",
                             "The Python backend started but hasn't answered yet.",
-                            "Plaud V2 keeps waiting and carries on by itself if it comes up. \
+                            "Open Pin keeps waiting and carries on by itself if it comes up. \
                              Retry restarts it.",
                             &format!("No answer from /health within {}s", budget.as_secs()),
                         );
@@ -1216,7 +1236,7 @@ fn monitor_backend(app: AppHandle, mut generation: u64, budget: Duration) {
                 set_startup_error(
                     "WATCHDOG_DIED",
                     "Process monitor stopped",
-                    "Plaud V2's crash watchdog could not poll the backend process.",
+                    "Open Pin's crash watchdog could not poll the backend process.",
                     "Restart the app to recover.",
                     &format!("try_wait error: {err}"),
                 );
@@ -1390,6 +1410,10 @@ fn spawn_backend(
         .env("PATH", full_path)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONNOUSERSITE", "1")
+        // Bytecode caches go outside the app bundle: .pyc files written into
+        // Contents/Resources break the bundle's code signature after the first
+        // launch (codesign --verify / spctl fail on the installed app).
+        .env("PYTHONPYCACHEPREFIX", pycache_dir())
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
         .env("PLAUD_API_PORT", port.to_string())
@@ -1515,12 +1539,11 @@ fn terminate_backend(grace: Duration) {
 
 /// Gracefully stop the Python server — disconnect BLE, SIGTERM, then SIGKILL
 pub fn stop_python_server() {
-    // Disconnect BLE before killing Python — give it 2s to complete the BLE
-    // teardown. Only a backend that got as far as answering /health can hold
-    // a BLE connection.
+    // Disconnect BLE before killing Python; send_ble_disconnect waits for the
+    // teardown (instant when nothing is connected). Only a backend that got
+    // as far as answering /health can hold a BLE connection.
     if SERVER_READY.load(Ordering::Acquire) {
         send_ble_disconnect();
-        std::thread::sleep(Duration::from_secs(2));
     }
     terminate_backend(Duration::from_secs(3));
 }

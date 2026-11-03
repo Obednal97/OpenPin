@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — Transcript View Module
+   Open Pin — Transcript View Module
    ============================================================ */
 
 // Track document-level listener to prevent accumulation across openTranscript() calls
@@ -261,7 +261,7 @@ function openTranscript(sessionId, autoPlay = false) {
       <img src="notion-icon.svg" width="16" height="16" style="vertical-align:middle;">
       <span>Notion</span>
     </button>
-    <button class="action-btn subtle hidden" id="notion-update-btn" title="Update title, tags and the Plaud V2 section of the Notion page. Your own notes in Notion are kept.">
+    <button class="action-btn subtle hidden" id="notion-update-btn" title="Update title, tags and the Open Pin section of the Notion page. Your own notes in Notion are kept.">
       <span>Update in Notion</span>
     </button>
     `

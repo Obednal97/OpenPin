@@ -118,7 +118,7 @@ pub fn current_status() -> StartupStatus {
             Some(Err(detail)) => Some(python::StartupError {
                 code: "STARTUP_FAILED".into(),
                 title: "Couldn't start the backend".into(),
-                friendly: "Plaud V2's local server couldn't be started.".into(),
+                friendly: "Open Pin's local server couldn't be started.".into(),
                 hint: "Try again. If this keeps happening, open the diagnostics log.".into(),
                 detail: detail.clone(),
             }),

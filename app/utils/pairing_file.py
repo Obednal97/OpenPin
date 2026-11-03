@@ -22,6 +22,7 @@ from app.utils import pairing_store
 from app.utils.config import load_config, update_config
 from app.utils.constants import DATA_DIR, PROJECT_ROOT
 
+# The app's pre-rename name; a file-format id, kept so older exports import.
 FORMAT = "plaud-v2-pairing"
 VERSION = 1
 MAX_FILE_BYTES = 64 * 1024
@@ -70,13 +71,13 @@ def build_export(devices, now: datetime | None = None) -> dict:
 def parse_export(data) -> list[dict]:
     """Validate a parsed export; return its devices or raise PairingFileError."""
     if not isinstance(data, dict) or data.get("format") != FORMAT:
-        raise PairingFileError("This isn't a Plaud V2 pairing export.")
+        raise PairingFileError("This isn't an Open Pin pairing export.")
     version = data.get("version")
     if type(version) is not int:
         raise PairingFileError("The pairing file has no valid version number.")
     if version != VERSION:
         raise PairingFileError(
-            f"This pairing file is version {version}; this app reads version {VERSION}. Update Plaud V2."
+            f"This pairing file is version {version}; this app reads version {VERSION}. Update Open Pin."
         )
     unknown = set(data) - _TOP_KEYS
     if unknown:
@@ -131,7 +132,7 @@ def parse_export_bytes(raw: bytes) -> list[dict]:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise PairingFileError("That file isn't a Plaud V2 pairing export (not JSON).") from None
+        raise PairingFileError("That file isn't an Open Pin pairing export (not JSON).") from None
     return parse_export(data)
 
 
@@ -152,10 +153,10 @@ def _forbidden_reason(path: Path) -> str | None:
     if any(part.lower().endswith(".app") for part in path.parts):
         return "Choose a location outside an app bundle."
     if _inside(path, PROJECT_ROOT):
-        return "Choose a location outside Plaud V2's own files."
+        return "Choose a location outside Open Pin's own files."
     if _inside(path, DATA_DIR):
         return (
-            "Choose a location outside Plaud V2's data folder: a cleaner that wipes that folder would delete "
+            "Choose a location outside Open Pin's data folder: a cleaner that wipes that folder would delete "
             "the export too."
         )
     return None

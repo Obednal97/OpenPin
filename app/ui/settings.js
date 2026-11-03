@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — Settings Module
+   Open Pin — Settings Module
    ============================================================ */
 
 // OAuth poll handles — stored at module scope so repeated clicks don't accumulate intervals
@@ -1110,7 +1110,7 @@ async function exportPairingFile() {
   if (choice !== 'export') return;
   let path;
   try {
-    path = _pairingDialogPath(await window.plaud.choosePairingExportPath('Plaud V2 pairing.json'));
+    path = _pairingDialogPath(await window.plaud.choosePairingExportPath('Open Pin pairing.json'));
   } catch (err) {
     toast(`Couldn't open the save panel: ${err && err.message ? err.message : err}`, 'error');
     return;
@@ -1537,7 +1537,7 @@ function initSettingsEvents() {
 
   $('#launch-login-toggle').addEventListener('change', async (e) => {
     await window.plaud.setLoginItem(e.target.checked);
-    toast(e.target.checked ? 'Plaud V2 will open at login' : 'Plaud V2 won\'t open at login', 'success');
+    toast(e.target.checked ? 'Open Pin will open at login' : 'Open Pin won\'t open at login', 'success');
   });
 
   $('#show-dock-toggle').addEventListener('change', async (e) => {
@@ -1597,7 +1597,7 @@ function initSettingsEvents() {
     toast(
       e.target.checked
         ? 'Large transfers will use Wi-Fi without asking'
-        : 'Plaud V2 will ask before using Wi-Fi',
+        : 'Open Pin will ask before using Wi-Fi',
       'success',
     );
   });
@@ -1662,7 +1662,7 @@ function initSettingsEvents() {
         body: JSON.stringify({
           event: 'test',
           timestamp: new Date().toISOString(),
-          data: { message: 'Plaud V2 webhook test' },
+          data: { message: 'Open Pin webhook test' },
         }),
       });
       if (!resp.ok) {

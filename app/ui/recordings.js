@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — Recordings List Module
+   Open Pin — Recordings List Module
    ============================================================ */
 
 async function loadRecordings() {

@@ -50,7 +50,7 @@ class TestPythonValidation:
         src = RUST_PYTHON.read_text()
         assert "const REQUIRED_PYTHON: (u32, u32) = (3, 12);" in src
         assert "MIN_PYTHON_VERSION" not in src
-        assert "Plaud V2 needs Python 3.12; couldn't download it" in src
+        assert "Open Pin needs Python 3.12; couldn't download it" in src
 
     def test_standalone_python_download_url(self):
         """python.rs downloads python-build-standalone for Apple Silicon only;

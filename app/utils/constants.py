@@ -1,9 +1,18 @@
-"""Shared constants for Plaud V2."""
+"""Shared constants for Open Pin."""
 
 import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# The product name users see. The app was called "Plaud V2" until v2.6; the
+# data folder, config file name, Keychain service, bundle id (com.plaud.v2) and
+# package name (plaud-v2) still use the old name so installs keep their data.
+# Never build a path from APP_NAME.
+APP_NAME = "Open Pin"
+# Source repository (bug reports, OpenRouter's HTTP-Referer). GitHub redirects
+# the old slug if the repo is renamed; change it here and in app/renderer.js.
+PROJECT_URL = "https://github.com/Obednal97/Plaud-V2"
 
 # User data directory — outside the app bundle so it persists across updates.
 # 1. PLAUD_DATA_DIR env var, if set. The Rust shell always sets it: to
@@ -15,6 +24,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 #    "dev mode" fallback: running app/api_server.py by hand without
 #    PLAUD_DATA_DIR uses real data (see docs/DEVELOPMENT.md). The repo root is
 #    never used: it may be synced elsewhere and the folder holds API keys.
+# The folder keeps the app's old name on purpose (see APP_NAME above);
+# tests/test_legacy_names.py pins it.
 DATA_DIR_ENV = "PLAUD_DATA_DIR"
 PACKAGED_DATA_DIR = Path("~/Library/Application Support/Plaud V2").expanduser()
 

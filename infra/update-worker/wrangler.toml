@@ -1,9 +1,15 @@
-# Cloudflare Worker that proxies the Plaud V2 updater + bug reporter to GitHub.
+# Cloudflare Worker that proxies the Open Pin updater (and the retired bug reporter) to GitHub.
+# Its name (and so its workers.dev URL) keeps the pre-rename name: installed apps call it.
 # No secrets in this file: GH_TOKEN is a Worker secret (`npx wrangler secret put GH_TOKEN`).
 name = "plaud-v2-updates"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
+# Installed apps up to v2.5.x call the workers.dev URL; from Open Pin (v2.6.0)
+# they call the custom domain. Keep both until old installs have updated.
 workers_dev = true
+routes = [
+  { pattern = "openpin.bednal.com", custom_domain = true },
+]
 
 [observability]
 enabled = true

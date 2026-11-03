@@ -478,8 +478,8 @@ class TestPairingFileFormat:
     @pytest.mark.parametrize(
         "doc,fragment",
         [
-            ([], "isn't a Plaud V2 pairing export"),
-            (_export_doc(format="plaud-pairing"), "isn't a Plaud V2 pairing export"),
+            ([], "isn't an Open Pin pairing export"),
+            (_export_doc(format="plaud-pairing"), "isn't an Open Pin pairing export"),
             (_export_doc(version=2), "version 2"),
             (_export_doc(version="1"), "version"),
             (_export_doc(version=True), "version"),

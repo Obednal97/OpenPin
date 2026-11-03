@@ -2,6 +2,7 @@ mod commands;
 mod deep_link;
 mod lifecycle;
 mod logging;
+mod migrate;
 mod paths;
 mod power;
 mod python;
@@ -87,6 +88,13 @@ pub fn run() {
     // Report Rust panics (see lifecycle::install_panic_hook for the ordering).
     lifecycle::install_panic_hook();
 
+    // First launch after updating from "Plaud V2": rename the bundle to
+    // "Open Pin.app" and relaunch from there (see migrate.rs). Before anything
+    // else starts, so there's nothing to stop.
+    if migrate::start_bundle_rename_if_needed() {
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -111,6 +119,10 @@ pub fn run() {
 
             // Cache app version for the diagnostics log (report_error doesn't have AppHandle)
             commands::set_app_version(app.package_info().version.to_string());
+
+            // Move "Open at login" off the pre-rename LaunchAgent, or onto
+            // this copy's path if the app was moved (see migrate.rs).
+            migrate::fix_login_item(app.handle());
 
             // Keep the latest startup message for the page to poll: the first
             // ones are emitted before the page has loaded.
@@ -195,7 +207,7 @@ pub fn run() {
             power::spawn_fallback_detector(app.handle().clone());
 
             // System tray
-            let show = MenuItemBuilder::with_id("show", "Show Plaud V2").build(app)?;
+            let show = MenuItemBuilder::with_id("show", "Show Open Pin").build(app)?;
             let sync = MenuItemBuilder::with_id("sync", "Sync Device").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
@@ -215,7 +227,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .icon_as_template(true)
-                .tooltip("Plaud V2")
+                .tooltip("Open Pin")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => {
@@ -307,7 +319,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Plaud V2")
+        .expect("error while building Open Pin")
         .run(|app, event| {
             match event {
                 // macOS: dock icon click reshows window

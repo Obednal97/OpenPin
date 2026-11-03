@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- CSP managed by Tauri (tauri.conf.json) -->
-  <title>Plaud V2</title>
+  <title>Open Pin</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -19,8 +19,8 @@
   <header id="header" data-tauri-drag-region>
     <div class="header-left">
       <span class="header-separator"></span>
-      <img src="assets/wordmark-white.png" alt="Plaud V2" class="app-wordmark app-wordmark-dark" height="18">
-      <img src="assets/wordmark-black.png" alt="Plaud V2" class="app-wordmark app-wordmark-light" height="18">
+      <img src="assets/wordmark-white.png" alt="Open Pin" class="app-wordmark app-wordmark-dark" height="18">
+      <img src="assets/wordmark-black.png" alt="Open Pin" class="app-wordmark app-wordmark-light" height="18">
     </div>
     <div class="header-center">
       <div id="device-status" class="device-status disconnected">
@@ -149,8 +149,8 @@
     <!-- Empty State -->
     <div id="empty-state" class="empty-state">
       <div class="empty-icon">
-        <img src="assets/icon-white.png" alt="" class="app-wordmark-dark" height="64">
-        <img src="assets/icon-black.png" alt="" class="app-wordmark-light" height="64">
+        <img src="assets/icon-white.svg" alt="" class="app-wordmark-dark" height="64">
+        <img src="assets/icon-black.svg" alt="" class="app-wordmark-light" height="64">
       </div>
       <h2>No recordings yet</h2>
       <p>Connect your Plaud NotePin S and sync recordings, or start a new recording from the device.</p>
@@ -421,7 +421,7 @@
               <span>Delete recordings from the device after sync</span>
             </label>
           </div>
-          <p class="settings-hint mt-2">Wi-Fi is about 50 times faster than Bluetooth, but this Mac is offline for the transfer (about 15 seconds to reconnect afterwards). Without this, Plaud V2 asks each time.</p>
+          <p class="settings-hint mt-2">Wi-Fi is about 50 times faster than Bluetooth, but this Mac is offline for the transfer (about 15 seconds to reconnect afterwards). Without this, Open Pin asks each time.</p>
         </div>
         <details class="settings-section settings-advanced" id="device-advanced">
           <summary>Advanced</summary>
@@ -434,8 +434,8 @@
             <div class="settings-subsection" id="pairing-backup-section">
               <h4>Pairing backup</h4>
               <p class="settings-desc">
-                Your NotePin only connects with two keys that Plaud's cloud issues for it. Plaud V2 also keeps a copy in
-                your login Keychain, so the pairing survives a cleaner app deleting Plaud V2's data. You can also export
+                Your NotePin only connects with two keys that Plaud's cloud issues for it. Open Pin also keeps a copy in
+                your login Keychain, so the pairing survives a cleaner app deleting Open Pin's data. You can also export
                 them to a file, for another Mac or as an extra backup.
               </p>
               <div class="dm-actions">
@@ -810,7 +810,7 @@
               <div style="text-align:center;padding:16px 0;">
                 <div class="settings-desc" style="margin-bottom:12px;">Waiting for you to sign in in the browser…</div>
                 <div class="settings-hint" style="margin-bottom:16px;">
-                  Sign in to your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.
+                  Sign in to your Plaud account in the browser and click <strong>Continue to desktop</strong>. Open Pin finishes signing in by itself.
                 </div>
                 <div class="cloud-divider" style="margin:12px 0;"><span>or paste the sign-in link or token</span></div>
                 <div class="token-input-row" style="margin-top:12px;">
@@ -921,7 +921,7 @@
             <label class="toggle-label auto-step">
               <input type="checkbox" id="launch-login-toggle" class="toggle-input">
               <span class="toggle-switch"></span>
-              <span>Open Plaud V2 at login</span>
+              <span>Start Open Pin at login</span>
             </label>
             <label class="toggle-label auto-step">
               <input type="checkbox" id="show-dock-toggle" class="toggle-input">
@@ -943,8 +943,11 @@
         <div class="settings-section">
           <h3>About</h3>
           <p class="settings-desc">
-            Plaud V2: an open-source companion for your Plaud recorder.
+            Open Pin: an open-source companion for your Plaud recorder.
             Everything runs on your Mac unless you connect a cloud AI provider.
+          </p>
+          <p class="settings-hint mb-2" id="about-disclaimer">
+            Open Pin is an independent project. It isn&rsquo;t made by, affiliated with or endorsed by PLAUD. Plaud and NotePin are trademarks of their owners. Use it with your own NotePin and your own Plaud account, at your own risk.
           </p>
           <p class="settings-desc version" id="app-version">Version …</p>
           <div class="update-check-row">

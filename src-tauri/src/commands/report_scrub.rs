@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn emails() {
-        assert_eq!(scrub_secrets("from ollie.b+x@example.co.uk, ok"), "from [email], ok");
+        assert_eq!(scrub_secrets("from jane.d+x@example.co.uk, ok"), "from [email], ok");
         assert_eq!(scrub_secrets("<a_b@sub.mail.example.com>."), "<[email]>.");
         // Not addresses
         for keep in ["@app.route", "pkg@2.0", "a @ b", "user@localhost", "x@y.1"] {

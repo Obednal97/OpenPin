@@ -25,12 +25,12 @@ _SERVICES = {
     "notion": {
         "name": "Notion",
         "connect": "Connect Notion",
-        "next": "Go back to Plaud V2 and choose the Notion database for your transcripts and summaries.",
+        "next": "Go back to Open Pin and choose the Notion database for your transcripts and summaries.",
     },
     "gdrive": {
         "name": "Google Drive",
         "connect": "Connect Google Drive",
-        "next": "Go back to Plaud V2 and choose the Google Drive folder for your recordings.",
+        "next": "Go back to Open Pin and choose the Google Drive folder for your recordings.",
     },
 }
 
@@ -40,7 +40,7 @@ _SETTINGS_PATH = "Settings\u00a0›\u00a0Integrations"
 # around the centre line). The bars grow left to right on success.
 _BARS = (4, 8, 14, 10, 20, 28, 18, 32, 24, 30, 16, 22, 12, 18, 8, 10, 4)
 
-# The Plaud V2 mark (white V holding two dots) on its black tile, 72x72.
+# The Open Pin mark (white V holding two dots) on its black tile, 72x72.
 _MARK_TILE = (
     '<svg class="tile tile-app" viewBox="0 0 72 72" aria-hidden="true">'
     '<rect width="72" height="72" rx="17" fill="#1d1d1f"/>'
@@ -85,29 +85,29 @@ def _copy(service: str, outcome: str) -> tuple[str, str, str]:
     """(tab title, heading, body) for one outcome."""
     s = _SERVICES[service]
     name = s["name"]
-    again = f"To try again, open {_SETTINGS_PATH} in Plaud V2 and choose {s['connect']}."
+    again = f"To try again, open {_SETTINGS_PATH} in Open Pin and choose {s['connect']}."
     if outcome == "connected":
         return (
             f"Connected to {name}",
-            f"Plaud V2 is connected to {name}",
+            f"Open Pin is connected to {name}",
             f"{s['next']} You can close this tab.",
         )
     if outcome == "cancelled":
         return (
             f"{name} not connected",
             f"{name} wasn't connected",
-            f"Access was declined on {name}'s page, so nothing changed in Plaud V2. {again}",
+            f"Access was declined on {name}'s page, so nothing changed in Open Pin. {again}",
         )
     if outcome == "expired":
         return (
             "Link out of date",
             "This connection link is out of date",
-            f"It belongs to an earlier attempt to connect {name}, so Plaud V2 ignored it. {again}",
+            f"It belongs to an earlier attempt to connect {name}, so Open Pin ignored it. {again}",
         )
     return (
         f"{name} not connected",
         f"{name} didn't finish connecting",
-        f"Plaud V2 couldn't finish the sign-in with {name}'s reply. {again} "
+        f"Open Pin couldn't finish the sign-in with {name}'s reply. {again} "
         "If it keeps failing, use Report a bug in Settings.",
     )
 
@@ -144,10 +144,10 @@ def render(service: str, outcome: str, detail: str | None = None, *, nonce: str 
             f"<pre>{html.escape(str(detail)[:600])}</pre></details>"
         )
     status_label = {
-        "connected": f"Plaud V2 linked to {name}",
-        "cancelled": f"Plaud V2 not linked to {name}",
-        "expired": f"Plaud V2 not linked to {name}",
-        "failed": f"Plaud V2 not linked to {name}",
+        "connected": f"Open Pin linked to {name}",
+        "cancelled": f"Open Pin not linked to {name}",
+        "expired": f"Open Pin not linked to {name}",
+        "failed": f"Open Pin not linked to {name}",
     }[outcome]
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -156,7 +156,7 @@ def render(service: str, outcome: str, detail: str | None = None, *, nonce: str 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
-<title>{html.escape(title)} · Plaud V2</title>
+<title>{html.escape(title)} · Open Pin</title>
 <link rel="icon" href="{_FAVICON}">
 <style>
 :root {{
