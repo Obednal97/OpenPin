@@ -28,14 +28,14 @@ try:
     with open(_CONFIG_PATH) as _f:
         _cfg = json.load(_f)
 except FileNotFoundError:
-    sys.exit(f"Config not found at {_CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+    sys.exit(f"Config not found at {_CONFIG_PATH}. Run the Open Pin app first to pair a device.")
 
 # Serial number: $PLAUD_SN, else the first device paired in the app.
 _SN = os.environ.get("PLAUD_SN") or next(iter(_cfg.get("device_bind_tokens", {})), "")
 BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(_SN)
 SN_SIG = _cfg.get("device_sn_signatures", {}).get(_SN)
 if not BIND_TOKEN or not SN_SIG:
-    sys.exit(f"No credentials for SN {_SN} in config — re-pair device via the Plaud V2 app first.")
+    sys.exit(f"No credentials for SN {_SN} in config — re-pair device via the Open Pin app first.")
 
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"
@@ -316,7 +316,7 @@ async def main():
                 args.no_transcribe = True
 
     print("=" * 60)
-    print("  PLAUD V2 — Sync, Decrypt & Transcribe")
+    print("  OPEN PIN — Sync, Decrypt & Transcribe")
     print("=" * 60)
     if not args.no_transcribe:
         print(f"  Whisper model: {model} ({model_info['accuracy']})")

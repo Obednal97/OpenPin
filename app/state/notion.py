@@ -169,7 +169,7 @@ def _register_client(registration_endpoint):
     r = http_requests.post(
         registration_endpoint,
         json={
-            "client_name": "Plaud V2",
+            "client_name": "Open Pin",
             "redirect_uris": [f"http://localhost:{NOTION_CALLBACK_PORT}/notion/callback"],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],

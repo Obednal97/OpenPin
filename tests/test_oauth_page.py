@@ -26,7 +26,7 @@ def test_every_page_renders_with_its_outcome(service, outcome):
 
 def test_connected_page_says_what_to_do_next():
     page = oauth_page.render("notion", "connected")
-    assert "Plaud V2 is connected to Notion" in page
+    assert "Open Pin is connected to Notion" in page
     assert "choose the Notion database" in page
 
 

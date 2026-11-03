@@ -154,7 +154,7 @@ def transcript_part(content: str) -> str:
     for m in TRANSCRIPT_HEADING_RE.finditer(content):
         pass
     body = content[m.end() :] if m else content
-    end = re.search(r"^\s*---\s*\n\s*\*End of Plaud V2 section\*", body, re.M)
+    end = re.search(r"^\s*---\s*\n\s*\*End of (?:Open Pin|Plaud V2) section\*", body, re.M)
     if end:
         body = body[: end.start()]
     return body

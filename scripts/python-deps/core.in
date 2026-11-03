@@ -1,4 +1,4 @@
-# Core runtime for the Plaud V2 backend, installed into the app-managed venv
+# Core runtime for the Open Pin backend, installed into the app-managed venv
 # at launch. Edit this, then run scripts/lock-python-deps.sh to regenerate
 # app/requirements/core.txt.
 flask

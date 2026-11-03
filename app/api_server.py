@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plaud V2 — Flask API server.
+"""Open Pin — Flask API server.
 
 Wraps the existing BLE/crypto/transcription code as HTTP endpoints.
 Spawned by the Tauri Rust shell as a child process on localhost:5123.
@@ -288,7 +288,7 @@ if __name__ == "__main__":
             last_err = e
             continue
         print(f"PLAUD_PORT_BOUND: {candidate}", flush=True)
-        print(f"Plaud V2 API server starting on http://127.0.0.1:{candidate}", flush=True)
+        print(f"Open Pin API server starting on http://127.0.0.1:{candidate}", flush=True)
         bound = True
         # Listening now: WiFi recovery from a crashed sync runs in the background.
         _start_wifi_recovery()

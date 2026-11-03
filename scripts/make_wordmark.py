@@ -13,20 +13,21 @@ wordmark-header-{black,white}.png (29 px tall, 11 px of ink, as before).
 
     python3 scripts/make_wordmark.py            # into app/assets
 """
+
 import math
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-CAP = 958            # cap height
-STROKE = 168         # stem and bar weight
-R_OUT = 290          # outer corner radius (P bowl, D, arch)
-R_IN = 20            # inner corner radius
-R_FOOT = 250         # L / E bottom-left corner
-SLANT = 50 / 160     # L terminal: dx per unit of dy
-TOP = 4              # top margin inside the canvas
-HEIGHT = 967         # canvas height (as the old wordmark)
+CAP = 958  # cap height
+STROKE = 168  # stem and bar weight
+R_OUT = 290  # outer corner radius (P bowl, D, arch)
+R_IN = 20  # inner corner radius
+R_FOOT = 250  # L / E bottom-left corner
+SLANT = 50 / 160  # L terminal: dx per unit of dy
+TOP = 4  # top margin inside the canvas
+HEIGHT = 967  # canvas height (as the old wordmark)
 
 
 def rounded(points):
@@ -85,17 +86,34 @@ def letter_e(w=870, mid=800):
     cut = s * SLANT
     m0 = (CAP - s) / 2
     outer = [
-        (0, 0, 0), (w, 0, 0), (w - cut, s, 0), (s, s, R_IN),
-        (s, m0, R_IN), (mid, m0, 0), (mid - cut, m0 + s, 0), (s, m0 + s, R_IN),
-        (s, CAP - s, R_IN), (w, CAP - s, 0), (w - cut, CAP, 0), (0, CAP, R_FOOT),
+        (0, 0, 0),
+        (w, 0, 0),
+        (w - cut, s, 0),
+        (s, s, R_IN),
+        (s, m0, R_IN),
+        (mid, m0, 0),
+        (mid - cut, m0 + s, 0),
+        (s, m0 + s, R_IN),
+        (s, CAP - s, R_IN),
+        (w, CAP - s, 0),
+        (w - cut, CAP, 0),
+        (0, CAP, R_FOOT),
     ]
     return [outer], w
 
 
 def letter_n(w=910):
     s = STROKE
-    outer = [(0, CAP, 0), (0, 0, R_OUT), (w, 0, R_OUT), (w, CAP, 0),
-             (w - s, CAP, 0), (w - s, s, R_IN), (s, s, R_IN), (s, CAP, 0)]
+    outer = [
+        (0, CAP, 0),
+        (0, 0, R_OUT),
+        (w, 0, R_OUT),
+        (w, CAP, 0),
+        (w - s, CAP, 0),
+        (w - s, s, R_IN),
+        (s, s, R_IN),
+        (s, CAP, 0),
+    ]
     return [outer], w
 
 
@@ -106,8 +124,13 @@ def letter_i():
 # (letter, gap before it). Gaps follow PLAVD's spacing (~250 between straight
 # sides), opened up after the E's terminals and closed a little after round O.
 LAYOUT = [
-    (letter_o, 1), (letter_p, 235), (letter_e, 250), (letter_n, 300),
-    (letter_p, 650), (letter_i, 250), (letter_n, 250),
+    (letter_o, 1),
+    (letter_p, 235),
+    (letter_e, 250),
+    (letter_n, 300),
+    (letter_p, 650),
+    (letter_i, 250),
+    (letter_n, 250),
 ]
 
 
@@ -133,8 +156,16 @@ def rasterise(svg, png, ink_height=None, pad=(0, 0)):
     """SVG -> PNG with a transparent background via ImageMagick."""
     cmd = ["magick", "-background", "none", "-density", "96", str(svg)]
     if ink_height:
-        cmd += ["-trim", "+repage", "-resize", f"x{ink_height}",
-                "-bordercolor", "none", "-border", f"{pad[0]}x{pad[1]}"]
+        cmd += [
+            "-trim",
+            "+repage",
+            "-resize",
+            f"x{ink_height}",
+            "-bordercolor",
+            "none",
+            "-border",
+            f"{pad[0]}x{pad[1]}",
+        ]
     subprocess.run(cmd + [f"PNG32:{png}"], check=True)
 
 
