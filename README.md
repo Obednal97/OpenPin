@@ -163,12 +163,14 @@ manager.
   `diarize` library downloads its 25 MB WeSpeaker voice model from WeSpeaker's own server (hosted
   in mainland China, on Tencent Cloud). Only the model is downloaded; no audio is sent.
 
-**Crash reports** are on by default and can be turned off in **Settings › General › System ›
-Send anonymous crash reports**. Before a report is sent, the app removes your user name and home
-folder, device serial numbers, Bluetooth IDs, API keys and tokens, e-mail addresses, and Notion and
-Google Drive links. Recording audio, transcripts and summaries are never included. Reports become
-issues in the private GitHub repo. **Report a bug** (the bug icon in the toolbar) sends a report
-you write yourself, even with crash reports off.
+**No crash reports.** The app never sends errors or bug reports anywhere; it only writes them to
+its local logs. To report a bug, click the bug icon in the toolbar (or **Settings › General ›
+System › Export bug report**) and choose **Export bug report**. It saves a zip to your Downloads
+folder with what you wrote, app and Mac details, a few checks (signed in or not, whether keys are
+set, the last NotePin handshake) and recent logs. Your home folder and user name, device serial
+numbers, Bluetooth IDs, API keys and tokens, e-mail addresses, and Notion and Google Drive links
+are removed. Recording audio, transcripts and summaries are never included. Look through the zip,
+then attach it to a [GitHub issue](https://github.com/Obednal97/Plaud-V2/issues/new?template=bug_report.yml).
 
 ## Troubleshooting
 
@@ -176,7 +178,7 @@ you write yourself, even with crash reports off.
 |---|---|
 | `~/Library/Logs/Plaud V2/app.log` | The app and its Python backend (startup, BLE, sync, errors). Rotates at 1 MB to `app.log.1` |
 | `~/Library/Logs/Plaud V2/update.log` | Every step of the last update install, and why it stopped if it did |
-| `~/Library/Application Support/com.plaud.v2/diagnostics.log` | Errors the app caught, including ones it didn't report. Open it from the splash screen's **Open diagnostics log** |
+| `~/Library/Application Support/com.plaud.v2/diagnostics.log` | Errors the app caught. Open it from the splash screen's **Open diagnostics log** |
 | `~/Library/Application Support/Plaud V2/wifi_sync.log` | WiFi syncs (appended, not rotated) |
 
 Common problems:

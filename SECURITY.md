@@ -20,8 +20,7 @@ Mac, other machines on the network, and a tampered update.
 | Other users on the Mac | Config files are written with mode `0600` |
 | Credentials in the process list | The WiFi-sync worker gets its credentials on stdin, not in `argv` |
 | A tampered or broken update | Downloaded through the Worker; size and SHA-256 checked; the install script refuses any bundle that isn't `com.plaud.v2` at the expected version, signed by team 4SN93PWF7Z, and accepted by Gatekeeper |
-| Personal data in crash reports | Reports are scrubbed before sending (home folder, serials, BLE IDs, keys, tokens, e-mail addresses, Notion and Drive links) and can be turned off. Recordings, transcripts and summaries are never sent |
-| Abuse of the report endpoint | The Worker rate-limits per IP and globally, caps issues and comments per day, and fences submitted text so GitHub renders none of it |
+| Personal data in bug reports | The app sends no crash or bug reports. **Export bug report** saves a zip to `~/Downloads` that the user reviews and attaches to an issue themselves. Every file in it is scrubbed first (home folder, user names, serials, BLE IDs, keys, tokens, e-mail addresses, Notion and Drive links); `GET /diagnostics` returns only booleans, counts, the API host and the last four characters of serials. Recordings, transcripts and summaries are never included |
 
 Not in scope: malware running as the same user. It can read the config (API keys and device
 tokens are stored as plain JSON, not in the Keychain) and the backend's environment, which holds
