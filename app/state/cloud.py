@@ -123,7 +123,7 @@ def _auth_headers(token):
         "x-device-id": _client_device_id(),
         "timezone": _system_timezone(),
         "x-request-id": uuid.uuid4().hex,
-        "User-Agent": "PlaudV2",
+        "User-Agent": "OpenPin",
     }
     id_hash = (_cloud_state.get("user") or {}).get("id_hash")
     if id_hash:  # known once /user/me has answered
@@ -518,7 +518,7 @@ def refresh_user_token():
     try:
         r = http_requests.post(
             f"{domain}/auth/refresh-user-token",
-            headers={"Content-Type": "application/json", "app-platform": "desktop", "User-Agent": "PlaudV2"},
+            headers={"Content-Type": "application/json", "app-platform": "desktop", "User-Agent": "OpenPin"},
             cookies={"pld_ut": ut or "", "pld_urt": urt},
             json={},
             timeout=15,
@@ -558,7 +558,7 @@ _LOGIN_STARTED_KEY = "plaud_login_started_at"
 # How long a plaud://login link is accepted after the user starts a sign-in.
 LOGIN_LINK_TTL_S = 15 * 60
 UNREQUESTED_LINK_MESSAGE = (
-    "Ignored a Plaud sign-in link because no sign-in was started from Plaud V2 "
+    "Ignored a Plaud sign-in link because no sign-in was started from Open Pin "
     "in the last 15 minutes. To sign in, use Settings › Plaud Cloud."
 )
 

@@ -35,7 +35,7 @@ def start(on_exit=None, interval: float = 2.0) -> bool:
     _started = True
 
     def _exit():
-        logging.warning("[parent-watch] Plaud V2 shell (pid %s) is gone; stopping the backend", original)
+        logging.warning("[parent-watch] Open Pin shell (pid %s) is gone; stopping the backend", original)
         if on_exit is not None:
             try:
                 on_exit()

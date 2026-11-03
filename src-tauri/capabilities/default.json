@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Plaud V2",
+  "description": "Default capabilities for Open Pin",
   "windows": ["main"],
   "permissions": [
     "core:default",

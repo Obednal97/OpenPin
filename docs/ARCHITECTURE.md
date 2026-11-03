@@ -1,7 +1,31 @@
 # Architecture
 
-How Plaud V2 is put together, as of v2.4.0. For running and testing it see
+How Open Pin is put together, as of v2.4.0. For running and testing it see
 [DEVELOPMENT.md](DEVELOPMENT.md); for shipping it see [RELEASING.md](RELEASING.md).
+
+## Names
+
+The app was called **Plaud V2** until it was renamed **Open Pin** (after v2.5.3). Everything
+users see says Open Pin. These internal names keep the old name on purpose, because existing
+installs, their data or their permissions depend on them. Don't rename them:
+
+| Legacy name | Where | Why it stays |
+|---|---|---|
+| `com.plaud.v2` | Bundle ID (`tauri.conf.json`), `Application Support/com.plaud.v2/` (venv, Python, FFmpeg, updates, `diagnostics.log`), `com.plaud.v2.dev` | macOS ties Bluetooth permission, notifications and the Keychain items' access to it; the updater refuses any other ID |
+| `Plaud V2`, `Plaud V2 (Dev)` | Data folder `Application Support/Plaud V2/`, logs `Logs/Plaud V2/` (`paths.rs`, `app/utils/constants.py`) | Recordings, settings and tokens live there. Fixed literals, never derived from `productName` |
+| `.plaud_v2_config.json`, `.plaud_config.json`, config keys | Data folder | Existing settings |
+| `Plaud V2 pairing`, `Plaud V2 (Dev) pairing` | Keychain service names (`app/utils/pairing_store.py`) | Existing pairing backups. Item labels say Open Pin |
+| `plaud-v2-pairing` | Pairing export file format (`app/utils/pairing_file.py`) | Older exports import |
+| `plaud-v2`, `plaud_v2` | Crate, binary (`Contents/MacOS/plaud-v2`), Python package, log targets (`RUST_LOG=plaud_v2=…`) | Internal only |
+| `plaud://` | Deep-link scheme | Plaud's sign-in redirects to it |
+| `PLAUD_*` | Environment variables (`PLAUD_DATA_DIR`, `PLAUD_API_TOKEN`…), the `X-Plaud-Token` header | Internal only |
+| `plaud-v2-updates` | The update Worker and its `workers.dev` URL (`WORKER_BASE`) | Installed apps call that URL |
+| `<!-- plaud-v2-worker -->` | Marker in issues the Worker created | Finds existing issues |
+| `Plaud V2 — transcript & summary` | Notion section heading written before the rename | Still recognised, so updates replace old sections in place |
+
+`tests/test_legacy_names.py` and the tests in `paths.rs` and `migrate.rs` pin these. How installs
+move from `Plaud V2.app` to `Open Pin.app` is in
+[RELEASING.md](RELEASING.md#the-rename-to-open-pin).
 
 ## Overview
 
@@ -18,7 +42,7 @@ Three parts in one macOS app bundle:
    and the shell through Tauri commands.
 
 ```
-┌─────────────────────── Plaud V2.app ───────────────────────┐
+┌─────────────────────── Open Pin.app ───────────────────────┐
 │ Frontend (WKWebView, tauri://localhost)                    │
 │   tauri-bridge.js → window.plaud.*                         │
 │      │ invoke()/events                 │ fetch() + token   │
@@ -45,7 +69,8 @@ Three parts in one macOS app bundle:
 | `lifecycle.rs` | Starts the backend on a background thread; startup status for the splash (`get_startup_status`, `retry_startup`); shutdown (BLE disconnect, then SIGTERM/SIGKILL) once, off the main thread; SIGTERM/SIGINT handling; the panic hook |
 | `python.rs` | Managed Python runtime and venv, lockfiles, port choice, per-launch API token, spawning `api_server.py`, `/health` polling, crash restarts (up to 3), orphan cleanup via a PID file |
 | `power.rs` | Sleep/wake: `NSWorkspace` notifications, plus a wall-clock fallback; sends one `system-wake` event per wake |
-| `paths.rs` | Where everything lives on disk: the data folder passed to Python as `PLAUD_DATA_DIR`, Application Support and log folders, and the separate dev-build folders |
+| `paths.rs` | Where everything lives on disk: the data folder passed to Python as `PLAUD_DATA_DIR`, Application Support and log folders, and the separate dev-build folders. All fixed literals with the legacy name (see [Names](#names)) |
+| `migrate.rs` | The rename to Open Pin: renames a `Plaud V2.app` bundle to `Open Pin.app` on its first launch, and moves the "Open at login" LaunchAgent to the new name |
 | `logging.rs` | `~/Library/Logs/Plaud V2/app.log` (rotates at 1 MB, one old file kept). Backend stdout/stderr lands here too. `RUST_LOG` overrides levels |
 | `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, error logging, the bug report export (`export_bug_report`, `reveal_in_finder`) and the diagnostics log |
 | `commands/report_scrub.rs` | Removes secrets and personal data from exported bug reports |
@@ -290,8 +315,9 @@ summary's title replaces it, unless the user renamed the recording in between.
   OAuth flow with PKCE. The browser redirects to a one-shot callback server on `localhost:5124`.
 - Each recording is one page, found by its **Session ID** property (upsert), so a push can be
   repeated safely.
-- The app writes its content between a heading (`Plaud V2 — transcript & summary`) and an end
-  marker, and only ever replaces that section. Tag and title changes update **properties only**.
+- The app writes its content between a heading (`Open Pin — transcript & summary`) and an end
+  marker, and only ever replaces that section. Sections written before the rename (headed
+  `Plaud V2 — transcript & summary`) are recognised too and replaced with the new markers. Tag and title changes update **properties only**.
 - Schema changes only add: a `Session ID` column, a `Tags` multi-select, new tag options.
 - Pushes go through a **durable queue** on disk (`.notion_queue.json`), retried with backoff,
   paused while Notion auth is broken, with failures listed in Settings with a Retry button.
@@ -333,7 +359,7 @@ The app has no GitHub token. It talks only to the `plaud-v2-updates` Cloudflare 
 sequenceDiagram
     participant App as Rust shell
     participant W as plaud-v2-updates Worker
-    participant GH as GitHub (private repo)
+    participant GH as GitHub
     App->>W: GET /v1/latest (5 s after launch, then every 4 h)
     W->>GH: releases/latest (cached 5 min)
     W-->>App: version, asset name/size/sha256, download_url
@@ -341,7 +367,7 @@ sequenceDiagram
     W-->>App: 302 to a short-lived GitHub URL
     App->>GH: download DMG, check size and SHA-256
     Note over App: banner: Restart to Update
-    App->>App: helper script: mount DMG, check bundle ID, version,<br/>codesign, team 4SN93PWF7Z, Gatekeeper, swap, relaunch
+    App->>App: helper script: mount DMG, check bundle ID, version,<br/>codesign, team ID, Gatekeeper, swap, relaunch
 ```
 
 Errors: Rust panics, renderer errors and Python tracebacks go through `report_error`, which only

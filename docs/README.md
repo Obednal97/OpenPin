@@ -1,11 +1,12 @@
-# Plaud V2 documentation
+# Open Pin documentation
 
 Start with the [project README](../README.md) for what the app does, how to install it and where
-the logs are. Then, in reading order:
+the logs are. Open Pin was called Plaud V2 until the rename after v2.5.3; some internal names still
+use that (see [ARCHITECTURE.md](ARCHITECTURE.md#names)). Then, in reading order:
 
 | Doc | Read it to |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Understand how the app works: modules, startup, security model, data locations, device sync, AI pipeline, Notion, updates |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Understand how the app works: legacy names, modules, startup, security model, data locations, device sync, AI pipeline, Notion, updates |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Run it from source, run the tests and linters, avoid the known gotchas, change Python dependencies |
 | [RELEASING.md](RELEASING.md) | Build, sign, notarise and publish a release; rotate the update server's token; what an exported bug report contains |
 | [../SECURITY.md](../SECURITY.md) | Report a problem; threat model; secrets policy; accepted risks |

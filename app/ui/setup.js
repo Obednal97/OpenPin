@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — First-Run Setup / Onboarding
+   Open Pin — First-Run Setup / Onboarding
    Shows on first launch when no device has been paired.
    ============================================================ */
 
@@ -43,13 +43,14 @@ function showSetupWelcome() {
 
   _renderSetup(`
     <div class="empty-icon">
-      <img src="assets/icon-white.png" alt="" class="app-wordmark-dark" height="56">
-      <img src="assets/icon-black.png" alt="" class="app-wordmark-light" height="56">
+      <img src="assets/icon-white.svg" alt="" class="app-wordmark-dark" height="56">
+      <img src="assets/icon-black.svg" alt="" class="app-wordmark-light" height="56">
     </div>
-    <h2>Welcome to Plaud V2</h2>
+    <h2>Welcome to Open Pin</h2>
     <p>Your private, local voice recorder companion. Sync, transcribe, and organise recordings from your Plaud NotePin S — no cloud required.</p>
     <button class="action-btn primary" id="setup-get-started">Get started</button>
     <button class="setup-skip" id="setup-skip-welcome">Skip for now</button>
+    <p class="setup-disclaimer">Open Pin is an independent project. It isn't made by, affiliated with or endorsed by PLAUD. Plaud and NotePin are trademarks of their owners. Use it with your own NotePin and your own Plaud account, at your own risk.</p>
   `);
 
   _showOverlay();
@@ -117,9 +118,9 @@ function _showCloudLogin() {
         _renderSetup(`
           <div class="setup-spinner"></div>
           <h2>Waiting for you to sign in</h2>
-          <p>Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.</p>
+          <p>Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Open Pin finishes signing in by itself.</p>
           <div style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg-input);border-radius:var(--radius-sm);text-align:left;">
-            <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Didn't come back to Plaud V2?</div>
+            <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Didn't come back to Open Pin?</div>
             <div style="font-size:var(--text-xs);color:var(--text-tertiary);line-height:1.5;">
               Paste the <strong>plaud://login</strong> link the browser tried to open, or a token:<br>
               1. Open <strong>web.plaud.ai</strong> in your browser and sign in<br>
@@ -199,7 +200,7 @@ function _showPermissions() {
       </svg>
     </div>
     <h2>Bluetooth access</h2>
-    <p>Plaud V2 uses Bluetooth to find and communicate with your NotePin S device. macOS will ask for your permission when we start scanning.</p>
+    <p>Open Pin uses Bluetooth to find and communicate with your NotePin S device. macOS will ask for your permission when we start scanning.</p>
     <button class="action-btn primary" id="setup-enable-bt">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-right:4px;" aria-hidden="true">
         <path d="M7 7l10 10-5 5V2l5 5L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>

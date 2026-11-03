@@ -17,14 +17,14 @@ try:
     with open(CONFIG_PATH) as _f:
         _cfg = json.load(_f)
 except FileNotFoundError:
-    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Plaud V2 app first to pair a device.")
+    sys.exit(f"Config not found at {CONFIG_PATH}. Run the Open Pin app first to pair a device.")
 
 # Serial number: $PLAUD_SN, else the first device paired in the app.
 SN = os.environ.get("PLAUD_SN") or next(iter(_cfg.get("device_bind_tokens", {})), "")
 BIND_TOKEN = _cfg.get("device_bind_tokens", {}).get(SN)
 SN_SIG = _cfg.get("device_sn_signatures", {}).get(SN)
 if not BIND_TOKEN or not SN_SIG:
-    sys.exit(f"No credentials for SN {SN} in config — re-pair device via the Plaud V2 app first.")
+    sys.exit(f"No credentials for SN {SN} in config — re-pair device via the Open Pin app first.")
 
 W = "00002bb1-0000-1000-8000-00805f9b34fb"
 N = "00002bb0-0000-1000-8000-00805f9b34fb"

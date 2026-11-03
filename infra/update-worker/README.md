@@ -1,10 +1,19 @@
 # plaud-v2-updates (Cloudflare Worker)
 
-Fronts every GitHub call the Plaud V2 app makes, so the DMG ships **no GitHub token**.
+Fronts every GitHub call the Open Pin app makes, so the DMG ships **no GitHub token**.
 The token lives only as a Worker secret and can be rotated without an app release.
 
-Deployed at **https://plaud-v2-updates.leave-hacker-feedback.workers.dev**
-(the hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`).
+Deployed at **https://openpin.bednal.com** (a custom domain, `routes` in `wrangler.toml`; the
+hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`). Installs up to v2.5.x
+call the same Worker at its `workers.dev` address (`workers_dev = true`), which keeps the
+pre-rename Worker name; keep it until they have updated. `/v1/latest` is cached per host, because
+its `download_url` must stay on the host the app called.
+
+**Test channel:** callers whose IP is in the secret `CANARY_IPS` (comma-separated;
+`npx wrangler secret put CANARY_IPS`) get the newest release including pre-releases
+(`X-Open-Pin-Channel: canary`); everyone else gets `releases/latest`.
+
+The repository it reads releases from is `REPO` in `src/index.js`.
 
 ## Endpoints
 
@@ -17,8 +26,8 @@ Deployed at **https://plaud-v2-updates.leave-hacker-feedback.workers.dev**
 
 ### Issue content (everything posted runs under the owner's GitHub identity)
 
-- The body starts with `<!-- plaud-v2-worker -->`, then the notice "Automated report submitted by a
-  Plaud V2 install — unverified content", the app version / macOS line (plain text), and the
+- The body starts with `<!-- plaud-v2-worker -->`, then the notice "Automated report submitted by an
+  Open Pin install — unverified content", the app version / macOS line (plain text), and the
   submitted body inside a `~~~~~text` code fence, so GitHub renders none of it: no links, images,
   HTML, `@mentions` or `#123` cross-refs. Runs of 3+ tildes are broken up so nothing can close the
   fence; every `<!--` is broken too, so client text can't forge either marker. `auto` issues end
@@ -66,7 +75,6 @@ The response carries `Cache-Control: public, max-age=60`.
 cd infra/update-worker
 node --test test/                         # unit tests first (no network)
 # Cloudflare credentials in the environment: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
-# (on the owner's Mac mini: source ~/.secrets/cloudflare.env)
 npx --yes wrangler@4 deploy
 ```
 
@@ -76,16 +84,16 @@ Also in [docs/RELEASING.md](../../docs/RELEASING.md#rotating-the-workers-github-
 current status of the token.
 
 1. GitHub → Settings → Developer settings → Fine-grained tokens → generate a token for
-   **Obednal97/Plaud-V2** only, with **Contents: Read-only** and **Issues: Read and write**
+   the app's repository (`REPO`) only, with **Contents: Read-only** and **Issues: Read and write**
    (Metadata: Read-only is added automatically).
 2. `npx --yes wrangler@4 secret put GH_TOKEN` and paste it (stdin, not a CLI argument).
-3. Check: `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest` returns the latest version.
+3. Check: `curl -s https://openpin.bednal.com/v1/latest` returns the latest version.
 4. Revoke the old token on GitHub.
 
 ## Smoke tests
 
 ```bash
-W=https://plaud-v2-updates.leave-hacker-feedback.workers.dev
+W=https://openpin.bednal.com
 curl -s $W/v1/latest | jq '{version, asset}'
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$W/v1/download/v2.3.0/Plaud.V2_2.3.0_aarch64.dmg"   # 302 → githubusercontent
 curl -s -X POST -H 'Content-Type: application/json' -d '{"fingerprint":"00","title":"t","body":"b","app_version":"0.0.0","os":"test","dry_run":true}' $W/v1/report

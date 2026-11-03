@@ -1,6 +1,6 @@
 {
-  "productName": "Plaud V2",
-  "version": "2.5.3",
+  "productName": "Open Pin",
+  "version": "2.6.0",
   "identifier": "com.plaud.v2",
   "build": {
     "beforeBuildCommand": { "script": "bash scripts/prepare-frontend.sh", "cwd": ".." },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Plaud V2",
+        "title": "Open Pin",
         "url": "index.html",
         "width": 1200,
         "height": 800,

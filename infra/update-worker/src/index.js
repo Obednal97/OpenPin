@@ -1,6 +1,8 @@
 /**
  * plaud-v2-updates — Cloudflare Worker that fronts every GitHub call the
- * Plaud V2 desktop app makes, so no GitHub token ships inside the DMG.
+ * Open Pin desktop app makes, so no GitHub token ships inside the DMG.
+ * (The Worker, its URL and the markers below keep the app's pre-rename name:
+ * installed apps and existing issues depend on them.)
  *
  *   GET  /v1/latest                     latest published release (cached ~5 min)
  *   GET  /v1/download/<tag>/<asset>     302 to GitHub's signed, token-free asset URL
@@ -14,6 +16,8 @@
  * — no app release needed.
  */
 
+// The GitHub repo releases and issues live in. GitHub redirects API calls for
+// a renamed repo, but update this when the repo is renamed (then redeploy).
 export const REPO = 'Obednal97/Plaud-V2';
 export const USER_AGENT = 'plaud-v2-updates-worker';
 const GH_API = 'https://api.github.com';
@@ -38,7 +42,7 @@ const MAX_REQUEST_BYTES = 32 * 1024;
 
 /** First line of every issue this Worker creates; only such issues get comments. */
 export const WORKER_MARKER = '<!-- plaud-v2-worker -->';
-export const UNVERIFIED_NOTICE = 'Automated report submitted by a Plaud V2 install — unverified content';
+export const UNVERIFIED_NOTICE = 'Automated report submitted by an Open Pin install — unverified content';
 /** GitHub author associations only the PAT's owner / collaborators can have. */
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
@@ -87,8 +91,8 @@ export function parseChecksum(text, fileName, { dedicated = false } = {}) {
     const m = raw.trim().match(/^([0-9a-fA-F]{64})(?:\s+\*?(.+))?$/);
     if (m) entries.push({ digest: m[1].toLowerCase(), name: m[2] ? m[2].trim() : null });
   }
-  // GitHub turns spaces in uploaded asset names into dots ("Plaud V2_…" →
-  // "Plaud.V2_…"), so compare names with that normalisation too.
+  // GitHub turns spaces in uploaded asset names into dots ("Open Pin_…" →
+  // "Open.Pin_…"), so compare names with that normalisation too.
   const norm = (n) => n.replace(/^.*\//, '').replace(/ /g, '.');
   const named = entries.find((e) => e.name && fileName && norm(e.name) === norm(fileName));
   if (named) return named.digest;
@@ -222,7 +226,7 @@ export function validateReport(payload) {
 function reportMeta(report) {
   const os = plainInline(report.os, 64) || 'unknown';
   const kind = report.kind === 'user' ? 'user report' : 'auto report';
-  return `Plaud V2 ${plainInline(report.appVersion, 32)} · macOS ${os} · ${kind}`;
+  return `Open Pin ${plainInline(report.appVersion, 32)} · macOS ${os} · ${kind}`;
 }
 
 export function buildIssueBody(report) {
@@ -338,38 +342,72 @@ async function readChecksum(env, asset, dmgName) {
 // store entries there when tested on 2026-11-02, but nothing relies on that).
 // Its errors are swallowed. A full miss costs 1-3 GitHub calls against the
 // PAT's 5,000/hour quota.
-let memLatest = null; // { body: string, expires: number }
+// Keyed by `${origin}|${channel}`: the body holds a download_url on the host
+// the request came to, and installed apps only accept their own Worker host
+// (old installs: *.workers.dev; newer: the custom domain). One shared entry
+// would hand one host's URL to the other's apps.
+const memLatest = new Map(); // key -> { body: string, expires: number }
+
+// Pre-releases are offered only to a few test machines, matched by the
+// caller's IP (CANARY_IPS: comma-separated, a Worker secret). Installed apps
+// send nothing that identifies them, so the address is the only handle.
+// Everyone else gets releases/latest, which never includes a pre-release.
+export function isCanary(request, env) {
+  const list = String((env && env.CANARY_IPS) || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (list.length === 0) return false;
+  return list.includes(request.headers.get('CF-Connecting-IP') || '');
+}
+
+export function _resetLatestCache() {
+  memLatest.clear();
+}
 
 async function handleLatest(request, env, ctx) {
   const now = Date.now();
-  if (memLatest && memLatest.expires > now) {
-    return new Response(memLatest.body, { headers: latestHeaders('memory') });
+  const origin = new URL(request.url).origin;
+  const channel = isCanary(request, env) ? 'canary' : 'stable';
+  const memKey = `${origin}|${channel}`;
+  const mem = memLatest.get(memKey);
+  if (mem && mem.expires > now) {
+    return new Response(mem.body, { headers: latestHeaders('memory', channel) });
   }
 
-  const cacheKey = new Request(new URL('/__cache/v1/latest', request.url).toString(), { method: 'GET' });
+  const cacheKey = new Request(new URL(`/__cache/v1/latest/${channel}`, request.url).toString(), { method: 'GET' });
   const cache = typeof caches !== 'undefined' ? caches.default : null;
   if (cache) {
     const hit = await cache.match(cacheKey).catch(() => undefined);
     if (hit) {
       const body = await hit.text();
-      memLatest = { body, expires: now + 60 * 1000 };
-      return new Response(body, { headers: latestHeaders('cache') });
+      memLatest.set(memKey, { body, expires: now + 60 * 1000 });
+      return new Response(body, { headers: latestHeaders('cache', channel) });
     }
   }
 
-  const rel = await ghJson(env, `/repos/${REPO}/releases/latest`);
-  if (rel.status === 404) return json({ ok: false, error: 'no published release' }, 404);
-  if (!rel.ok || !rel.data) return json({ ok: false, error: `GitHub returned ${rel.status}` }, 502);
-  const release = rel.data;
-  // releases/latest already excludes drafts and prereleases; belt and braces.
-  if (release.draft || release.prerelease) return json({ ok: false, error: 'no published release' }, 404);
+  let release;
+  if (channel === 'canary') {
+    // Newest first (by creation); the first published one with a DMG,
+    // pre-release or not.
+    const list = await ghJson(env, `/repos/${REPO}/releases?per_page=10`);
+    if (!list.ok || !Array.isArray(list.data)) return json({ ok: false, error: `GitHub returned ${list.status}` }, 502);
+    release = list.data.find((r) => r && !r.draft && pickDmgAsset(r.assets || []));
+    if (!release) return json({ ok: false, error: 'no published release' }, 404);
+  } else {
+    const rel = await ghJson(env, `/repos/${REPO}/releases/latest`);
+    if (rel.status === 404) return json({ ok: false, error: 'no published release' }, 404);
+    if (!rel.ok || !rel.data) return json({ ok: false, error: `GitHub returned ${rel.status}` }, 502);
+    release = rel.data;
+    // releases/latest already excludes drafts and prereleases; belt and braces.
+    if (release.draft || release.prerelease) return json({ ok: false, error: 'no published release' }, 404);
+  }
 
   const dmg = pickDmgAsset(release.assets);
   if (!dmg) return json({ ok: false, error: 'latest release has no .dmg asset' }, 502);
   const sumAsset = pickChecksumAsset(release.assets, dmg.name);
   const sha256 = sumAsset ? await readChecksum(env, sumAsset, dmg.name) : null;
 
-  const origin = new URL(request.url).origin;
   const data = {
     version: versionFromTag(release.tag_name),
     tag: release.tag_name,
@@ -380,18 +418,19 @@ async function handleLatest(request, env, ctx) {
     download_url: `${origin}/v1/download/${encodeURIComponent(release.tag_name)}/${encodeURIComponent(dmg.name)}`,
   };
   const body = JSON.stringify(data);
-  memLatest = { body, expires: now + LATEST_TTL_SECONDS * 1000 };
+  memLatest.set(memKey, { body, expires: now + LATEST_TTL_SECONDS * 1000 });
   if (cache) {
     const toCache = new Response(body, {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${LATEST_TTL_SECONDS}` },
     });
     ctx.waitUntil(cache.put(cacheKey, toCache).catch(() => {}));
   }
-  return new Response(body, { headers: latestHeaders('miss') });
+  return new Response(body, { headers: latestHeaders('miss', channel) });
 }
 
-function latestHeaders(source) {
+function latestHeaders(source, channel = 'stable') {
   return {
+    'X-Open-Pin-Channel': channel,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': `public, max-age=60`,
     'X-Plaud-Cache': source,
