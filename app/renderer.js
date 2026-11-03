@@ -40,7 +40,7 @@ $('#theme-toggle-btn').addEventListener('click', async () => {
 // "Export bug report" saves a zip to ~/Downloads (Rust: export_bug_report);
 // nothing is sent anywhere. The user attaches it to a GitHub issue.
 // Source repo (also in app/utils/constants.py PROJECT_URL); GitHub redirects the old slug after a rename.
-const BUG_REPORT_ISSUE_URL = 'https://github.com/Obednal97/Plaud-V2/issues/new?template=bug_report.yml';
+const BUG_REPORT_ISSUE_URL = 'https://github.com/Obednal97/OpenPin/issues/new?template=bug_report.yml';
 let _bugReportSavedPath = '';
 
 function _bugReportShowForm() {

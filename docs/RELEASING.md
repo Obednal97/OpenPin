@@ -122,8 +122,8 @@ is checked: always upload it.
   no Apple ID password or app-specific password in the process any more.
 - The RSA keys in `keys/` (gitignored; see [DEVELOPMENT.md](DEVELOPMENT.md#keys)). The build fails
   without them.
-- `gh`, signed in with permission to create releases on the repository (`Obednal97/Plaud-V2`;
-  GitHub redirects the old slug if the repository is renamed).
+- `gh`, signed in with permission to create releases on the repository (`Obednal97/OpenPin`, renamed from
+  `Obednal97/Plaud-V2` on 3 November 2026; GitHub redirects the old slug).
 - `jq` (used in the checks below).
 
 Keep all of these outside the repo. Nothing in the repo or the app holds a signing, notarisation
@@ -236,7 +236,7 @@ The only GitHub token in the system is the Worker secret `GH_TOKEN`. Rotate it a
 release is needed.
 
 1. GitHub › Settings › Developer settings › Fine-grained tokens › **Generate new token**, for
-   repository **Obednal97/Plaud-V2** only, with **Contents: Read-only** and **Issues: Read and
+   repository **Obednal97/OpenPin** only, with **Contents: Read-only** and **Issues: Read and
    write** (Metadata: Read-only is added automatically).
 2. Set it (wrangler reads it from the prompt, so it stays out of shell history):
 

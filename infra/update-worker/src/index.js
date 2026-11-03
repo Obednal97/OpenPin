@@ -10,7 +10,7 @@
  *
  * Bindings (wrangler.toml): LIMITER, the ReportLimiter Durable Object that
  * holds the report rate limits and the daily create / comment caps.
- * The only secret is GH_TOKEN (a fine-grained PAT on Obednal97/Plaud-V2 with
+ * The only secret is GH_TOKEN (a fine-grained PAT on Obednal97/OpenPin with
  * Contents: read + Issues: read/write). Rotate it with
  *   npx wrangler secret put GH_TOKEN
  * — no app release needed.
@@ -18,7 +18,7 @@
 
 // The GitHub repo releases and issues live in. GitHub redirects API calls for
 // a renamed repo, but update this when the repo is renamed (then redeploy).
-export const REPO = 'Obednal97/Plaud-V2';
+export const REPO = 'Obednal97/OpenPin';
 export const USER_AGENT = 'plaud-v2-updates-worker';
 const GH_API = 'https://api.github.com';
 
