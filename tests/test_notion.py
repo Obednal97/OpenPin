@@ -963,6 +963,23 @@ def test_repush_replaces_only_app_section(env, fake):
     assert all("allow_deleting_content" not in p for p in upd)
 
 
+def test_repush_replaces_a_section_written_before_the_rename(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _write_transcript(env.trn, SID, {"text": "new words"})
+    old_section = rn._build_app_section({"text": "old words"}, SID).replace("Open Pin", "Plaud V2")
+    assert "Plaud V2 — transcript & summary" in old_section
+    fake.handlers["notion-fetch"] = _page_fetch("T", f"Notes\n\n{old_section}\n\nLater notes")
+
+    r = env.client.post("/notion/push", json={"session_id": SID})
+    assert r.get_json()["content"] == "replaced"
+    op = fake.of("notion-update-page")[1]["content_updates"][0]
+    assert op["old_str"] == old_section
+    assert op["new_str"].startswith("## Open Pin — transcript & summary")
+    assert "End of Open Pin section" in op["new_str"] and "Plaud V2" not in op["new_str"]
+
+
 def test_repush_unchanged_section_makes_no_content_write(env, fake):
     from app.routes import notion as rn
 

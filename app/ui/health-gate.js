@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — Health Gate (startup state machine)
+   Open Pin — Health Gate (startup state machine)
    ----------------------------------------------------------------
    Mounted before the main UI. Covers the window with a splash until
    the Python backend is ready, then reveals the app and starts the
@@ -123,7 +123,7 @@
     splash.setAttribute('data-tauri-drag-region', '');
     splash.innerHTML = `
       <div class="hg-spinner" id="hg-spinner"></div>
-      <div class="hg-title" id="hg-title">Starting Plaud V2</div>
+      <div class="hg-title" id="hg-title">Starting Open Pin</div>
       <div class="hg-msg" id="hg-msg" role="status" aria-live="polite"></div>
       <div class="hg-hint" id="hg-hint" hidden></div>
       <div class="hg-detail" id="hg-detail" hidden></div>
@@ -155,13 +155,13 @@
     const splash = ensureSplash();
     splash.querySelector('#hg-spinner').hidden = false;
     splash.querySelector('#hg-actions').hidden = true;
-    setText('hg-title', 'Starting Plaud V2');
+    setText('hg-title', 'Starting Open Pin');
     setText('hg-msg', message || 'Starting backend…');
     setText('hg-detail', '');
     setText(
       'hg-hint',
       elapsedMs >= SLOW_HINT_MS
-        ? 'The first launch can take a few minutes while Plaud V2 installs what it needs. Keep this window open.'
+        ? 'The first launch can take a few minutes while Open Pin installs what it needs. Keep this window open.'
         : '',
     );
   }
@@ -171,7 +171,7 @@
     splash.querySelector('#hg-spinner').hidden = true;
     splash.querySelector('#hg-actions').hidden = false;
     setText('hg-title', (err && err.title) || 'Backend not responding');
-    setText('hg-msg', (err && err.friendly) || "Plaud V2's local server didn't start.");
+    setText('hg-msg', (err && err.friendly) || "Open Pin's local server didn't start.");
     const hint = [err && err.hint, err && err.code ? `Error code: ${err.code}` : ''].filter(Boolean).join(' · ');
     setText('hg-hint', hint);
     setText('hg-detail', (err && err.detail) || '');
@@ -293,7 +293,7 @@
         showFailure({
           code: 'SERVER_TIMEOUT',
           title: 'Backend not responding',
-          friendly: `Plaud V2's local server didn't start within ${Math.round(ceiling / 60000)} minute${ceiling >= 120000 ? 's' : ''}.`,
+          friendly: `Open Pin's local server didn't start within ${Math.round(ceiling / 60000)} minute${ceiling >= 120000 ? 's' : ''}.`,
           hint: 'Retry, or open the diagnostics log if this keeps happening.',
           detail: st && st.message ? `Last step: ${st.message}` : '',
         });

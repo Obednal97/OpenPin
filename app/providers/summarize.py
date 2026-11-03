@@ -17,6 +17,8 @@ import threading
 
 import requests as http_requests
 
+from app.utils.constants import PROJECT_URL
+
 try:  # Official Anthropic SDK; missing only if the dependency install failed.
     import anthropic
 except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
@@ -316,8 +318,8 @@ def summarize_openrouter(transcript, api_key, model, tag_context=""):
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "https://github.com/Obednal97/Plaud-V2",
-                "X-Title": "Plaud V2",
+                "HTTP-Referer": PROJECT_URL,
+                "X-Title": "Open Pin",
                 "Content-Type": "application/json",
             },
             json={
@@ -735,7 +737,7 @@ def generate_title(full_text, config, segments=None):
                 "openrouter",
                 lambda: _title_chat(
                     "https://openrouter.ai/api/v1/chat/completions",
-                    {"Authorization": f"Bearer {or_key}", "X-Title": "Plaud V2"},
+                    {"Authorization": f"Bearer {or_key}", "X-Title": "Open Pin"},
                     OPENROUTER_CLAUDE_SUMMARIZE,
                     transcript,
                     "OpenRouter",

@@ -312,13 +312,17 @@ def _build_notion_content(t_data):
 # ``update_content`` with the exact current text as ``old_str``), so notes and
 # blocks the user adds above or below it in Notion are never touched.
 
-APP_SECTION_HEADING = "Plaud V2 — transcript & summary"
-APP_SECTION_END = "End of Plaud V2 section"
+APP_SECTION_HEADING = "Open Pin — transcript & summary"
+APP_SECTION_END = "End of Open Pin section"
+# Sections written before the app was renamed carry its old name. They're still
+# recognised, so an update replaces them in place (with the new markers).
+_SECTION_APP_NAMES = ("Open Pin", "Plaud V2")
 SESSION_ID_PROP = "Session ID"
 TAGS_PROP = "Tags"
 
-_SECTION_START_RE = re.compile(r"^#{1,6}[ \t]+" + re.escape(APP_SECTION_HEADING) + r".*$", re.M)
-_SECTION_END_RE = re.compile(r"^.*" + re.escape(APP_SECTION_END) + r".*$", re.M)
+_NAMES_RE = "(?:" + "|".join(re.escape(n) for n in _SECTION_APP_NAMES) + ")"
+_SECTION_START_RE = re.compile(r"^#{1,6}[ \t]+" + _NAMES_RE + r" — transcript & summary.*$", re.M)
+_SECTION_END_RE = re.compile(r"^.*End of " + _NAMES_RE + r" section.*$", re.M)
 
 # Creating a page with a long transcript can take a while.
 _CREATE_TIMEOUT = 120
@@ -338,7 +342,7 @@ def _build_app_section(t_data, session_id, stamp=None):
     return "\n".join(
         [
             heading,
-            f"*Session ID: {session_id} · Written by Plaud V2. Updating from the app replaces everything from "
+            f"*Session ID: {session_id} · Written by Open Pin. Updating from the app replaces everything from "
             f"this heading down to the end line below; add your own notes above or below it.*",
             "",
             _build_notion_content(t_data),
@@ -1251,9 +1255,9 @@ def _update_app_section(page_id, t_data, session_id, append=True):
             return "replaced", ""
         except ValueError as e:
             if not append:
-                logging.warning(f"Could not replace the Plaud V2 section in place ({e}); leaving the page as it is")
+                logging.warning(f"Could not replace the Open Pin section in place ({e}); leaving the page as it is")
                 return "kept", ""
-            logging.warning(f"Could not replace the Plaud V2 section in place ({e}); appending a new one")
+            logging.warning(f"Could not replace the Open Pin section in place ({e}); appending a new one")
 
     if not append:
         return "kept", ""

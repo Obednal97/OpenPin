@@ -46,6 +46,9 @@ from app.utils.config import load_config, update_config
 from app.utils.constants import DATA_DIR, PACKAGED_DATA_DIR
 
 SECURITY = "/usr/bin/security"
+# Keychain service names: the app's pre-rename name, kept so installs find the
+# items they already wrote. Labels (what Keychain Access shows as the name) use
+# the current name; lookups never depend on them.
 RELEASE_SERVICE = "Plaud V2 pairing"
 DEV_SERVICE = "Plaud V2 (Dev) pairing"
 INDEX_ACCOUNT = "index"
@@ -316,7 +319,7 @@ def _update_index(change) -> bool:
     change(serials)
     if serials == before:
         return True
-    return _write(INDEX_ACCOUNT, json.dumps(sorted(serials)), "Plaud V2 paired devices")
+    return _write(INDEX_ACCOUNT, json.dumps(sorted(serials)), "Open Pin paired devices")
 
 
 def load(serial: str) -> dict | None:
@@ -343,7 +346,7 @@ def save(serial: str, sn_signature: str, bind_token: str, name: str | None = Non
         }
     )
     with _lock:
-        if not _write(serial, payload, f"Plaud V2 pairing ({serial_tail(serial)})"):
+        if not _write(serial, payload, f"Open Pin pairing ({serial_tail(serial)})"):
             return False
         _update_index(lambda serials: serials.add(serial))
     return True

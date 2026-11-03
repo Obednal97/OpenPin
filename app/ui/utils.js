@@ -1,5 +1,5 @@
 /* ============================================================
-   Plaud V2 — Shared UI Utilities
+   Open Pin — Shared UI Utilities
    ============================================================ */
 
 // Global error reporter — catches unhandled errors and sends to GitHub Issues
