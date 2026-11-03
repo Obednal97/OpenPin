@@ -1741,25 +1741,11 @@ function initSettingsEvents() {
         statusEl.textContent = summary;
         toast(`Cloud sync: ${summary}`, 'success');
 
-        if (newDown.length > 0) {
-          statusEl.textContent = `Transcribing ${newDown.length} new recording(s)...`;
-          for (let i = 0; i < newDown.length; i++) {
-            const f = newDown[i];
-            if (f.ogg_path) {
-              try {
-                await window.plaud.transcribe(
-                  f.ogg_path,
-                  app.settings.model || 'small',
-                  app.settings.diarize || false,
-                  app.settings.language || 'en',
-                );
-              } catch {}
-            }
-          }
-          statusEl.textContent = `${summary} — transcription complete`;
-        }
-
         await loadRecordings();
+        // Downloads from Plaud Cloud were always transcribed: in the background now.
+        if (queueAutoProcess(newDown, { always: true, language: app.settings.language || 'en' }) > 0) {
+          statusEl.textContent = `${summary} — transcribing in the background`;
+        }
       }
     } catch (err) {
       toast(`Cloud sync error: ${err.message}`, 'error');

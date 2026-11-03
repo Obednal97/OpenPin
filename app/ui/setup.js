@@ -462,35 +462,10 @@ async function completeSetup() {
           const newFiles = (result.files || []).filter((f) => f.status === 'new');
           if (newFiles.length > 0) {
             toast(`Synced ${newFiles.length} recording(s)`, 'success');
-            // Auto-transcribe
-            for (let i = 0; i < newFiles.length; i++) {
-              const f = newFiles[i];
-              if (f.ogg_path) {
-                showProgress(`Transcribing ${i + 1}/${newFiles.length}...`, 60 + (30 * i) / newFiles.length);
-                try {
-                  await window.plaud.transcribe(
-                    f.ogg_path,
-                    app.settings.model || 'small',
-                    app.settings.diarize || false,
-                    app.settings.language || 'auto',
-                  );
-                } catch {}
-              }
-            }
-            toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
-
-            // Auto-summarize if enabled
-            if (app.settings.auto_summarise) {
-              for (const f of newFiles) {
-                const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
-                try {
-                  await window.plaud.summarize(sid);
-                } catch {}
-              }
-              toast('Summaries generated', 'success');
-            }
           }
           await loadRecordings();
+          // First sync after pairing always transcribed: do it in the background.
+          queueAutoProcess(newFiles, { always: true });
         }
       } finally {
         if (_releaseSync(syncGen)) {
