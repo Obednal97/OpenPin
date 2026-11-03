@@ -1,13 +1,13 @@
 name: Bug report
-description: Something in Plaud V2 isn't working.
+description: Something in Open Pin isn't working.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. In Plaud V2, click the bug button in the header (or Settings › General › System) and choose **Export bug report**. It saves a zip to your Downloads folder with app and Mac details, a few checks and recent logs.
+        Thanks for reporting a bug. In Open Pin, click the bug button in the header (or Settings › General › System) and choose **Export bug report**. It saves a zip to your Downloads folder with app and Mac details, a few checks and recent logs.
 
-        Plaud V2 removes your home folder, user name, serial numbers, email addresses and tokens from the zip, but please **look through the files before you attach them**. Delete anything you don't want to share.
+        Open Pin removes your home folder, user name, serial numbers, email addresses and tokens from the zip, but please **look through the files before you attach them**. Delete anything you don't want to share.
   - type: textarea
     id: what-happened
     attributes:
