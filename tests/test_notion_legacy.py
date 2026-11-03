@@ -528,10 +528,17 @@ def test_transient_listing_failure_does_not_create(lenv):
     assert "notion-create-pages" not in lenv.fake.methods()
 
 
-def test_unsupported_listing_falls_back_to_create(lenv):
+def test_unreadable_database_asks_instead_of_creating(lenv):
+    """If older pages can't be checked at all, nothing is created: the owner
+    chooses (a duplicate is what this feature exists to prevent)."""
     _setup_recording(lenv)
     lenv.fake.handlers["notion-query-data-sources"] = _raise("validation_error: unknown mode")
-    assert _push(lenv).get_json()["url"] == NEW_URL
+    body = _push(lenv).get_json()
+    assert body["needs_review"] is True and body["candidates"] == []
+    assert "Couldn't check Notion" in body["message"]
+    assert "notion-create-pages" not in lenv.fake.methods()
+    # "Create a new page" still works.
+    assert _push(lenv, force_new=True).get_json()["url"] == NEW_URL
 
 
 def test_transient_page_fetch_failure_does_not_create(lenv):

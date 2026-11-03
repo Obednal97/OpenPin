@@ -635,6 +635,8 @@ def page_url(session_id):
         if review:
             out["needs_review"] = True
             out["candidates"] = review.get("candidates") or []
+            # No candidates: the check itself couldn't run (MATCH_UNCHECKED).
+            out["message"] = _needs_review(session_id, out["candidates"], unchecked=not out["candidates"])["message"]
     return jsonify(out)
 
 
@@ -1514,8 +1516,9 @@ def _match_legacy_page(session_id, t_data, schema):
 
     Returns ``(outcome, candidates)`` as notion_legacy.classify does; each
     candidate has page_id, url, title, score and duration_ok. Raises on a
-    transient Notion failure (so no duplicate is created blindly); other
-    failures to list the database skip the check (and the page is created).
+    transient Notion failure (the queue retries later). If the database can't
+    be checked at all, returns MATCH_UNCHECKED: the caller asks the user rather
+    than risk a duplicate (they can still choose "Create a new page").
     """
     local = notion_legacy.fingerprint_local(t_data)
     if local["count"] < notion_legacy.MIN_SHINGLES:
@@ -1523,14 +1526,15 @@ def _match_legacy_page(session_id, t_data, schema):
     ds = (schema or {}).get("data_source_id")
     db_id = notion.get_database_id()
     if not ds:
-        return notion_legacy.MATCH_NONE, []
+        logging.warning(f"No data source id for the Notion database; can't look for older pages of {session_id}")
+        return MATCH_UNCHECKED, []
     try:
         rows, _complete = _list_db_rows(ds)
     except Exception as e:
         if _is_transient_error(e):
             raise
         logging.warning(f"Couldn't list the Notion database to look for older pages of {session_id}: {e}")
-        return notion_legacy.MATCH_NONE, []
+        return MATCH_UNCHECKED, []
 
     taken = _linked_page_ids(except_session=session_id)
     entries = _page_fingerprints(rows, db_id, wanted=lambda row, pid: not _row_session_id(row) and pid not in taken)
@@ -1557,12 +1561,20 @@ def _match_legacy_page(session_id, t_data, schema):
     return outcome, found
 
 
-def _needs_review(session_id, candidates):
+# _match_legacy_page couldn't read the database: ask, don't create.
+MATCH_UNCHECKED = "unchecked"
+
+
+def _needs_review(session_id, candidates, unchecked=False):
     return {
         "pushed": False,
         "needs_review": True,
         "url": "",
-        "message": "This recording may already be in Notion, on a page an older version of the app made.",
+        "message": (
+            "Couldn't check Notion for an older page of this recording, so nothing was created."
+            if unchecked
+            else "This recording may already be in Notion, on a page an older version of the app made."
+        ),
         "candidates": [
             {"url": c["url"], "title": c.get("title") or "", "score": c["score"], "duration_ok": c["duration_ok"]}
             for c in candidates
@@ -1883,6 +1895,8 @@ def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False,
                         raise ValueError("The older Notion page for this recording went away; will look again") from e
                 if outcome == notion_legacy.MATCH_REVIEW:
                     return _needs_review(session_id, found)
+                if outcome == MATCH_UNCHECKED:
+                    return _needs_review(session_id, [], unchecked=True)
             return _create_page(session_id, t_data, app_title, tags, schema, poll_budget)
 
         page_id = _extract_page_id(page_url)
