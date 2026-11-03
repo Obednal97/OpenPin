@@ -268,8 +268,8 @@ All model IDs are in `app/providers/_models.py`. The order is:
 
 1. Anthropic `claude-sonnet-5-5` (or OpenRouter `anthropic/claude-sonnet-5.5` if there's no
    Anthropic key)
-2. OpenAI `gpt-6-luna` (or OpenRouter `openai/gpt-6-luna` if there's no OpenAI key)
-3. Ollama, if running locally, with the best model already pulled (`qwen3`, `llama3.3`, ...)
+2. OpenAI `gpt-6.1-sol` (or OpenRouter `openai/gpt-6.1-sol` if there's no OpenAI key)
+3. Ollama, if running locally, with the best model already pulled (`qwen3.8`, `qwen3.6`, `qwen3.5`, `gemma4`, ...; never a `-cloud` tag)
 4. DistilBART (`sshleifer/distilbart-cnn-12-6`), installed on demand
 
 The provider group chosen in Settings goes first. LLMs get the transcript as `[mm:ss] Speaker:
