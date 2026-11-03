@@ -110,7 +110,7 @@ Add API keys in **Settings › Processing**. Without keys everything runs locall
 | OpenRouter | Summaries, if you have no Anthropic or OpenAI key | [openrouter.ai](https://openrouter.ai/keys) |
 
 For local summaries with a better model than DistilBART, install [Ollama](https://ollama.com) and
-pull a model (for example `ollama pull qwen3`). The app uses it when it's running; it never pulls
+pull a model (for example `ollama pull qwen3.5:9b`). The app uses it when it's running; it never pulls
 models itself.
 
 ### Notion

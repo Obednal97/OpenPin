@@ -11,6 +11,7 @@ error and the cascade moves on.
 
 import json
 import logging
+import re
 import textwrap
 import threading
 
@@ -27,6 +28,7 @@ from app.providers._models import (
     CLAUDE_SUMMARIZE_MAX_TOKENS,
     LOCAL_SUMMARIZE,
     OLLAMA_PREFERRED_MODELS,
+    OLLAMA_SUGGESTED_MODEL,
     OLLAMA_URL,
     OPENAI_REASONING_EFFORT,
     OPENAI_SUMMARIZE,
@@ -247,7 +249,9 @@ def _anthropic_call(client):
             raise SummaryError("Claude declined to summarize this transcript")
         if message.stop_reason == "max_tokens":
             raise SummaryError("summary was cut off at the output limit")
-        text = next((b.text for b in message.content if b.type == "text"), "")
+        # All text blocks: after a mid-stream decline the fallback model's text
+        # continues the partial text, with a fallback marker block in between.
+        text = "".join(b.text for b in message.content if b.type == "text")
         return _parse_summary(text)
 
     return call
@@ -351,12 +355,24 @@ def pick_ollama_model(models, preferred=None):
         for m in models:
             if m == preferred or m.split(":")[0] == preferred:
                 return m
-    chat_models = [m for m in models if "embed" not in m.lower()]
-    for prefix in OLLAMA_PREFERRED_MODELS:
-        for m in chat_models:
-            if m.startswith(prefix):
-                return m
+    # Never pick an embedding model, or a "-cloud" tag (that runs on Ollama's
+    # servers, so the transcript would leave the Mac) unless the user chose it.
+    chat_models = [m for m in models if "embed" not in m.lower() and "cloud" not in _ollama_tag(m)]
+    for family in OLLAMA_PREFERRED_MODELS:
+        in_family = [m for m in chat_models if m.split(":")[0] == family]
+        if in_family:
+            return max(in_family, key=_ollama_size_b)  # the biggest one pulled
     return chat_models[0] if chat_models else None
+
+
+def _ollama_tag(model):
+    return model.split(":", 1)[1].lower() if ":" in model else "latest"
+
+
+def _ollama_size_b(model):
+    """Billions of parameters from the tag ("27b", "e4b", "0.6b"); 8 for "latest" and the like."""
+    m = re.search(r"(\d+(?:\.\d+)?)b", _ollama_tag(model))
+    return float(m.group(1)) if m else 8.0
 
 
 def summarize_ollama(transcript, tag_context="", model=None):
@@ -366,7 +382,7 @@ def summarize_ollama(transcript, tag_context="", model=None):
         raise SummaryError(f"not running on {OLLAMA_URL}")
     chosen = pick_ollama_model(models, model)
     if not chosen:
-        raise SummaryError("no chat model pulled (try: ollama pull llama3.2)")
+        raise SummaryError(f"no chat model pulled (try: ollama pull {OLLAMA_SUGGESTED_MODEL})")
 
     def call(system, user_content):
         prompt_chars = len(system) + len(user_content)
@@ -564,24 +580,46 @@ def summarize(full_text, config, tag_context="", segments=None):
 
     all_providers = []
     if config.get("anthropic_api_key"):
-        all_providers.append((f"Anthropic ({CLAUDE_SUMMARIZE})", "anthropic",
-            lambda: summarize_anthropic(transcript, config["anthropic_api_key"], tag_context)))
+        all_providers.append(
+            (
+                f"Anthropic ({CLAUDE_SUMMARIZE})",
+                "anthropic",
+                lambda: summarize_anthropic(transcript, config["anthropic_api_key"], tag_context),
+            )
+        )
     elif or_key and preferred in ("anthropic", "openrouter"):
-        all_providers.append((f"OpenRouter ({OPENROUTER_CLAUDE_SUMMARIZE})", "openrouter-claude",
-            lambda: summarize_openrouter(transcript, or_key, OPENROUTER_CLAUDE_SUMMARIZE, tag_context)))
+        all_providers.append(
+            (
+                f"OpenRouter ({OPENROUTER_CLAUDE_SUMMARIZE})",
+                "openrouter-claude",
+                lambda: summarize_openrouter(transcript, or_key, OPENROUTER_CLAUDE_SUMMARIZE, tag_context),
+            )
+        )
     if config.get("openai_api_key"):
-        all_providers.append((f"OpenAI ({OPENAI_SUMMARIZE})", "openai",
-            lambda: summarize_openai(transcript, config["openai_api_key"], tag_context)))
+        all_providers.append(
+            (
+                f"OpenAI ({OPENAI_SUMMARIZE})",
+                "openai",
+                lambda: summarize_openai(transcript, config["openai_api_key"], tag_context),
+            )
+        )
     elif or_key:
-        all_providers.append((f"OpenRouter ({OPENROUTER_OPENAI_SUMMARIZE})", "openrouter-gpt",
-            lambda: summarize_openrouter(transcript, or_key, OPENROUTER_OPENAI_SUMMARIZE, tag_context)))
-    all_providers.append(("Ollama (local)", "ollama",
-        lambda: summarize_ollama(transcript, tag_context, config.get("ollama_model"))[:2]))
+        all_providers.append(
+            (
+                f"OpenRouter ({OPENROUTER_OPENAI_SUMMARIZE})",
+                "openrouter-gpt",
+                lambda: summarize_openrouter(transcript, or_key, OPENROUTER_OPENAI_SUMMARIZE, tag_context),
+            )
+        )
+    all_providers.append(
+        ("Ollama (local)", "ollama", lambda: summarize_ollama(transcript, tag_context, config.get("ollama_model"))[:2])
+    )
     all_providers.append(("Local (DistilBART)", "local", lambda: (summarize_local(full_text), "")))
 
     preferred_group = _PREFERENCE_GROUP.get(preferred, 0)
     attempts = [
-        p for _, p in sorted(
+        p
+        for _, p in sorted(
             enumerate(all_providers),
             key=lambda ip: (
                 0 if _PROVIDER_GROUP.get(ip[1][1], 9) == preferred_group else 1,
