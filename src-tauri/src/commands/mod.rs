@@ -2083,8 +2083,8 @@ exit 0"#
     #[test]
     fn scrubs_paths() {
         let s = scrub_report_text(
-            "File \"/Users/ollie/projects/x.py\", in /Users/someone-else/Library and '/Users/bob' and /Users/Shared/x",
-            "/Users/ollie",
+            "File \"/Users/jdoe/projects/x.py\", in /Users/someone-else/Library and '/Users/bob' and /Users/Shared/x",
+            "/Users/jdoe",
             SALT,
         );
         assert_eq!(s, "File \"~/projects/x.py\", in /Users/~/Library and '/Users/~' and /Users/Shared/x");
@@ -2094,7 +2094,7 @@ exit 0"#
     #[test]
     fn scrubs_serials_and_uuids() {
         let msg = "API error: /device/connect [SN: 8810A00012345678] — HTTP 500 (device 8810A00012345678)";
-        let s = scrub_report_text(msg, "/Users/ollie", SALT);
+        let s = scrub_report_text(msg, "/Users/jdoe", SALT);
         assert!(!s.contains("8810A00012345678"), "{s}");
         let tag = id_tag(SALT, "8810A00012345678");
         assert_eq!(tag.len(), 8);
@@ -2103,7 +2103,7 @@ exit 0"#
         assert_ne!(id_tag("other", "8810A00012345678"), tag);
 
         let ble = "Device with address 3F2504E0-4F89-11D3-9A0C-0305E82C3301 not found; char 00002bb1-0000-1000-8000-00805f9b34fb";
-        let s = scrub_report_text(ble, "/Users/ollie", SALT);
+        let s = scrub_report_text(ble, "/Users/jdoe", SALT);
         assert!(!s.contains("3F2504E0-4F89"), "{s}");
         assert!(s.contains("uuid-"));
         assert!(s.contains("00002bb1-0000-1000-8000-00805f9b34fb"));
@@ -2183,11 +2183,11 @@ exit 0"#
 
     #[test]
     fn report_text_has_no_secrets() {
-        let msg = "Notion push failed for ollie@example.com: 401 at https://api.notion.com/v1/pages/0123456789abcdef0123456789abcdef \
+        let msg = "Notion push failed for jdoe@example.com: 401 at https://api.notion.com/v1/pages/0123456789abcdef0123456789abcdef \
                    (Authorization: Bearer ntn_123456789012345678901234567890abcd) GET http://127.0.0.1:5123/audio?token=s3cr3t \
                    key sk-ant-api03-AbCdEfGhIjKlMnOpQrSt [SN: 8810A00012345678]";
-        let s = scrub_report_text(msg, "/Users/ollie", SALT);
-        for leaked in ["ollie@example.com", "0123456789abcdef0123456789abcdef", "ntn_1234", "s3cr3t", "AbCdEfGhIjKlMnOpQrSt", "8810A00012345678", "/v1/pages"] {
+        let s = scrub_report_text(msg, "/Users/jdoe", SALT);
+        for leaked in ["jdoe@example.com", "0123456789abcdef0123456789abcdef", "ntn_1234", "s3cr3t", "AbCdEfGhIjKlMnOpQrSt", "8810A00012345678", "/v1/pages"] {
             assert!(!s.contains(leaked), "{leaked} leaked: {s}");
         }
         assert!(s.starts_with("Notion push failed for [email]: 401 at https://api.notion.com/[redacted]"), "{s}");
@@ -2362,7 +2362,7 @@ exit 0"#
     #[test]
     fn every_report_file_is_scrubbed() {
         let files = report_files(&planted_inputs(), |s| {
-            scrub_report_text(s, "/Users/ollie", SALT)
+            scrub_report_text(s, "/Users/jdoe", SALT)
         });
         let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
         assert_eq!(

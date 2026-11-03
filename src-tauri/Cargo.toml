@@ -2,7 +2,7 @@
 name = "plaud-v2"
 version = "2.5.3"
 description = "Open Pin: sync, decrypt and transcribe Plaud NotePin S recordings locally"
-authors = ["Oliver Bednal"]
+authors = ["Open Pin contributors"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.90"

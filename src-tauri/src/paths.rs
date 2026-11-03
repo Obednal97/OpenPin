@@ -18,7 +18,7 @@
 //! `PLAUD_DATA_DIR`, when set, overrides the data folder in both builds. The
 //! shell always passes the resolved folder to Python in `PLAUD_DATA_DIR`, so
 //! the backend and the Rust side (the bug report's `wifi_sync.log`) agree.
-//! Dev data never defaults to the repo: `~/projects` is synced with other
+//! Dev data never defaults to the repo: a checkout may be synced to other
 //! machines and the data folder holds API keys and device tokens.
 
 use std::path::{Path, PathBuf};
