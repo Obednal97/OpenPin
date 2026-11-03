@@ -1103,3 +1103,38 @@ class TestErrorHandling:
             content_type="application/json",
         )
         assert "error" in r.get_json()
+
+
+class TestSyncDoesNotWaitForTranscription:
+    """v2.5.1: a sync ends when the files are on disk. 47 recordings synced over
+    WiFi kept the sync window open, the list empty and 'Syncing' showing for
+    hours while each one was transcribed inside the sync."""
+
+    UI = PROJECT_ROOT / "app"
+
+    def _sources(self):
+        files = [self.UI / "renderer.js", *sorted((self.UI / "ui").glob("*.js"))]
+        return {f.name: f.read_text() for f in files}
+
+    def test_only_the_queue_and_the_transcript_view_transcribe(self):
+        callers = {name for name, src in self._sources().items() if "window.plaud.transcribe(" in src}
+        assert callers == {"recordings.js", "transcript.js"}
+
+    def test_every_sync_path_uses_the_queue(self):
+        src = self._sources()
+        assert src["renderer.js"].count("queueAutoProcess(") >= 4  # manual, WiFi, background, reconnect
+        assert "queueAutoProcess(" in src["setup.js"]
+        assert "queueAutoProcess(" in src["settings.js"]
+
+    def test_queue_honours_auto_transcribe_and_shows_badges(self):
+        rec = self._sources()["recordings.js"]
+        assert "app.settings.auto_transcribe === false" in rec
+        assert "app.processingIds.set(item.sid, 'transcribing')" in rec
+        assert "queued: 'Queued'" in rec
+
+    def test_select_bar_can_queue_a_backlog(self):
+        src = self._sources()
+        html = (self.UI / "index.html").read_text()
+        assert 'id="transcribe-selected-btn"' in html
+        assert "addEventListener('click', transcribeSelected)" in src["renderer.js"]
+        assert "function transcribeSelected()" in src["recordings.js"]

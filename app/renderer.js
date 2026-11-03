@@ -337,42 +337,11 @@ async function performSync(triggerBtn) {
       toast(`Sync complete: ${newFiles.length} new, ${total} total`, 'success');
       toastPartialSync(result);
 
-      if (newFiles.length > 0) {
-        showProgress('Transcribing new recordings...', 60);
-        for (let i = 0; i < newFiles.length; i++) {
-          const f = newFiles[i];
-          if (f.ogg_path) {
-            showProgress(`Transcribing ${i + 1}/${newFiles.length}...`, 60 + (40 * i) / newFiles.length);
-            try {
-              await window.plaud.transcribe(
-                f.ogg_path,
-                app.settings.model || 'small',
-                app.settings.diarize || false,
-                app.settings.language || 'auto',
-              );
-            } catch (err) {
-              console.error(`Transcription failed for ${f.session_id}:`, err);
-            }
-          }
-        }
-        toast(`Transcribed ${newFiles.length} recording(s)`, 'success');
-
-        if (app.settings.auto_summarise) {
-          showProgress('Summarising...', 90);
-          for (const f of newFiles) {
-            if (f.ogg_path) {
-              try {
-                const sid = f.session_id || String(f.ogg_path).split('/').pop().replace('.ogg', '');
-                await window.plaud.summarize(sid);
-              } catch {}
-            }
-          }
-          toast('Summarised new recordings', 'success');
-        }
-      }
-
       await loadRecordings();
       await loadSettings();
+      // Transcribed in the background: the sync is over once the files are here.
+      // (A manual sync always transcribed, whatever "Auto-transcribe" says.)
+      queueAutoProcess(newFiles, { always: true });
 
       const syncDir = app.settings.cloud_sync_direction || 'download';
       if (syncDir === 'twoway' && app.cloudState.logged_in) {
@@ -435,6 +404,7 @@ $('#select-all-btn').addEventListener('click', toggleSelectAllVisible);
 
 $('#delete-selected-btn').addEventListener('click', deleteSelected);
 $('#move-selected-btn').addEventListener('click', moveSelected);
+$('#transcribe-selected-btn').addEventListener('click', transcribeSelected);
 
 // Search
 $('#search-input').addEventListener('input', (e) => {
@@ -808,40 +778,13 @@ async function executeWifiSync(claimedGen) {
     toastPartialSync(result);
 
     if (newFiles.length > 0) {
-      // Auto-transcribe if enabled
-      if (app.settings.auto_transcribe !== false) {
-        for (let i = 0; i < newFiles.length; i++) {
-          _renderWifiProgress('preparing', 'Transcribing...', `Recording ${i + 1} of ${newFiles.length}`, 60 + (25 * i / newFiles.length));
-          const f = newFiles[i];
-          if (f.ogg_path) {
-            try {
-              await window.plaud.transcribe(
-                f.ogg_path,
-                app.settings.model || 'small',
-                app.settings.diarize || false,
-                app.settings.language || 'auto',
-              );
-            } catch {}
-          }
-        }
-        if (app.settings.auto_summarise) {
-          for (let i = 0; i < newFiles.length; i++) {
-            _renderWifiProgress('preparing', 'Summarising...', `Recording ${i + 1} of ${newFiles.length}`, 85 + (10 * i / newFiles.length));
-            const f = newFiles[i];
-            if (f.ogg_path) {
-              try {
-                const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
-                await window.plaud.summarize(sid);
-              } catch {}
-            }
-          }
-        }
-      }
       await loadRecordings();
       await loadSettings();
 
       // Show success
       _renderWifiProgress('check', 'Transfer complete!', `${newFiles.length} recording(s) synced`, 100, 'success');
+      // Transcribed in the background, after the transfer (see queueAutoProcess).
+      queueAutoProcess(newFiles);
     } else {
       _renderWifiProgress('check', 'Transfer complete', 'No new recordings found', 100, 'success');
     }
@@ -980,6 +923,7 @@ window.plaud.onSystemWake(async () => {
                   await loadRecordings();
                   toast('Sync complete', 'success');
                   toastPartialSync(r);
+                  queueAutoProcess((r.files || []).filter((f) => f.status === 'new'));
                 }
               } catch {} finally {
                 if (_releaseSync(gen)) await updateDeviceStatus();
@@ -1297,37 +1241,10 @@ function _startBgPoll() {
             if (newFiles.length > 0) {
               toast(`Synced ${newFiles.length} recording(s)`, 'success');
 
-              // Auto-transcribe if enabled
-              if (app.settings.auto_transcribe !== false) {
-                for (const f of newFiles) {
-                  if (f.ogg_path) {
-                    try {
-                      await window.plaud.transcribe(
-                        f.ogg_path,
-                        app.settings.model || 'small',
-                        app.settings.diarize || false,
-                        app.settings.language || 'auto',
-                      );
-                    } catch {}
-                  }
-                }
-
-                // Auto-summarise if enabled (requires auto-transcribe)
-                if (app.settings.auto_summarise) {
-                  for (const f of newFiles) {
-                    if (f.ogg_path) {
-                      try {
-                        const sid = f.session_id || f.ogg_path.split('/').pop().replace('.ogg', '');
-                        await window.plaud.summarize(sid);
-                      } catch {}
-                    }
-                  }
-                  toast('Auto-summarised new recordings', 'success');
-                }
-              }
-
               await loadRecordings();
               await loadSettings();
+              // Auto-transcribe (and summarise) in the background.
+              queueAutoProcess(newFiles);
 
               const bgSyncDir = app.settings.cloud_sync_direction || 'download';
               if (bgSyncDir === 'twoway' && app.cloudState.logged_in) {
