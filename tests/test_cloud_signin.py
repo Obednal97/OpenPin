@@ -661,3 +661,43 @@ class TestRefreshUserToken:
         assert [u for _m, u in with_urt.urls()].count(f"{EU}/auth/refresh-user-token") == 1
         last = [c for c in with_urt.calls if c[1].endswith("/device/list")][-1]
         assert last[2]["headers"]["Authorization"] == f"bearer {NEW_UT}"
+
+
+# ---------------------------------------------------------------------------
+# Startup: an expired saved token is renewed before anyone is signed out
+# ---------------------------------------------------------------------------
+
+
+class TestStartupRefresh:
+    def restore(self):
+        cloud.PLAUD_CONFIG_PATH.write_text(
+            json.dumps({"token": "old.ut", "api_domain": EU, "ut": "old.ut", "urt": "the.urt"})
+        )
+        cloud._cloud_state.update(token="old.ut", api_domain=EU, logged_in=True, ut="old.ut", urt="the.urt")
+
+    @staticmethod
+    def user_me(**kw):
+        ok = NEW_UT in kw["headers"]["Authorization"]
+        return FakeResponse(GOOD_USER_REPLY) if ok else FakeResponse(EXPIRED_TOKEN_REPLY, 401)
+
+    def test_expired_token_is_refreshed_not_signed_out(self, plaud):
+        self.restore()
+        plaud.on("GET", f"{EU}/user/me", self.user_me)
+        plaud.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [f"pld_ut={NEW_UT}"]))
+        cloud._validate_token_async("old.ut", EU)
+        assert cloud._cloud_state["logged_in"] is True and cloud._cloud_state["token"] == NEW_UT
+        assert saved_config()["token"] == NEW_UT and saved_config()["urt"] == "the.urt"
+
+    def test_refresh_refused_signs_out(self, plaud):
+        self.restore()
+        plaud.on("GET", f"{EU}/user/me", self.user_me)
+        plaud.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({"status": -1, "msg": "nope"}))
+        cloud._validate_token_async("old.ut", EU)
+        assert_signed_out()
+
+    def test_refresh_network_error_keeps_the_login(self, plaud):
+        self.restore()
+        plaud.on("GET", f"{EU}/user/me", self.user_me)  # no refresh route: ConnectionError
+        cloud._validate_token_async("old.ut", EU)
+        assert cloud._cloud_state["logged_in"] is True
+        assert saved_config()["urt"] == "the.urt"
