@@ -382,7 +382,9 @@ class TestBackupWriteSites:
             pairing_store.flush(timeout=5)
             assert kc.device_item(SN) is None  # no signature yet
             # sn-sign no longer goes through cloud_api (Android headers, direct POST)
-            sign_reply = Mock(status_code=200, content=json.dumps({"status": 0, "data": {"signature": {SN: SIG}}}).encode())
+            sign_reply = Mock(
+                status_code=200, content=json.dumps({"status": 0, "data": {"signature": {SN: SIG}}}).encode()
+            )
             with patch.object(cloud.http_requests, "post", return_value=sign_reply):
                 assert cloud.fetch_sn_signature(SN)["signature"] == SIG
             pairing_store.flush(timeout=5)
