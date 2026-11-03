@@ -877,3 +877,74 @@ def test_cloud_id_keeps_legacy_name_for_known_recordings(tmp_path):
     assert _resolve_cloud_session_id("D", "a\\b", rec, set(), {"cloud_D_a\\b": "fid"}) == "cloud_D_a\\b"
     # Names that never differed are unaffected
     assert _resolve_cloud_session_id("D", "Q&A (draft)", rec, set(), {}) == "cloud_D_Q&A_(draft)"
+
+
+# ---------------------------------------------------------------------------
+# Titles without a summary (_auto_title)
+# ---------------------------------------------------------------------------
+
+
+def _write_transcript(env, sid, **extra):
+    path = env.trn / f"{sid}.json"
+    path.write_text(json.dumps({"text": "We agreed the launch moves to May.", **extra}))
+    return path
+
+
+def test_auto_title_names_an_unsummarised_recording(env):
+    from app.routes import transcribe as T
+
+    sid = "1715000000"
+    path = _write_transcript(env, sid)
+    with patch.object(T, "generate_title", return_value=("Launch moves to May", "anthropic")) as gen:
+        assert T._auto_title(sid, path, "We agreed the launch moves to May.", []) == "Launch moves to May"
+    gen.assert_called_once()
+    t = json.loads(path.read_text())
+    assert t["auto_title"] == "Launch moves to May" and t["auto_title_source"] == "transcript"
+    assert _cfg()["recording_names"][sid] == "Launch moves to May"
+
+
+@pytest.mark.parametrize(
+    "config, transcript_extra",
+    [
+        ({"auto_summarise": True}, {}),  # the summary will title it
+        ({"recording_names": {"1715000000": "Mine"}}, {}),  # the user named it
+        ({}, {"auto_title": "Earlier title"}),  # already titled
+    ],
+)
+def test_auto_title_skips(env, config, transcript_extra):
+    from app.routes import transcribe as T
+    from app.utils.config import save_config
+
+    sid = "1715000000"
+    save_config(config)
+    path = _write_transcript(env, sid, **transcript_extra)
+    with patch.object(T, "generate_title") as gen:
+        assert T._auto_title(sid, path, "text", []) == ""
+    gen.assert_not_called()
+
+
+def test_auto_title_failure_is_harmless(env):
+    from app.routes import transcribe as T
+
+    sid = "1715000000"
+    path = _write_transcript(env, sid)
+    with patch.object(T, "generate_title", side_effect=RuntimeError("boom")):
+        assert T._auto_title(sid, path, "text", []) == ""
+    assert "auto_title" not in json.loads(path.read_text())
+
+
+def test_summary_title_replaces_a_transcript_title_but_not_a_rename(env):
+    from app.utils.config import save_config
+
+    sid, other = "1715000000", "1715000001"
+    _write_transcript(env, sid, auto_title="Launch moves", auto_title_source="transcript")
+    _write_transcript(env, other, auto_title="Launch moves", auto_title_source="transcript")
+    save_config({"recording_names": {sid: "Launch moves", other: "My own name"}})
+    with patch("app.routes.transcribe.summarize", return_value=("S.", "Q2 launch moved to May", "x", [])):
+        _post(env.client, "/summarize", {"session_id": sid})
+        _post(env.client, "/summarize", {"session_id": other})
+    names = _cfg()["recording_names"]
+    assert names[sid] == "Q2 launch moved to May"
+    assert names[other] == "My own name"
+    t = json.loads((env.trn / f"{sid}.json").read_text())
+    assert t["auto_title"] == "Q2 launch moved to May" and "auto_title_source" not in t

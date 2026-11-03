@@ -33,7 +33,8 @@ function openTranscript(sessionId, autoPlay = false) {
   const titleEl = $('#transcript-title');
   titleEl.textContent = rec.title || '';
   titleEl.dataset.sid = sessionId;
-  titleEl.setAttribute('data-placeholder', rec.title ? 'Add a title...' : formatDate(rec.date));
+  // The date is on the line below, so an untitled recording doesn't show it twice
+  titleEl.setAttribute('data-placeholder', 'Add a title…');
 
   titleEl.onblur = async () => {
     // Only ever rename the recording this title element is showing.
@@ -47,9 +48,6 @@ function openTranscript(sessionId, autoPlay = false) {
         return;
       }
       rec.title = newTitle;
-      if (!newTitle) {
-        titleEl.setAttribute('data-placeholder', formatDate(rec.date));
-      }
       loadRecordings();
     }
   };
@@ -74,17 +72,41 @@ function openTranscript(sessionId, autoPlay = false) {
     'Lecture',
   ];
   const currentTags = rec.tags || [];
+  // Collapsed: only this recording's tags and "+ Tag". Open: every tag, a
+  // new-tag box and "Done".
+  let tagPickerOpen = false;
 
   function renderTagPicker() {
+    const shown = availableTags.filter((tag) => tagPickerOpen || currentTags.includes(tag));
+    // Tags set elsewhere (e.g. spoken) that aren't in the list yet
+    currentTags.forEach((tag) => { if (!shown.includes(tag)) shown.push(tag); });
     tagPicker.innerHTML =
-      availableTags
+      shown
         .map((tag) => {
           const active = currentTags.includes(tag);
-          return `<button class="tag-option ${active ? 'active' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`;
+          return `<button class="tag-option ${active ? 'active' : ''}" data-tag="${escapeHtml(tag)}" title="${active ? 'Remove tag' : 'Add tag'}">${escapeHtml(tag)}</button>`;
         })
-        .join('') + `<input type="text" class="tag-add-input" id="tag-add-input" placeholder="+ New tag">`;
+        .join('')
+      + (tagPickerOpen
+        ? `<input type="text" class="tag-add-input" id="tag-add-input" placeholder="+ New tag"><button class="tag-option tag-picker-toggle" id="tag-picker-done">Done</button>`
+        : `<button class="tag-option tag-picker-toggle" id="tag-picker-open">${currentTags.length ? '+ Tag' : '+ Add tag'}</button>`);
 
-    tagPicker.querySelectorAll('.tag-option').forEach((btn) => {
+    const openBtn = document.getElementById('tag-picker-open');
+    if (openBtn) {
+      openBtn.addEventListener('click', () => {
+        tagPickerOpen = true;
+        renderTagPicker();
+      });
+    }
+    const doneBtn = document.getElementById('tag-picker-done');
+    if (doneBtn) {
+      doneBtn.addEventListener('click', () => {
+        tagPickerOpen = false;
+        renderTagPicker();
+      });
+    }
+
+    tagPicker.querySelectorAll('.tag-option[data-tag]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const tag = btn.dataset.tag;
         const idx = currentTags.indexOf(tag);
@@ -102,7 +124,13 @@ function openTranscript(sessionId, autoPlay = false) {
     });
 
     const addInput = document.getElementById('tag-add-input');
+    if (!addInput) return;
     addInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        tagPickerOpen = false;
+        renderTagPicker();
+        return;
+      }
       if (e.key !== 'Enter') return;
       const newTag = addInput.value.trim();
       if (!newTag) return;
@@ -127,7 +155,7 @@ function openTranscript(sessionId, autoPlay = false) {
   renderTagPicker();
 
   // Meta
-  const metaParts = [formatDuration(rec.duration)];
+  const metaParts = rec.duration ? [formatDuration(rec.duration)] : [];
   if (t && t.language) metaParts.push(t.language.toUpperCase());
   if (t && t.speakers && t.speakers.length > 0) {
     metaParts.push(`${t.speakers.length} speaker${t.speakers.length > 1 ? 's' : ''}`);
@@ -201,11 +229,11 @@ function openTranscript(sessionId, autoPlay = false) {
     ${
       t && t.text
         ? `
-    <button class="action-btn subtle" id="summarize-btn" title="Generate AI summary">
+    <button class="action-btn subtle" id="summarize-btn" title="Write an AI summary">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path d="M2 4h12M2 8h8M2 12h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
       </svg>
-      <span>${hasSummary ? 'Re-summarize' : 'Summarize'}</span>
+      <span>${hasSummary ? 'Re-summarise' : 'Summarise'}</span>
     </button>
     <div class="actions-divider"></div>
     <button class="action-btn subtle" id="copy-transcript-btn" title="Copy to clipboard">
@@ -224,7 +252,7 @@ function openTranscript(sessionId, autoPlay = false) {
       </button>
       <div id="export-dropdown" class="export-dropdown hidden">
         <button class="export-option" data-format="md">Markdown (.md)</button>
-        <button class="export-option" data-format="txt">Plain Text (.txt)</button>
+        <button class="export-option" data-format="txt">Plain text (.txt)</button>
         <button class="export-option" data-format="pdf">PDF (.pdf)</button>
         <button class="export-option" data-format="json">JSON (.json)</button>
       </div>
@@ -407,7 +435,8 @@ function openTranscript(sessionId, autoPlay = false) {
             printWin.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title>
               <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222;}
               h1{font-size:20px;margin-bottom:24px;}h2{font-size:16px;margin-top:24px;}h3{font-size:14px;}
-              ul{padding-left:20px;}li{margin:4px 0;}small{color:#888;}p{margin:8px 0;}</style>
+              ul,ol{padding-left:20px;}li{margin:4px 0;}li.md-task{list-style:none;margin-left:-16px;}small{color:#888;}p{margin:8px 0;}
+              table{border-collapse:collapse;margin:12px 0;}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;}</style>
               </head><body>${html}</body></html>`);
             printWin.document.close();
             printWin.focus();
@@ -462,7 +491,7 @@ function openTranscript(sessionId, autoPlay = false) {
       setLoading(sumBtn, true);
       app.processingIds.set(sessionId, 'summarizing');
       renderRecordingsList();
-      toast('Generating summary...', 'info');
+      toast('Writing the summary…', 'info');
       dom.progressBar.classList.remove('hidden');
       dom.progressBar.classList.add('indeterminate');
       try {
@@ -488,7 +517,7 @@ function openTranscript(sessionId, autoPlay = false) {
             // never write this title into (and later rename) that one.
             if (app.currentView === 'transcript' && app.currentSessionId === sessionId && titleEl.dataset.sid === sessionId) {
               titleEl.textContent = result.title;
-              titleEl.setAttribute('data-placeholder', 'Add a title...');
+              titleEl.setAttribute('data-placeholder', 'Add a title…');
             }
           }
           await loadRecordings();
@@ -519,25 +548,103 @@ function openTranscript(sessionId, autoPlay = false) {
     notionBtn.dataset.notionUrl = url;
     if (notionUpdateBtn) notionUpdateBtn.classList.remove('hidden');
   };
+  // The push found a page an older version of the app made that may hold
+  // this recording: let the owner use it or create a new page.
+  const hideNotionReview = () => {
+    const box = $('#notion-review');
+    if (box) box.remove();
+  };
+  // `message` is shown when there are no candidate pages (Notion couldn't be
+  // checked for older pages, so nothing was created).
+  const showNotionReview = (candidates, message) => {
+    hideNotionReview();
+    const pages = (candidates || []).filter((c) => c && c.url);
+    // Only while this recording is still the one shown.
+    if ((!pages.length && !message) || app.currentSessionId !== sessionId || (notionBtn && !notionBtn.isConnected)) return;
+    const box = document.createElement('div');
+    box.id = 'notion-review';
+    box.className = 'redownload-notice';
+    box.style.flexWrap = 'wrap';
+    const text = document.createElement('span');
+    const pageLink = (c) => {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.textContent = c.title || 'the Notion page';
+      a.style.color = 'inherit';
+      a.style.textDecoration = 'underline';
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.plaud.openExternal(c.url);
+      });
+      return a;
+    };
+    const choose = async (btn, opts) => {
+      box.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      setLoading(btn, true);
+      try {
+        reportNotionPush(await window.plaud.notionPush(sessionId, opts));
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
+      } finally {
+        if (btn.isConnected) {
+          setLoading(btn, false);
+          box.querySelectorAll('button').forEach((b) => (b.disabled = false));
+        }
+      }
+    };
+    const button = (label, opts) => {
+      const b = document.createElement('button');
+      b.className = 'action-btn subtle';
+      b.textContent = label;
+      b.addEventListener('click', () => choose(b, opts));
+      return b;
+    };
+    if (!pages.length) {
+      text.textContent = `${message} Try again later, or create a new page if it isn't in Notion yet.`;
+      box.append(text);
+    } else if (pages.length === 1) {
+      text.append('Looks like this recording is already in Notion: ', pageLink(pages[0]), '.');
+      box.append(text, button('Use that page', { link_url: pages[0].url }));
+    } else {
+      text.textContent = 'Looks like this recording is already in Notion, on one of these pages:';
+      box.append(text);
+      pages.forEach((c) => {
+        const row = document.createElement('span');
+        row.style.flexBasis = '100%';
+        row.append(pageLink(c), ' ', button('Use this page', { link_url: c.url }));
+        box.append(row);
+      });
+    }
+    box.append(button('Create a new page', { force_new: true }));
+    actionsBar.insertAdjacentElement('afterend', box);
+  };
   const reportNotionPush = (result) => {
     if (result.error) {
       toast(`Notion push failed: ${result.error}`, 'error');
+      return;
+    }
+    if (result.needs_review) {
+      showNotionReview(result.candidates, result.message);
       return;
     }
     if (result.queued) {
       toast(result.message || 'Sending to Notion in the background', 'info');
       return;
     }
+    hideNotionReview();
     toast(result.updated ? 'Updated in Notion' : 'Pushed to Notion!', 'success');
     if (result.content_note) toast(result.content_note, 'info');
     if (result.url) showNotionPageLinked(result.url);
   };
+  hideNotionReview();
   if (notionBtn) {
-    // Check if this recording already has a Notion page
+    // Check if this recording already has a Notion page, or is waiting for
+    // the owner to choose one (found by a background push).
     (async () => {
       try {
         const pageInfo = await window.plaud.notionPageUrl(sessionId);
         if (pageInfo.has_page) showNotionPageLinked(pageInfo.url);
+        else if (pageInfo.needs_review) showNotionReview(pageInfo.candidates, pageInfo.message);
       } catch {}
     })();
 
@@ -695,12 +802,15 @@ function showTranscriptTab(tabName, sessionId, rec, t) {
 
 function renderTranscriptSegments(container, t, sessionId) {
   if (t && t.segments && t.segments.length > 0) {
+    // Recordings over an hour show every time as H:MM:SS, so the column lines up
+    const lastStart = t.segments[t.segments.length - 1].start || 0;
+    const withHours = (t.duration || 0) >= 3600 || lastStart >= 3600;
     container.innerHTML = t.segments
       .map(
         (seg, i) => `
       <div class="segment" data-index="${i}" data-start="${escapeHtml(seg.start)}">
-        <span class="segment-time">${formatTime(seg.start)}</span>
-        ${seg.speaker ? `<span class="segment-speaker">${escapeHtml(seg.speaker)}</span>` : ''}
+        <span class="segment-time">${formatTime(seg.start, withHours)}</span>
+        ${seg.speaker ? `<span class="segment-speaker" title="${escapeHtml(seg.speaker)}">${escapeHtml(seg.speaker)}</span>` : ''}
         <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
         <button class="segment-delete" data-index="${i}" title="Remove segment">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -757,9 +867,16 @@ function renderTranscriptSegments(container, t, sessionId) {
       }
     });
   } else {
+    // Only point at the Transcribe button when it can be used
+    const rec = app.recordings.find((r) => r.session_id === sessionId);
+    let hint = 'Click <strong>Transcribe</strong> above to make one.';
+    if (app.processingIds.get(sessionId) === 'transcribing') hint = 'Transcribing now…';
+    else if (app.processingIds.get(sessionId) === 'queued') hint = 'Waiting to be transcribed.';
+    else if (rec && rec.redownload_pending) hint = 'Sync your device to download the audio again, then transcribe it.';
+    else if (rec && !rec.ogg_path) hint = 'The audio isn’t on this Mac yet. Sync to download it, then transcribe it.';
     container.innerHTML = `
-      <div style="text-align: center; padding: 40px; color: var(--text-tertiary);">
-        <p>No transcript yet. Click <strong>Transcribe</strong> above to generate one.</p>
+      <div class="transcript-empty">
+        <p>No transcript yet. ${hint}</p>
       </div>
     `;
   }
@@ -816,7 +933,7 @@ function renderEditableSummary(container, t, sessionId, rec) {
       const link = document.createElement('button');
       link.type = 'button';
       link.className = 'summary-stale-action';
-      link.textContent = 'Re-summarize';
+      link.textContent = 'Re-summarise';
       link.addEventListener('click', () => {
         const sb = document.getElementById('summarize-btn');
         if (sb && !sb.disabled && app.currentSessionId === sessionId) sb.click();

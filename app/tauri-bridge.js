@@ -90,6 +90,7 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/device/connect', // BLE pairing — service discovery can take 30-45s on slow links
   '/device/sync', '/device/wifi-sync',
   '/transcribe', '/summarize', '/notion/push', // Notion creates of long transcripts can exceed 30s
+  '/notion/duplicates', // reads every page of the database the first time
   '/cloud/sync',
   '/gdrive/sync', '/gdrive/upload',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
@@ -440,7 +441,9 @@ window.plaud = {
   notionSetDatabase: (database_id, database_name) =>
     apiCall('POST', '/notion/set-database', { database_id, database_name }),
   notionSetDatabaseUrl: (url) => apiCall('POST', '/notion/set-database-url', { url }),
-  notionPush: (session_id) => apiCall('POST', '/notion/push', { session_id }),
+  // opts: { link_url } to use an existing page, { force_new: true } to create one anyway
+  notionPush: (session_id, opts) => apiCall('POST', '/notion/push', { session_id, ...(opts || {}) }),
+  notionDuplicates: () => apiCall('GET', '/notion/duplicates'),
   notionPageUrl: (session_id) => apiCall('GET', `/notion/page-url/${session_id}`),
   notionQueueStatus: () => apiCall('GET', '/notion/queue-status'),
   notionQueueResume: () => apiCall('POST', '/notion/queue-resume'),

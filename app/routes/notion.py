@@ -13,8 +13,9 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
+from app.utils import notion_legacy
 from app.utils.config import load_config, update_config
-from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.constants import DEFAULT_TAGS, TRANSCRIPTS_DIR
 from app.utils.paths import InvalidSessionIdError, validate_session_id
 from app.utils.transcript_locks import get_transcript_lock
 
@@ -626,7 +627,17 @@ def page_url(session_id):
     except InvalidSessionIdError:
         return _invalid_session_id()
     url = _get_notion_page_url(session_id)
-    return jsonify({"url": url, "has_page": bool(url)})
+    out = {"url": url, "has_page": bool(url)}
+    if not url:
+        from app.utils import notion_queue
+
+        review = notion_queue.needs_review_for(session_id)
+        if review:
+            out["needs_review"] = True
+            out["candidates"] = review.get("candidates") or []
+            # No candidates: the check itself couldn't run (MATCH_UNCHECKED).
+            out["message"] = _needs_review(session_id, out["candidates"], unchecked=not out["candidates"])["message"]
+    return jsonify(out)
 
 
 def _save_notion_pushed_title(session_id, title):
@@ -689,6 +700,7 @@ def reset_schema_cache():
     global _schema_cache
     with _schema_lock:
         _schema_cache = None
+    reset_rows_cache()
 
 
 def _fetch_db_schema(db_id):
@@ -1205,14 +1217,16 @@ def _create_page(session_id, t_data, app_title, tags, schema, poll_budget):
     return {"pushed": True, "updated": False, "url": page_url or ""}
 
 
-def _update_app_section(page_id, t_data, session_id):
+def _update_app_section(page_id, t_data, session_id, append=True):
     """Replace only the app-owned section of an existing page.
 
     Returns ``(outcome, note)``; outcome is "replaced", "unchanged",
-    "appended" or "skipped". Nothing outside the section is ever deleted: if
-    the section can't be found or replaced (e.g. pages made by older versions,
-    or the user removed the markers), a new dated section is appended after
-    the existing content instead.
+    "appended", "skipped" or "kept". Nothing outside the section is ever
+    deleted: if the section can't be found or replaced (e.g. pages made by
+    older versions, or the user removed the markers), a new dated section is
+    appended after the existing content instead, unless ``append`` is False
+    (a legacy page the recording adopted, whose body already holds the
+    transcript): then the body is left as it is ("kept").
     """
     section = _build_app_section(t_data, session_id)
     info = _parse_fetch(notion.mcp_call("notion-fetch", {"id": page_id}))
@@ -1236,7 +1250,13 @@ def _update_app_section(page_id, t_data, session_id):
             )
             return "replaced", ""
         except ValueError as e:
+            if not append:
+                logging.warning(f"Could not replace the Plaud V2 section in place ({e}); leaving the page as it is")
+                return "kept", ""
             logging.warning(f"Could not replace the Plaud V2 section in place ({e}); appending a new one")
+
+    if not append:
+        return "kept", ""
 
     stamp = _time.strftime("%Y-%m-%d %H:%M")
     dated = _build_app_section(t_data, session_id, stamp=stamp)
@@ -1274,6 +1294,495 @@ def _update_app_section(page_id, t_data, session_id):
     return "appended", note
 
 
+# ---------------------------------------------------------------------------
+# Pages made by older app versions (before v2.4.0: no Session ID)
+# ---------------------------------------------------------------------------
+#
+# If the app's data is lost and the recordings are synced and transcribed
+# again, their old pages can only be recognised by content. Before creating a
+# page, push_to_notion lists the database rows, fingerprints the pages without
+# a Session ID (cached in .notion_legacy_cache.json, see
+# app/utils/notion_legacy.py) and scores them against the local transcript.
+#
+# Adopting a legacy page (automatically on a confident match, or when the
+# user picks it):
+# - sets its Session ID property (and merges its tags with the recording's;
+#   the page's tags are also added to the recording in the app, so later
+#   pushes don't drop them); the title is left as it is;
+# - saves its URL locally and records the adoption in the config
+#   (``notion_legacy_pages``), keyed by session id.
+# The body is never changed: it already holds the transcript, and adding the
+# app section would put a second copy on the page. Later pushes of an adopted
+# page update its properties only, plus the app section if one is ever found
+# on it (replaced in place, never appended). Its Notion title is kept until
+# the recording is renamed in the app; from then on the usual rule applies
+# (_resolve_title_for_update).
+
+LEGACY_PAGES_KEY = "notion_legacy_pages"
+
+# Rows listing: page size, a cap on pages, and how long a listing is reused
+# (pushing a batch of recordings lists the database once, not once each).
+_ROWS_PAGE_SIZE = 100
+_ROWS_MAX_PAGES = 50
+_ROWS_CACHE_TTL = 600
+
+_rows_cache = {}
+_rows_lock = threading.Lock()
+
+_CREATED_KEYS = ("created_time", "createdTime", "created")
+_EDITED_KEYS = ("last_edited_time", "lastEditedTime", "last_edited", "edited")
+
+
+def reset_rows_cache():
+    with _rows_lock:
+        _rows_cache.clear()
+
+
+def _row_field(row, keys):
+    for source in (row, row.get("properties") if isinstance(row.get("properties"), dict) else {}):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, (str, int, float)) and value:
+                return value
+            if isinstance(value, dict):
+                for inner in ("created_time", "last_edited_time", "date", "start"):
+                    if isinstance(value.get(inner), str) and value[inner]:
+                        return value[inner]
+    return None
+
+
+def _row_page_id(row):
+    for key in ("id", "page_id"):
+        value = row.get(key)
+        if isinstance(value, str) and _extract_notion_id(value):
+            return _extract_notion_id(value)
+    url = _find_page_url(row)
+    return _extract_notion_id(url) if url else None
+
+
+def _row_title(row):
+    props = row.get("properties") if isinstance(row.get("properties"), dict) else row
+    for key in ("title", "Name", "Title", "name"):
+        title = _text_value(props.get(key))
+        if title:
+            return title
+    return ""
+
+
+def _list_db_rows(ds, refresh=False):
+    """All rows of the data source ``ds`` (paginated, reused for a while).
+
+    Returns ``(rows, complete)``; ``complete`` is False if the listing was
+    cut off at _ROWS_MAX_PAGES. Raises if a page of the listing fails.
+    """
+    with _rows_lock:
+        hit = _rows_cache.get(ds)
+        if hit and not refresh and _time.monotonic() - hit[0] < _ROWS_CACHE_TTL:
+            return list(hit[1]), hit[2]
+        rows, seen_ids, seen_cursors, cursor, complete = [], set(), set(), None, False
+        for _ in range(_ROWS_MAX_PAGES):
+            data = {"mode": "rows", "data_source_url": f"collection://{ds}", "limit": _ROWS_PAGE_SIZE}
+            if cursor:
+                data["start_cursor"] = cursor
+            result = notion.mcp_call("notion-query-data-sources", {"data": data})
+            for row in _result_rows(result):
+                pid = _row_page_id(row)
+                if pid and pid not in seen_ids:
+                    seen_ids.add(pid)
+                    rows.append(row)
+            obj = _result_json(result)
+            obj = obj if isinstance(obj, dict) else {}
+            nxt = obj.get("next_cursor") or obj.get("nextCursor")
+            if not (nxt and obj.get("has_more", obj.get("hasMore", True))) or nxt in seen_cursors:
+                complete = True
+                break
+            seen_cursors.add(nxt)
+            cursor = nxt
+        if not complete:
+            logging.warning(
+                f"Notion database has more than {_ROWS_MAX_PAGES * _ROWS_PAGE_SIZE} rows; checked the first"
+            )
+        _rows_cache[ds] = (_time.monotonic(), rows, complete)
+        return list(rows), complete
+
+
+def _tag_values(value):
+    """Tag names from a multi-select property value (JSON string or list)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return [t.strip() for t in value.split(",") if t.strip()]
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        name = item.get("name") if isinstance(item, dict) else item
+        if isinstance(name, str) and name.strip():
+            out.append(name.strip())
+    return out
+
+
+def _page_entry(page_id, row, info, db_id, edited):
+    """Cache entry (fingerprint plus facts) for a fetched page."""
+    content = info["content"] if info["content"] is not None else info["text"]
+    props = info["properties"]
+    session = _text_value(props.get(SESSION_ID_PROP)) or _row_session_id(row)
+    section = _locate_app_section(content or "")
+    if section and not session:
+        m = re.search(r"Session ID:\s*`?([\w.-]+)", section)
+        session = m.group(1) if m else ""
+    entry = notion_legacy.fingerprint_page(section or content or "")
+    entry.update(
+        {
+            "edited": edited,
+            "fetched_at": _time.time(),
+            "db": db_id,
+            "url": _find_page_url(row) or f"https://www.notion.so/{page_id.replace('-', '')}",
+            "title": (info["title"] or _row_title(row) or "").strip(),
+            "created": notion_legacy.parse_time(_row_field(row, _CREATED_KEYS)),
+            # "app": has the app section (made by v2.4.0+); "legacy": doesn't.
+            "kind": "app" if section else "legacy",
+            "session_id": session,
+            "truncated": bool(info["truncated"]),
+        }
+    )
+    return entry
+
+
+def _drop_cached_page(page_id):
+    reset_rows_cache()
+    cache = notion_legacy.load_cache()
+    if cache.get("pages", {}).pop(page_id, None) is not None:
+        notion_legacy.save_cache(cache)
+
+
+def _page_fingerprints(rows, db_id, wanted=None, prune=False):
+    """Fingerprints of the rows' pages, from the cache or fetched one by one.
+
+    Pages that are gone or can't be read are skipped; a transient failure
+    raises (the push is retried later rather than matching on a partial view).
+    ``prune``: ``rows`` is the whole database, so cached pages of this
+    database that aren't in it any more are dropped.
+    """
+    cache = notion_legacy.load_cache()
+    pages = cache.setdefault("pages", {})
+    out, fetched = [], 0
+    if prune:
+        listed = {_row_page_id(r) for r in rows}
+        stale = [pid for pid, e in pages.items() if isinstance(e, dict) and e.get("db") == db_id and pid not in listed]
+        for pid in stale:
+            del pages[pid]
+        fetched = len(stale)  # forces a save
+    try:
+        for row in rows:
+            pid = _row_page_id(row)
+            if not pid or (wanted and not wanted(row, pid)):
+                continue
+            edited = _row_field(row, _EDITED_KEYS)
+            edited = str(edited) if edited else None
+            entry = notion_legacy.cached_entry(cache, pid, edited)
+            if entry is None:
+                try:
+                    info = _parse_fetch(notion.mcp_call("notion-fetch", {"id": pid}))
+                except Exception as e:
+                    if _is_page_gone_error(e):
+                        pages.pop(pid, None)
+                        continue
+                    if _is_transient_error(e):
+                        raise
+                    logging.warning(f"Could not read Notion page {pid} to compare it: {e}")
+                    continue
+                entry = _page_entry(pid, row, info, db_id, edited)
+                pages[pid] = entry
+                fetched += 1
+                if fetched % 10 == 0:
+                    notion_legacy.save_cache(cache)
+            out.append(dict(entry, page_id=pid))
+    finally:
+        if fetched:
+            notion_legacy.save_cache(cache)
+    return out
+
+
+def _linked_page_ids(except_session=None):
+    """Ids of pages already saved as some recording's page."""
+    urls = load_config().get("notion_page_urls", {})
+    return {_extract_notion_id(u) for s, u in urls.items() if s != except_session and isinstance(u, str)} - {None}
+
+
+def _match_legacy_page(session_id, t_data, schema):
+    """Look for a legacy page holding this recording.
+
+    Returns ``(outcome, candidates)`` as notion_legacy.classify does; each
+    candidate has page_id, url, title, score and duration_ok. Raises on a
+    transient Notion failure (the queue retries later). If the database can't
+    be checked at all, returns MATCH_UNCHECKED: the caller asks the user rather
+    than risk a duplicate (they can still choose "Create a new page").
+    """
+    local = notion_legacy.fingerprint_local(t_data)
+    if local["count"] < notion_legacy.MIN_SHINGLES:
+        return notion_legacy.MATCH_NONE, []
+    ds = (schema or {}).get("data_source_id")
+    db_id = notion.get_database_id()
+    if not ds:
+        logging.warning(f"No data source id for the Notion database; can't look for older pages of {session_id}")
+        return MATCH_UNCHECKED, []
+    try:
+        rows, _complete = _list_db_rows(ds)
+    except Exception as e:
+        if _is_transient_error(e):
+            raise
+        logging.warning(f"Couldn't list the Notion database to look for older pages of {session_id}: {e}")
+        return MATCH_UNCHECKED, []
+
+    taken = _linked_page_ids(except_session=session_id)
+    entries = _page_fingerprints(rows, db_id, wanted=lambda row, pid: not _row_session_id(row) and pid not in taken)
+    scored = []
+    for entry in entries:
+        if entry["kind"] != "legacy" or entry.get("session_id"):
+            continue
+        result = notion_legacy.score_candidate(local, entry, session_id)
+        if result is None:
+            continue
+        scored.append(
+            {
+                "page_id": entry["page_id"],
+                "url": entry["url"],
+                "title": entry.get("title") or "",
+                "score": result["score"],
+                "duration_ok": result["duration_ok"],
+            }
+        )
+    outcome, found = notion_legacy.classify(scored)
+    if outcome != notion_legacy.MATCH_NONE:
+        summary = ", ".join(f"{c['page_id']} ({c['score']:.2f})" for c in found)
+        logging.info(f"Older Notion page(s) for {session_id}: {outcome}: {summary}")
+    return outcome, found
+
+
+# _match_legacy_page couldn't read the database: ask, don't create.
+MATCH_UNCHECKED = "unchecked"
+
+
+def _needs_review(session_id, candidates, unchecked=False):
+    return {
+        "pushed": False,
+        "needs_review": True,
+        "url": "",
+        "message": (
+            "Couldn't check Notion for an older page of this recording, so nothing was created."
+            if unchecked
+            else "This recording may already be in Notion, on a page an older version of the app made."
+        ),
+        "candidates": [
+            {"url": c["url"], "title": c.get("title") or "", "score": c["score"], "duration_ok": c["duration_ok"]}
+            for c in candidates
+        ],
+    }
+
+
+def _get_legacy_adoption(session_id, page_id=None):
+    record = load_config().get(LEGACY_PAGES_KEY, {}).get(session_id)
+    if not isinstance(record, dict):
+        return None
+    if page_id and record.get("page_id") != page_id:
+        return None
+    return record
+
+
+def _release_adopted_title(session_id):
+    """The recording was renamed in the app: from now on its title follows
+    the usual rule (no longer kept as the adopted page had it)."""
+
+    def _drop(c):
+        record = c.get(LEGACY_PAGES_KEY, {}).get(session_id)
+        if isinstance(record, dict):
+            record.pop("app_title", None)
+
+    update_config(_drop)
+
+
+def _forget_legacy_adoption(session_id, page_id):
+    def _drop(c):
+        records = c.get(LEGACY_PAGES_KEY)
+        if isinstance(records, dict) and (records.get(session_id) or {}).get("page_id") == page_id:
+            del records[session_id]
+
+    update_config(_drop)
+
+
+def _import_page_tags(session_id, page_tags):
+    """Add a legacy page's tags to the recording in the app (add-only)."""
+    if not page_tags:
+        return
+
+    def _merge_tags(current):
+        current = [t for t in (current or []) if isinstance(t, str)]
+        have = {t.casefold() for t in current}
+        return current + [t for t in page_tags if t.casefold() not in have]
+
+    def _config(c):
+        rec = c.setdefault("recording_tags", {})
+        rec[session_id] = _merge_tags(rec.get(session_id))
+        custom = c.setdefault("custom_tags", [])
+        for tag in page_tags:
+            if tag not in DEFAULT_TAGS and tag not in custom:
+                custom.append(tag)
+
+    update_config(_config)
+
+    def _transcript(data):
+        merged = _merge_tags(data.get("tags"))
+        if merged == data.get("tags"):
+            return False
+        data["tags"] = merged
+        return True
+
+    try:
+        _mutate_transcript_json(session_id, _transcript)
+    except Exception as e:
+        logging.warning(f"Could not add the Notion page's tags to transcript {session_id}: {e}")
+
+
+def _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how, info=None):
+    """Make an existing page this recording's page without touching its body.
+
+    Sets the Session ID (and merged tags), saves the URL and records the
+    adoption. See the comment at the top of this section.
+    """
+    page_id = _extract_page_id(page_url)
+    if info is None:
+        info = _parse_fetch(notion.mcp_call("notion-fetch", {"id": page_id}))
+    page_tags = _sanitize_tags(_tag_values(info["properties"].get(TAGS_PROP)))
+    merged = _sanitize_tags(list(tags or []) + page_tags)
+    props = _page_properties(None, _writable_tags(merged, schema) or None, session_id, schema)
+    if props:
+        try:
+            notion.mcp_call(
+                "notion-update-page",
+                {"page_id": page_id, "command": "update_properties", "properties": props, "content_updates": []},
+            )
+        except Exception:
+            reset_schema_cache()
+            raise
+    _save_notion_page_url(session_id, page_url)
+    title = (info["title"] or "").strip()
+    if title:
+        _save_notion_pushed_title(session_id, title)
+    record = {"page_id": page_id, "adopted_at": _time.time(), "how": how, "app_title": app_title}
+    update_config(lambda c: c.setdefault(LEGACY_PAGES_KEY, {}).__setitem__(session_id, record))
+    _import_page_tags(session_id, page_tags)
+
+    cache = notion_legacy.load_cache()
+    entry = cache.get("pages", {}).get(page_id)
+    if isinstance(entry, dict):
+        entry["session_id"] = session_id
+        entry["edited"] = None  # setting the property changed it; re-read next time
+        notion_legacy.save_cache(cache)
+
+    logging.info(f"Linked recording {session_id} to the older Notion page {page_id} ({how}); its content was kept")
+    return {
+        "pushed": True,
+        "updated": True,
+        "adopted": True,
+        "url": page_url,
+        "content": "kept",
+        "content_note": "Linked to the page an older version of the app made. Its content was left as it is.",
+    }
+
+
+def _link_page(session_id, link_url, t_data, app_title, tags, schema, mode):
+    """The user chose an existing page for this recording (``link_url``)."""
+    page_id = _extract_page_id(link_url)
+    saved = _get_notion_page_url(session_id)
+    if saved and _extract_page_id(saved) != page_id:
+        return {"error": "This recording is already linked to another Notion page"}
+    try:
+        info = _parse_fetch(notion.mcp_call("notion-fetch", {"id": page_id}))
+    except Exception as e:
+        if _is_page_gone_error(e):
+            return {"error": "That Notion page doesn't exist any more, or is in the trash"}
+        raise
+    content = info["content"] if info["content"] is not None else info["text"]
+    owner = _text_value(info["properties"].get(SESSION_ID_PROP))
+    if not owner:
+        m = re.search(r"Session ID:\s*`?([\w.-]+)", _locate_app_section(content or "") or "")
+        owner = m.group(1) if m else ""
+    if owner and owner != session_id:
+        return {"error": "That Notion page belongs to another recording"}
+    page_url = link_url if _PAGE_URL_RE.match(link_url) else f"https://www.notion.so/{page_id.replace('-', '')}"
+    if owner == session_id:
+        # Already this recording's page (made by the app): a normal update.
+        _save_notion_page_url(session_id, page_url)
+        return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode)
+    return _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how="manual", info=info)
+
+
+def _read_schema_for_scan():
+    """The database schema without changing it (for read-only checks)."""
+    db_id = notion.get_database_id()
+    with _schema_lock:
+        cached = _schema_cache if _schema_cache and _schema_cache.get("db_id") == db_id else None
+    return cached or _fetch_db_schema(db_id)
+
+
+def find_duplicate_pairs(entries):
+    """Pairs (app-made page, legacy page) holding the same recording.
+
+    Uses the same confident rule as automatic adoption, comparing the app
+    page's transcript and last timestamp with each legacy page's.
+    """
+    app_pages = [e for e in entries if e["kind"] == "app" and e.get("session_id")]
+    legacy = [e for e in entries if e["kind"] == "legacy"]
+    pairs = []
+    for newer in app_pages:
+        scored = []
+        for older in legacy:
+            if older["page_id"] == newer["page_id"]:
+                continue
+            result = notion_legacy.score_candidate(newer, older, newer["session_id"])
+            if result is not None:
+                scored.append({**result, "entry": older})
+        outcome, found = notion_legacy.classify(scored)
+        if outcome != notion_legacy.MATCH_CONFIDENT:
+            continue
+        older = found[0]["entry"]
+        pairs.append(
+            {
+                "session_id": newer["session_id"],
+                "score": found[0]["score"],
+                "older": {"url": older["url"], "title": older.get("title") or "", "created": older.get("created")},
+                "newer": {"url": newer["url"], "title": newer.get("title") or "", "created": newer.get("created")},
+            }
+        )
+    return pairs
+
+
+@bp.route("/duplicates")
+def duplicates():
+    """Pages the app made that hold the same recording as an older page.
+
+    Read-only: lists the pairs so the owner can delete one in Notion.
+    """
+    if not notion.is_connected():
+        return jsonify({"error": "Not connected to Notion"}), 401
+    db_id = notion.get_database_id()
+    if not db_id:
+        return jsonify({"error": "No database selected — configure in Settings"}), 400
+    try:
+        schema = _read_schema_for_scan()
+        ds = (schema or {}).get("data_source_id")
+        if not ds:
+            return jsonify({"error": "Couldn't read the Notion database's layout"}), 400
+        rows, complete = _list_db_rows(ds, refresh=True)
+        entries = _page_fingerprints(rows, db_id, prune=complete)
+        pairs = find_duplicate_pairs(entries)
+        return jsonify({"pairs": pairs, "checked": len(entries), "complete": complete})
+    except Exception as e:
+        return jsonify(_error_json({}, e)), 500
+
+
 # One lock per recording: auto-push and a click (or two clicks) must not both
 # see "no page yet" and create two pages.
 _push_locks = {}
@@ -1289,7 +1798,16 @@ MODE_FULL = "full"
 MODE_PROPERTIES = "properties"
 
 
-def push_to_notion(session_id, t_data=None, config=None, mode=MODE_FULL, poll_budget=None, lock_timeout=180):
+def push_to_notion(
+    session_id,
+    t_data=None,
+    config=None,
+    mode=MODE_FULL,
+    poll_budget=None,
+    lock_timeout=180,
+    force_new=False,
+    link_url=None,
+):
     """Create or update a recording's Notion page (upsert by Session ID).
 
     ``mode``:
@@ -1298,8 +1816,14 @@ def push_to_notion(session_id, t_data=None, config=None, mode=MODE_FULL, poll_bu
     - "properties": title/tags/Session ID only; the body is never touched.
       Does nothing if the recording has no page yet.
 
+    Before creating, a page an older app version made for this recording
+    (no Session ID) is looked for by content: a confident match is adopted,
+    a doubtful one returns ``needs_review`` (nothing is created).
+    ``force_new`` skips that check; ``link_url`` adopts the given page.
+
     Returns a dict: pushed, updated, url, content/content_note (full updates),
-    pending (async create still running), skipped, or error.
+    adopted, needs_review/candidates, pending (async create still running),
+    skipped, or error.
     """
     try:
         validate_session_id(session_id)
@@ -1314,12 +1838,12 @@ def push_to_notion(session_id, t_data=None, config=None, mode=MODE_FULL, poll_bu
     if not lock.acquire(timeout=lock_timeout):
         return {"busy": True, "error": "A Notion push for this recording is already running"}
     try:
-        return _push_locked(session_id, t_data, config, mode, poll_budget)
+        return _push_locked(session_id, t_data, config, mode, poll_budget, force_new, link_url)
     finally:
         lock.release()
 
 
-def _push_locked(session_id, t_data, config, mode, poll_budget):
+def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False, link_url=None):
     if poll_budget is None:
         poll_budget = _POLL_BUDGET_QUEUE
     if t_data is None:
@@ -1335,6 +1859,9 @@ def _push_locked(session_id, t_data, config, mode, poll_budget):
 
     schema = _ensure_schema(tags)
     tags = _writable_tags(tags, schema)
+
+    if link_url:
+        return _link_page(session_id, link_url, t_data, app_title, tags, schema, mode)
 
     page_url = _get_notion_page_url(session_id)
     gone_id = None
@@ -1353,6 +1880,23 @@ def _push_locked(session_id, t_data, config, mode, poll_budget):
         if not page_url:
             if mode == MODE_PROPERTIES:
                 return {"pushed": False, "skipped": True, "url": ""}
+            if not force_new:
+                outcome, found = _match_legacy_page(session_id, t_data, schema)
+                if outcome == notion_legacy.MATCH_CONFIDENT:
+                    try:
+                        return _adopt_legacy_page(session_id, found[0]["url"], app_title, tags, schema, how="auto")
+                    except Exception as e:
+                        if not _is_page_gone_error(e):
+                            raise
+                        # Deleted in Notion since it was scored: forget it and
+                        # let the retry look again (no message the queue treats
+                        # as permanent).
+                        _drop_cached_page(found[0]["page_id"])
+                        raise ValueError("The older Notion page for this recording went away; will look again") from e
+                if outcome == notion_legacy.MATCH_REVIEW:
+                    return _needs_review(session_id, found)
+                if outcome == MATCH_UNCHECKED:
+                    return _needs_review(session_id, [], unchecked=True)
             return _create_page(session_id, t_data, app_title, tags, schema, poll_budget)
 
         page_id = _extract_page_id(page_url)
@@ -1370,13 +1914,23 @@ def _push_locked(session_id, t_data, config, mode, poll_budget):
                 return {"error": f"The Notion page for this recording is gone: {e}", "page_gone": True}
             logging.warning(f"Notion page for {session_id} was deleted or archived ({e}); recreating it")
             _forget_notion_page_url(session_id, page_url)
+            _forget_legacy_adoption(session_id, page_id)
             gone_id = page_id
             page_url = None
 
 
 def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode):
-    """Update an existing page: properties, then (full mode) the app section."""
-    resolved_title = _resolve_title_for_update(session_id, app_title, page_url)
+    """Update an existing page: properties, then (full mode) the app section.
+
+    A legacy page the recording adopted keeps its body (see
+    ``_adopt_legacy_page``) and its Notion title until the recording is
+    renamed in the app.
+    """
+    adopted = _get_legacy_adoption(session_id, page_id)
+    if adopted and "app_title" in adopted and adopted["app_title"] == app_title:
+        resolved_title = None
+    else:
+        resolved_title = _resolve_title_for_update(session_id, app_title, page_url)
     properties = _page_properties(resolved_title, tags, session_id, schema)
     if properties:
         try:
@@ -1389,10 +1943,12 @@ def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags
             raise
     if resolved_title is not None:
         _save_notion_pushed_title(session_id, resolved_title)
+        if adopted and "app_title" in adopted:
+            _release_adopted_title(session_id)
 
     out = {"pushed": True, "updated": True, "url": page_url}
     if mode == MODE_FULL:
-        outcome, note = _update_app_section(page_id, t_data, session_id)
+        outcome, note = _update_app_section(page_id, t_data, session_id, append=not adopted)
         out["content"] = outcome
         if note:
             out["content_note"] = note
@@ -1448,6 +2004,11 @@ def push():
     replaces the app-owned section. If Notion is still creating the page (async)
     or another push for this recording is running, the work is handed to the
     background queue and the response says ``queued``.
+
+    If the recording looks like it is already in Notion on a page an older
+    app version made, the response says ``needs_review`` with the candidate
+    pages; the user then sends ``link_url`` (use that page) or
+    ``force_new: true`` (create a new page anyway).
     """
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id", "")
@@ -1457,12 +2018,33 @@ def push():
         validate_session_id(session_id)
     except InvalidSessionIdError:
         return _invalid_session_id()
+    link_url = data.get("link_url") or None
+    if link_url is not None and (not isinstance(link_url, str) or not _extract_notion_id(link_url)):
+        return jsonify({"error": "That isn't a Notion page link"}), 400
+    force_new = data.get("force_new") is True
+
+    from app.utils import notion_queue
 
     try:
-        result = push_to_notion(session_id, mode=MODE_FULL, poll_budget=_POLL_BUDGET_REQUEST, lock_timeout=20)
+        result = push_to_notion(
+            session_id,
+            mode=MODE_FULL,
+            poll_budget=_POLL_BUDGET_REQUEST,
+            lock_timeout=20,
+            force_new=force_new,
+            link_url=link_url,
+        )
+        if result.get("needs_review"):
+            notion_queue.mark_needs_review(session_id, result.get("candidates") or [])
+            return jsonify(result)
         if result.get("pending") or result.get("busy"):
-            from app.utils import notion_queue
-
+            if result.get("busy") and (force_new or link_url):
+                # The queue can't carry the choice; ask again rather than let
+                # the background push decide. (A pending create is safe to
+                # queue: the queue resumes it before matching anything.)
+                return jsonify(
+                    {"error": "Another Notion push for this recording is running. Try again in a moment."}
+                ), 409
             notion_queue.enqueue(session_id, notion_queue.KIND_FULL)
             return jsonify(
                 {
@@ -1474,6 +2056,8 @@ def push():
         if result.get("error"):
             code = 401 if "Not connected" in result["error"] else 400
             return jsonify(result), code
+        if result.get("pushed"):
+            notion_queue.clear_needs_review(session_id)
         return jsonify(result)
     except Exception as e:
         return jsonify(_error_json({}, e)), 500

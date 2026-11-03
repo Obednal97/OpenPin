@@ -10,7 +10,7 @@ from pathlib import Path
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
-from app.providers.summarize import summarize
+from app.providers.summarize import generate_title, summarize
 from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
 from app.providers.validate import validate_key as do_validate_key
 from app.utils.config import load_config, update_config
@@ -259,6 +259,47 @@ def _start_background_diarize(**kwargs):
 bp = Blueprint("transcribe", __name__)
 
 
+def _auto_title(session_id, transcript_path, text, segments):
+    """Name a freshly transcribed recording when no summary will.
+
+    Skipped when auto-summarise is on (the summary brings a better title), when
+    the recording already has a name or title, or when no AI provider answers.
+    The title is marked as transcript-made, so a later summary may replace it;
+    a name the user typed is never replaced. Returns the title or "".
+    """
+    try:
+        config = load_config()
+        if config.get("auto_summarise"):
+            return ""
+        if (config.get("recording_names") or {}).get(session_id):
+            return ""
+        with get_transcript_lock(session_id):
+            if json.loads(transcript_path.read_text()).get("auto_title"):
+                return ""
+        title, provider = generate_title(text, config, segments=segments)
+        if not title:
+            return ""
+        with get_transcript_lock(session_id):
+            t_data = json.loads(transcript_path.read_text())
+            if t_data.get("auto_title"):
+                return ""
+            t_data["auto_title"] = title
+            t_data["auto_title_source"] = "transcript"
+            _write_text_atomic(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
+
+        def _set_name(cfg):
+            names = cfg.setdefault("recording_names", {})
+            if not names.get(session_id):
+                names[session_id] = title
+
+        update_config(_set_name)
+        logging.info(f"Auto title for {session_id} from {provider}")
+        return title
+    except Exception as e:
+        logging.warning(f"Auto title for {session_id} failed: {e}")
+        return ""
+
+
 @bp.route("/transcribe", methods=["POST"])
 def transcribe_file():
     data = request.get_json(silent=True) or {}
@@ -484,6 +525,9 @@ def transcribe_file():
                 resp["diarization_message"] = diarization_message
             if spoken_tags:
                 resp["spoken_tags"] = spoken_tags
+            title = _auto_title(session_id, transcript_path, text, segments)
+            if title:
+                resp["auto_title"] = title
             return jsonify(resp)
 
         # Local transcription via Whisper
@@ -577,6 +621,9 @@ def transcribe_file():
                 resp["diarization_message"] = diarization_message
             if local_spoken_tags:
                 resp["spoken_tags"] = local_spoken_tags
+            title = _auto_title(session_id, transcript_path, t.text, local_segments)
+            if title:
+                resp["auto_title"] = title
             return jsonify(resp)
         else:
             return jsonify({"session_id": session_id, "text": "", "message": "No speech detected"})
@@ -682,8 +729,12 @@ def summarize_transcript():
             # Re-read under the lock so any concurrent writes (e.g. diarization
             # completing while the LLM call was in flight) are not overwritten.
             t_data = json.loads(transcript_path.read_text())
+            # A title made from the transcript alone (_auto_title) may be
+            # replaced by the summary's, unless the user has renamed it since.
+            transcript_title = t_data.get("auto_title") if t_data.get("auto_title_source") == "transcript" else ""
             t_data["summary"] = summary_text
             t_data["auto_title"] = title
+            t_data.pop("auto_title_source", None)
             # Stale only if the transcript changed while the AI call ran.
             if t_data.get("text", "") != full_text:
                 t_data["summary_stale"] = True
@@ -693,7 +744,8 @@ def summarize_transcript():
 
         def _set_default_name(cfg):
             names = cfg.setdefault("recording_names", {})
-            if not names.get(session_id):
+            current = names.get(session_id)
+            if not current or (transcript_title and current == transcript_title):
                 names[session_id] = title
 
         # Fresh, locked read-modify-write; also gives Notion the current config.
