@@ -343,35 +343,123 @@
     </div>
   </footer>
 
-  <!-- Settings Panel -->
+  <!-- Settings Panel: five tabs (Device, Transcription & AI, Automation,
+       Accounts & storage, General). Every setting saves as soon as it changes. -->
   <div id="settings-overlay" class="settings-overlay hidden"></div>
-  <div id="settings-panel" class="settings-panel hidden">
+  <div id="settings-panel" class="settings-panel hidden" role="dialog" aria-label="Settings">
     <div class="settings-header">
       <h2>Settings</h2>
-      <button id="settings-close" class="icon-btn">
+      <button id="settings-close" class="icon-btn" title="Close settings" aria-label="Close settings">
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M15 5L5 15M5 5l10 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         </svg>
       </button>
     </div>
     <!-- Tab Navigation -->
-    <div class="settings-tabs">
-      <button class="settings-tab active" data-tab="general">General</button>
-      <button class="settings-tab" data-tab="device">Device</button>
-      <button class="settings-tab" data-tab="processing">Processing</button>
-      <button class="settings-tab" data-tab="plaud-cloud">Plaud Cloud</button>
-      <button class="settings-tab" data-tab="profile">Profile</button>
-      <button class="settings-tab" data-tab="integrations">Integrations</button>
+    <div class="settings-tabs" role="tablist">
+      <button class="settings-tab active" data-tab="device" role="tab" aria-selected="true">Device</button>
+      <button class="settings-tab" data-tab="ai" role="tab" aria-selected="false">Transcription &amp; AI</button>
+      <button class="settings-tab" data-tab="automation" role="tab" aria-selected="false">Automation</button>
+      <button class="settings-tab" data-tab="accounts" role="tab" aria-selected="false">Accounts &amp; storage</button>
+      <button class="settings-tab" data-tab="general" role="tab" aria-selected="false">General</button>
     </div>
     <div class="settings-body">
 
-      <!-- ===== GENERAL TAB ===== -->
-      <div class="settings-tab-content active" data-tab="general">
+      <!-- ===== DEVICE TAB ===== -->
+      <div class="settings-tab-content active" data-tab="device" role="tabpanel">
+        <div class="settings-section">
+          <h3>NotePin</h3>
+          <div id="device-manager">
+            <div id="dm-disconnected">
+              <p class="settings-desc">Not connected. Scan for nearby Plaud devices to connect.</p>
+              <button id="dm-scan-btn" class="action-btn primary w-full justify-center">
+                <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                  <path d="M13.5 9a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" stroke="currentColor" stroke-width="1.5"/>
+                  <path d="M15.75 2.25L13 5M2.25 15.75L5 13M15.75 15.75L13 13M2.25 2.25L5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <span>Scan for devices</span>
+              </button>
+              <div id="dm-scan-results" class="dm-scan-results hidden"></div>
+            </div>
+            <div id="dm-connected" class="hidden">
+              <div class="dm-device-card">
+                <div class="dm-device-info">
+                  <div class="dm-device-name" id="dm-device-name">Plaud NotePin S</div>
+                  <div class="dm-device-meta" id="dm-device-meta"></div>
+                </div>
+                <div class="dm-device-right">
+                  <div class="dm-device-battery" id="dm-device-battery"></div>
+                  <div class="dm-device-rssi" id="dm-device-rssi"></div>
+                </div>
+              </div>
+              <!-- Same as the Sync button in the action bar (performSync) -->
+              <div class="dm-actions mt-3">
+                <button id="dm-sync-btn" class="action-btn accent flex-1">
+                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+                    <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>Sync now</span>
+                </button>
+                <button id="dm-disconnect-btn" class="action-btn subtle flex-1">Disconnect</button>
+              </div>
+              <p class="settings-hint mt-2">Disconnect keeps the pairing, so your NotePin reconnects next time.</p>
+            </div>
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>Transfer</h3>
+          <div class="auto-pipeline">
+            <label class="toggle-label auto-step" id="auto-wifi-row">
+              <input type="checkbox" id="auto-wifi-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Prefer Wi-Fi for large transfers</span>
+            </label>
+            <label class="toggle-label auto-step" id="dm-auto-delete-row">
+              <input type="checkbox" id="dm-auto-delete-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Delete recordings from the device after sync</span>
+            </label>
+          </div>
+          <p class="settings-hint mt-2">Wi-Fi is about 50 times faster than Bluetooth, but this Mac is offline for the transfer (about 15 seconds to reconnect afterwards). Without this, Plaud V2 asks each time.</p>
+        </div>
+        <details class="settings-section settings-advanced" id="device-advanced">
+          <summary>Advanced</summary>
+          <div class="settings-advanced-body">
+            <div class="settings-subsection">
+              <h4>Device details</h4>
+              <div id="dm-info-panel" class="dm-info-panel"></div>
+              <p id="dm-info-empty" class="settings-hint">Connect your NotePin to see its storage, firmware and battery.</p>
+            </div>
+            <div class="settings-subsection" id="pairing-backup-section">
+              <h4>Pairing backup</h4>
+              <p class="settings-desc">
+                Your NotePin only connects with two keys that Plaud's cloud issues for it. Plaud V2 also keeps a copy in
+                your login Keychain, so the pairing survives a cleaner app deleting Plaud V2's data. You can also export
+                them to a file, for another Mac or as an extra backup.
+              </p>
+              <div class="dm-actions">
+                <button id="pairing-export-btn" class="action-btn subtle flex-1" disabled>Export pairing…</button>
+                <button id="pairing-import-btn" class="action-btn subtle flex-1">Import pairing…</button>
+              </div>
+              <p class="settings-hint mt-2" id="pairing-backup-hint">Connect your NotePin to export its pairing.</p>
+            </div>
+            <div class="settings-subsection hidden" id="dm-erase-section">
+              <h4>Erase and disconnect</h4>
+              <p class="settings-desc">Unpairs your NotePin so it can pair with another phone or computer. To use it here again, scan and pair it again.</p>
+              <button id="dm-depair-btn" class="action-btn delete">Erase &amp; disconnect</button>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <!-- ===== TRANSCRIPTION & AI TAB ===== -->
+      <div class="settings-tab-content" data-tab="ai" role="tabpanel">
         <div class="settings-section">
           <h3>Language</h3>
-          <p class="settings-desc">Default language for transcription and summaries.</p>
-          <select id="language-select" class="settings-select">
-            <option value="auto">Auto-detect</option>
+          <p class="settings-desc">The language spoken in your recordings, for transcripts and summaries.</p>
+          <select id="language-select" class="settings-select" aria-label="Language">
+            <option value="auto">Detect automatically</option>
             <option value="en">English</option>
             <option value="es">Spanish</option>
             <option value="fr">French</option>
@@ -391,236 +479,32 @@
             <option value="fi">Finnish</option>
           </select>
           <div id="english-variant-group" class="mt-3">
-            <label class="settings-label">English Variant</label>
+            <label class="settings-label" for="english-variant-select">English variant</label>
             <select id="english-variant-select" class="settings-select">
               <option value="us">American English</option>
               <option value="gb">British English</option>
             </select>
-            <p class="settings-hint">Affects spelling and phrasing in transcriptions and summaries (e.g. colour vs color, organisation vs organization).</p>
+            <p class="settings-hint">Affects spelling and phrasing in transcripts and summaries (e.g. colour or color, organisation or organization).</p>
           </div>
         </div>
-        <div class="settings-section">
-          <h3>Automation</h3>
-          <p class="settings-desc">Control what happens automatically when your device connects.</p>
-          <div class="auto-pipeline">
-            <label class="toggle-label auto-step" id="auto-sync-row">
-              <input type="checkbox" id="auto-sync-toggle" class="toggle-input" checked>
-              <span class="toggle-switch"></span>
-              <span>Auto-sync recordings from device</span>
-            </label>
-            <label class="toggle-label auto-step" id="auto-transcribe-row">
-              <input type="checkbox" id="auto-transcribe-toggle" class="toggle-input" checked>
-              <span class="toggle-switch"></span>
-              <span>Auto-transcribe after sync</span>
-            </label>
-            <label class="toggle-label auto-step" id="auto-summarise-row">
-              <input type="checkbox" id="auto-summarise-toggle" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>Auto-summarise after transcription</span>
-            </label>
-            <label class="toggle-label auto-step" id="auto-wifi-row">
-              <input type="checkbox" id="auto-wifi-toggle" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>Prefer WiFi for large transfers</span>
-            </label>
-          </div>
-        </div>
-        <div class="settings-section">
-          <h3>System</h3>
-          <div class="auto-pipeline">
-            <label class="toggle-label auto-step">
-              <input type="checkbox" id="launch-login-toggle" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>Open Plaud V2 at login</span>
-            </label>
-            <label class="toggle-label auto-step">
-              <input type="checkbox" id="show-dock-toggle" class="toggle-input">
-              <span class="toggle-switch"></span>
-              <span>Show icon in Dock</span>
-            </label>
-          </div>
-          <p class="settings-desc mt-3 mb-2">Something not working? Export a bug report to attach to a GitHub issue.</p>
-          <button id="settings-export-bug-report-btn" class="action-btn subtle">Export bug report</button>
-        </div>
-        <div class="settings-section">
-          <h3>Storage</h3>
-          <p class="settings-desc">Choose where new recordings are saved. Existing recordings stay in their original location.</p>
-          <div class="save-dir-row">
-            <div id="save-dir-path" class="save-dir-field" title="Click to reveal in Finder">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              <span id="save-dir-label"></span>
-            </div>
-            <button id="change-save-dir-btn" class="action-btn subtle">Change</button>
-            <button id="reset-save-dir-btn" class="action-btn subtle hidden">Reset</button>
-          </div>
-          <div id="historical-dirs" class="historical-dirs hidden">
-            <p class="settings-hint mt-2">Previous locations (recordings here are still visible):</p>
-            <ul id="historical-dirs-list" class="historical-dirs-list"></ul>
-          </div>
-          <label class="settings-label mt-3">Storage Mode</label>
-          <div class="storage-mode-selector" id="storage-mode-selector">
-            <button class="storage-mode-btn active" data-mode="local">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/></svg>
-              Local
-            </button>
-            <button class="storage-mode-btn" data-mode="cloud">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/></svg>
-              Cloud
-            </button>
-            <button class="storage-mode-btn" data-mode="both">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/><path d="M18 14h-1.26A4 4 0 109 18h9a2.5 2.5 0 000-5z" stroke-width="1.5"/></svg>
-              Both
-            </button>
-          </div>
-          <p id="storage-mode-hint" class="settings-hint mt-1"></p>
-        </div>
-        <div class="settings-section">
-          <h3>About</h3>
-          <p class="settings-desc">
-            Plaud V2 — open-source voice recorder companion.
-            All processing happens locally on your Mac unless you connect cloud AI.
-          </p>
-          <p class="settings-desc version" id="app-version">Version ...</p>
-          <div class="update-check-row">
-            <button id="check-updates-btn" class="link">Check for Updates</button>
-            <span id="update-check-status" class="settings-hint"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- ===== PROFILE TAB ===== -->
-      <div class="settings-tab-content" data-tab="profile">
-        <div class="settings-section">
-          <h3>About You</h3>
-          <p class="settings-desc">Help the AI generate better summaries and transcriptions tailored to you.</p>
-          <div class="profile-field">
-            <label class="settings-label">Your Name</label>
-            <input type="text" id="profile-name" class="settings-input" placeholder="e.g. John, John Doe, Johnny">
-          </div>
-          <div class="profile-field">
-            <label class="settings-label">Job Function</label>
-            <input type="text" id="profile-job" class="settings-input" placeholder="e.g. Product Manager, Software Engineer">
-          </div>
-          <div class="profile-field">
-            <label class="settings-label">Industry</label>
-            <input type="text" id="profile-industry" class="settings-input" placeholder="e.g. Technology, Healthcare, Finance">
-          </div>
-          <div class="profile-field">
-            <label class="settings-label">Seniority</label>
-            <select id="profile-seniority" class="settings-select">
-              <option value="">Not set</option>
-              <option value="individual">Individual Contributor</option>
-              <option value="lead">Team Lead</option>
-              <option value="manager">Manager</option>
-              <option value="director">Director</option>
-              <option value="vp">VP</option>
-              <option value="c-level">C-Level / Founder</option>
-            </select>
-          </div>
-          <div class="profile-field">
-            <label class="settings-label">Primary Use Cases</label>
-            <input type="text" id="profile-usecases" class="settings-input" placeholder="e.g. Meeting notes, interviews, brainstorming">
-          </div>
-          <div class="profile-field">
-            <label class="settings-label">Custom Instructions</label>
-            <textarea id="profile-instructions" class="settings-textarea" rows="3" placeholder="Any specific instructions for how summaries should be written, what to focus on, etc."></textarea>
-          </div>
-          <button id="profile-save-btn" class="btn-small mt-2">Save Profile</button>
-        </div>
-        <div class="settings-section">
-          <h3>Custom Vocabulary</h3>
-          <p class="settings-desc">Add company names, product names, technical terms, or web addresses that should be transcribed accurately.</p>
-          <div class="token-input-row">
-            <input type="text" id="vocab-input" class="settings-input" placeholder="Add a word or phrase...">
-            <button id="vocab-add-btn" class="btn-small">Add</button>
-          </div>
-          <div id="vocab-list" class="vocab-list"></div>
-        </div>
-      </div>
-
-      <!-- ===== DEVICE TAB ===== -->
-      <div class="settings-tab-content" data-tab="device">
-        <div class="settings-section">
-          <div id="device-manager">
-            <div id="dm-disconnected">
-              <p class="settings-desc">Scan for nearby Plaud devices to connect.</p>
-              <button id="dm-scan-btn" class="action-btn primary w-full justify-center">
-                <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
-                  <path d="M13.5 9a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M15.75 2.25L13 5M2.25 15.75L5 13M15.75 15.75L13 13M2.25 2.25L5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                </svg>
-                <span>Scan for Devices</span>
-              </button>
-              <div id="dm-scan-results" class="dm-scan-results hidden"></div>
-            </div>
-            <div id="dm-connected" class="hidden">
-              <div class="dm-device-card">
-                <div class="dm-device-info">
-                  <div class="dm-device-name" id="dm-device-name">Plaud NotePin S</div>
-                  <div class="dm-device-meta" id="dm-device-meta"></div>
-                </div>
-                <div class="dm-device-right">
-                  <div class="dm-device-battery" id="dm-device-battery"></div>
-                  <div class="dm-device-rssi" id="dm-device-rssi"></div>
-                </div>
-              </div>
-              <div id="dm-info-panel" class="dm-info-panel mt-3"></div>
-              <div class="dm-actions mt-3">
-                <button id="dm-sync-btn" class="action-btn accent flex-1">
-                  <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
-                    <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                    <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <span>Force Sync</span>
-                </button>
-              </div>
-              <div class="dm-actions mt-2">
-                <button id="dm-disconnect-btn" class="action-btn subtle flex-1">Disconnect</button>
-                <button id="dm-depair-btn" class="action-btn delete flex-1">Erase &amp; Disconnect</button>
-              </div>
-              <p class="settings-hint mt-2">
-                <strong>Disconnect</strong> keeps pairing — device will reconnect next time.<br>
-                <strong>Erase &amp; Disconnect</strong> unpairs the device so it can pair with another phone or computer.
-              </p>
-            </div>
-          </div>
-        </div>
-        <div class="settings-section" id="pairing-backup-section">
-          <h3>Pairing backup</h3>
-          <p class="settings-desc">
-            Your NotePin only connects with two keys that Plaud's cloud issues for it. Plaud V2 also keeps a copy in
-            your login Keychain, so the pairing survives a cleaner app deleting Plaud V2's data. You can also export
-            them to a file, for another Mac or as an extra backup.
-          </p>
-          <div class="dm-actions">
-            <button id="pairing-export-btn" class="action-btn subtle flex-1" disabled>Export pairing…</button>
-            <button id="pairing-import-btn" class="action-btn subtle flex-1">Import pairing…</button>
-          </div>
-          <p class="settings-hint mt-2" id="pairing-backup-hint">Connect your NotePin to export its pairing.</p>
-        </div>
-      </div>
-
-      <!-- ===== PROCESSING TAB ===== -->
-      <div class="settings-tab-content" data-tab="processing">
 
         <!-- 1. Transcription -->
         <div class="settings-section">
           <div class="proc-section-header">
             <h3>Transcription</h3>
-            <span class="proc-subtitle">Speech to Text</span>
-            <span class="proc-info-icon" data-tooltip="Converts your voice recordings to text. Local Whisper runs on your Mac (slow but free). Cloud providers are 10-50x faster — Deepgram recommended for best accuracy with built-in speaker identification.">
+            <span class="proc-subtitle">Speech to text</span>
+            <span class="proc-info-icon" data-tooltip="Turns your recordings into text. Local Whisper runs on your Mac (slow but free). Cloud providers are 10 to 50 times faster; Deepgram is the most accurate and labels speakers itself.">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><text x="8" y="12" text-anchor="middle" fill="currentColor" font-size="11" font-weight="600">i</text></svg>
             </span>
           </div>
           <div class="proc-provider-row">
             <label class="proc-label" for="transcription-provider">Provider</label>
             <select id="transcription-provider" class="proc-select">
-              <option value="deepgram">Deepgram Nova-3</option>
+              <option value="deepgram">Deepgram Nova-3 (recommended)</option>
               <option value="groq">Groq Whisper Large v3</option>
               <option value="openai">OpenAI GPT-Transcribe</option>
               <option value="local">Local Whisper (on this Mac)</option>
             </select>
-            <span class="proc-recommended" id="transcription-rec">Recommended</span>
           </div>
           <!-- Inline key input (shown when cloud provider selected & no key) -->
           <div id="transcription-key-area"></div>
@@ -634,78 +518,288 @@
         <!-- 2. Speaker Identification -->
         <div class="settings-section">
           <div class="proc-section-header">
-            <h3>Speaker Identification</h3>
-            <span class="proc-subtitle">Diarization</span>
-            <span class="proc-info-icon" data-tooltip="Labels who is speaking (Speaker 1, Speaker 2...). Deepgram does this itself when it transcribes. With any other transcription provider, a speaker model runs on your Mac after transcription (no account needed).">
+            <h3>Speaker identification</h3>
+            <span class="proc-subtitle">Diarisation</span>
+            <span class="proc-info-icon" data-tooltip="Labels who is speaking (Speaker 1, Speaker 2…). Deepgram does this itself when it transcribes. With any other transcription provider, a speaker model runs on your Mac after transcription (no account needed).">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><text x="8" y="12" text-anchor="middle" fill="currentColor" font-size="11" font-weight="600">i</text></svg>
             </span>
           </div>
           <label class="toggle-label auto-step">
             <input type="checkbox" id="diarize-toggle" class="toggle-input">
             <span class="toggle-switch"></span>
-            <span>Enable speaker identification</span>
+            <span>Label who is speaking</span>
           </label>
           <!-- Who labels speakers follows the transcription provider (set by renderDiarizationSection) -->
           <p id="diarization-mode-note" class="settings-hint hidden" style="margin-top:var(--sp-2)"></p>
-          <div id="hf-token-area" class="hidden" style="margin-top:var(--sp-3)">
-            <label class="proc-label" for="hf-token-input">Hugging Face token (optional)</label>
-            <p class="settings-hint">Not needed for normal use. It only lets the app fall back to pyannote when the built-in model can't run and pyannote.audio is installed. Accept the terms for <code>pyannote/speaker-diarization-3.1</code> and <code>pyannote/segmentation-3.0</code> on huggingface.co first.</p>
-            <div id="hf-token-entry" class="token-input-row">
-              <input type="password" id="hf-token-input" class="settings-input" placeholder="Paste token (hf_...)" autocomplete="off" spellcheck="false">
-              <button id="hf-token-save-btn" class="btn-small">Save</button>
+          <!-- Only for providers that can't label speakers themselves (not Deepgram) -->
+          <details id="hf-token-area" class="settings-advanced settings-advanced-inline hidden">
+            <summary>Advanced</summary>
+            <div class="settings-advanced-body">
+              <label class="proc-label" for="hf-token-input">Hugging Face token (optional)</label>
+              <p class="settings-hint">Not needed for normal use. It only lets the app fall back to pyannote when the built-in model can't run and pyannote.audio is installed. Accept the terms for <code>pyannote/speaker-diarization-3.1</code> and <code>pyannote/segmentation-3.0</code> on huggingface.co first.</p>
+              <div id="hf-token-entry" class="token-input-row mt-2">
+                <input type="password" id="hf-token-input" class="settings-input" placeholder="Paste token (hf_…)" autocomplete="off" spellcheck="false">
+                <button id="hf-token-save-btn" class="btn-small">Save</button>
+              </div>
+              <div id="hf-token-saved" class="hf-token-saved hidden">
+                <span class="ai-key-badge connected">Saved</span>
+                <button id="hf-token-remove-btn" class="btn-small">Remove</button>
+              </div>
+              <p id="hf-token-status" class="ai-key-status hidden"></p>
             </div>
-            <div id="hf-token-saved" class="hidden">
-              <span class="ai-key-badge connected">Saved ✓</span>
-              <button id="hf-token-remove-btn" class="btn-small">Remove</button>
-            </div>
-            <p id="hf-token-status" class="ai-key-status hidden"></p>
-          </div>
+          </details>
         </div>
 
-        <!-- 3. Summarization -->
+        <!-- 3. Summarisation -->
         <div class="settings-section">
           <div class="proc-section-header">
-            <h3>Summarization</h3>
-            <span class="proc-subtitle">AI Summary</span>
-            <span class="proc-info-icon" data-tooltip="Generates a structured summary with key points and action items. Cloud AI produces much richer, more detailed summaries than local processing.">
+            <h3>Summarisation</h3>
+            <span class="proc-subtitle">AI summary</span>
+            <span class="proc-info-icon" data-tooltip="Writes a structured summary with key points and action items. Cloud AI writes much richer, more detailed summaries than local processing.">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><text x="8" y="12" text-anchor="middle" fill="currentColor" font-size="11" font-weight="600">i</text></svg>
             </span>
           </div>
           <div class="proc-provider-row">
             <label class="proc-label" for="summarization-provider">Provider</label>
             <select id="summarization-provider" class="proc-select">
-              <option value="anthropic">Anthropic Claude Sonnet</option>
+              <option value="anthropic">Anthropic Claude Sonnet (recommended)</option>
               <option value="openai">OpenAI GPT-6.1 Sol</option>
               <option value="openrouter">OpenRouter</option>
               <option value="local">Local (Ollama if running, else DistilBART)</option>
             </select>
-            <span class="proc-recommended" id="summarization-rec">Recommended</span>
           </div>
           <div id="summarization-key-area"></div>
         </div>
 
-        <!-- Connected Keys Overview -->
-        <div class="settings-section">
-          <h3>API Keys</h3>
-          <p class="settings-desc">Manage your connected provider keys.</p>
+        <!-- 4. Personalisation: saved as you type -->
+        <div class="settings-section" id="personalisation-section">
+          <div class="settings-section-title">
+            <h3>Personalisation</h3>
+            <span id="profile-save-status" class="settings-save-status" aria-live="polite"></span>
+          </div>
+          <p class="settings-desc">Helps the AI write summaries and transcripts that fit you. Saved as you type.</p>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-name">Your name</label>
+            <input type="text" id="profile-name" class="settings-input" placeholder="e.g. John, John Doe, Johnny">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-job">Job</label>
+            <input type="text" id="profile-job" class="settings-input" placeholder="e.g. Product manager, software engineer">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-industry">Industry</label>
+            <input type="text" id="profile-industry" class="settings-input" placeholder="e.g. Technology, healthcare, finance">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-seniority">Seniority</label>
+            <select id="profile-seniority" class="settings-select">
+              <option value="">Not set</option>
+              <option value="individual">Individual contributor</option>
+              <option value="lead">Team lead</option>
+              <option value="manager">Manager</option>
+              <option value="director">Director</option>
+              <option value="vp">VP</option>
+              <option value="c-level">C-level or founder</option>
+            </select>
+          </div>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-usecases">What you record</label>
+            <input type="text" id="profile-usecases" class="settings-input" placeholder="e.g. Meeting notes, interviews, brainstorming">
+          </div>
+          <div class="profile-field">
+            <label class="settings-label" for="profile-instructions">Custom instructions</label>
+            <textarea id="profile-instructions" class="settings-textarea" rows="3" placeholder="Anything about how summaries should be written, what to focus on, etc."></textarea>
+          </div>
+          <h4 class="settings-subheading">Custom vocabulary</h4>
+          <p class="settings-desc">Company names, product names, technical terms or web addresses that should be transcribed exactly.</p>
+          <div class="token-input-row">
+            <input type="text" id="vocab-input" class="settings-input" placeholder="Add a word or phrase…" aria-label="Add a word or phrase">
+            <button id="vocab-add-btn" class="btn-small">Add</button>
+          </div>
+          <div id="vocab-list" class="vocab-list"></div>
+        </div>
+
+        <!-- Keys for providers that aren't selected above (renderAPIKeysOverview) -->
+        <div class="settings-section hidden" id="other-keys-section">
+          <h3>Other saved keys</h3>
+          <p class="settings-desc">Keys for providers you aren't using right now. Choose a provider above to use its key.</p>
           <div id="api-keys-overview"></div>
         </div>
       </div>
 
-      <!-- ===== PLAUD CLOUD TAB ===== -->
-      <div class="settings-tab-content" data-tab="plaud-cloud">
+      <!-- ===== AUTOMATION TAB (in pipeline order) ===== -->
+      <div class="settings-tab-content" data-tab="automation" role="tabpanel">
         <div class="settings-section">
-          <h3>Plaud Account</h3>
-          <p class="settings-desc">Connect your Plaud account to sync cloud recordings.</p>
+          <h3>New recordings</h3>
+          <p class="settings-desc">What happens by itself when your NotePin connects, in this order. Each step needs the one before it.</p>
+          <div class="auto-pipeline" id="automation-pipeline">
+            <label class="toggle-label auto-step" id="auto-sync-row">
+              <input type="checkbox" id="auto-sync-toggle" class="toggle-input" checked>
+              <span class="toggle-switch"></span>
+              <span>Sync new recordings from the device</span>
+            </label>
+            <label class="toggle-label auto-step" id="auto-transcribe-row">
+              <input type="checkbox" id="auto-transcribe-toggle" class="toggle-input" checked>
+              <span class="toggle-switch"></span>
+              <span>Transcribe them</span>
+            </label>
+            <label class="toggle-label auto-step" id="auto-summarise-row">
+              <input type="checkbox" id="auto-summarise-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Summarise the transcripts</span>
+            </label>
+          </div>
+          <h4 class="settings-subheading">Then send them on</h4>
+          <div class="auto-pipeline" id="automation-integrations">
+            <!-- initSettingsEvents() moves the Notion auto-push toggle (#notion-auto-push-toggle,
+                 markup in the Notion block under Accounts & storage) into this slot -->
+            <div id="automation-notion-slot"></div>
+            <p id="automation-notion-hint" class="settings-hint automation-hint hidden">Connect Notion in Accounts &amp; storage to push summaries there.</p>
+            <label class="toggle-label auto-step" id="gdrive-auto-sync-row">
+              <input type="checkbox" id="gdrive-auto-sync-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Upload new recordings to Google Drive</span>
+            </label>
+            <p id="automation-gdrive-hint" class="settings-hint automation-hint hidden">Connect Google Drive in Accounts &amp; storage to upload recordings there.</p>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Webhooks</h3>
+          <p class="settings-desc">Send data to other services when recordings are processed. Works with Zapier, Make, n8n, or any URL that accepts POST requests.</p>
+          <div id="webhook-list"></div>
+          <div class="ai-key-group mt-2">
+            <label class="settings-label" for="webhook-name-input">Add a webhook</label>
+            <input type="text" id="webhook-name-input" class="settings-input mb-2" placeholder="Name (e.g. Zapier, Slack, n8n)">
+            <div class="token-input-row">
+              <input type="text" id="webhook-url-input" class="settings-input" placeholder="https://hooks.zapier.com/…" aria-label="Webhook URL">
+              <button id="webhook-add-btn" class="btn-small">Add</button>
+            </div>
+            <div class="mt-2">
+              <p class="settings-label">Send when:</p>
+              <label class="toggle-label mb-2">
+                <input type="checkbox" id="webhook-on-transcribe" class="toggle-input" checked>
+                <span class="toggle-switch"></span>
+                <span>A recording is transcribed</span>
+              </label>
+              <label class="toggle-label mb-2">
+                <input type="checkbox" id="webhook-on-summarize" class="toggle-input" checked>
+                <span class="toggle-switch"></span>
+                <span>A summary is written</span>
+              </label>
+              <label class="toggle-label">
+                <input type="checkbox" id="webhook-on-sync" class="toggle-input">
+                <span class="toggle-switch"></span>
+                <span>A new recording is synced</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section" id="automation-cloud-section">
+          <h3>Plaud cloud sync</h3>
+          <p class="settings-desc">How often to check your Plaud account for recordings.</p>
+          <select id="cloud-sync-interval" class="settings-select" aria-label="Plaud cloud sync interval">
+            <option value="manual">Only when I click Sync</option>
+            <option value="300">Every 5 minutes</option>
+            <option value="1800">Every 30 minutes</option>
+            <option value="3600">Every hour</option>
+            <option value="14400">Every 4 hours</option>
+            <option value="86400">Every 24 hours</option>
+          </select>
+          <p id="automation-cloud-hint" class="settings-hint automation-hint hidden"></p>
+        </div>
+      </div>
+
+      <!-- ===== ACCOUNTS & STORAGE TAB ===== -->
+      <div class="settings-tab-content" data-tab="accounts" role="tabpanel">
+        <div class="settings-section">
+          <h3>Recordings folder</h3>
+          <p class="settings-desc">Where new recordings are saved. Existing recordings stay where they are.</p>
+          <div class="save-dir-row">
+            <div id="save-dir-path" class="save-dir-field" title="Click to show in Finder">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <span id="save-dir-label"></span>
+            </div>
+            <button id="change-save-dir-btn" class="action-btn subtle">Change</button>
+            <button id="reset-save-dir-btn" class="action-btn subtle hidden">Reset</button>
+          </div>
+          <div id="historical-dirs" class="historical-dirs hidden">
+            <p class="settings-hint mt-2">Previous locations (recordings there still show in the list):</p>
+            <ul id="historical-dirs-list" class="historical-dirs-list"></ul>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3>Google Drive</h3>
+          <p class="settings-desc">Back up recordings to a Google Drive folder.</p>
+          <div id="gdrive-section">
+            <div id="gdrive-disconnected">
+              <button id="gdrive-connect-btn" class="action-btn primary w-full justify-center">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span>Connect Google Drive</span>
+              </button>
+            </div>
+            <div id="gdrive-connected" class="hidden">
+              <div class="notion-db-card" id="gdrive-folder-card">
+                <div class="notion-db-card-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                </div>
+                <div class="notion-db-card-info">
+                  <div class="notion-db-card-label" id="gdrive-email"></div>
+                  <div class="notion-db-card-name" id="gdrive-folder-name">No folder selected</div>
+                </div>
+                <span class="ai-key-badge connected">Active</span>
+              </div>
+              <div class="settings-section mt-3 mb-0">
+                <label class="settings-label" for="gdrive-folder-search">Change folder</label>
+                <div class="token-input-row">
+                  <input type="text" id="gdrive-folder-search" class="settings-input" placeholder="Search folders…">
+                </div>
+                <div id="gdrive-folder-list" class="mt-2"></div>
+                <div class="cloud-divider my-2"><span>or create a new one</span></div>
+                <div class="token-input-row">
+                  <input type="text" id="gdrive-new-folder-name" class="settings-input" placeholder="New folder name" aria-label="New folder name">
+                  <button id="gdrive-folder-create-btn" class="btn-small">Create</button>
+                </div>
+              </div>
+              <div id="gdrive-sync-info" class="settings-desc mt-3"></div>
+              <div class="dm-actions">
+                <button id="gdrive-sync-btn" class="action-btn subtle settings-btn-compact">Upload all now</button>
+                <button id="gdrive-disconnect-btn" class="action-btn subtle settings-btn-compact">Disconnect Google Drive</button>
+              </div>
+            </div>
+          </div>
+          <label class="settings-label mt-3">Keep recordings</label>
+          <div class="storage-mode-selector segmented" id="storage-mode-selector">
+            <button class="storage-mode-btn active" data-mode="local">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/></svg>
+              Local
+            </button>
+            <button class="storage-mode-btn" data-mode="cloud">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 109 20h9a5 5 0 000-10z"/></svg>
+              Google Drive
+            </button>
+            <button class="storage-mode-btn" data-mode="both">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M2 9h20"/><path d="M18 14h-1.26A4 4 0 109 18h9a2.5 2.5 0 000-5z" stroke-width="1.5"/></svg>
+              Both
+            </button>
+          </div>
+          <p id="storage-mode-hint" class="settings-hint mt-1"></p>
+        </div>
+
+        <div class="settings-section">
+          <h3>Plaud account</h3>
+          <p class="settings-desc">Sign in to your Plaud account to sync recordings from Plaud's cloud.</p>
           <div id="cloud-account-section">
             <div id="cloud-logged-out">
               <button id="cloud-login-browser-btn" class="action-btn primary w-full justify-center mb-2">
-                Sign in with Plaud Account
+                Sign in with your Plaud account
               </button>
-              <div class="cloud-divider"><span>or paste it manually</span></div>
+              <div class="cloud-divider"><span>or paste it here</span></div>
               <div class="token-input-row mt-2">
-                <input type="password" id="cloud-token-input" class="settings-input" placeholder="Paste the sign-in link, code or token…">
-                <button id="cloud-token-login-btn" class="btn-small">Login</button>
+                <input type="password" id="cloud-token-input" class="settings-input" placeholder="Paste the sign-in link, code or token…" aria-label="Sign-in link, code or token">
+                <button id="cloud-token-login-btn" class="btn-small">Sign in</button>
               </div>
               <p class="settings-hint mt-1">
                 Get your token from <a href="#" id="plaud-web-link" class="link">web.plaud.ai</a>
@@ -714,14 +808,14 @@
             <!-- Shown by renderCloudAccount() while app.cloudLoginPending (browser sign-in in progress) -->
             <div id="cloud-login-waiting" class="hidden">
               <div style="text-align:center;padding:16px 0;">
-                <div class="settings-desc" style="margin-bottom:12px;">Waiting for login in browser...</div>
-                <div style="color:var(--text-muted);font-size:12px;margin-bottom:16px;">
-                  Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.
+                <div class="settings-desc" style="margin-bottom:12px;">Waiting for you to sign in in the browser…</div>
+                <div class="settings-hint" style="margin-bottom:16px;">
+                  Sign in to your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.
                 </div>
                 <div class="cloud-divider" style="margin:12px 0;"><span>or paste the sign-in link or token</span></div>
                 <div class="token-input-row" style="margin-top:12px;">
-                  <input type="password" id="cloud-token-input-waiting" class="settings-input" placeholder="Paste the sign-in link, code or token…">
-                  <button id="cloud-token-login-btn-waiting" class="btn-small">Login</button>
+                  <input type="password" id="cloud-token-input-waiting" class="settings-input" placeholder="Paste the sign-in link, code or token…" aria-label="Sign-in link, code or token">
+                  <button id="cloud-token-login-btn-waiting" class="btn-small">Sign in</button>
                 </div>
                 <button id="cloud-cancel-login" class="action-btn subtle" style="margin-top:12px;width:100%;justify-content:center;font-size:12px;">
                   Cancel
@@ -736,30 +830,20 @@
                 </div>
               </div>
               <div class="settings-section mt-4 mb-0">
-                <h3>Sync Direction</h3>
+                <h4 class="settings-subheading mt-0">Sync with Plaud's cloud</h4>
                 <label class="toggle-label mb-2">
                   <input type="radio" name="sync-direction" id="sync-none" value="none" class="toggle-input inline mr-1">
-                  <span>No sync — don't sync with Plaud cloud</span>
+                  <span>Off: don't sync with Plaud's cloud</span>
                 </label>
                 <label class="toggle-label mb-2">
                   <input type="radio" name="sync-direction" id="sync-download" value="download" checked class="toggle-input inline mr-1">
-                  <span>Download only — pull recordings from Plaud cloud</span>
+                  <span>Download only: get recordings from Plaud's cloud</span>
                 </label>
                 <label class="toggle-label">
                   <input type="radio" name="sync-direction" id="sync-twoway" value="twoway" class="toggle-input inline mr-1">
-                  <span>Two-way — also upload local recordings to Plaud cloud</span>
+                  <span>Both ways: also upload recordings from this Mac</span>
                 </label>
-              </div>
-              <div class="settings-section mt-3 mb-0">
-                <h3>Sync Interval</h3>
-                <select id="cloud-sync-interval" class="settings-select">
-                  <option value="manual">Manual only</option>
-                  <option value="300">Every 5 minutes</option>
-                  <option value="1800">Every 30 minutes</option>
-                  <option value="3600">Every hour</option>
-                  <option value="14400">Every 4 hours</option>
-                  <option value="86400">Every 24 hours</option>
-                </select>
+                <p class="settings-hint mt-2">How often it checks is under Automation.</p>
               </div>
               <div class="dm-actions mt-3" id="cloud-sync-actions">
                 <button id="cloud-sync-btn" class="action-btn accent flex-1">
@@ -767,20 +851,17 @@
                     <path d="M1.5 9a7.5 7.5 0 0113.1-5M16.5 9a7.5 7.5 0 01-13.1 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                     <path d="M14.6 1v3h-3M3.4 17v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
-                  <span>Sync Now</span>
+                  <span>Sync with Plaud cloud now</span>
                 </button>
               </div>
               <p id="cloud-sync-status" class="settings-hint mt-2"></p>
               <button id="cloud-logout-btn" class="action-btn subtle mt-3 settings-btn-compact">
-                Disconnect Account
+                Sign out of Plaud
               </button>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- ===== INTEGRATIONS TAB ===== -->
-      <div class="settings-tab-content" data-tab="integrations">
         <div class="settings-section">
           <h3>Notion</h3>
           <p class="settings-desc">Push transcripts and summaries to a Notion database.</p>
@@ -825,85 +906,50 @@
             </div>
           </div>
         </div>
+      </div>
 
+      <!-- ===== GENERAL TAB ===== -->
+      <div class="settings-tab-content" data-tab="general" role="tabpanel">
         <div class="settings-section">
-          <h3>Google Drive</h3>
-          <p class="settings-desc">Back up recordings to a Google Drive folder.</p>
-          <div id="gdrive-section">
-            <div id="gdrive-disconnected">
-              <button id="gdrive-connect-btn" class="action-btn primary w-full justify-center">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                <span>Connect Google Drive</span>
-              </button>
-            </div>
-            <div id="gdrive-connected" class="hidden">
-              <div class="notion-db-card" id="gdrive-folder-card">
-                <div class="notion-db-card-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                </div>
-                <div class="notion-db-card-info">
-                  <div class="notion-db-card-label" id="gdrive-email"></div>
-                  <div class="notion-db-card-name" id="gdrive-folder-name">No folder selected</div>
-                </div>
-                <span class="ai-key-badge connected">Active</span>
-              </div>
-              <div class="settings-section mt-3 mb-0">
-                <label class="settings-label">Change Folder</label>
-                <div class="token-input-row">
-                  <input type="text" id="gdrive-folder-search" class="settings-input" placeholder="Search folders...">
-                </div>
-                <div id="gdrive-folder-list" class="mt-2"></div>
-                <div class="cloud-divider my-2"><span>or create new</span></div>
-                <div class="token-input-row">
-                  <input type="text" id="gdrive-new-folder-name" class="settings-input" placeholder="New folder name">
-                  <button id="gdrive-folder-create-btn" class="btn-small">Create</button>
-                </div>
-              </div>
-              <div id="gdrive-sync-info" class="settings-desc mt-3"></div>
-              <label class="toggle-label dm-toggle-row mt-3">
-                <input type="checkbox" id="gdrive-auto-sync-toggle" class="toggle-input">
-                <span class="toggle-switch"></span>
-                <span>Auto-upload new recordings</span>
-              </label>
-              <button id="gdrive-sync-btn" class="action-btn subtle mt-2 settings-btn-compact">
-                Sync All Now
-              </button>
-              <button id="gdrive-disconnect-btn" class="action-btn subtle mt-2 settings-btn-compact">
-                Disconnect Google Drive
-              </button>
-            </div>
+          <h3>System</h3>
+          <div class="auto-pipeline">
+            <label class="toggle-label auto-step">
+              <input type="checkbox" id="launch-login-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Open Plaud V2 at login</span>
+            </label>
+            <label class="toggle-label auto-step">
+              <input type="checkbox" id="show-dock-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Show the icon in the Dock</span>
+            </label>
           </div>
         </div>
-
         <div class="settings-section">
-          <h3>Webhooks</h3>
-          <p class="settings-desc">Automatically send data to external services when recordings are processed. Works with Zapier, Make, n8n, or any URL that accepts POST requests.</p>
-          <div id="webhook-list"></div>
-          <div class="ai-key-group mt-2">
-            <label class="settings-label">Add Webhook</label>
-            <input type="text" id="webhook-name-input" class="settings-input mb-2" placeholder="Name (e.g. Zapier, Slack, n8n)">
-            <div class="token-input-row">
-              <input type="text" id="webhook-url-input" class="settings-input" placeholder="https://hooks.zapier.com/...">
-              <button id="webhook-add-btn" class="btn-small">Add</button>
-            </div>
-            <div class="mt-2">
-              <p class="settings-label">Trigger when:</p>
-              <label class="toggle-label mb-2">
-                <input type="checkbox" id="webhook-on-transcribe" class="toggle-input" checked>
-                <span class="toggle-switch"></span>
-                <span>Recording transcribed</span>
-              </label>
-              <label class="toggle-label mb-2">
-                <input type="checkbox" id="webhook-on-summarize" class="toggle-input" checked>
-                <span class="toggle-switch"></span>
-                <span>Summary generated</span>
-              </label>
-              <label class="toggle-label">
-                <input type="checkbox" id="webhook-on-sync" class="toggle-input">
-                <span class="toggle-switch"></span>
-                <span>New recording synced</span>
-              </label>
-            </div>
+          <h3>Appearance</h3>
+          <label class="settings-label" id="theme-setting-label">Theme</label>
+          <!-- Same setting as the header's theme button (renderThemeSetting / setThemePreference) -->
+          <div class="segmented" id="theme-setting" role="radiogroup" aria-labelledby="theme-setting-label">
+            <button class="storage-mode-btn" data-theme-pref="auto" role="radio" aria-checked="false">Match system</button>
+            <button class="storage-mode-btn" data-theme-pref="light" role="radio" aria-checked="false">Light</button>
+            <button class="storage-mode-btn" data-theme-pref="dark" role="radio" aria-checked="false">Dark</button>
+          </div>
+        </div>
+        <div class="settings-section">
+          <h3>About</h3>
+          <p class="settings-desc">
+            Plaud V2: an open-source companion for your Plaud recorder.
+            Everything runs on your Mac unless you connect a cloud AI provider.
+          </p>
+          <p class="settings-desc version" id="app-version">Version …</p>
+          <div class="update-check-row">
+            <button id="check-updates-btn" class="link">Check for updates</button>
+            <span id="update-check-status" class="settings-hint"></span>
+          </div>
+          <div class="dm-actions">
+            <!-- Opens the same "Report a bug" dialog as the header's bug button (openBugReport) -->
+            <button id="settings-export-bug-report-btn" class="action-btn subtle">Report a bug…</button>
+            <button id="open-diagnostics-log-btn" class="action-btn subtle">Show diagnostics log</button>
           </div>
         </div>
       </div>

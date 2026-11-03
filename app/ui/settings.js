@@ -47,6 +47,8 @@ function renderSettings() {
   if (summariseToggle) summariseToggle.checked = app.settings.auto_summarise || false;
   const wifiToggle = $('#auto-wifi-toggle');
   if (wifiToggle) wifiToggle.checked = app.settings.auto_prefer_wifi || false;
+  const autoDeleteToggle = $('#dm-auto-delete-toggle');
+  if (autoDeleteToggle) autoDeleteToggle.checked = app.settings.auto_delete_after_sync || false;
   updateAutoPipelineState();
 
   // Processing sections (replaces old model selector + AI key groups)
@@ -60,6 +62,90 @@ function renderSettings() {
   renderGoogleDrive();
   renderCloudAccount();
   renderStorageSettings();
+  renderAutomationState();
+}
+
+// ---- Settings tabs ----
+
+/** Show one Settings tab: device | ai | automation | accounts | general. */
+function showSettingsTab(name) {
+  document.querySelectorAll('.settings-tab').forEach((t) => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('.settings-tab-content').forEach((c) => {
+    c.classList.toggle('active', c.dataset.tab === name);
+  });
+  const body = $('.settings-body');
+  if (body) body.scrollTop = 0;
+}
+
+// ---- Automation tab ----
+// The Notion and Google Drive steps only work once those accounts are
+// connected, and the Plaud cloud interval only once signed in with sync on:
+// otherwise the row is dimmed with a hint pointing at Accounts & storage.
+
+function _setAutomationRow(row, input, hintEl, enabled, hintText) {
+  if (row) row.classList.toggle('disabled', !enabled);
+  if (input) input.disabled = !enabled;
+  if (hintEl) {
+    if (hintText) hintEl.textContent = hintText;
+    hintEl.classList.toggle('hidden', enabled);
+  }
+}
+
+function renderAutomationState() {
+  const notionToggle = $('#notion-auto-push-toggle');
+  const notionOn = !!(app.notionState && (app.notionState.connected || app.notionState.needs_reconnect));
+  _setAutomationRow(notionToggle && notionToggle.closest('label'), notionToggle, $('#automation-notion-hint'), notionOn);
+
+  const gdriveOn = !!(app.gdriveState && app.gdriveState.connected);
+  _setAutomationRow($('#gdrive-auto-sync-row'), $('#gdrive-auto-sync-toggle'), $('#automation-gdrive-hint'), gdriveOn);
+
+  const loggedIn = !!(app.cloudState && app.cloudState.logged_in);
+  const direction = (app.settings && app.settings.cloud_sync_direction) || 'download';
+  const cloudOn = loggedIn && direction !== 'none';
+  const hint = !loggedIn
+    ? 'Sign in to your Plaud account in Accounts & storage to sync from Plaud\u2019s cloud.'
+    : 'Sync with Plaud\u2019s cloud is off. Turn it on in Accounts & storage.';
+  _setAutomationRow(null, $('#cloud-sync-interval'), $('#automation-cloud-hint'), cloudOn, hint);
+}
+
+/** Move the Notion auto-push toggle from the Notion block into Automation (once). */
+function _mountNotionAutomationToggle() {
+  const toggle = $('#notion-auto-push-toggle');
+  const slot = $('#automation-notion-slot');
+  if (!toggle || !slot) return;
+  const row = toggle.closest('label');
+  if (!row || slot.contains(row)) return;
+  row.classList.remove('mt-3', 'dm-toggle-row');
+  row.classList.add('auto-step');
+  row.id = row.id || 'notion-auto-push-row';
+  const label = row.querySelector('span:last-child');
+  if (label) label.textContent = 'Push summaries to Notion';
+  slot.replaceWith(row);
+}
+
+// ---- Theme (General › Appearance) ----
+
+function renderThemeSetting(preference) {
+  const pref = preference || window._themePreference || 'auto';
+  document.querySelectorAll('#theme-setting [data-theme-pref]').forEach((btn) => {
+    const on = btn.dataset.themePref === pref;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+}
+
+/** The Rust side only cycles auto → light → dark, so step until it matches. */
+async function setThemePreference(target) {
+  let pref = window._themePreference;
+  for (let i = 0; i < 3 && pref !== target; i++) {
+    ({ preference: pref } = await window.plaud.cycleTheme());
+  }
+  if (typeof showThemeIcon === 'function') showThemeIcon(pref);
+  renderThemeSetting(pref);
 }
 
 // ---- Processing Sections ----
@@ -76,10 +162,6 @@ function renderProcessingSections() {
   const localOpts = $('#local-whisper-options');
   if (localOpts) localOpts.classList.toggle('hidden', transProv !== 'local');
 
-  // Show recommended badge only for deepgram
-  const transRec = $('#transcription-rec');
-  if (transRec) transRec.classList.toggle('hidden', transProv !== 'deepgram');
-
   // Render model selector if local
   if (transProv === 'local') renderModelSelector();
 
@@ -94,12 +176,9 @@ function renderProcessingSections() {
   const sumSelect = $('#summarization-provider');
   if (sumSelect) sumSelect.value = sumProv;
 
-  const sumRec = $('#summarization-rec');
-  if (sumRec) sumRec.classList.toggle('hidden', sumProv !== 'anthropic');
-
   renderInlineKey('summarization-key-area', sumProv);
 
-  // 4. API keys overview
+  // 4. Keys saved for providers that aren't selected
   renderAPIKeysOverview();
 
   // Bind tooltips (info icons with data-tooltip attributes)
@@ -125,10 +204,10 @@ function renderDiarizationSection(transProv) {
     note.classList.toggle('hidden', !enabled);
   }
 
-  // The token only matters when the local model runs; keep it reachable if one
-  // is saved so it can be removed.
+  // The token only matters when the local model labels speakers, i.e. with any
+  // provider but Deepgram. A saved token stays removable under "Other saved keys".
   const area = $('#hf-token-area');
-  if (area) area.classList.toggle('hidden', !enabled || (deepgramLabels && !s.hf_token_set));
+  if (area) area.classList.toggle('hidden', !enabled || transProv === 'deepgram');
   const entry = $('#hf-token-entry');
   const saved = $('#hf-token-saved');
   if (entry) entry.classList.toggle('hidden', !!s.hf_token_set);
@@ -150,7 +229,7 @@ async function saveHfTokenFromInput() {
   const token = input.value.trim();
   if (!token) return;
   _hfTokenSaving = true;
-  _setHfTokenStatus('Checking token with Hugging Face...', 'validating');
+  _setHfTokenStatus('Checking the token with Hugging Face…', 'validating');
   try {
     const result = await window.plaud.saveSettings({ hf_token: token });
     if (result && result.error) {
@@ -162,6 +241,7 @@ async function saveHfTokenFromInput() {
     _setHfTokenStatus('', '');
     toast('Hugging Face token saved', 'success');
     renderDiarizationSection(app.settings.transcription_provider || 'deepgram');
+    renderAPIKeysOverview();
   } catch (err) {
     _setHfTokenStatus(`Couldn't save the token: ${err.message}`, 'error');
   } finally {
@@ -179,14 +259,16 @@ function renderModelSelector() {
     .map(([name, info]) => {
       const selected = name === (app.settings.model || 'small');
       const disabled = !info.fits;
+      const why = `Needs about ${info.ram_gb} GB of free memory${app.settings.ram_headroom_gb ? `; this Mac has ${app.settings.ram_headroom_gb} GB free` : ''}`;
       return `
       <div class="model-option ${selected ? 'selected' : ''} ${disabled ? 'disabled' : ''}"
-           data-model="${escapeHtml(name)}" ${disabled ? 'title="Not enough RAM"' : ''}>
+           data-model="${escapeHtml(name)}" ${disabled ? `title="${escapeHtml(why)}" aria-disabled="true"` : ''}>
         <div>
           <div class="model-name">${escapeHtml(name)}</div>
           <div class="model-detail">${escapeHtml(info.speed)} \u00B7 ${escapeHtml(info.accuracy)}</div>
+          ${disabled ? `<div class="model-note">${escapeHtml(why)}</div>` : ''}
         </div>
-        <div class="model-size">${escapeHtml(info.size)} \u00B7 ~${escapeHtml(info.ram_gb)} GB RAM</div>
+        <div class="model-size">${escapeHtml(info.size)}<br>~${escapeHtml(info.ram_gb)} GB RAM</div>
       </div>
     `;
     })
@@ -205,7 +287,7 @@ function renderModelSelector() {
   const ramInfo = $('#ram-info');
   if (ramInfo) {
     ramInfo.textContent = app.settings.ram_total_gb
-      ? `System: ${app.settings.ram_total_gb} GB total, ${app.settings.ram_used_gb} GB used, ${app.settings.ram_headroom_gb} GB available`
+      ? `This Mac: ${app.settings.ram_total_gb} GB memory, ${app.settings.ram_used_gb} GB in use, ${app.settings.ram_headroom_gb} GB free`
       : '';
   }
 }
@@ -278,14 +360,14 @@ async function handleInlineKeyPaste(container, provider, key) {
   const statusEl = container.querySelector('.proc-key-status');
   const input = container.querySelector('.proc-key-input');
 
-  statusEl.textContent = 'Validating key...';
+  statusEl.textContent = 'Checking the key…';
   statusEl.className = 'ai-key-status validating proc-key-status';
   statusEl.classList.remove('hidden');
 
   try {
     const result = await window.plaud.validateKey(provider, key);
     if (result.valid) {
-      statusEl.textContent = 'Key valid — saving...';
+      statusEl.textContent = 'Key works. Saving…';
       statusEl.className = 'ai-key-status success proc-key-status';
       await window.plaud.saveSettings({ [`${provider}_api_key`]: key });
       app.settings[`${provider}_key_set`] = true;
@@ -302,32 +384,41 @@ async function handleInlineKeyPaste(container, provider, key) {
   }
 }
 
+/**
+ * "Other saved keys": keys for providers that aren't selected for transcription
+ * or summaries (the selected ones show in their own section), plus a saved
+ * Hugging Face token while its own field is hidden. Each can be removed here.
+ */
 function renderAPIKeysOverview() {
   const container = $('#api-keys-overview');
   if (!container) return;
 
-  const section = container.closest('.settings-section');
-  const connected = [];
+  const section = $('#other-keys-section') || container.closest('.settings-section');
+  const s = app.settings;
+  const inUse = new Set([s.transcription_provider || 'deepgram', s.summarization_provider || 'anthropic']);
+  const others = [];
   for (const [id, meta] of Object.entries(PROVIDERS)) {
-    if (app.settings[`${id}_key_set`]) {
-      connected.push({ id, ...meta });
-    }
+    if (s[`${id}_key_set`] && !inUse.has(id)) others.push({ id, name: meta.name, remove: `remove_${id}_key` });
+  }
+  const hfArea = $('#hf-token-area');
+  if (s.hf_token_set && (!hfArea || hfArea.classList.contains('hidden'))) {
+    others.push({ id: 'hf', name: 'Hugging Face token', remove: 'remove_hf_token' });
   }
 
-  // Hide entire section if no keys are set
-  if (connected.length === 0) {
+  if (others.length === 0) {
+    container.innerHTML = '';
     if (section) section.classList.add('hidden');
     return;
   }
   if (section) section.classList.remove('hidden');
 
   container.innerHTML = `<div class="api-keys-list">
-    ${connected.map(p => `
+    ${others.map(p => `
       <div class="api-key-overview-item connected">
-        <span class="api-key-overview-name">${p.name}</span>
+        <span class="api-key-overview-name">${escapeHtml(p.name)}</span>
         <div class="api-key-overview-right">
-          <span class="ai-key-badge connected">Connected</span>
-          <button class="ai-provider-remove proc-overview-remove" data-provider="${p.id}" title="Remove">&times;</button>
+          <span class="ai-key-badge connected">Saved</span>
+          <button class="ai-provider-remove proc-overview-remove" data-provider="${p.id}" data-remove="${p.remove}" title="Remove ${escapeHtml(p.name)}" aria-label="Remove ${escapeHtml(p.name)}">&times;</button>
         </div>
       </div>
     `).join('')}
@@ -336,9 +427,14 @@ function renderAPIKeysOverview() {
   container.querySelectorAll('.proc-overview-remove').forEach(btn => {
     btn.addEventListener('click', async () => {
       const provider = btn.dataset.provider;
-      await window.plaud.saveSettings({ [`remove_${provider}_key`]: true });
-      app.settings[`${provider}_key_set`] = false;
-      toast(`${PROVIDERS[provider]?.name || provider} key removed`, 'info');
+      await window.plaud.saveSettings({ [btn.dataset.remove]: true });
+      if (provider === 'hf') {
+        app.settings.hf_token_set = false;
+        toast('Hugging Face token removed', 'info');
+      } else {
+        app.settings[`${provider}_key_set`] = false;
+        toast(`${PROVIDERS[provider]?.name || provider} key removed`, 'info');
+      }
       renderProcessingSections();
     });
   });
@@ -380,6 +476,9 @@ function renderVocabulary() {
 
 // ---- Webhooks ----
 
+// Readable names for webhook triggers (config keys stay transcribe/summarize/sync)
+const WEBHOOK_TRIGGER_LABELS = { transcribe: 'Transcribed', summarize: 'Summarised', sync: 'Synced' };
+
 function renderWebhooks() {
   const webhooks = app.settings.webhooks || [];
   const list = $('#webhook-list');
@@ -387,17 +486,21 @@ function renderWebhooks() {
     .map((wh, i) => {
       const url = wh.url || '';
       const name = wh.name || '';
+      // Pipeline order: synced, transcribed, summarised
+      const order = ['sync', 'transcribe', 'summarize'];
       const triggers = Object.entries(wh.triggers || {})
         .filter(([, v]) => v)
         .map(([k]) => k)
-        .join(', ');
+        .sort((x, y) => (order.indexOf(x) + 1 || 99) - (order.indexOf(y) + 1 || 99))
+        .map((k) => `<span class="webhook-trigger">${escapeHtml(WEBHOOK_TRIGGER_LABELS[k] || k)}</span>`)
+        .join('');
       return `<div class="webhook-item">
       <div class="webhook-info">
-        ${name ? `<span class="webhook-name">${escapeHtml(name)}</span>` : ''}
+        ${name ? `<span class="webhook-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>` : ''}
         <span class="webhook-url" title="${escapeHtml(url)}">${escapeHtml(url)}</span>
+        <div class="webhook-triggers" aria-label="Sends when">${triggers || '<span class="webhook-trigger none">Never: no triggers</span>'}</div>
       </div>
-      <span class="webhook-status active">${escapeHtml(triggers || 'none')}</span>
-      <button class="icon-btn text-destructive" data-index="${i}" title="Remove" style="flex-shrink:0;">
+      <button class="icon-btn text-destructive" data-index="${i}" title="Remove webhook" aria-label="Remove webhook ${escapeHtml(name || url)}">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <path d="M10 4L4 10M4 4l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
@@ -471,6 +574,7 @@ function renderNotion() {
   if (autoPushToggle) {
     autoPushToggle.checked = app.settings.notion_auto_push || false;
   }
+  renderAutomationState();
 }
 
 function renderNotionBadge(state, reconnect) {
@@ -496,8 +600,8 @@ function renderNotionBadge(state, reconnect) {
     badge.title = 'Search for a database below or paste its URL';
   } else {
     badge.className = 'ai-key-badge connected';
-    badge.textContent = `Connected · ${state.database_name || 'database'}`;
-    badge.title = badge.textContent;
+    badge.textContent = 'Connected';
+    badge.title = `Connected · ${state.database_name || 'database'}`;
   }
 }
 
@@ -571,7 +675,7 @@ function renderGoogleDrive() {
     if (syncInfo && app.gdriveState.total !== undefined) {
       const synced = app.gdriveState.synced || 0;
       const total = app.gdriveState.total || 0;
-      syncInfo.textContent = `${synced} of ${total} recordings synced`;
+      syncInfo.textContent = `${synced} of ${total} recordings uploaded`;
     }
   } else {
     disconnected.classList.remove('hidden');
@@ -580,6 +684,9 @@ function renderGoogleDrive() {
 
   const autoSync = $('#gdrive-auto-sync-toggle');
   if (autoSync) autoSync.checked = (app.settings && app.settings.gdrive_auto_sync) || false;
+  // Storage mode (same section) needs a Drive folder; the Automation step needs Drive
+  if (app.settings) renderStorageSettings();
+  renderAutomationState();
 }
 
 function initGdriveEvents() {
@@ -597,7 +704,7 @@ function initGdriveEvents() {
         }
         if (result.url) {
           window.plaud.openExternal(result.url);
-          toast('Sign in with Google in your browser...', 'info');
+          toast('Sign in with Google in your browser…', 'info');
 
           if (_gdrivePollHandle) clearInterval(_gdrivePollHandle);
           if (_gdrivePollTimeoutHandle) clearTimeout(_gdrivePollTimeoutHandle);
@@ -657,7 +764,7 @@ function initGdriveEvents() {
       const list = $('#gdrive-folder-list');
       if (!list) return;
       try {
-        list.innerHTML = '<p class="settings-hint">Searching...</p>';
+        list.innerHTML = '<p class="settings-hint">Searching…</p>';
         const result = await window.plaud.gdriveFolders(q);
         if (result.error) {
           list.innerHTML = `<p class="settings-hint" style="color:var(--destructive);">${escapeHtml(result.error)}</p>`;
@@ -728,12 +835,12 @@ function initGdriveEvents() {
           toast(result.error, 'error');
         } else {
           const n = result.uploaded || 0;
-          toast(`Synced ${n} recording${n !== 1 ? 's' : ''} to Google Drive`, 'success');
+          toast(`Uploaded ${n} recording${n !== 1 ? 's' : ''} to Google Drive`, 'success');
         }
         app.gdriveState = await window.plaud.gdriveStatus();
         renderGoogleDrive();
       } catch (err) {
-        toast(`Sync failed: ${err.message}`, 'error');
+        toast(`Upload failed: ${err.message}`, 'error');
       } finally {
         setLoading(syncBtn, false);
       }
@@ -777,15 +884,15 @@ function renderCloudAccount() {
     dlRadio.checked = savedDirection === 'download';
     twRadio.checked = savedDirection === 'twoway';
   }
-  // Hide sync button and interval when "none" selected
+  // Hide the sync button when "none" selected (the interval, under
+  // Automation, is dimmed by renderAutomationState)
   const syncActions = $('#cloud-sync-actions');
-  const syncIntervalSection = $('#cloud-sync-interval');
   if (syncActions) syncActions.classList.toggle('hidden', savedDirection === 'none');
-  if (syncIntervalSection) syncIntervalSection.closest('.settings-section').classList.toggle('hidden', savedDirection === 'none');
 
   // Sync interval
   const savedInterval = app.settings.cloud_sync_interval || 'manual';
-  if (syncIntervalSection) syncIntervalSection.value = savedInterval;
+  const syncIntervalSelect = $('#cloud-sync-interval');
+  if (syncIntervalSelect) syncIntervalSelect.value = savedInterval;
 
   // Three states: logged in, waiting for the browser sign-in, logged out.
   // Only classes change here: the markup (and its listeners) is static in index.html.
@@ -801,14 +908,15 @@ function renderCloudAccount() {
     if (app.cloudState.user) {
       const raw = app.cloudState.user;
       const u = raw.data_user || raw;
-      userName.textContent = u.nickname || u.email || u.phone || 'Plaud User';
+      userName.textContent = u.nickname || u.email || u.phone || 'Plaud user';
     } else {
-      userName.textContent = 'Plaud User';
+      userName.textContent = 'Plaud user';
     }
   } else {
     loggedOut.classList.toggle('hidden', showWaiting);
     loggedIn.classList.add('hidden');
   }
+  renderAutomationState();
 }
 
 /**
@@ -854,12 +962,23 @@ function renderDeviceManager() {
   const dmDisconnected = $('#dm-disconnected');
   const dmConnected = $('#dm-connected');
 
-  if (app.deviceStateCache && app.deviceStateCache.connected) {
+  const connectedNow = !!(app.deviceStateCache && app.deviceStateCache.connected);
+  // Advanced: device details and "Erase and disconnect" need a connection
+  const eraseSection = $('#dm-erase-section');
+  if (eraseSection) eraseSection.classList.toggle('hidden', !connectedNow);
+  const infoEmpty = $('#dm-info-empty');
+  if (infoEmpty) infoEmpty.classList.toggle('hidden', connectedNow);
+  if (!connectedNow) {
+    const infoPanel = $('#dm-info-panel');
+    if (infoPanel) infoPanel.innerHTML = '';
+  }
+
+  if (connectedNow) {
     dmDisconnected.classList.add('hidden');
     dmConnected.classList.remove('hidden');
-    $('#dm-device-name').textContent = app.deviceStateCache.device_name || 'Plaud NotePin S';
+    $('#dm-device-name').textContent = prettyDeviceName(app.deviceStateCache.device_name) || 'Plaud NotePin S';
     const sn = app.deviceStateCache.serial_number;
-    $('#dm-device-meta').textContent = sn ? `SN: ${sn}` : '';
+    $('#dm-device-meta').textContent = sn ? `Serial number ${sn}` : '';
     const bat = app.deviceStateCache.battery;
     $('#dm-device-battery').textContent = bat != null ? `${bat}%` : '';
     // Show RSSI if available
@@ -1048,7 +1167,7 @@ function renderDeviceInfoPanel(panel, info) {
 
   // Battery + charging
   if (info.battery_level != null) {
-    const charging = info.charging ? ' (Charging)' : '';
+    const charging = info.charging ? ' (charging)' : '';
     items.push(`<div class="dm-info-item">
       <div class="dm-info-label">Battery</div>
       <div class="dm-info-value">${escapeHtml(info.battery_level)}%${charging}</div>
@@ -1074,48 +1193,17 @@ function renderDeviceInfoPanel(panel, info) {
     </div>`);
   }
 
-  // Active session
-  if (info.active_session_id && info.active_session_id > 0) {
+  // Recording now: the session id is the recording's start time (UNIX seconds)
+  if (info.is_recording && info.active_session_id > 0) {
+    const started = new Date(Number(info.active_session_id) * 1000);
+    const when = isNaN(started) ? '' : started.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     items.push(`<div class="dm-info-item">
-      <div class="dm-info-label">Active Session</div>
-      <div class="dm-info-value">${escapeHtml(info.active_session_id)}</div>
+      <div class="dm-info-label">Recording since</div>
+      <div class="dm-info-value">${escapeHtml(when || 'now')}</div>
     </div>`);
   }
 
-  // Accelerometer
-  if (info.accelerometer) {
-    const a = info.accelerometer;
-    items.push(`<div class="dm-info-item full-width">
-      <div class="dm-info-label">Orientation</div>
-      <div class="dm-info-value">Pitch ${escapeHtml(a.pitch)}\u00B0 \u00B7 Roll ${escapeHtml(a.roll)}\u00B0 \u00B7 Yaw ${escapeHtml(a.yaw)}\u00B0</div>
-    </div>`);
-  }
-
-  // Build the panel: grid for info cards, then standalone toggle rows below
-  const autoDelete = app.settings.auto_delete_after_sync || false;
-  const toggles = `<div class="dm-toggles">
-    <label class="toggle-label dm-toggle-row">
-      <input type="checkbox" id="dm-auto-delete-toggle" class="toggle-input" ${autoDelete ? 'checked' : ''}>
-      <span class="toggle-switch"></span>
-      <span>Delete recordings from device after sync</span>
-    </label>
-  </div>`;
-
-  panel.innerHTML = `<div class="dm-info-grid">${items.join('')}</div>${toggles}`;
-
-  // Wire up auto-delete toggle
-  const autoDeleteToggle = document.getElementById('dm-auto-delete-toggle');
-  if (autoDeleteToggle) {
-    autoDeleteToggle.addEventListener('change', async (e) => {
-      const enabled = e.target.checked;
-      await window.plaud.saveSettings({ auto_delete_after_sync: enabled });
-      app.settings.auto_delete_after_sync = enabled;
-      toast(
-        enabled ? 'Files will be deleted from device after sync' : 'Files will be kept on device after sync',
-        'success',
-      );
-    });
-  }
+  panel.innerHTML = `<div class="dm-info-grid">${items.join('')}</div>`;
 }
 
 function rssiToSignalLevel(rssi) {
@@ -1136,7 +1224,7 @@ function rssiToLabel(rssi) {
 function renderSignalBars(rssi) {
   const level = rssiToSignalLevel(rssi);
   const heights = [4, 7, 10, 13];
-  return `<div class="dm-signal" title="Signal: ${escapeHtml(rssi)} dBm (${rssiToLabel(rssi)})">
+  return `<div class="dm-signal" title="Signal: ${escapeHtml(rssi)} dBm (${rssiToLabel(rssi)})" role="img" aria-label="Signal ${rssiToLabel(rssi).toLowerCase()}">
     ${heights
       .map((h, i) => `<div class="dm-signal-bar ${i < level ? 'active' : ''}" style="height:${h}px;"></div>`)
       .join('')}
@@ -1168,7 +1256,7 @@ async function updateDeviceStatus() {
     app.deviceStateCache = status;
     if (status.connected) {
       dom.statusEl.className = 'device-status connected';
-      dom.statusText.textContent = status.device_name || 'Connected';
+      dom.statusText.textContent = prettyDeviceName(status.device_name) || 'Connected';
       const battStr = status.battery != null ? `${status.battery}%` : '';
       const chargingStr = status.charging ? ' \u26A1' : '';
       dom.batteryText.textContent = battStr + chargingStr;
@@ -1224,22 +1312,61 @@ function updateAutoPipelineState() {
     summariseToggle.disabled = false;
   }
 
-  const wifiToggle = $('#auto-wifi-toggle');
-  const wifiRow = $('#auto-wifi-row');
-  if (wifiToggle && wifiRow) {
-    if (!syncOn) {
-      wifiRow.classList.add('disabled');
-      wifiToggle.disabled = true;
-    } else {
-      wifiRow.classList.remove('disabled');
-      wifiToggle.disabled = false;
-    }
+  // "Prefer Wi-Fi" (Device › Transfer) isn't part of this chain: manual syncs
+  // use it too (performSync), so it stays available with auto-sync off.
+}
+
+// Personalisation saves as you type (debounced) and on blur/change.
+const PROFILE_SAVE_DELAY_MS = 700;
+const PROFILE_FIELD_IDS = ['profile-name', 'profile-job', 'profile-industry', 'profile-seniority', 'profile-usecases', 'profile-instructions'];
+let _profileSaveTimer = null;
+let _profileStatusTimer = null;
+
+function _readProfileFields() {
+  return {
+    name: $('#profile-name').value.trim(),
+    job: $('#profile-job').value.trim(),
+    industry: $('#profile-industry').value.trim(),
+    seniority: $('#profile-seniority').value,
+    usecases: $('#profile-usecases').value.trim(),
+    instructions: $('#profile-instructions').value.trim(),
+  };
+}
+
+function _setProfileSaveStatus(text, isError = false) {
+  const el = $('#profile-save-status');
+  if (!el) return;
+  clearTimeout(_profileStatusTimer);
+  el.textContent = text;
+  el.classList.toggle('error', isError);
+  if (text && !isError) _profileStatusTimer = setTimeout(() => { el.textContent = ''; }, 2000);
+}
+
+async function saveProfileNow() {
+  clearTimeout(_profileSaveTimer);
+  _profileSaveTimer = null;
+  const profile = _readProfileFields();
+  const before = app.settings.profile || {};
+  const same = Object.keys(profile).every((k) => (before[k] || '') === profile[k]);
+  if (same) return;
+  try {
+    await window.plaud.saveSettings({ profile });
+    app.settings.profile = profile;
+    _setProfileSaveStatus('Saved');
+  } catch (err) {
+    _setProfileSaveStatus(`Not saved: ${err.message}`, true);
   }
+}
+
+function scheduleProfileSave() {
+  clearTimeout(_profileSaveTimer);
+  _profileSaveTimer = setTimeout(saveProfileNow, PROFILE_SAVE_DELAY_MS);
 }
 
 function initSettingsEvents() {
   initStorageEvents();
   initGdriveEvents();
+  _mountNotionAutomationToggle();
 
   // Settings tabs — translate vertical scroll to horizontal (mouse wheel)
   // but let native horizontal scroll through (trackpad two-finger swipe)
@@ -1257,15 +1384,46 @@ function initSettingsEvents() {
     { passive: false },
   );
 
-  // Tab switching
-  document.querySelectorAll('.settings-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.settings-tab').forEach((t) => t.classList.remove('active'));
-      document.querySelectorAll('.settings-tab-content').forEach((c) => c.classList.remove('active'));
-      tab.classList.add('active');
-      const content = document.querySelector(`.settings-tab-content[data-tab="${tab.dataset.tab}"]`);
-      if (content) content.classList.add('active');
+  // Tab switching (arrow keys move between tabs too)
+  const settingsTabs = [...document.querySelectorAll('.settings-tab')];
+  settingsTabs.forEach((tab, i) => {
+    tab.addEventListener('click', () => showSettingsTab(tab.dataset.tab));
+    tab.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const next = settingsTabs[(i + (e.key === 'ArrowRight' ? 1 : settingsTabs.length - 1)) % settingsTabs.length];
+      next.focus();
+      showSettingsTab(next.dataset.tab);
     });
+  });
+
+  // General › Appearance
+  document.querySelectorAll('#theme-setting [data-theme-pref]').forEach((btn) => {
+    btn.addEventListener('click', () => setThemePreference(btn.dataset.themePref).catch(() => {}));
+  });
+  renderThemeSetting();
+
+  // General › About
+  const diagBtn = $('#open-diagnostics-log-btn');
+  if (diagBtn) {
+    diagBtn.addEventListener('click', async () => {
+      try {
+        await window.plaud.openDiagnosticsLog();
+      } catch (err) {
+        toast(`Couldn't open the diagnostics log: ${err && err.message ? err.message : err}`, 'error');
+      }
+    });
+  }
+
+  // Device › Transfer
+  $('#dm-auto-delete-toggle').addEventListener('change', async (e) => {
+    const enabled = e.target.checked;
+    await window.plaud.saveSettings({ auto_delete_after_sync: enabled });
+    app.settings.auto_delete_after_sync = enabled;
+    toast(
+      enabled ? 'Recordings will be deleted from the device after sync' : 'Recordings will stay on the device after sync',
+      'success',
+    );
   });
 
   // App version + check for updates
@@ -1281,7 +1439,7 @@ function initSettingsEvents() {
 
   $('#check-updates-btn').addEventListener('click', async () => {
     const statusEl = $('#update-check-status');
-    statusEl.textContent = 'Checking...';
+    statusEl.textContent = 'Checking…';
     try {
       const resultPromise = new Promise((resolve) => {
         app.updateListeners.push(resolve);
@@ -1290,13 +1448,13 @@ function initSettingsEvents() {
       window.plaud.checkForUpdates();
       const result = await resultPromise;
       if (result.status === 'up-to-date') {
-        statusEl.textContent = 'You\'re up to date!';
+        statusEl.textContent = 'You\'re up to date';
       } else if (result.status === 'available' || result.status === 'downloading' || result.status === 'ready') {
         statusEl.textContent = '';
       } else if (result.status === 'error') {
         statusEl.textContent = `Update error: ${result.message || 'Unknown'}`;
       } else if (result.status === 'timeout') {
-        statusEl.textContent = 'No response — check may not work in dev mode';
+        statusEl.textContent = 'No response. Checking may not work in development builds.';
       }
       setTimeout(() => { statusEl.textContent = ''; }, 5000);
     } catch (e) {
@@ -1319,7 +1477,7 @@ function initSettingsEvents() {
 
   $('#launch-login-toggle').addEventListener('change', async (e) => {
     await window.plaud.setLoginItem(e.target.checked);
-    toast(e.target.checked ? 'Will open at login' : 'Disabled open at login', 'success');
+    toast(e.target.checked ? 'Plaud V2 will open at login' : 'Plaud V2 won\'t open at login', 'success');
   });
 
   $('#show-dock-toggle').addEventListener('change', async (e) => {
@@ -1345,7 +1503,7 @@ function initSettingsEvents() {
   $('#diarize-toggle').addEventListener('change', async (e) => {
     app.settings.diarize = e.target.checked;
     await window.plaud.saveSettings({ diarize: e.target.checked });
-    toast(e.target.checked ? 'Diarization enabled' : 'Diarization disabled', 'success');
+    toast(e.target.checked ? 'Speaker identification on' : 'Speaker identification off', 'success');
     renderProcessingSections();
   });
 
@@ -1357,20 +1515,20 @@ function initSettingsEvents() {
     app.settings.auto_sync = e.target.checked;
     await window.plaud.saveSettings({ auto_sync: e.target.checked });
     updateAutoPipelineState();
-    toast(e.target.checked ? 'Auto-sync enabled' : 'Auto-sync disabled', 'success');
+    toast(e.target.checked ? 'New recordings will sync by themselves' : 'Automatic sync off', 'success');
   });
 
   $('#auto-transcribe-toggle').addEventListener('change', async (e) => {
     app.settings.auto_transcribe = e.target.checked;
     await window.plaud.saveSettings({ auto_transcribe: e.target.checked });
     updateAutoPipelineState();
-    toast(e.target.checked ? 'Auto-transcribe enabled' : 'Auto-transcribe disabled', 'success');
+    toast(e.target.checked ? 'New recordings will be transcribed' : 'Automatic transcription off', 'success');
   });
 
   $('#auto-summarise-toggle').addEventListener('change', async (e) => {
     app.settings.auto_summarise = e.target.checked;
     await window.plaud.saveSettings({ auto_summarise: e.target.checked });
-    toast(e.target.checked ? 'Auto-summarise enabled' : 'Auto-summarise disabled', 'success');
+    toast(e.target.checked ? 'New transcripts will be summarised' : 'Automatic summaries off', 'success');
   });
 
   $('#auto-wifi-toggle').addEventListener('change', async (e) => {
@@ -1378,25 +1536,19 @@ function initSettingsEvents() {
     await window.plaud.saveSettings({ auto_prefer_wifi: e.target.checked });
     toast(
       e.target.checked
-        ? 'WiFi preferred — large transfers will use WiFi automatically'
-        : 'WiFi preference disabled',
+        ? 'Large transfers will use Wi-Fi without asking'
+        : 'Plaud V2 will ask before using Wi-Fi',
       'success',
     );
   });
 
-  // Profile save
-  $('#profile-save-btn').addEventListener('click', async () => {
-    const profile = {
-      name: $('#profile-name').value.trim(),
-      job: $('#profile-job').value.trim(),
-      industry: $('#profile-industry').value.trim(),
-      seniority: $('#profile-seniority').value,
-      usecases: $('#profile-usecases').value.trim(),
-      instructions: $('#profile-instructions').value.trim(),
-    };
-    await window.plaud.saveSettings({ profile });
-    app.settings.profile = profile;
-    toast('Profile saved', 'success');
+  // Personalisation: autosave (no Save button)
+  PROFILE_FIELD_IDS.forEach((id) => {
+    const el = $(`#${id}`);
+    if (!el) return;
+    el.addEventListener('input', scheduleProfileSave);
+    el.addEventListener('change', saveProfileNow);
+    el.addEventListener('blur', saveProfileNow);
   });
 
   // Vocabulary
@@ -1426,13 +1578,13 @@ function initSettingsEvents() {
     const input = $('#webhook-url-input');
     const url = input.value.trim();
     if (!url) {
-      toast('Enter a webhook URL', 'error');
+      toast('Enter the webhook\'s URL', 'error');
       return;
     }
     try {
       new URL(url);
     } catch {
-      toast('Invalid URL', 'error');
+      toast('That isn\'t a valid URL', 'error');
       return;
     }
 
@@ -1442,7 +1594,7 @@ function initSettingsEvents() {
       sync: $('#webhook-on-sync').checked,
     };
 
-    toast('Testing webhook...', 'info');
+    toast('Testing the webhook…', 'info');
     try {
       const resp = await fetch(url, {
         method: 'POST',
@@ -1454,12 +1606,12 @@ function initSettingsEvents() {
         }),
       });
       if (!resp.ok) {
-        toast(`Webhook returned ${resp.status} — added anyway`, 'info');
+        toast(`The webhook answered ${resp.status}. Added it anyway.`, 'info');
       } else {
-        toast('Webhook validated and added', 'success');
+        toast('Webhook tested and added', 'success');
       }
     } catch {
-      toast('Could not reach URL — added anyway (check URL)', 'info');
+      toast('Couldn\'t reach that URL. Added it anyway: check the URL.', 'info');
     }
 
     const nameInput = $('#webhook-name-input');
@@ -1692,11 +1844,10 @@ function initSettingsEvents() {
       const dir = e.target.value;
       app.settings.cloud_sync_direction = dir;
       await window.plaud.saveSettings({ cloud_sync_direction: dir });
-      // Show/hide sync button and interval
+      // Show/hide the sync button; dim the interval (Automation) when off
       const syncActions = $('#cloud-sync-actions');
-      const syncIntervalEl = $('#cloud-sync-interval');
       if (syncActions) syncActions.classList.toggle('hidden', dir === 'none');
-      if (syncIntervalEl) syncIntervalEl.closest('.settings-section').classList.toggle('hidden', dir === 'none');
+      renderAutomationState();
       // Restart polling timers to apply new sync direction
       if (app.restartPollingTimers) app.restartPollingTimers();
     });
@@ -1706,7 +1857,7 @@ function initSettingsEvents() {
   $('#cloud-sync-interval').addEventListener('change', async (e) => {
     app.settings.cloud_sync_interval = e.target.value;
     await window.plaud.saveSettings({ cloud_sync_interval: e.target.value });
-    toast(`Sync interval set to ${e.target.options[e.target.selectedIndex].text}`, 'success');
+    toast(`Plaud cloud sync: ${e.target.options[e.target.selectedIndex].text.toLowerCase()}`, 'success');
     // Restart polling timers to apply new interval
     if (app.restartPollingTimers) app.restartPollingTimers();
   });
@@ -1717,7 +1868,7 @@ function initSettingsEvents() {
     setLoading(btn, true);
     const statusEl = $('#cloud-sync-status');
     const direction = $('#sync-twoway').checked ? 'twoway' : 'download';
-    statusEl.textContent = direction === 'twoway' ? 'Syncing (download + upload)...' : 'Downloading from cloud...';
+    statusEl.textContent = direction === 'twoway' ? 'Syncing both ways…' : 'Downloading from Plaud\u2019s cloud…';
 
     try {
       const result = await window.plaud.cloudSync(direction);
@@ -1737,14 +1888,14 @@ function initSettingsEvents() {
         if (uploaded.length > 0) parts.push(`${uploaded.length} uploaded`);
         if (uploadErrors.length > 0) parts.push(`${uploadErrors.length} upload failed`);
 
-        const summary = parts.length > 0 ? parts.join(', ') : 'Everything up to date';
+        const summary = parts.length > 0 ? parts.join(', ') : 'Everything is up to date';
         statusEl.textContent = summary;
         toast(`Cloud sync: ${summary}`, 'success');
 
         await loadRecordings();
         // Downloads from Plaud Cloud were always transcribed: in the background now.
         if (queueAutoProcess(newDown, { always: true, language: app.settings.language || 'en' }) > 0) {
-          statusEl.textContent = `${summary} — transcribing in the background`;
+          statusEl.textContent = `${summary}. Transcribing in the background.`;
         }
       }
     } catch (err) {
@@ -1781,7 +1932,7 @@ function initSettingsEvents() {
     const results = $('#dm-scan-results');
     setLoading(btn, true);
     results.classList.remove('hidden');
-    results.innerHTML = '<div class="dm-scanning">Scanning for nearby devices</div>';
+    results.innerHTML = '<div class="dm-scanning">Looking for nearby devices</div>';
 
     try {
       const data = await window.plaud.scanAll();
@@ -1789,21 +1940,21 @@ function initSettingsEvents() {
 
       if (devices.length === 0) {
         results.innerHTML = `<p class="settings-desc" style="text-align:center;padding:12px;">
-          No devices found. Make sure your Plaud is nearby and not connected to the phone app.
+          No devices found. Make sure your NotePin is nearby and not connected to the Plaud phone app.
         </p>`;
       } else {
         results.innerHTML = devices
           .map((d) => {
-            const sn = d.serial_number ? `SN: ${d.serial_number}` : '';
+            const sn = d.serial_number ? `Serial ${d.serial_number}` : '';
             const model = d.model || '';
             const detail = [model, sn, `${d.rssi} dBm`].filter(Boolean).join(' · ');
             return `
-            <div class="dm-device-row" data-address="${escapeHtml(d.address)}" data-name="${escapeHtml(d.name || 'Plaud')}" data-sn="${escapeHtml(d.serial_number || '')}">
+            <div class="dm-device-row" data-address="${escapeHtml(d.address)}" data-name="${escapeHtml(prettyDeviceName(d.name) || 'Plaud')}" data-sn="${escapeHtml(d.serial_number || '')}" role="button" tabindex="0">
               <div class="dm-device-row-icon">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="5" y="1" width="6" height="14" rx="2"/></svg>
               </div>
               <div class="dm-device-row-info">
-                <div class="dm-device-row-name">${escapeHtml(d.name || 'Plaud Device')}</div>
+                <div class="dm-device-row-name">${escapeHtml(prettyDeviceName(d.name) || 'Plaud device')}</div>
                 <div class="dm-device-row-detail">${escapeHtml(detail)}</div>
               </div>
               ${renderSignalBars(d.rssi)}
@@ -1872,12 +2023,12 @@ function initSettingsEvents() {
   $('#dm-depair-btn').addEventListener('click', async () => {
     const btn = $('#dm-depair-btn');
     if (btn.dataset.confirmed !== 'yes') {
-      btn.textContent = 'Confirm Erase?';
-      btn.style.background = '#e74c3c';
+      btn.textContent = 'Click again to erase';
+      btn.style.background = 'var(--destructive-fill-hover)';
       btn.dataset.confirmed = 'yes';
       setTimeout(() => {
         if (btn.dataset.confirmed === 'yes') {
-          btn.innerHTML = 'Erase &amp; Disconnect';
+          btn.innerHTML = 'Erase &amp; disconnect';
           btn.style.background = '';
           btn.dataset.confirmed = '';
         }
@@ -1885,7 +2036,7 @@ function initSettingsEvents() {
       return;
     }
     btn.dataset.confirmed = '';
-    btn.innerHTML = 'Erase &amp; Disconnect';
+    btn.innerHTML = 'Erase &amp; disconnect';
     btn.style.background = '';
 
     setLoading(btn, true);
@@ -1961,13 +2112,15 @@ function renderStorageSettings() {
   const hint = $('#storage-mode-hint');
   if (hint) {
     const hints = {
-      local: 'Recordings saved locally only.',
-      cloud: 'Recordings uploaded to Google Drive. Local files removed after upload to save space.',
-      both: 'Recordings saved locally and backed up to Google Drive.',
+      local: 'Recordings are kept on this Mac only.',
+      cloud: 'Recordings are uploaded to Google Drive, then removed from this Mac to save space.',
+      both: 'Recordings are kept on this Mac and backed up to Google Drive.',
     };
     let text = hints[mode] || '';
-    if ((mode === 'cloud' || mode === 'both') && !gdConnected) {
-      text = 'Connect Google Drive in Integrations to enable cloud storage.';
+    if (!gdConnected) {
+      text = mode === 'local'
+        ? `${text} Connect Google Drive and choose a folder to keep them there too.`
+        : 'Connect Google Drive and choose a folder above to keep recordings there.';
     }
     hint.textContent = text;
   }
@@ -1979,12 +2132,12 @@ function _showMigrationDialog(newDir, oldDir, isReset) {
   overlay.className = 'delete-dialog-overlay';
   overlay.innerHTML = `
     <div class="delete-dialog" style="max-width:440px;">
-      <h3>${isReset ? 'Reset save location' : 'Change save location'}</h3>
+      <h3>${isReset ? 'Reset the recordings folder' : 'Change the recordings folder'}</h3>
       <p class="settings-desc">New recordings will save to <strong>${escapeHtml(shortNew)}</strong></p>
-      <p class="settings-desc" style="margin-top:var(--sp-2);">What would you like to do with your existing recordings?</p>
+      <p class="settings-desc" style="margin-top:var(--sp-2);">What should happen to your existing recordings?</p>
       <div class="delete-dialog-actions">
         <button class="action-btn primary" id="migrate-move-all">
-          Move all recordings to new location
+          Move them all to the new folder
         </button>
         <button class="action-btn subtle" id="migrate-leave">
           Leave them where they are
@@ -2007,7 +2160,7 @@ function _showMigrationDialog(newDir, oldDir, isReset) {
   const changeDirOnly = async () => {
     try {
       await window.plaud.saveSettings({ save_directory: isReset ? '' : newDir });
-      toast(isReset ? 'Reset to default directory' : 'Save directory updated');
+      toast(isReset ? 'Recordings folder reset to the default' : 'Recordings folder changed');
       await loadSettings();
       await loadRecordings();
     } catch (err) {
@@ -2039,7 +2192,7 @@ function _showMigrationDialog(newDir, oldDir, isReset) {
     }
 
     try {
-      toast(`Moving ${allIds.length} recording${allIds.length > 1 ? 's' : ''}...`, 'info');
+      toast(`Moving ${allIds.length} recording${allIds.length > 1 ? 's' : ''}…`, 'info');
       const result = await window.plaud.moveRecordings(allIds, newDir);
       const moved = result.count || 0;
       const errors = (result.errors || []).length;
@@ -2063,14 +2216,14 @@ function initStorageEvents() {
         const mode = btn.dataset.mode;
         const gdConnected = app.gdriveState && app.gdriveState.connected && app.gdriveState.folder_id;
         if ((mode === 'cloud' || mode === 'both') && !gdConnected) {
-          toast('Connect Google Drive first in Settings > Integrations', 'error');
+          toast('Connect Google Drive and choose a folder first', 'error');
           return;
         }
         try {
           await window.plaud.saveSettings({ storage_mode: mode });
           app.settings.storage_mode = mode;
           renderStorageSettings();
-          toast(`Storage mode: ${mode}`, 'success');
+          toast(`Recordings kept: ${{ local: 'on this Mac', cloud: 'in Google Drive', both: 'on this Mac and in Google Drive' }[mode] || mode}`, 'success');
         } catch (err) {
           toast(`Failed: ${err.message}`, 'error');
         }

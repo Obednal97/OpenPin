@@ -14,6 +14,7 @@
 .mt-3 { margin-top: var(--sp-3); }
 .mt-4 { margin-top: var(--sp-4); }
 .mb-0 { margin-bottom: 0; }
+.mt-0 { margin-top: 0; }
 .mb-2 { margin-bottom: var(--sp-2); }
 .mb-3 { margin-bottom: var(--sp-3); }
 .mr-1 { margin-right: var(--sp-1); }
@@ -37,8 +38,12 @@
 
 /* === RESPONSIVE === */
 @media (max-width: 900px) {
-  .settings-panel { width: 100%; }
   #action-bar { flex-wrap: wrap; gap: var(--sp-2); }
   .action-bar-left, .action-bar-right { flex-wrap: wrap; }
   .search-bar-inline { width: 160px; }
+}
+/* A full-width settings panel starts at the window's left edge: keep its
+   header clear of the macOS traffic lights (trafficLightPosition 16,28). */
+@media (max-width: 520px) {
+  .settings-header { padding-left: 80px; }
 }
