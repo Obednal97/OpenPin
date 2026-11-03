@@ -1,6 +1,7 @@
-# Cloudflare Worker that proxies the Open Pin updater (and the retired bug reporter) to GitHub.
+# Cloudflare Worker that proxies the Open Pin updater to the GitHub release API.
 # Its name (and so its workers.dev URL) keeps the pre-rename name: installed apps call it.
-# No secrets in this file: GH_TOKEN is a Worker secret (`npx wrangler secret put GH_TOKEN`).
+# The repo is public, so no token is required. An optional read-only GH_TOKEN
+# (Contents: read) only raises the GitHub API rate limit: `npx wrangler secret put GH_TOKEN`.
 name = "plaud-v2-updates"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
@@ -14,12 +15,12 @@ routes = [
 [observability]
 enabled = true
 
-# Report rate limits + daily create/comment caps (see README "Limits").
-# SQLite-backed, so it runs on the Workers Free plan.
-[[durable_objects.bindings]]
-name = "LIMITER"
-class_name = "ReportLimiter"
-
+# Migration history. v1 created the ReportLimiter Durable Object for the old
+# bug-report endpoint; v2 deletes it now that the endpoint is retired.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ReportLimiter"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["ReportLimiter"]

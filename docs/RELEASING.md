@@ -8,15 +8,10 @@ Names: the product is **Open Pin**; the bundle ID (`com.plaud.v2`), the Worker
 Plaud V2, on purpose (see [ARCHITECTURE.md](ARCHITECTURE.md#names)). Never change the bundle ID:
 the installer refuses any other, and Bluetooth permission and the Keychain backup depend on it.
 
-> **Operational status (2 November 2026)** — delete this box once it's resolved.
->
-> - The fine-grained token the Worker used (`GH_TOKEN`) was **revoked on 2026-11-02**. Until a new
->   one is set, `/v1/latest`, `/v1/download` and `/v1/report` fail once the Worker's 5-minute
->   cache expires, so no install can update. (The app no longer calls `/v1/report`; see
->   [Bug reports](#bug-reports).) Create a new token and set it as in
->   [Rotating the Worker's GitHub token](#rotating-the-workers-github-token).
-> - The GitHub token embedded in **v2.3.0 and older** has been revoked too. Those builds can't
->   update themselves any more: install the latest DMG by hand.
+> **Note** — the repository is **public**, so the update Worker needs no GitHub token. The old
+> `POST /v1/report` bug-report endpoint and its issue-writing token were retired in November 2026.
+> The GitHub token embedded in **v2.3.0 and older** was revoked, so those builds can't update
+> themselves: install the latest DMG by hand.
 
 ## Contents
 
@@ -25,7 +20,7 @@ the installer refuses any other, and Bluetooth permission and the Keychain backu
 - [Release recipe](#release-recipe)
 - [Verify before publishing](#verify-before-publishing)
 - [Publish](#publish)
-- [Rotating the Worker's GitHub token](#rotating-the-workers-github-token)
+- [The Worker's GitHub token (optional)](#the-workers-github-token-optional)
 - [Bug reports](#bug-reports)
 - [Troubleshooting](#troubleshooting)
 
@@ -230,14 +225,15 @@ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$(curl -s "$W/v1/lates
 Running copies pick the update up within 4 hours, or straight away with **Check for Updates**.
 Check an older install updates and that `update.log` ends cleanly.
 
-## Rotating the Worker's GitHub token
+## The Worker's GitHub token (optional)
 
-The only GitHub token in the system is the Worker secret `GH_TOKEN`. Rotate it any time; no app
-release is needed.
+The repository is public, so the update Worker reads releases **without a token**. A read-only
+`GH_TOKEN` is optional and only raises GitHub's API rate limit; add it if unauthenticated reads
+ever start returning `403` rate-limit errors.
 
 1. GitHub › Settings › Developer settings › Fine-grained tokens › **Generate new token**, for
-   repository **Obednal97/OpenPin** only, with **Contents: Read-only** and **Issues: Read and
-   write** (Metadata: Read-only is added automatically).
+   repository **Obednal97/OpenPin** only, with **Contents: Read-only** (Metadata: Read-only is
+   added automatically). No other permission — the Worker never writes.
 2. Set it (wrangler reads it from the prompt, so it stays out of shell history):
 
    ```bash
@@ -257,7 +253,7 @@ Deploying the Worker, its endpoints, limits and smoke tests:
 
 The app files no GitHub issues: no crash reports, no in-app submission. Errors only go
 to the app log and `~/Library/Application Support/com.plaud.v2/diagnostics.log` (rotates at 1 MB),
-Rust panics included. The Worker's `/v1/report` endpoint is unused and will be retired separately.
+Rust panics included. (The Worker's old `/v1/report` endpoint was retired in November 2026.)
 
 **Report a bug › Export bug report** (`export_bug_report` in `src-tauri/src/commands/mod.rs`)
 saves `Open Pin bug report <date> <time>.zip` to `~/Downloads` (" 2", " 3"… if the name is taken).

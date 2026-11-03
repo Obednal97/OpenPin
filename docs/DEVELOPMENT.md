@@ -32,7 +32,7 @@ app/                    Python backend + frontend (one folder; the build splits 
   index.html renderer.js tauri-bridge.js ui/ css/ assets/   frontend
 src/                    shared Python: crypto, BLE scanner, local Whisper + diarization
 src-tauri/              Rust shell (Tauri 2): src/, tauri.conf.json, Entitlements.plist, Info.plist
-infra/update-worker/    Cloudflare Worker for updates (its old /v1/report endpoint is unused)
+infra/update-worker/    Cloudflare Worker for updates (release lookup + download proxy)
 scripts/                build helpers and legacy device scripts (see scripts/README.md)
 tests/                  pytest suite
 docs/                   these docs
