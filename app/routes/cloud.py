@@ -14,6 +14,7 @@ def _error_json(base, exc):
     base["traceback"] = traceback.format_exc()
     return base
 
+
 bp = Blueprint("cloud", __name__, url_prefix="/cloud")
 
 
@@ -48,7 +49,9 @@ def exchange_token():
         return jsonify({"error": "No auth code provided"}), 400
 
     try:
-        result = cloud.exchange_token(auth_code, desktop_uuid)
+        # "link": the code came from a plaud:// link (any web page can open one)
+        from_link = data.get("source") == "link"
+        result = cloud.exchange_token(auth_code, desktop_uuid, from_link=from_link)
         if result.get("error"):
             return jsonify(result), 400
         return jsonify(result)
@@ -68,9 +71,11 @@ def login_token():
 
     try:
         result = cloud.login_with_token(token, region)
-        return jsonify(result)
     except Exception as e:
-        return jsonify({"error": f"Token validation failed: {e}"}), 401
+        return jsonify({"error": f"Couldn't check the token with Plaud: {e}"}), 502
+    if result.get("error"):
+        return jsonify(result), 401
+    return jsonify(result)
 
 
 @bp.route("/logout", methods=["POST"])

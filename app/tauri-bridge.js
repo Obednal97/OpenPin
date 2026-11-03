@@ -212,6 +212,8 @@ async function apiCall(method, endpoint, body = null) {
     'went out of range',
     'already in progress',
     'powered off',
+    'invalid or has expired', // expired Plaud sign-in code: the user signs in again
+    'ignored a plaud sign-in link', // a plaud:// link nobody asked for
   ];
   // 409 / busy = "a sync is already running" — expected, never a bug.
   const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
@@ -265,6 +267,52 @@ listen('system-theme-changed', () => {
   }
 });
 
+// --- Plaud sign-in links (plaud://login?auth_code=…; src-tauri/src/deep_link.rs) ---
+// Rust keeps the code until the page takes it and emits 'plaud-sign-in-link'
+// (no payload). The link may have launched the app, so check once after every
+// script has loaded too. Wait for the backend (the exchange needs it), then take
+// the code (handed out once) and give it to the 'oauth-callback' listeners.
+let _bridgeSignInDraining = false;
+let _bridgeSignInRecheck = false;
+
+async function _bridgeDrainSignInLink() {
+  if (_bridgeSignInDraining) {
+    _bridgeSignInRecheck = true;
+    return;
+  }
+  _bridgeSignInDraining = true;
+  try {
+    do {
+      _bridgeSignInRecheck = false;
+      while (await invoke('has_pending_sign_in_code')) {
+        let info = null;
+        try {
+          info = await _bridgeRefreshApiInfo();
+        } catch {
+          info = null;
+        }
+        if (info && info.status === 'ready') {
+          const code = await invoke('take_pending_sign_in_code');
+          if (code) for (const cb of _eventCallbacks['oauth-callback']) cb(code);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    } while (_bridgeSignInRecheck);
+  } catch (err) {
+    console.error('[sign-in link]', err && err.message ? err.message : err);
+  } finally {
+    _bridgeSignInDraining = false;
+  }
+}
+
+listen('plaud-sign-in-link', () => _bridgeDrainSignInLink());
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => _bridgeDrainSignInLink(), { once: true });
+} else {
+  setTimeout(_bridgeDrainSignInLink, 0);
+}
+
 function addListener(eventName, callback) {
   if (_eventCallbacks[eventName]) {
     _eventCallbacks[eventName].push(callback);
@@ -288,6 +336,30 @@ window.plaud = {
   setFindMy: (enabled) => apiCall('POST', '/device/find-my', { enabled }),
   files: () => apiCall('GET', '/device/files'),
   checkNew: () => apiCall('GET', '/device/check-new'),
+  // Pairing backup (Settings › Device). Responses never contain credentials.
+  pairingStatus: () => apiCall('GET', '/device/pairing'),
+  exportPairing: (path) => apiCall('POST', '/device/pairing/export', { path }),
+  importPairing: (path) => apiCall('POST', '/device/pairing/import', { path }),
+  // Native save/open panels from the dialog plugin (capability dialog:default
+  // allows save and open). Resolve to an absolute path, or null if cancelled.
+  choosePairingExportPath: (defaultPath) =>
+    invoke('plugin:dialog|save', {
+      options: {
+        title: 'Export pairing',
+        defaultPath,
+        filters: [{ name: 'Pairing export', extensions: ['json'] }],
+        canCreateDirectories: true,
+      },
+    }),
+  choosePairingImportFile: () =>
+    invoke('plugin:dialog|open', {
+      options: {
+        title: 'Import pairing',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Pairing export', extensions: ['json'] }],
+      },
+    }),
   // opts e.g. { background: true } for automatic syncs; no args = no body, as before.
   sync: (opts) => apiCall('POST', '/device/sync', opts || null),
   syncStatus: () => apiCall('GET', '/device/sync-status'),
@@ -326,8 +398,10 @@ window.plaud = {
   // Cloud account
   cloudStatus: () => apiCall('GET', '/cloud/status'),
   cloudLoginUrl: (region) => apiCall('POST', '/cloud/login-url', { region }),
-  cloudExchangeToken: (auth_code, desktop_uuid) =>
-    apiCall('POST', '/cloud/exchange-token', { auth_code, desktop_uuid }),
+  // source 'link': the code came from a plaud:// link, so the backend only uses it
+  // while a sign-in started here is pending (any web page can open such a link)
+  cloudExchangeToken: (auth_code, desktop_uuid, source) =>
+    apiCall('POST', '/cloud/exchange-token', { auth_code, desktop_uuid, source: source || 'paste' }),
   cloudLoginToken: (token, region) => apiCall('POST', '/cloud/login-token', { token, region }),
   cloudLogout: () => apiCall('POST', '/cloud/logout'),
   cloudRecordings: () => apiCall('GET', '/cloud/recordings'),
