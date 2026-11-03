@@ -23,6 +23,12 @@ Design:
   (shown in Settings with a Retry button) instead of disappearing silently.
 - A properties-only job whose Notion page was deleted or archived is turned
   into a full push once, which recreates the page.
+- A push that finds the recording may already be in Notion on a page an
+  older app version made ("needs review") is moved to a ``needs_review``
+  list: it needs the owner's choice, so it isn't retried, isn't counted as a
+  failure and doesn't pause anything. It leaves the list when a push of that
+  recording succeeds (e.g. the owner picks "Use that page" or "Create a new
+  page" in the transcript view).
 - Global pause when Notion auth fails. While paused we probe with backoff,
   and stop probing entirely once the refresh token is known to be dead (the
   user must reconnect, which resumes the queue).
@@ -53,7 +59,7 @@ _BACKOFF_SCHEDULE = [2, 5, 15, 45, 180, 900, 3600]
 _PAUSE_PROBE_FIRST = 30.0
 _PAUSE_PROBE_MAX = 1800.0
 
-# Keep at most this many permanently-failed jobs.
+# Keep at most this many permanently-failed jobs (and as many awaiting review).
 _FAILED_CAP = 50
 
 # Give a job up (move it to ``failed``) after this many failed attempts.
@@ -107,6 +113,9 @@ class _State:
         self.entries: dict[str, dict] = {}
         # Jobs that failed permanently: [{"session_id", "kind", "error", "failed_at"}]
         self.failed: list[dict] = []
+        # Pushes waiting for the owner to choose between an older page and a
+        # new one: {session_id: {"session_id", "kind", "candidates", "at"}}
+        self.needs_review: dict[str, dict] = {}
         # session_ids currently being processed (memory only: after a crash
         # nothing is in flight, so everything on disk is picked up again).
         self._in_flight: set[str] = set()
@@ -134,6 +143,8 @@ class _State:
             entries[sid] = v
         self.entries = entries
         self.failed = [f for f in (data.get("failed") or []) if isinstance(f, dict)][-_FAILED_CAP:]
+        review = data.get("needs_review")
+        self.needs_review = {k: v for k, v in review.items() if isinstance(v, dict)} if isinstance(review, dict) else {}
         self.paused = bool(data.get("paused"))
         self.pause_reason = data.get("pause_reason")
 
@@ -142,6 +153,7 @@ class _State:
         payload = {
             "entries": self.entries,
             "failed": self.failed,
+            "needs_review": self.needs_review,
             "paused": self.paused,
             "pause_reason": self.pause_reason,
         }
@@ -213,8 +225,51 @@ class _State:
             self._in_flight.discard(sid)
             if self._is_current_locked(entry):
                 del self.entries[sid]
+                self.needs_review.pop(sid, None)
                 self._save_locked()
         self._wake.set()
+
+    def set_needs_review(self, entry: dict, candidates: list) -> None:
+        """The claimed job found a possible older page: park it for the
+        owner's choice (no retry, no failure counted)."""
+        sid = entry.get("session_id")
+        with self._lock:
+            self._in_flight.discard(sid)
+            if not self._is_current_locked(entry):
+                return  # a newer job replaced it; that one runs instead
+            del self.entries[sid]
+            self._record_review_locked(sid, entry.get("kind", KIND_FULL), candidates)
+            self._save_locked()
+        log.info(f"[notion-queue] {sid} may already be in Notion; waiting for the owner to choose")
+
+    def mark_needs_review(self, session_id: str, candidates: list) -> None:
+        """Record a "needs review" found outside the queue (a manual push)."""
+        if not session_id:
+            return
+        with self._lock:
+            self._record_review_locked(session_id, KIND_FULL, candidates)
+            self._save_locked()
+
+    def _record_review_locked(self, sid: str, kind: str, candidates: list) -> None:
+        self.needs_review.pop(sid, None)
+        self.needs_review[sid] = {
+            "session_id": sid,
+            "kind": kind,
+            "candidates": [dict(c) for c in (candidates or []) if isinstance(c, dict)][:3],
+            "at": _now_iso(),
+        }
+        while len(self.needs_review) > _FAILED_CAP:
+            del self.needs_review[next(iter(self.needs_review))]
+
+    def clear_needs_review(self, session_id: str) -> None:
+        with self._lock:
+            if self.needs_review.pop(session_id, None) is not None:
+                self._save_locked()
+
+    def needs_review_for(self, session_id: str) -> dict | None:
+        with self._lock:
+            record = self.needs_review.get(session_id)
+            return dict(record) if record else None
 
     def record_failure(self, entry: dict, error: str, permanent: bool, counts: bool = True) -> None:
         """Record a failed attempt: give up if ``permanent`` (or the job is
@@ -338,6 +393,8 @@ class _State:
                 "last_error": self._last_error_locked(),
                 "failed": [dict(f) for f in self.failed],
                 "failed_count": len(self.failed),
+                "needs_review": [dict(r) for r in self.needs_review.values()],
+                "needs_review_count": len(self.needs_review),
             }
 
     def _last_error_locked(self) -> str | None:
@@ -374,6 +431,18 @@ def resume() -> None:
 
 def retry_failed() -> int:
     return _state.retry_failed()
+
+
+def mark_needs_review(session_id: str, candidates: list) -> None:
+    _state.mark_needs_review(session_id, candidates)
+
+
+def clear_needs_review(session_id: str) -> None:
+    _state.clear_needs_review(session_id)
+
+
+def needs_review_for(session_id: str) -> dict | None:
+    return _state.needs_review_for(session_id)
 
 
 def _is_permanent_error(msg: str) -> bool:
@@ -442,6 +511,10 @@ def _process_one(entry: dict) -> None:
             _state.record_failure(entry, err, permanent=False, counts=False)
             return
         _state.record_failure(entry, err, permanent=_is_permanent_error(err))
+        return
+    if result.get("needs_review"):
+        # Maybe already in Notion on an older page: the owner decides.
+        _state.set_needs_review(entry, result.get("candidates") or [])
         return
     if result.get("pending"):
         # Notion accepted an async create that hasn't finished: poll it again
