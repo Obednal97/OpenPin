@@ -20,6 +20,8 @@
 }
 .back-btn:hover { opacity: 0.7; }
 
+/* Room for the title's hover background, which sticks out 4px each side */
+.transcript-header { padding-right: 4px; }
 .transcript-title-editable {
   font-size: var(--text-xl);
   font-weight: var(--weight-bold);
@@ -41,8 +43,17 @@
   color: var(--text-tertiary);
   pointer-events: none;
 }
-.transcript-date { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-0_5); }
-.transcript-meta { font-size: var(--text-sm); color: var(--text-secondary); margin-top: var(--sp-1); display: flex; gap: var(--sp-4); }
+.transcript-subline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-1);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+.transcript-date, .transcript-meta { font-size: inherit; color: inherit; }
+.transcript-date:not(:empty) + .transcript-meta:not(:empty)::before { content: '\00B7'; margin-right: var(--sp-2); }
 
 /* === MODULE: Audio Player === */
 .audio-player {
@@ -57,7 +68,7 @@
 .play-btn {
   width: 40px; height: 40px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   color: var(--white);
   display: flex;
@@ -67,14 +78,14 @@
   transition: all var(--duration) var(--ease);
   flex-shrink: 0;
 }
-.play-btn:hover { background: var(--accent-hover); transform: scale(1.06); }
+.play-btn:hover { background: var(--accent-fill-hover); transform: scale(1.06); }
 .play-btn:active { transform: scale(0.95); }
 
-.player-track { flex: 1; display: flex; flex-direction: column; gap: var(--sp-1); }
+.player-track { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
 .player-progress {
   width: 100%;
   height: 4px;
-  background: var(--bg-input);
+  background: var(--control-off);
   border-radius: var(--radius-full);
   cursor: pointer;
   position: relative;
@@ -213,7 +224,7 @@
   transition: all var(--duration) var(--ease);
 }
 .tag-option:hover { border-color: var(--accent); color: var(--text); }
-.tag-option.active { background: var(--accent); color: var(--white); border-color: var(--accent); }
+.tag-option.active { background: var(--accent-fill); color: var(--white); border-color: var(--accent-fill); }
 .tag-add-input {
   font-size: var(--text-xs);
   padding: var(--sp-1) var(--sp-2);
@@ -222,12 +233,14 @@
   background: transparent;
   color: var(--text);
   font-family: var(--font);
-  width: 80px;
+  width: 96px;
+  max-width: 100%;
   outline: none;
-  transition: border-color var(--duration) var(--ease);
+  transition: border-color var(--duration) var(--ease), width var(--duration) var(--ease);
 }
 .tag-add-input::placeholder { color: var(--text-tertiary); }
-.tag-add-input:focus { border-color: var(--accent); width: 120px; }
+.tag-add-input:focus { border-color: var(--accent); width: 220px; }
+.tag-option.tag-picker-toggle { border-style: dashed; }
 
 /* === MODULE: Transcript Tabs === */
 .transcript-tabs {
@@ -287,6 +300,20 @@
   vertical-align: middle;
   accent-color: var(--accent);
 }
+/* To-do items show the checkbox, not a bullet too */
+.transcript-summary li.md-task { list-style: none; margin-left: calc(-1 * var(--sp-4)); }
+.transcript-summary ol ol, .transcript-summary ul ol, .transcript-summary ol ul { margin: var(--sp-1) 0; padding-left: var(--sp-4); }
+.transcript-summary .md-table-wrap { overflow-x: auto; margin: var(--sp-3) 0; }
+.transcript-summary table { border-collapse: collapse; width: 100%; font-size: var(--text-sm); line-height: 1.5; }
+.transcript-summary th, .transcript-summary td {
+  border: 1px solid var(--border-strong);
+  padding: var(--sp-1_5) var(--sp-2);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.transcript-summary th { background: var(--bg-input); font-weight: var(--weight-semibold); }
+.transcript-summary p, .transcript-summary li { overflow-wrap: anywhere; }
 .transcript-summary strong { font-weight: var(--weight-semibold); }
 .transcript-summary em { font-style: italic; color: var(--text-secondary); }
 .transcript-summary blockquote {
@@ -478,6 +505,7 @@
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  flex-shrink: 0;
   padding-top: 2px;
   min-width: 44px;
   font-family: var(--font-mono);
@@ -490,7 +518,12 @@
   color: var(--accent);
   white-space: nowrap;
   padding-top: 2px;
-  min-width: 68px;
+  /* Fixed column: a long name is cut short (full name in its title), so the
+     text column lines up on every row */
+  width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 .segment-text {
   font-size: var(--text-base);
@@ -499,6 +532,8 @@
   user-select: text;
   cursor: text;
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .segment-text[contenteditable] {
   outline: none;
@@ -571,7 +606,7 @@
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-sm);
   background: var(--yellow-subtle);
-  color: var(--yellow);
+  color: var(--yellow-text);
   font-size: var(--text-sm);
 }
 .redownload-notice span { flex: 1; }
@@ -596,3 +631,6 @@
   cursor: pointer;
 }
 .summary-stale-action:hover { text-decoration: underline; }
+
+/* No transcript yet (ui/transcript.js renderTranscriptSegments) */
+.transcript-empty { text-align: center; padding: 40px var(--sp-4); color: var(--text-secondary); font-size: var(--text-sm); }

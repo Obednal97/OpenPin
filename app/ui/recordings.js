@@ -104,7 +104,8 @@ function renderRecordingsList() {
       const t = app.transcripts[rec.session_id];
       const hasTranscript = rec.has_transcript && t;
       const date = formatDate(rec.date);
-      const dur = formatDuration(rec.duration);
+      // Cloud-only recordings have no duration until they're downloaded
+      const dur = rec.duration ? formatDuration(rec.duration) : '';
       const preview = hasTranscript ? t.text_preview : '';
       const speakerCount =
         hasTranscript && t.speakers && t.speakers.length > 0
@@ -122,7 +123,7 @@ function renderRecordingsList() {
         badgeText = 'Waiting for re-download';
       } else if (processing) {
         badgeClass = 'badge-processing';
-        badgeText = { transcribing: 'Transcribing', summarizing: 'Summarizing', queued: 'Queued' }[processing] || 'Processing';
+        badgeText = { transcribing: 'Transcribing', summarizing: 'Summarising', queued: 'Queued' }[processing] || 'Processing';
       } else if (hasTranscript) {
         badgeClass = 'badge-transcribed';
         badgeText = 'Transcribed';
@@ -162,11 +163,11 @@ function renderRecordingsList() {
         <div class="recording-info">
           ${rec.title ? `<div class="recording-title">${rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(rec.title)}</div>` : ''}
           <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(date)}</div>
-          <div class="recording-duration">${rec.partial ? (rec.redownload_pending ? 'Sync again to finish, or right-click to restore the previous copy' : 'Sync again to complete transfer') : dur}${speakerCount ? ' \u00B7 ' + speakerCount : ''}</div>
+          <div class="recording-duration">${rec.partial ? (rec.redownload_pending ? 'Sync again to finish, or right-click to restore the previous copy' : 'Sync again to complete transfer') : [dur, speakerCount].filter(Boolean).join(' \u00B7 ')}</div>
           ${preview ? `<div class="recording-preview">${escapeHtml(preview)}</div>` : ''}
         </div>
         <div class="recording-right">
-          ${rec.tags && rec.tags.length ? `<div class="tag-list">${rec.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
+          ${_recordingTagChips(rec.tags)}
           <span class="recording-badge ${badgeClass}">${badgeText}</span>
         </div>
       </div>
@@ -214,6 +215,21 @@ function renderRecordingsList() {
   });
 
   updateSelectBar();
+}
+
+// A card shows at most two tags (each cut short with an ellipsis if long) and
+// a "+N" chip for the rest, so a recording with many tags keeps its title.
+const _CARD_TAG_LIMIT = 2;
+
+function _recordingTagChips(tags) {
+  if (!tags || !tags.length) return '';
+  const shown = tags.slice(0, _CARD_TAG_LIMIT);
+  const rest = tags.slice(_CARD_TAG_LIMIT);
+  const chips = shown.map((t) => `<span class="tag" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`);
+  if (rest.length) {
+    chips.push(`<span class="tag tag-more" title="${escapeHtml(tags.join(', '))}">+${rest.length}</span>`);
+  }
+  return `<div class="tag-list">${chips.join('')}</div>`;
 }
 
 // The recording a Shift-click range starts from: the last one clicked without
@@ -287,13 +303,18 @@ function updateSelectBar() {
   const tagsToShow = app.selectMode && app.selectedIds.size > 0 ? allTags : usedTags;
 
   if (tagsToShow.size > 0) {
-    tagFilters.innerHTML = [...tagsToShow]
+    // In select mode with a selection, the chips tag the selected recordings
+    // instead of filtering the list: the label says which.
+    const applying = app.selectMode && app.selectedIds.size > 0;
+    const label = applying ? 'Tag selected:' : 'Filter:';
+    tagFilters.innerHTML = `<span class="tag-filters-label">${label}</span>` + [...tagsToShow]
       .sort()
       .map(
         (tag) =>
           `<button class="tag-filter ${app.activeTagFilters.has(tag) ? 'active' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`,
       )
       .join('');
+    tagFilters.classList.toggle('applying', applying);
 
     tagFilters.querySelectorAll('.tag-filter').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -552,6 +573,14 @@ function _shortenDirPath(p) {
   return p;
 }
 
+/** "/a/very/long/path" → "/a/ver…ng/path": keeps both ends, which tell folders apart. */
+function _moveMiddleTruncate(text, max = 44) {
+  if (text.length <= max) return text;
+  const keep = max - 1;
+  const head = Math.ceil(keep * 0.4);
+  return `${text.slice(0, head)}\u2026${text.slice(text.length - (keep - head))}`;
+}
+
 function showMoveDialog(ids, onMoved) {
   const count = ids.length;
   const s = app.settings || {};
@@ -559,17 +588,34 @@ function showMoveDialog(ids, onMoved) {
   const defaultDir = s.default_save_directory || '';
   const historical = (s.historical_directories || []);
 
-  // Build list of unique destination options (exclude the source dir of the first selected recording)
+  // The folder the (first) selected recording is in now: listed, marked, not clickable
   const sourceRec = app.recordings.find(r => r.session_id === ids[0]);
   const sourceDir = sourceRec && sourceRec.ogg_path ? sourceRec.ogg_path.replace(/\/[^/]+$/, '') : '';
 
   const destinations = [];
   const seen = new Set();
-  for (const d of [activeDir, defaultDir, ...historical]) {
-    if (!d || seen.has(d) || d === sourceDir) continue;
+  for (const d of [sourceDir, activeDir, defaultDir, ...historical]) {
+    if (!d || seen.has(d)) continue;
     seen.add(d);
     destinations.push(d);
   }
+  const destButton = (d) => {
+    const short = _shortenDirPath(d);
+    const cut = short.lastIndexOf('/');
+    const name = cut >= 0 && cut < short.length - 1 ? short.slice(cut + 1) : short;
+    const parent = cut > 0 ? short.slice(0, cut) : '';
+    const isCurrent = d === sourceDir;
+    const marks = [isCurrent ? 'Current location' : '', d === activeDir ? 'Save folder' : ''].filter(Boolean);
+    return `
+          <button class="action-btn subtle move-dest-btn${isCurrent ? ' is-current' : ''}" data-dir="${escapeHtml(d)}" title="${escapeHtml(d)}" ${isCurrent ? 'disabled aria-disabled="true"' : ''}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="move-dest-icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span class="move-dest-text">
+              <span class="move-dest-name">${escapeHtml(name)}</span>
+              ${parent ? `<span class="move-dest-path">${escapeHtml(_moveMiddleTruncate(parent))}</span>` : ''}
+            </span>
+            ${marks.length ? `<span class="move-dest-mark">${escapeHtml(marks.join(' · '))}</span>` : ''}
+          </button>`;
+  };
 
   const overlay = document.createElement('div');
   overlay.className = 'delete-dialog-overlay';
@@ -578,15 +624,9 @@ function showMoveDialog(ids, onMoved) {
       <h3>Move ${count} recording${count > 1 ? 's' : ''}</h3>
       <p class="settings-desc">Choose a destination folder.</p>
       <div class="move-destinations">
-        ${destinations.map(d => `
-          <button class="action-btn subtle move-dest-btn" data-dir="${escapeHtml(d)}" style="width:100%;justify-content:flex-start;text-align:left;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(_shortenDirPath(d))}</span>
-            ${d === activeDir ? '<span style="margin-left:auto;font-size:var(--text-xs);color:var(--text-tertiary);">active</span>' : ''}
-          </button>
-        `).join('')}
+        ${destinations.map(destButton).join('')}
         <button class="action-btn subtle" id="move-browse-btn" style="width:100%;justify-content:center;">
-          Browse...
+          Choose another folder…
         </button>
       </div>
       <button class="action-btn subtle" id="move-cancel-btn" style="width:100%;margin-top:var(--sp-2);justify-content:center;">
@@ -620,7 +660,7 @@ function showMoveDialog(ids, onMoved) {
     }
   };
 
-  overlay.querySelectorAll('.move-dest-btn').forEach(btn => {
+  overlay.querySelectorAll('.move-dest-btn:not(.is-current)').forEach(btn => {
     btn.addEventListener('click', () => doMove(btn.dataset.dir));
   });
 
@@ -676,7 +716,7 @@ function _showContextMenu(x, y, sessionId) {
   const items = [];
 
   if (hasTranscript) {
-    items.push({ label: 'Copy Transcript', icon: 'copy', action: () => {
+    items.push({ label: 'Copy transcript', icon: 'copy', action: () => {
       const text = (t.segments || []).map(s => {
         const speaker = s.speaker ? `[${s.speaker}] ` : '';
         return `${speaker}${s.text}`;
@@ -686,7 +726,7 @@ function _showContextMenu(x, y, sessionId) {
   }
 
   if (hasSummary) {
-    items.push({ label: 'Copy Summary', icon: 'copy', action: () => {
+    items.push({ label: 'Copy summary', icon: 'copy', action: () => {
       navigator.clipboard.writeText(t.summary).then(() => toast('Summary copied', 'success')).catch(() => toast('Copy failed', 'error'));
     }});
   }
@@ -718,7 +758,7 @@ function _showContextMenu(x, y, sessionId) {
     items.push({ divider: true });
   }
 
-  items.push({ label: 'Move to...', icon: 'move', action: () => {
+  items.push({ label: 'Move to…', icon: 'move', action: () => {
     showMoveDialog([sessionId], () => { loadRecordings(); });
   }});
   const ctxRec = app.recordings.find((r) => r.session_id === sessionId);
