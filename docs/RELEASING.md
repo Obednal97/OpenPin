@@ -1,7 +1,12 @@
 # Releasing
 
 How to build, sign, notarise and publish a release, and how the update channel works. Tested
-with v2.4.0 on a headless Mac mini.
+with v2.4.0 on a headless Mac.
+
+Names: the product is **Open Pin**; the bundle ID (`com.plaud.v2`), the Worker
+(`plaud-v2-updates`), the data and log folders and the crate name keep the app's old name,
+Plaud V2, on purpose (see [ARCHITECTURE.md](ARCHITECTURE.md#names)). Never change the bundle ID:
+the installer refuses any other, and Bluetooth permission and the Keychain backup depend on it.
 
 > **Operational status (2 November 2026)** — delete this box once it's resolved.
 >
@@ -40,54 +45,103 @@ holds a GitHub token as a secret. The token can be rotated without a release.
    URL) to `~/Library/Application Support/com.plaud.v2/updates/<name>.part`, with a 15 s connect
    timeout and a 60 s idle timeout. It checks the **size** and, if the release has a
    `<dmg>.sha256` asset, the **SHA-256**, then renames the file into place.
-4. A banner offers **Restart to Update**. A detached helper script (log:
+4. A banner offers **Restart to Update**. A detached helper script (`INSTALL_SCRIPT`; log:
    `~/Library/Logs/Plaud V2/update.log`):
    1. waits up to 30 s for the app to exit;
    2. mounts the DMG on a private mount point;
    3. refuses the update unless the bundle is `com.plaud.v2`, has the expected version, passes
-      `codesign --verify --deep --strict`, is signed by team **4SN93PWF7Z**, and passes Gatekeeper
+      `codesign --verify --deep --strict`, is signed by the expected team (`EXPECTED_TEAM_ID`: the
+      build's `APPLE_TEAM_ID`, else the official releases' team), and passes Gatekeeper
       (`spctl -a -t exec`);
-   4. moves the old app aside, copies the new one with `ditto`, checks it again and deletes the
-      old copy, restoring the old app on any failure;
-   5. removes the quarantine flag and relaunches.
+   4. picks the destination: over the running app, keeping the name and folder the user gave it,
+      except that a bundle still called `Plaud V2.app` gets the DMG's `Open Pin.app` installed
+      next to it (see [The rename to Open Pin](#the-rename-to-open-pin));
+   5. moves whatever is at the destination aside, copies the new app with `ditto`, checks its
+      version and signature again, deletes the aside copy (and, when renaming, the old
+      `Plaud V2.app`), restoring everything on any failure;
+   6. removes the quarantine flag and relaunches the new path.
 5. If the app runs from a randomised `/AppTranslocation/` path (opened from Downloads or the DMG),
    the updater refuses and asks the user to move it to Applications.
 
 Every build is signed with the same Developer ID, so macOS keeps Bluetooth and other permissions
 across updates.
 
+### The rename to Open Pin
+
+Releases up to v2.5.3 shipped `Plaud V2.app`; later ones ship `Open Pin.app` (same bundle ID,
+same team). What happens to an existing install:
+
+1. **The update from a pre-rename version** is installed by that version's own installer, which
+   copies the new app over `Plaud V2.app` and keeps that name. Nothing else changes: the data,
+   logs, venv and Keychain items never depended on the app's name.
+2. **On the first launch** from a bundle named exactly `Plaud V2.app`, the new version
+   (`src-tauri/src/migrate.rs`) starts a helper and quits before anything else starts. The helper
+   waits for it to exit, renames the bundle to `Open Pin.app` in the same folder with `mv` (a
+   rename, nothing copied) and opens it. It reopens the old bundle instead if `Open Pin.app`
+   already exists there, another copy is still running from the old bundle, or `mv` fails. It's
+   tried once (marker `bundle-rename-tried` in `Application Support/com.plaud.v2/`); the steps
+   are logged to `update.log`.
+3. **The installer** does the same rename on any later update if the bundle is still called
+   `Plaud V2.app`: it installs `Open Pin.app` next to it and deletes the old bundle only after the
+   new one verified. An `Open Pin.app` already there is replaced only if it has our bundle ID.
+4. **Open at login**: the autostart plugin names its LaunchAgent after the product, so it moves
+   from `~/Library/LaunchAgents/Plaud V2.plist` to `Open Pin.plist`. At startup the app deletes
+   the old file and registers the login item again under the new name, and re-registers it
+   whenever the file points at an old path (the app was moved or renamed).
+5. A bundle the user renamed to anything else, or moved, is updated in place and keeps its name.
+
+Tests: `install_script_*` in `src-tauri/src/commands/mod.rs` and `rename_script_*` in
+`migrate.rs` run the real scripts against fake bundles, with stub `hdiutil`, `codesign`, `spctl`
+and `open`. Not covered by tests: Dock items. A Dock entry for `Plaud V2.app` may need pinning
+again after the rename.
+
 ### What a release contains
 
 | Asset (as GitHub names it) | Purpose |
 |---|---|
-| `Plaud.V2_<version>_aarch64.dmg` | First installs and the update payload |
-| `Plaud.V2_<version>_aarch64.dmg.sha256` | `shasum -a 256` of the DMG; the updater checks the download against it |
+| `Open.Pin_<version>_aarch64.dmg` | First installs and the update payload |
+| `Open.Pin_<version>_aarch64.dmg.sha256` | `shasum -a 256` of the DMG; the updater checks the download against it |
 
-GitHub turns spaces in uploaded file names into dots (`Plaud V2_…` becomes `Plaud.V2_…`), so the
-recipe renames the DMG before uploading. A release without a `.sha256` still updates, but only the
-size is checked: always upload it.
+GitHub turns spaces in uploaded file names into dots (`Open Pin_…` becomes `Open.Pin_…`), so the
+recipe renames the DMG before uploading. Releases up to v2.5.3 used `Plaud.V2_…`. Nothing depends
+on the name: the Worker returns whichever `.dmg` the latest release has, and the app accepts any
+safe file name ending in `.dmg`. A release without a `.sha256` still updates, but only the size
+is checked: always upload it.
 
 ## Prerequisites
 
 - **Apple Silicon Mac** with Xcode command-line tools, Node (for `npx`) and Rust via rustup.
-- **Developer ID Application** certificate for team 4SN93PWF7Z
-  (`Developer ID Application: Oliver Bednal (4SN93PWF7Z)`) in an unlocked keychain.
+- A **Developer ID Application** certificate in an unlocked keychain. Its name goes in
+  `APPLE_SIGNING_IDENTITY` and its team ID in `APPLE_TEAM_ID` (see the recipe).
 - An **App Store Connect API key** (team key, `.p8` file) for notarisation. The release needs three
   values: key ID, issuer ID, and the path to the `.p8`. Notarisation uses only this key; there is
   no Apple ID password or app-specific password in the process any more.
 - The RSA keys in `keys/` (gitignored; see [DEVELOPMENT.md](DEVELOPMENT.md#keys)). The build fails
   without them.
-- `gh`, signed in with permission to create releases on `Obednal97/Plaud-V2`.
+- `gh`, signed in with permission to create releases on the repository (`Obednal97/Plaud-V2`;
+  GitHub redirects the old slug if the repository is renamed).
 - `jq` (used in the checks below).
 
 Keep all of these outside the repo. Nothing in the repo or the app holds a signing, notarisation
 or GitHub credential.
 
-**On the owner's Mac mini** (headless): Rust is at `/opt/homebrew/opt/rustup/bin`; the
-certificate is in a dedicated signing keychain that has to be unlocked first; the API key's IDs
-and `.p8` path are in `~/.appstoreconnect/iqralock.env` (`ASC_KEY_ID`, `ASC_ISSUER_ID`,
-`ASC_KEY_PATH`) and the `.p8` is mounted from 1Password by `apple-keys-mount`. See that Mac's
-own notes for the unlock command.
+### Signing settings
+
+| Variable | Example | Used by |
+|---|---|---|
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Jane Doe (ABCDE12345)` | Tauri (overrides `bundle.macOS.signingIdentity` in `tauri.conf.json`) and the DMG `codesign` step |
+| `APPLE_TEAM_ID` | `ABCDE12345` | Compiled into the app as the team its updater accepts (`EXPECTED_TEAM_ID`); also the check below |
+| `APPLE_PROVIDER_SHORT_NAME` | `ABCDE12345` | Tauri (overrides `bundle.macOS.providerShortName`); only needed if the API key can see several teams |
+| `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_PATH` | key ID, issuer ID, path to the `.p8` | Notarisation |
+
+`tauri.conf.json` still names the official releases' identity and team, so the owner's builds
+work without these overrides; anyone else must set them. Without `APPLE_TEAM_ID` the app expects
+updates signed by the official team, so a build signed by another team won't accept its own
+updates. Your own build also needs its own update channel: `WORKER_BASE` in
+`src-tauri/src/commands/mod.rs` points at the official Worker.
+
+Keep machine-specific details (keychain unlock, where the API key lives) in your own notes, not
+in the repo.
 
 ## Release recipe
 
@@ -104,12 +158,10 @@ git commit -m "Bump v$V"
 git tag "v$V"
 git push origin master "v$V"
 
-# 2. Signing and notarisation environment (values from wherever you keep them)
-export APPLE_SIGNING_IDENTITY="Developer ID Application: Oliver Bednal (4SN93PWF7Z)"
+# 2. Signing and notarisation environment (see "Signing settings"; values from wherever you keep them)
+export APPLE_SIGNING_IDENTITY="Developer ID Application: <name> (<team id>)"
+export APPLE_TEAM_ID="<team id>"
 export APPLE_API_KEY="<key id>" APPLE_API_ISSUER="<issuer id>" APPLE_API_KEY_PATH="/path/to/AuthKey_<key id>.p8"
-#    On the owner's Mac mini, after unlocking the signing keychain and running apple-keys-mount:
-#    set -a; . ~/.appstoreconnect/iqralock.env; set +a
-#    export APPLE_API_KEY="$ASC_KEY_ID" APPLE_API_ISSUER="$ASC_ISSUER_ID" APPLE_API_KEY_PATH="$ASC_KEY_PATH"
 
 # 3. Build: Tauri builds, signs and notarises the .app, then builds the DMG.
 #    Use the @tauri-apps/cli minor that matches the tauri crate in Cargo.lock (2.12.x -> 2.12).
@@ -118,7 +170,7 @@ TAURI_MINOR=$(grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock | sed -nE 's/^ver
 CI=true npx --yes "@tauri-apps/cli@$TAURI_MINOR" build
 
 # 4. Sign, notarise and staple the DMG itself (Tauri only notarises the .app inside it).
-DMG="src-tauri/target/release/bundle/dmg/Plaud V2_${V}_aarch64.dmg"
+DMG="src-tauri/target/release/bundle/dmg/Open Pin_${V}_aarch64.dmg"
 codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
 xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" \
   --issuer "$APPLE_API_ISSUER" --wait
@@ -133,9 +185,10 @@ with `--skip-jenkins` added in front of the same arguments.
 ## Verify before publishing
 
 ```bash
-APP="src-tauri/target/release/bundle/macos/Plaud V2.app"
+APP="src-tauri/target/release/bundle/macos/Open Pin.app"
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dv "$APP" 2>&1 | grep -E 'TeamIdentifier=4SN93PWF7Z|flags=.*runtime'   # team + hardened runtime
+codesign -dv "$APP" 2>&1 | grep -E "TeamIdentifier=$APPLE_TEAM_ID|flags=.*runtime"   # team + hardened runtime
+plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist"          # = com.plaud.v2
 spctl -a -t exec -vv "$APP"                                          # accepted, Notarized Developer ID
 xcrun stapler validate "$APP"
 spctl -a -t open --context context:primary-signature -vv "$DMG"      # accepted, Notarized Developer ID
@@ -145,6 +198,9 @@ plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist"   # = 
 
 Then open the DMG, drag the app to Applications on a test Mac (or over an older install) and check
 it starts, shows the new version in **Settings › General › About**, and connects to the device.
+For the first release after the rename, also update a `Plaud V2.app` install through **Restart to
+Update** and check that it ends up as `Open Pin.app` with its recordings, pairing and "Open at
+login" intact, and that `update.log` shows the rename.
 
 ## Publish
 
@@ -153,12 +209,12 @@ then:
 
 ```bash
 OUT="$(mktemp -d)"
-cp "$DMG" "$OUT/Plaud.V2_${V}_aarch64.dmg"
-( cd "$OUT" && shasum -a 256 "Plaud.V2_${V}_aarch64.dmg" > "Plaud.V2_${V}_aarch64.dmg.sha256" )
+cp "$DMG" "$OUT/Open.Pin_${V}_aarch64.dmg"
+( cd "$OUT" && shasum -a 256 "Open.Pin_${V}_aarch64.dmg" > "Open.Pin_${V}_aarch64.dmg.sha256" )
 
 gh release create "v$V" \
-  "$OUT/Plaud.V2_${V}_aarch64.dmg" \
-  "$OUT/Plaud.V2_${V}_aarch64.dmg.sha256" \
+  "$OUT/Open.Pin_${V}_aarch64.dmg" \
+  "$OUT/Open.Pin_${V}_aarch64.dmg.sha256" \
   --title "v$V" --notes-file release-notes.md
 
 # What installs will see (allow up to 5 minutes for the Worker's cache):
@@ -200,7 +256,7 @@ to the app log and `~/Library/Application Support/com.plaud.v2/diagnostics.log` 
 Rust panics included. The Worker's `/v1/report` endpoint is unused and will be retired separately.
 
 **Report a bug › Export bug report** (`export_bug_report` in `src-tauri/src/commands/mod.rs`)
-saves `Plaud V2 bug report <date> <time>.zip` to `~/Downloads` (" 2", " 3"… if the name is taken).
+saves `Open Pin bug report <date> <time>.zip` to `~/Downloads` (" 2", " 3"… if the name is taken).
 People look through it and attach it to an issue made from `.github/ISSUE_TEMPLATE/bug_report.yml`.
 
 - **`report.md`:** the user's three answers, system info (app and macOS version, architecture,
@@ -226,7 +282,8 @@ People look through it and attach it to an issue made from `.github/ISSUE_TEMPLA
 | Update check fails for everyone | Worker down or not deployed | `cd infra/update-worker && npx --yes wrangler@4 deploy`; watch `npx --yes wrangler@4 tail` |
 | "Downloaded update failed its checksum" | The `.sha256` doesn't match the DMG | Regenerate it from the uploaded DMG and `gh release upload v$V <file> --clobber` |
 | Update downloads but doesn't install | A check or the copy failed | Read `~/Library/Logs/Plaud V2/update.log`; every step and the reason for an abort is there |
-| "Plaud V2 is running from a temporary location…" | App Translocation | Move the app to Applications and open it from there |
+| "Open Pin is running from a temporary location…" | App Translocation | Move the app to Applications and open it from there |
+| Still called `Plaud V2.app` after updating | The launch-time rename was skipped (see `update.log`: another copy running, `Open Pin.app` already there, or `mv` failed) | The next update renames it; or quit and rename it by hand |
 | "Restart to Update" can't replace the app | App Management permission (macOS 13+) or Applications not writable | Allow it in System Settings › Privacy & Security › App Management |
 | `glob pattern ../keys/* path not found` | `keys/` missing | Copy the RSA keys into `keys/` |
 | Notarisation fails | Wrong or missing API key values, or the `.p8` isn't readable | Check the three `APPLE_API_*` variables; `xcrun notarytool log <submission-id> --key … --key-id … --issuer …` shows Apple's reason |

@@ -1,10 +1,13 @@
 # plaud-v2-updates (Cloudflare Worker)
 
-Fronts every GitHub call the Plaud V2 app makes, so the DMG ships **no GitHub token**.
+Fronts every GitHub call the Open Pin app makes, so the DMG ships **no GitHub token**.
 The token lives only as a Worker secret and can be rotated without an app release.
 
 Deployed at **https://plaud-v2-updates.leave-hacker-feedback.workers.dev**
-(the hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`).
+(the hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`). The Worker
+keeps the app's pre-rename name (Plaud V2): every installed copy calls this URL, so renaming the
+Worker would need a new route and an app release, and old installs would still call the old one.
+The repository it reads releases from is `REPO` in `src/index.js`.
 
 ## Endpoints
 
@@ -17,8 +20,8 @@ Deployed at **https://plaud-v2-updates.leave-hacker-feedback.workers.dev**
 
 ### Issue content (everything posted runs under the owner's GitHub identity)
 
-- The body starts with `<!-- plaud-v2-worker -->`, then the notice "Automated report submitted by a
-  Plaud V2 install — unverified content", the app version / macOS line (plain text), and the
+- The body starts with `<!-- plaud-v2-worker -->`, then the notice "Automated report submitted by an
+  Open Pin install — unverified content", the app version / macOS line (plain text), and the
   submitted body inside a `~~~~~text` code fence, so GitHub renders none of it: no links, images,
   HTML, `@mentions` or `#123` cross-refs. Runs of 3+ tildes are broken up so nothing can close the
   fence; every `<!--` is broken too, so client text can't forge either marker. `auto` issues end
@@ -66,7 +69,6 @@ The response carries `Cache-Control: public, max-age=60`.
 cd infra/update-worker
 node --test test/                         # unit tests first (no network)
 # Cloudflare credentials in the environment: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
-# (on the owner's Mac mini: source ~/.secrets/cloudflare.env)
 npx --yes wrangler@4 deploy
 ```
 
@@ -76,7 +78,7 @@ Also in [docs/RELEASING.md](../../docs/RELEASING.md#rotating-the-workers-github-
 current status of the token.
 
 1. GitHub → Settings → Developer settings → Fine-grained tokens → generate a token for
-   **Obednal97/Plaud-V2** only, with **Contents: Read-only** and **Issues: Read and write**
+   the app's repository (`REPO`) only, with **Contents: Read-only** and **Issues: Read and write**
    (Metadata: Read-only is added automatically).
 2. `npx --yes wrangler@4 secret put GH_TOKEN` and paste it (stdin, not a CLI argument).
 3. Check: `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest` returns the latest version.
