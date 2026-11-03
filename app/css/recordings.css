@@ -46,7 +46,10 @@
   justify-content: space-between;
   margin-bottom: var(--sp-3);
 }
-.select-bar-left { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+/* The chips wrap inside their own column, never under the select toggle */
+.select-bar-left { display: flex; align-items: flex-start; gap: var(--sp-2); flex: 1; min-width: 0; }
+.select-bar-left > .icon-btn, .select-actions, .select-bar-divider { flex-shrink: 0; }
+.select-bar-divider { margin-top: 7px; }
 .select-actions { display: flex; align-items: center; gap: var(--sp-1); }
 .select-count { font-size: var(--text-sm); color: var(--text-secondary); font-weight: var(--weight-medium); }
 .select-bar-divider {
@@ -55,8 +58,13 @@
   background: var(--border-strong);
   flex-shrink: 0;
 }
-.tag-filters { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.tag-filters { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; flex: 1; min-width: 0; padding-top: 6px; }
+.tag-filters-label { font-size: var(--text-xs); color: var(--text-secondary); margin-right: var(--sp-1); white-space: nowrap; }
+.tag-filters.applying .tag-filters-label { color: var(--accent); font-weight: var(--weight-semibold); }
 .tag-filter {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--text-xs);
   padding: 2px var(--sp-2);
   border-radius: var(--radius-full);
@@ -70,7 +78,7 @@
   white-space: nowrap;
 }
 .tag-filter:hover { border-color: var(--accent); color: var(--text); }
-.tag-filter.active { background: var(--accent); color: var(--white); border-color: var(--accent); }
+.tag-filter.active { background: var(--accent-fill); color: var(--white); border-color: var(--accent-fill); }
 
 /* === MODULE: Recordings List === */
 .recordings-list { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -88,14 +96,14 @@
 }
 .recording-card:hover { background: var(--bg-hover); border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
 .recording-card.selected { border-color: var(--accent); background: var(--accent-subtle); }
-.recording-card.recording-partial { opacity: 0.7; }
+.recording-card.recording-partial { border-style: dashed; }
 .recording-card.recording-partial:hover { cursor: default; }
 
 .recording-partial-icon {
   width: 38px; height: 38px;
   border-radius: 50%;
   background: var(--yellow-subtle);
-  color: var(--yellow);
+  color: var(--yellow-text);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -105,7 +113,7 @@
 .recording-play-btn {
   width: 38px; height: 38px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   color: var(--white);
   display: flex;
@@ -115,7 +123,7 @@
   transition: all var(--duration) var(--ease);
   flex-shrink: 0;
 }
-.recording-play-btn:hover { background: var(--accent-hover); transform: scale(1.06); }
+.recording-play-btn:hover { background: var(--accent-fill-hover); transform: scale(1.06); }
 .recording-play-btn:active { transform: scale(0.95); }
 
 .recording-info { flex: 1; min-width: 0; }
@@ -129,15 +137,24 @@
   white-space: nowrap;
 }
 .cloud-icon { color: var(--accent); vertical-align: middle; display: inline; margin-right: 2px; }
+/* Tags give way to the title: the right column shrinks (tags ellipsize),
+   never past 45% of the card; the status badge never shrinks. */
 .recording-right {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--sp-2);
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
 }
-.recording-right .tag-list { flex-shrink: 0; }
-.recording-date { font-size: var(--text-sm); color: var(--text-secondary); font-weight: var(--weight-medium); }
-.recording-duration { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-0_5); }
+.recording-right .tag-list { flex-wrap: nowrap; min-width: 0; margin-top: 0; overflow: hidden; }
+.recording-right .tag { min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.recording-right .tag.tag-more { flex-shrink: 0; overflow: visible; }
+.recording-right .recording-badge { flex-shrink: 0; white-space: nowrap; }
+.recording-date { font-size: var(--text-sm); color: var(--text-secondary); font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recording-duration { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--sp-0_5); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recording-duration:empty { display: none; }
 .recording-preview {
   font-size: var(--text-sm);
   color: var(--text-secondary);
