@@ -29,7 +29,7 @@ app/                    Python backend + frontend (one folder; the build splits 
   index.html renderer.js tauri-bridge.js ui/ css/ assets/   frontend
 src/                    shared Python: crypto, BLE scanner, local Whisper + diarization
 src-tauri/              Rust shell (Tauri 2): src/, tauri.conf.json, Entitlements.plist, Info.plist
-infra/update-worker/    Cloudflare Worker for updates and crash reports
+infra/update-worker/    Cloudflare Worker for updates (its old /v1/report endpoint is unused)
 scripts/                build helpers and legacy device scripts (see scripts/README.md)
 tests/                  pytest suite
 docs/                   these docs
@@ -76,8 +76,8 @@ npx --yes @tauri-apps/cli@2.12 dev
   so rebuild (or re-run `tauri dev`) after editing Python.
 - There is no `beforeDevCommand` or dev server: the window loads `dist-tauri/`. Re-run
   `prepare-frontend.sh` (and reload with Cmd+R) after editing HTML, CSS or JS.
-- Dev builds send crash reports too, tagged `[DEV]`, unless `crash_reports_enabled` is `false` in
-  the dev config (the Rust side reads the config in the same data folder as the backend).
+- The app sends no crash reports. **Export bug report** in a dev build marks the report
+  "Build: dev" and reads the dev logs and data folder.
 - `RUST_LOG=debug` (or e.g. `RUST_LOG=warn,plaud_v2::python=debug`) raises log levels; debug
   builds also log to stderr.
 

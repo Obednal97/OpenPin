@@ -8,7 +8,7 @@ How Plaud V2 is put together, as of v2.4.0. For running and testing it see
 Three parts in one macOS app bundle:
 
 1. **Rust shell** (`src-tauri/`, Tauri 2.12). Owns the window, tray, dock icon, login item,
-   sleep/wake detection, logging, the updater and the crash reporter. It sets up and supervises
+   sleep/wake detection, logging, the updater and the bug report export. It sets up and supervises
    the Python backend.
 2. **Python backend** (`app/` and `src/`, Flask). Does the real work: Bluetooth, WiFi sync,
    decryption, transcription, summaries, Notion, Google Drive, Plaud Cloud. Listens on
@@ -47,8 +47,8 @@ Three parts in one macOS app bundle:
 | `power.rs` | Sleep/wake: `NSWorkspace` notifications, plus a wall-clock fallback; sends one `system-wake` event per wake |
 | `paths.rs` | Where everything lives on disk: the data folder passed to Python as `PLAUD_DATA_DIR`, Application Support and log folders, and the separate dev-build folders |
 | `logging.rs` | `~/Library/Logs/Plaud V2/app.log` (rotates at 1 MB, one old file kept). Backend stdout/stderr lands here too. `RUST_LOG` overrides levels |
-| `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, the bug reporter and the diagnostics log |
-| `commands/report_scrub.rs` | Removes secrets and personal data from bug reports |
+| `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, error logging, the bug report export (`export_bug_report`, `reveal_in_finder`) and the diagnostics log |
+| `commands/report_scrub.rs` | Removes secrets and personal data from exported bug reports |
 | `commands/sha256.rs` | The shell's only SHA-256: update and Python-download checksums, the venv lockfile stamp, report IDs (no hashing crate in `Cargo.toml`) |
 
 ### Python backend
@@ -56,7 +56,7 @@ Three parts in one macOS app bundle:
 | Path | Responsibility |
 |---|---|
 | `app/api_server.py` | Flask app, request security (below), blueprint registration, startup housekeeping (partial files, WiFi recovery, Notion queue), port binding |
-| `app/routes/` | HTTP endpoints, one blueprint per area: `core` (`/health`, `/audio`), `device` (`/device/*`: scan, connect, sync, WiFi sync, record, find-my, depair), `recordings` (list, tag, rename, crop, move, delete, re-download, transcripts), `transcribe` (`/transcribe`, `/summarize`, `/validate-key`), `notion` (`/notion/*`), `gdrive` (`/gdrive/*`), `cloud` (`/cloud/*`), `settings` |
+| `app/routes/` | HTTP endpoints, one blueprint per area: `core` (`/health`, `/audio`), `device` (`/device/*`: scan, connect, sync, WiFi sync, record, find-my, depair), `recordings` (list, tag, rename, crop, move, delete, re-download, transcripts), `transcribe` (`/transcribe`, `/summarize`, `/validate-key`), `notion` (`/notion/*`), `gdrive` (`/gdrive/*`), `cloud` (`/cloud/*`), `settings`, `diagnostics` (`/diagnostics`: checks for a bug report, no secrets) |
 | `app/state/` | Long-lived state and logic: `device.py` (BLE connection, handshake, encrypted command channel, file download, WiFi-sync orchestration), `notion.py` (Notion OAuth and MCP session), `gdrive.py` (Drive OAuth and uploads), `cloud.py` (Plaud account and cloud sync) |
 | `app/providers/` | AI: `transcribe.py` (Deepgram, Groq, OpenAI), `summarize.py` (summary cascade), `validate.py` (API key checks), `_models.py` (every model ID in one place) |
 | `app/utils/` | `config.py` (atomic, locked config), `constants.py` (paths, UUIDs, endpoints), `paths.py` (session-ID validation), `audio.py` (decryption, Ogg wrapping), `wifi_sync_worker.py` (WiFi sync subprocess), `notion_queue.py`, `trash.py`, `redownload_backup.py`, `transcript_locks.py`, `parent_watch.py`, `system.py` (on-demand pip installs, FFmpeg), `webhooks.py`, `recording_utils.py` |
@@ -72,7 +72,7 @@ Three parts in one macOS app bundle:
 
 | File | Responsibility |
 |---|---|
-| `tauri-bridge.js` | `window.plaud.*`: HTTP calls to the backend (with the token) and Tauri `invoke`/`listen`; error capture for the crash reporter, with a simplified copy of the Rust scrubbing rules |
+| `tauri-bridge.js` | `window.plaud.*`: HTTP calls to the backend (with the token) and Tauri `invoke`/`listen`; error capture for the local diagnostics log, with a simplified copy of the Rust scrubbing rules |
 | `ui/health-gate.js` | Startup splash: polls `get_startup_status`, shows progress, errors, **Retry** and the diagnostics log |
 | `ui/utils.js` | Shared `app` state and `dom` references, formatters, toasts, Markdown rendering |
 | `ui/recordings.js` | Recording list, search, multi-select, bulk actions, delete dialog |
@@ -163,8 +163,8 @@ Other rules:
   `update_config()` so concurrent writers don't lose each other's changes.
 - **WiFi-sync credentials** (bind token, serial signature) go to the worker on stdin, not in
   `argv`, so `ps` can't see them.
-- **No secrets in the app or repo.** The updater and crash reporter talk to a Cloudflare Worker
-  that holds the GitHub token. See [SECURITY.md](../SECURITY.md).
+- **No secrets in the app or repo.** The updater talks to a Cloudflare Worker that holds the
+  GitHub token. See [SECURITY.md](../SECURITY.md).
 - The webview CSP (`tauri.conf.json`) only allows connections to the app itself and `127.0.0.1`.
 
 ## Data locations
@@ -180,8 +180,8 @@ Other rules:
 `DATA_DIR` is chosen in `app/utils/constants.py`: `PLAUD_DATA_DIR` if set, else
 `~/Library/Application Support/Plaud V2/`. The shell always sets `PLAUD_DATA_DIR`
 (`src-tauri/src/paths.rs`): the variable it was started with, if any, else `Plaud V2`, or
-`Plaud V2 (Dev)` for a debug build, and it reads the crash-report setting from the config in that
-same folder. The repo is never used as the data folder. Users can also pick another
+`Plaud V2 (Dev)` for a debug build, and reads `wifi_sync.log` from that same folder for bug
+reports. The repo is never used as the data folder. Users can also pick another
 recordings folder; old folders stay listed.
 
 ## Device sync
@@ -298,7 +298,7 @@ of date, failed). It is self-contained: no outside fonts, images or scripts, a s
 per-response nonce, `Referrer-Policy: no-referrer` and `no-store`, and its one script removes the
 one-time code from the address bar.
 
-## Updates and crash reports
+## Updates and bug reports
 
 The app has no GitHub token. It talks only to the `plaud-v2-updates` Cloudflare Worker
 (`infra/update-worker/`), which holds the token as a secret.
@@ -318,12 +318,11 @@ sequenceDiagram
     App->>App: helper script: mount DMG, check bundle ID, version,<br/>codesign, team 4SN93PWF7Z, Gatekeeper, swap, relaunch
 ```
 
-Crash reports: Rust panics, renderer errors and Python tracebacks go through
-`report_error`. The message is scrubbed (home folder, serials, BLE UUIDs, keys, tokens, e-mail
-addresses, Notion/Drive links), fingerprinted, sent at most once per session, and posted to
-`POST /v1/report`, which comments on the matching open `auto-bug` issue or opens one. Reports are
-skipped when the user turned them off, for `AbortError`s, and while the backend is down; those
-still go to `diagnostics.log`.
+Errors: Rust panics, renderer errors and Python tracebacks go through `report_error`, which only
+writes them to `app.log` and `diagnostics.log`. Nothing is sent anywhere. **Report a bug ›
+Export bug report** calls `GET /diagnostics` for a few checks, then `export_bug_report` zips a
+scrubbed `report.md` and recent logs into `~/Downloads` for the user to attach to a GitHub issue
+(details in [RELEASING.md](RELEASING.md#bug-reports)).
 
 Release mechanics and the Worker's limits are in [RELEASING.md](RELEASING.md) and
 [infra/update-worker/README.md](../infra/update-worker/README.md).
