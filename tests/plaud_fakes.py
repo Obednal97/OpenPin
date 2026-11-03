@@ -26,9 +26,15 @@ class FakeNotePin:
                   an unsolicited record event, a late reply to another command)
       replies     cmd id -> reply body override (bytes after [1, cid lo, cid hi])
       reply_as    cmd id -> the cmd id the reply carries (e.g. 10 -> 13)
+      token_len   if set, the only BIND_TOKEN length the device accepts: cmd 1
+                  with another length gets status 1 and later commands no reply
     """
 
-    def __init__(self, hs_status=0, port_version=9, silent=(), before=None, replies=None, reply_as=None):
+    def __init__(
+        self, hs_status=0, port_version=9, silent=(), before=None, replies=None, reply_as=None, token_len=None
+    ):
+        self.token_len = token_len
+        self.token_ok = token_len is None
         self.hs_status = hs_status
         self.port_version = port_version
         self.silent = set(silent)
@@ -67,9 +73,10 @@ class FakeNotePin:
 
     def _default_body(self, cid):
         if cid == 1:
+            status = self.hs_status if self.token_ok else 1
             # status, port version, tz h/m, audio channel, wifi, 2 flags, "V" + u24 version
             return (
-                bytes([self.hs_status])
+                bytes([status])
                 + struct.pack("<H", self.port_version)
                 + bytes([0, 0, 0, 1, 0, 0])
                 + b"V"
@@ -102,8 +109,12 @@ class FakeNotePin:
         loop = asyncio.get_running_loop()
         for extra in self.before.get(cid, []):
             loop.call_soon(self.notify, extra)
+        if cid == 1 and self.token_len is not None:
+            self.token_ok = len(pt) - 6 == self.token_len
         if cid == 1 and self.hs_status is None or cid in self.silent:
             return
+        if cid != 1 and not self.token_ok:
+            return  # a rejected token: the device ignores everything else
         body = self.replies.get(cid)
         body = body if body is not None else self._default_body(cid)
         # The real reply comes a little after any `before` packets, so a waiter
