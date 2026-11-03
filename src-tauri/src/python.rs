@@ -580,11 +580,18 @@ fn write_lockfiles() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Where Python keeps bytecode caches (PYTHONPYCACHEPREFIX): never inside the
+/// signed app bundle.
+pub(crate) fn pycache_dir() -> PathBuf {
+    crate::paths::app_support_dir().join("pycache")
+}
+
 /// A command running a venv/base interpreter with a clean Python environment.
 fn python_command(python: &Path, full_path: &str) -> Command {
     let mut cmd = Command::new(python);
     cmd.env("PATH", full_path)
         .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONPYCACHEPREFIX", pycache_dir())
         .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
@@ -834,6 +841,10 @@ fn parse_port_bound(line: &str) -> Option<u16> {
 }
 
 /// Send BLE disconnect request to the Python backend (fire-and-forget)
+/// Ask the backend to disconnect the NotePin and wait (up to
+/// BLE_DISCONNECT_WAIT) for its answer: /device/disconnect only answers once
+/// the teardown is done, and at once when nothing is connected. (It used to
+/// fire and forget, and the caller slept 2 s every time.)
 pub fn send_ble_disconnect() {
     let server = get_server().lock().unwrap();
     let port = server.port;
@@ -845,12 +856,21 @@ pub fn send_ble_disconnect() {
             .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5123))),
         Duration::from_secs(2),
     ) {
-        let _ = write!(
+        if write!(
             s,
             "POST /device/disconnect HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{API_TOKEN_HEADER}: {token}\r\nContent-Length: 0\r\n\r\n"
-        );
+        )
+        .is_ok()
+        {
+            let _ = s.set_read_timeout(Some(BLE_DISCONNECT_WAIT));
+            let mut sink = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut sink);
+        }
     }
 }
+
+/// Longest wait for the backend's answer to /device/disconnect on quit.
+const BLE_DISCONNECT_WAIT: Duration = Duration::from_millis(2500);
 
 fn set_startup_error(code: &str, title: &str, friendly: &str, hint: &str, detail: &str) {
     let err = StartupError {
@@ -1390,6 +1410,10 @@ fn spawn_backend(
         .env("PATH", full_path)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONNOUSERSITE", "1")
+        // Bytecode caches go outside the app bundle: .pyc files written into
+        // Contents/Resources break the bundle's code signature after the first
+        // launch (codesign --verify / spctl fail on the installed app).
+        .env("PYTHONPYCACHEPREFIX", pycache_dir())
         .env_remove("PYTHONHOME")
         .env_remove("PYTHONPATH")
         .env("PLAUD_API_PORT", port.to_string())
@@ -1515,12 +1539,11 @@ fn terminate_backend(grace: Duration) {
 
 /// Gracefully stop the Python server — disconnect BLE, SIGTERM, then SIGKILL
 pub fn stop_python_server() {
-    // Disconnect BLE before killing Python — give it 2s to complete the BLE
-    // teardown. Only a backend that got as far as answering /health can hold
-    // a BLE connection.
+    // Disconnect BLE before killing Python; send_ble_disconnect waits for the
+    // teardown (instant when nothing is connected). Only a backend that got
+    // as far as answering /health can hold a BLE connection.
     if SERVER_READY.load(Ordering::Acquire) {
         send_ble_disconnect();
-        std::thread::sleep(Duration::from_secs(2));
     }
     terminate_backend(Duration::from_secs(3));
 }
