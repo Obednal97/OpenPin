@@ -69,7 +69,9 @@ class FakePlaud:
         self.HTTPError = requests.HTTPError
 
     def on(self, method, url, body, status_code=200):
-        self.routes[(method, url)] = body if callable(body) or isinstance(body, FakeResponse) else FakeResponse(body, status_code)
+        self.routes[(method, url)] = (
+            body if callable(body) or isinstance(body, FakeResponse) else FakeResponse(body, status_code)
+        )
 
     def _send(self, method, url, **kw):
         self.calls.append((method, url, kw))
@@ -518,8 +520,13 @@ class TestCookieCapture:
         assert cloud._cookies_from_response(r) == {"ut": "c.ut", "urt": None}
 
     def test_exchange_saves_ut_and_urt(self, plaud):
-        plaud.on("POST", f"{EU}/auth/access-token-auth-code",
-                 CookieResponse({"status": 0, "access_token": FAKE_TOKEN}, [UT_CLEARER, "pld_ut=real.ut", "pld_urt=real.urt"]))
+        plaud.on(
+            "POST",
+            f"{EU}/auth/access-token-auth-code",
+            CookieResponse(
+                {"status": 0, "access_token": FAKE_TOKEN}, [UT_CLEARER, "pld_ut=real.ut", "pld_urt=real.urt"]
+            ),
+        )
         plaud.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
         assert cloud.exchange_token(region_code())["logged_in"] is True
         assert cloud._cloud_state["ut"] == "real.ut" and cloud._cloud_state["urt"] == "real.urt"
@@ -586,8 +593,12 @@ class TestSnSignAndroid:
         assert cloud._decode_body(b"<html>") == {}
 
     def test_stale_ut_refreshes_once_then_succeeds(self, signed_in):
-        replies = iter([FakeResponse({"status": -3900, "msg": "invalid auth header"}, 401),
-                        FakeResponse({"status": 0, "data": {"signature": {self.SN: "SIG2"}}})])
+        replies = iter(
+            [
+                FakeResponse({"status": -3900, "msg": "invalid auth header"}, 401),
+                FakeResponse({"status": 0, "data": {"signature": {self.SN: "SIG2"}}}),
+            ]
+        )
         signed_in.on("POST", f"{EU}/device/sn-sign", lambda **kw: next(replies))
         signed_in.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [UT_CLEARER, f"pld_ut={NEW_UT}"]))
         signed_in.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
@@ -628,7 +639,9 @@ class TestRefreshUserToken:
         assert kw["cookies"] == {"pld_ut": "old.ut", "pld_urt": "the.urt"} and kw["json"] == {}
 
     def test_no_new_cookie_leaves_state_alone(self, with_urt):
-        with_urt.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({"status": -1, "msg": "nope"}, [UT_CLEARER]))
+        with_urt.on(
+            "POST", f"{EU}/auth/refresh-user-token", CookieResponse({"status": -1, "msg": "nope"}, [UT_CLEARER])
+        )
         result = cloud.refresh_user_token()
         assert result["refreshed"] is False and "nope" in result["error"]
         assert cloud._cloud_state["token"] == "old.token"

@@ -26,7 +26,11 @@ class TestNoHardcodedCredentials:
     def test_device_py_no_import_bind_token(self):
         """device.py must not import BIND_TOKEN from constants."""
         src = (Path(__file__).parent.parent / "app" / "state" / "device.py").read_text()
-        assert "import" not in src or "BIND_TOKEN" not in src.split("from app.utils.constants import")[1].split(")")[0] if "from app.utils.constants import" in src else True
+        assert (
+            "import" not in src or "BIND_TOKEN" not in src.split("from app.utils.constants import")[1].split(")")[0]
+            if "from app.utils.constants import" in src
+            else True
+        )
 
     def test_device_py_no_import_sn_sig(self):
         """device.py must not import SN_SIG from constants."""
@@ -53,51 +57,63 @@ class TestCloudDeviceCredentials:
     def test_get_device_bind_token_returns_none_when_missing(self, tmp_config):
         """get_device_bind_token returns None for unknown device."""
         from app.state.cloud import get_device_bind_token
+
         assert get_device_bind_token("UNKNOWN_SN") is None
 
     def test_get_device_bind_token_returns_stored_value(self, tmp_config):
         """get_device_bind_token returns the stored token."""
         from app.utils.config import save_config
+
         save_config({"device_bind_tokens": {"TEST_SN_123": "test_token_value"}})
 
         from app.state.cloud import get_device_bind_token
+
         assert get_device_bind_token("TEST_SN_123") == "test_token_value"
 
     def test_get_device_sn_signature_returns_none_when_missing(self, tmp_config):
         """get_device_sn_signature returns None for unknown device."""
         from app.state.cloud import get_device_sn_signature
+
         assert get_device_sn_signature("UNKNOWN_SN") is None
 
     def test_get_device_sn_signature_returns_stored_value(self, tmp_config):
         """get_device_sn_signature returns the stored signature."""
         from app.utils.config import save_config
+
         save_config({"device_sn_signatures": {"TEST_SN_123": "base64sigdata=="}})
 
         from app.state.cloud import get_device_sn_signature
+
         assert get_device_sn_signature("TEST_SN_123") == "base64sigdata=="
 
     def test_bind_device_stores_token(self, tmp_config):
         """bind_device should store the resolved user id (bind reply has no token) in config."""
         mock_response = {"status": 0, "data": {}}
-        with patch("app.state.cloud.cloud_api", return_value=mock_response), \
-             patch("app.state.cloud._resolve_bind_token", return_value="new_device_token_123"), \
-             patch("app.state.cloud._cloud_state", {"logged_in": True, "token": "user_token"}):
+        with (
+            patch("app.state.cloud.cloud_api", return_value=mock_response),
+            patch("app.state.cloud._resolve_bind_token", return_value="new_device_token_123"),
+            patch("app.state.cloud._cloud_state", {"logged_in": True, "token": "user_token"}),
+        ):
             from app.state.cloud import bind_device, get_device_bind_token
+
             result = bind_device("SN_ABC")
             assert result["token"] == "new_device_token_123"
             assert get_device_bind_token("SN_ABC") == "new_device_token_123"
 
     def test_fetch_sn_signature_stores_signature(self, tmp_config):
         """fetch_sn_signature should store the signature in config."""
-        mock_response = {
-            "status": 0,
-            "data": {"signature": {"SN_ABC": "test_sig_base64=="}}
-        }
-        resp = type("R", (), {"status_code": 200, "content": json.dumps(mock_response).encode(),
-                              "raise_for_status": lambda self: None})()
-        with patch("app.state.cloud.http_requests.post", return_value=resp), \
-             patch("app.state.cloud._cloud_state", dict(_STATE, token="user_token")):
+        mock_response = {"status": 0, "data": {"signature": {"SN_ABC": "test_sig_base64=="}}}
+        resp = type(
+            "R",
+            (),
+            {"status_code": 200, "content": json.dumps(mock_response).encode(), "raise_for_status": lambda self: None},
+        )()
+        with (
+            patch("app.state.cloud.http_requests.post", return_value=resp),
+            patch("app.state.cloud._cloud_state", dict(_STATE, token="user_token")),
+        ):
             from app.state.cloud import fetch_sn_signature, get_device_sn_signature
+
             result = fetch_sn_signature("SN_ABC")
             assert result["signature"] == "test_sig_base64=="
             assert get_device_sn_signature("SN_ABC") == "test_sig_base64=="
@@ -106,6 +122,7 @@ class TestCloudDeviceCredentials:
         """bind_device should fail if not logged in."""
         with patch("app.state.cloud._cloud_state", {"logged_in": False, "token": None}):
             from app.state.cloud import bind_device
+
             result = bind_device("SN_ABC")
             assert "error" in result
 
@@ -113,6 +130,7 @@ class TestCloudDeviceCredentials:
         """fetch_sn_signature should fail if not logged in."""
         with patch("app.state.cloud._cloud_state", {"logged_in": False, "token": None}):
             from app.state.cloud import fetch_sn_signature
+
             result = fetch_sn_signature("SN_ABC")
             assert "error" in result
 
@@ -123,12 +141,18 @@ class TestCloudDeviceCredentials:
         def mock_post(url, headers=None, json=None, **kwargs):
             call_args.update(url=url, headers=headers, json_body=json)
             body = {"status": 0, "data": {"signature": {"SN_ABC": "sig=="}}}
-            return type("R", (), {"status_code": 200, "content": json.dumps(body).encode(),
-                                  "raise_for_status": lambda self: None})()
+            return type(
+                "R",
+                (),
+                {"status_code": 200, "content": json.dumps(body).encode(), "raise_for_status": lambda self: None},
+            )()
 
-        with patch("app.state.cloud.http_requests.post", side_effect=mock_post), \
-             patch("app.state.cloud._cloud_state", dict(_STATE, token="tok")):
+        with (
+            patch("app.state.cloud.http_requests.post", side_effect=mock_post),
+            patch("app.state.cloud._cloud_state", dict(_STATE, token="tok")),
+        ):
             from app.state.cloud import fetch_sn_signature
+
             fetch_sn_signature("SN_ABC")
 
         assert call_args["url"].endswith("/device/sn-sign")
