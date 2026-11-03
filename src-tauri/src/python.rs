@@ -985,15 +985,15 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
 
     if std::env::consts::ARCH != SUPPORTED_ARCH {
         let detail = format!(
-            "This copy of Plaud V2 runs as {}; its Python packages are built for Apple Silicon (arm64) only.",
+            "This copy of Open Pin runs as {}; its Python packages are built for Apple Silicon (arm64) only.",
             std::env::consts::ARCH
         );
         log::error!("[Python] {detail}");
         set_startup_error(
             "UNSUPPORTED_MAC",
             "Intel Macs aren't supported",
-            "This build of Plaud V2 needs a Mac with Apple Silicon (M1 or later); Intel Macs aren't supported.",
-            "On an Apple Silicon Mac, make sure Plaud V2 isn't set to open using Rosetta \
+            "This build of Open Pin needs a Mac with Apple Silicon (M1 or later); Intel Macs aren't supported.",
+            "On an Apple Silicon Mac, make sure Open Pin isn't set to open using Rosetta \
              (Finder › Get Info).",
             &detail,
         );
@@ -1015,7 +1015,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         set_startup_error(
             "PYTHON_NOT_FOUND",
             "Python 3.12 not available",
-            "Plaud V2 needs Python 3.12; couldn't download it.",
+            "Open Pin needs Python 3.12; couldn't download it.",
             "Check your internet connection and click Retry. Or install Python 3.12 \
              (python.org, or `brew install python@3.12`) and click Retry.",
             &detail,
@@ -1041,7 +1041,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
                      failing, delete ~/Library/Application Support/com.plaud.v2/venv and click Retry."
                     .to_string(),
                 RuntimeKind::Fallback => format!(
-                    "Plaud V2 needs Python 3.12; couldn't download it, so it used {} at {}. \
+                    "Open Pin needs Python 3.12; couldn't download it, so it used {} at {}. \
                      Check your internet connection and click Retry.",
                     base.version, base.path
                 ),
@@ -1049,7 +1049,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
             set_startup_error(
                 "DEPS_FAILED",
                 "Missing dependencies",
-                "Plaud V2 couldn't install the Python packages it needs.",
+                "Open Pin couldn't install the Python packages it needs.",
                 &hint,
                 &e,
             );
@@ -1194,7 +1194,7 @@ fn monitor_backend(app: AppHandle, mut generation: u64, budget: Duration) {
                             "SERVER_TIMEOUT",
                             "Server not responding",
                             "The Python backend started but hasn't answered yet.",
-                            "Plaud V2 keeps waiting and carries on by itself if it comes up. \
+                            "Open Pin keeps waiting and carries on by itself if it comes up. \
                              Retry restarts it.",
                             &format!("No answer from /health within {}s", budget.as_secs()),
                         );
@@ -1216,7 +1216,7 @@ fn monitor_backend(app: AppHandle, mut generation: u64, budget: Duration) {
                 set_startup_error(
                     "WATCHDOG_DIED",
                     "Process monitor stopped",
-                    "Plaud V2's crash watchdog could not poll the backend process.",
+                    "Open Pin's crash watchdog could not poll the backend process.",
                     "Restart the app to recover.",
                     &format!("try_wait error: {err}"),
                 );

@@ -1,5 +1,5 @@
 {
-  "productName": "Plaud V2",
+  "productName": "Open Pin",
   "version": "2.5.3",
   "identifier": "com.plaud.v2",
   "build": {
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Plaud V2",
+        "title": "Open Pin",
         "url": "index.html",
         "width": 1200,
         "height": 800,

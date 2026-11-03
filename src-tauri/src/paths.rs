@@ -8,6 +8,13 @@
 //! | Python runtime (`python/`) and FFmpeg (`bin/`) | `Application Support/com.plaud.v2` | shared with release |
 //! | Logs | `Logs/Plaud V2` | `Logs/Plaud V2 (Dev)` |
 //!
+//! The app was called "Plaud V2" before it became Open Pin. Every folder name
+//! above is a fixed literal, never derived from the product name or bundle
+//! name, so renaming the app moves nothing: installs keep their recordings,
+//! settings, venv and logs. The bundle identifier `com.plaud.v2` stays too
+//! (Bluetooth permission and the Keychain pairing backup hang off it). The
+//! tests at the bottom pin these names; don't change them.
+//!
 //! `PLAUD_DATA_DIR`, when set, overrides the data folder in both builds. The
 //! shell always passes the resolved folder to Python in `PLAUD_DATA_DIR`, so
 //! the backend and the Rust side (the bug report's `wifi_sync.log`) agree.
@@ -20,6 +27,7 @@ use std::path::{Path, PathBuf};
 /// `app/utils/constants.py`).
 pub const DATA_DIR_ENV: &str = "PLAUD_DATA_DIR";
 
+// Legacy names, kept on purpose (see the module docs). Not `productName`.
 const RELEASE_DATA_DIR: &str = "Plaud V2";
 const DEV_DATA_DIR: &str = "Plaud V2 (Dev)";
 const RELEASE_SUPPORT_DIR: &str = "com.plaud.v2";
@@ -165,6 +173,41 @@ mod tests {
         assert!(app_support_dir().ends_with("com.plaud.v2.dev"));
         assert!(shared_support_dir().ends_with("com.plaud.v2"));
         assert!(log_dir().ends_with("Plaud V2 (Dev)"));
+    }
+
+    #[test]
+    fn folder_names_are_pinned_to_the_legacy_name() {
+        // Existing installs keep their data only while these stay exactly so.
+        assert_eq!(RELEASE_DATA_DIR, "Plaud V2");
+        assert_eq!(DEV_DATA_DIR, "Plaud V2 (Dev)");
+        assert_eq!(RELEASE_SUPPORT_DIR, "com.plaud.v2");
+        assert_eq!(DEV_SUPPORT_DIR, "com.plaud.v2.dev");
+        assert_eq!(RELEASE_LOG_DIR, "Plaud V2");
+        assert_eq!(DEV_LOG_DIR, "Plaud V2 (Dev)");
+        let lib = Path::new("/Users/x/Library");
+        assert_eq!(
+            resolve(None, false),
+            Path::new("/Users/x/Library/Application Support/Plaud V2")
+        );
+        assert_eq!(
+            lib.join("Logs").join(RELEASE_LOG_DIR),
+            Path::new("/Users/x/Library/Logs/Plaud V2")
+        );
+    }
+
+    #[test]
+    fn product_rename_kept_the_identifier() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        // The bundle id carries Bluetooth permission, the Keychain backup and
+        // the support folder; the updater insists on it too.
+        assert_eq!(conf["identifier"], "com.plaud.v2");
+        assert_eq!(RELEASE_SUPPORT_DIR, conf["identifier"].as_str().unwrap());
+        // The product name is free to change: nothing on disk is derived from it.
+        assert_eq!(conf["productName"], "Open Pin");
+        assert_ne!(conf["productName"].as_str(), Some(RELEASE_DATA_DIR));
+        // Plaud's sign-in redirect.
+        assert_eq!(conf["plugins"]["deep-link"]["desktop"]["schemes"][0], "plaud");
     }
 
     #[test]

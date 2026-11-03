@@ -4,6 +4,6 @@
 <dict>
     <!-- Bluetooth permission prompt message -->
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Plaud V2 uses Bluetooth to connect to your Plaud NotePin S and sync recordings.</string>
+    <string>Open Pin uses Bluetooth to connect to your Plaud NotePin S and sync recordings.</string>
 </dict>
 </plist>
