@@ -171,7 +171,7 @@ Other rules:
 
 | Path | Contents |
 |---|---|
-| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
+| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.notion_legacy_cache.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
 | `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log` |
 | `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
 | `... Plaud V2 (Dev)/`, `com.plaud.v2.dev/`, `Logs/Plaud V2 (Dev)/` | The same, for debug builds (`tauri dev`). They share only `com.plaud.v2/python/` and `bin/` with the installed app |
@@ -295,6 +295,26 @@ summary's title replaces it, unless the user renamed the recording in between.
 - Schema changes only add: a `Session ID` column, a `Tags` multi-select, new tag options.
 - Pushes go through a **durable queue** on disk (`.notion_queue.json`), retried with backoff,
   paused while Notion auth is broken, with failures listed in Settings with a Retry button.
+- **Pages from before v2.4.0** have no Session ID (title, Tags, and a body of summary, `---`,
+  `## Full Transcript`, `[mm:ss] **Speaker**: text` lines). Before creating a page, a push lists
+  the database rows (paginated, reused for 10 minutes) and compares the local transcript with every
+  page that has no Session ID (`app/utils/notion_legacy.py`): word 3-shingles after normalising
+  punctuation, numbers and hesitations (so Whisper and Deepgram wordings of the same audio match),
+  the page's last `[mm:ss]` against the recording's length, and the page's creation time against the
+  recording's start. Page fingerprints are cached in `.notion_legacy_cache.json`, keyed by page id
+  and last-edited time.
+  - A **confident match** (score ≥ 0.35, a consistent length, 0.15 ahead of any other page) is
+    **adopted**: its Session ID is set, its tags are merged (and added to the recording in the app),
+    the URL is saved, and `notion_legacy_pages` in the config records it. Its body is never changed.
+    Later pushes of an adopted page update properties only (the app section too, in place, if one is
+    ever on the page; never appended, so the transcript isn't doubled). Its Notion title is kept until
+    the recording is renamed in the app.
+  - A **doubtful match** (score ≥ 0.15 but not confident, e.g. no timestamps on the page, or two
+    similar pages) creates nothing: the push returns `needs_review` with the candidate pages, the
+    queue parks the job in its `needs_review` list (not retried, not a failure), and the transcript
+    view offers "Use that page" (`link_url`) or "Create a new page" (`force_new`).
+  - Settings › Notion › **Check for duplicates** (`GET /notion/duplicates`) lists pages the app made
+    whose transcript confidently matches an older page, as links to both. Nothing is deleted.
 
 Google Drive signs in with OAuth through a callback on `localhost:5125`, using the app's own
 Google OAuth client (see [SECURITY.md](../SECURITY.md)), and uploads recordings to a chosen folder.

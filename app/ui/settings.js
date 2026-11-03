@@ -610,7 +610,8 @@ function renderNotionQueueNotice(queueSnap, reconnect) {
   let notice = $('#notion-queue-notice');
   const failed = queueSnap.failed_count || 0;
   const paused = !!queueSnap.paused && !reconnect;
-  if (!failed && !paused) {
+  const review = queueSnap.needs_review_count || 0;
+  if (!failed && !paused && !review) {
     if (notice) notice.remove();
     return;
   }
@@ -624,6 +625,18 @@ function renderNotionQueueNotice(queueSnap, reconnect) {
     card.insertAdjacentElement('afterend', notice);
   }
   notice.textContent = '';
+  notice.title = '';
+  if (review) {
+    // Pushes that found a page an older version of the app made: the owner
+    // chooses in the transcript view ("Use that page" / "Create a new page").
+    const names = (queueSnap.needs_review || []).map((r) => _recordingLabel(r.session_id));
+    const reviewText = document.createElement('div');
+    reviewText.textContent =
+      `${review === 1 ? 'This recording' : `These ${review} recordings`} may already be in Notion: ` +
+      `${names.join(', ')}. Open ${review === 1 ? 'it' : 'each one'} to choose which page to use.`;
+    notice.append(reviewText);
+    if (!failed && !paused) return;
+  }
   const text = document.createElement('span');
   if (failed) {
     text.textContent = `${failed} Notion push${failed === 1 ? '' : 'es'} failed — `;
@@ -648,6 +661,53 @@ function renderNotionQueueNotice(queueSnap, reconnect) {
     }
   });
   notice.append(text, retry);
+}
+
+// "Check for duplicates": pairs of pages holding the same recording, shown
+// as links so the owner can delete one in Notion (the app never deletes).
+function renderNotionDuplicates(result) {
+  const box = $('#notion-duplicates-result');
+  if (!box) return;
+  box.textContent = '';
+  box.classList.remove('hidden');
+  const pairs = (result && result.pairs) || [];
+  if (!pairs.length) {
+    box.textContent = `No duplicates found (${result.checked || 0} pages checked).`;
+    return;
+  }
+  const intro = document.createElement('p');
+  intro.className = 'mb-2';
+  intro.textContent =
+    `${pairs.length} recording${pairs.length === 1 ? ' is' : 's are'} in Notion twice. ` +
+    "Delete the page you don't want in Notion. If you delete the newer one, the app uses the older page " +
+    'the next time it sends that recording.';
+  box.append(intro);
+  const link = (label, page) => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'ai-key-get-link';
+    a.textContent = label;
+    a.title = page.title || '';
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.plaud.openExternal(page.url);
+    });
+    return a;
+  };
+  pairs.forEach((pair) => {
+    const row = document.createElement('div');
+    row.className = 'mb-2';
+    const name = document.createElement('div');
+    name.textContent = pair.newer.title || pair.older.title || pair.session_id;
+    row.append(name, link('Older page', pair.older), ' · ', link('Newer page', pair.newer));
+    box.append(row);
+  });
+  if (result.complete === false) {
+    const more = document.createElement('p');
+    more.className = 'mb-0';
+    more.textContent = 'The database is very large, so only its first pages were checked.';
+    box.append(more);
+  }
 }
 
 // ---- Google Drive ----
@@ -1702,6 +1762,23 @@ function initSettingsEvents() {
     app.notionState = { connected: false };
     renderNotion();
     toast('Notion disconnected', 'info');
+  });
+
+  $('#notion-duplicates-btn').addEventListener('click', async () => {
+    const btn = $('#notion-duplicates-btn');
+    setLoading(btn, true);
+    try {
+      const result = await window.plaud.notionDuplicates();
+      if (result.error) {
+        toast(`Couldn't check for duplicates: ${result.error}`, 'error');
+      } else {
+        renderNotionDuplicates(result);
+      }
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      setLoading(btn, false);
+    }
   });
 
   // Notion auto-push toggle
