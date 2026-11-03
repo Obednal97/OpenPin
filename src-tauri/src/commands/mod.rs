@@ -248,7 +248,7 @@ mod report_scrub;
 pub(crate) mod sha256;
 
 /// Base URL of the update Worker (infra/update-worker/).
-pub(crate) const WORKER_BASE: &str = "https://plaud-v2-updates.leave-hacker-feedback.workers.dev";
+pub(crate) const WORKER_BASE: &str = "https://openpin.bednal.com";
 
 /// Bundle identity the installer insists on before swapping the app. The
 /// identifier is the app's original one and must not change (Bluetooth
@@ -2551,7 +2551,7 @@ exit 0"#
     }
     #[test]
     fn worker_base_is_https() {
-        assert!(WORKER_BASE.starts_with("https://plaud-v2-updates."));
+        assert_eq!(WORKER_BASE, "https://openpin.bednal.com");
         assert!(!WORKER_BASE.ends_with('/'));
     }
 }

@@ -32,12 +32,16 @@ the installer refuses any other, and Bluetooth permission and the Keychain backu
 ## How updates reach users
 
 The app never talks to GitHub and ships no token. The updater in `src-tauri/src/commands/mod.rs`
-talks to the **`plaud-v2-updates` Cloudflare Worker** (`infra/update-worker/`,
-`https://plaud-v2-updates.leave-hacker-feedback.workers.dev`, the `WORKER_BASE` constant), which
-holds a GitHub token as a secret. The token can be rotated without a release.
+talks to the **`plaud-v2-updates` Cloudflare Worker** (`infra/update-worker/`) at
+`https://openpin.bednal.com` (the `WORKER_BASE` constant), which holds a GitHub token as a secret.
+The token can be rotated without a release. Installs up to v2.5.x call the same Worker at its old
+`workers.dev` address; keep that address working until they have updated.
 
 1. 5 seconds after launch, then every 4 hours, the app calls `GET /v1/latest`: the latest
    **published** release (no drafts or pre-releases), cached for 5 minutes by the Worker.
+   **Test channel:** callers whose IP is in the Worker secret `CANARY_IPS` get the newest release
+   including pre-releases. To try a build on your own Macs first, publish it as a GitHub
+   pre-release, then promote it (`gh release edit <tag> --prerelease=false`) for everyone.
 2. Versions compare as `major.minor.patch`; anything after `-` or `+` is ignored, so
    `2.4.0-beta` is never newer than `2.4.0`. Any non-2xx answer is shown as an update error, never
    as "up to date".
@@ -218,7 +222,7 @@ gh release create "v$V" \
   --title "v$V" --notes-file release-notes.md
 
 # What installs will see (allow up to 5 minutes for the Worker's cache):
-W=https://plaud-v2-updates.leave-hacker-feedback.workers.dev
+W=https://openpin.bednal.com
 curl -s "$W/v1/latest" | jq '{version, asset}'                   # version = $V, sha256 not null
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$(curl -s "$W/v1/latest" | jq -r .download_url)"   # 302
 ```
@@ -242,7 +246,7 @@ release is needed.
    npx --yes wrangler@4 secret put GH_TOKEN
    ```
 
-3. Check: `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest | jq .version`
+3. Check: `curl -s https://openpin.bednal.com/v1/latest | jq .version` (and the old `workers.dev` address, which installs up to v2.5.x still call)
    returns the latest version (wait out the 5-minute cache if it was failing before).
 4. Revoke the old token on GitHub.
 

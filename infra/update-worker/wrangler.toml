@@ -4,7 +4,12 @@
 name = "plaud-v2-updates"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
+# Installed apps up to v2.5.x call the workers.dev URL; from Open Pin (v2.6.0)
+# they call the custom domain. Keep both until old installs have updated.
 workers_dev = true
+routes = [
+  { pattern = "openpin.bednal.com", custom_domain = true },
+]
 
 [observability]
 enabled = true

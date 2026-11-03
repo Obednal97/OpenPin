@@ -3,10 +3,16 @@
 Fronts every GitHub call the Open Pin app makes, so the DMG ships **no GitHub token**.
 The token lives only as a Worker secret and can be rotated without an app release.
 
-Deployed at **https://plaud-v2-updates.leave-hacker-feedback.workers.dev**
-(the hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`). The Worker
-keeps the app's pre-rename name (Plaud V2): every installed copy calls this URL, so renaming the
-Worker would need a new route and an app release, and old installs would still call the old one.
+Deployed at **https://openpin.bednal.com** (a custom domain, `routes` in `wrangler.toml`; the
+hostname is hard-coded as `WORKER_BASE` in `src-tauri/src/commands/mod.rs`). Installs up to v2.5.x
+call the same Worker at its `workers.dev` address (`workers_dev = true`), which keeps the
+pre-rename Worker name; keep it until they have updated. `/v1/latest` is cached per host, because
+its `download_url` must stay on the host the app called.
+
+**Test channel:** callers whose IP is in the secret `CANARY_IPS` (comma-separated;
+`npx wrangler secret put CANARY_IPS`) get the newest release including pre-releases
+(`X-Open-Pin-Channel: canary`); everyone else gets `releases/latest`.
+
 The repository it reads releases from is `REPO` in `src/index.js`.
 
 ## Endpoints
@@ -81,13 +87,13 @@ current status of the token.
    the app's repository (`REPO`) only, with **Contents: Read-only** and **Issues: Read and write**
    (Metadata: Read-only is added automatically).
 2. `npx --yes wrangler@4 secret put GH_TOKEN` and paste it (stdin, not a CLI argument).
-3. Check: `curl -s https://plaud-v2-updates.leave-hacker-feedback.workers.dev/v1/latest` returns the latest version.
+3. Check: `curl -s https://openpin.bednal.com/v1/latest` returns the latest version.
 4. Revoke the old token on GitHub.
 
 ## Smoke tests
 
 ```bash
-W=https://plaud-v2-updates.leave-hacker-feedback.workers.dev
+W=https://openpin.bednal.com
 curl -s $W/v1/latest | jq '{version, asset}'
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$W/v1/download/v2.3.0/Plaud.V2_2.3.0_aarch64.dmg"   # 302 → githubusercontent
 curl -s -X POST -H 'Content-Type: application/json' -d '{"fingerprint":"00","title":"t","body":"b","app_version":"0.0.0","os":"test","dry_run":true}' $W/v1/report
