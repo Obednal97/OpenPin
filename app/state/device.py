@@ -499,6 +499,27 @@ def _run_on_loop(coro, timeout):
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
 
 
+# Devices the last scans saw: address -> (BLEDevice, time.monotonic()). On macOS
+# the address is a CoreBluetooth UUID, and connecting by address makes bleak
+# search for it again; that search often misses a NotePin a scan has just
+# found ("Device with address … was not found" after the full 30 s timeout).
+# Connecting with the scan's BLEDevice skips the second search.
+_recent_ble_devices = {}
+RECENT_DEVICE_MAX_AGE_S = 60.0
+
+
+def _remember_ble_device(device):
+    _recent_ble_devices[device.address] = (device, time.monotonic())
+
+
+def _fresh_ble_device(address, max_age=RECENT_DEVICE_MAX_AGE_S):
+    """The BLEDevice a scan saw at `address` within `max_age` seconds, or None."""
+    seen = _recent_ble_devices.get(address) if address else None
+    if seen and time.monotonic() - seen[1] <= max_age:
+        return seen[0]
+    return None
+
+
 async def scan_devices(scan_duration=6):
     """Scan for all Plaud devices in range, returning detailed info for each."""
     from bleak import BleakScanner
@@ -514,6 +535,7 @@ async def scan_devices(scan_duration=6):
         mfr_info = parse_manufacturer_data(adv.manufacturer_data) if adv.manufacturer_data else None
 
         if is_plaud or mfr_info or (0x5D in (adv.manufacturer_data or {})):
+            _remember_ble_device(device)
             info = by_address.get(device.address)
             if info is None:
                 info = mfr_info or {}
@@ -547,6 +569,16 @@ async def scan_devices(scan_duration=6):
     )
     print(f"[BLE] Scan found {len(found)} Plaud device(s){': ' + summary if found else ''}")
     return found
+
+
+async def scan_unless_connected(attempts=2, scan_duration=4):
+    """scan_devices_with_retry, or None if a device is connected by the time
+    this runs. Scan requests wait behind a connect on the BLE lock; once the
+    connect succeeds the NotePin stops advertising, so scanning then only
+    finds nothing (and a "found" answer would make the caller reconnect)."""
+    if is_connected():
+        return None
+    return await scan_devices_with_retry(attempts=attempts, scan_duration=scan_duration)
 
 
 async def scan_devices_with_retry(attempts=2, scan_duration=6):
@@ -631,16 +663,24 @@ ADDRESS_CHECK_S = 5.0
 
 
 async def _address_visible(address):
-    """Whether a device is advertising at `address` right now (a short scan).
+    """Whether a device is advertising at `address` right now.
 
-    If the check itself fails, answer True so the connect goes ahead as before.
+    A scan in the last minute counts; otherwise a short scan for it (whose
+    BLEDevice is remembered for the connect). If the check itself fails,
+    answer True so the connect goes ahead as before.
     """
+    if _fresh_ble_device(address):
+        return True
     try:
         from bleak import BleakScanner
 
-        return await BleakScanner.find_device_by_address(address, timeout=ADDRESS_CHECK_S) is not None
+        device = await BleakScanner.find_device_by_address(address, timeout=ADDRESS_CHECK_S)
     except Exception:
         return True
+    if device is None:
+        return False
+    _remember_ble_device(device)
+    return True
 
 
 def _remember_bind_token(sn, token_bytes):
@@ -704,7 +744,9 @@ async def connect_device(address=None):
     cl = None
     for attempt in range(3):
         try:
-            cl = BC(address, timeout=30.0, disconnected_callback=_on_disconnect)
+            # The scan's BLEDevice if there is one: no second search (see _recent_ble_devices).
+            target = _fresh_ble_device(address) or address
+            cl = BC(target, timeout=30.0, disconnected_callback=_on_disconnect)
             await cl.connect()
             await asyncio.sleep(1)
 

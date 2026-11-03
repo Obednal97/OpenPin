@@ -308,3 +308,105 @@ def test_address_check_failure_means_try_anyway(monkeypatch):
     monkeypatch.undo()  # drop the conftest stub: test the real helper
     monkeypatch.setattr(bleak, "BleakScanner", BrokenScanner)
     assert asyncio.run(dev._address_visible("X")) is True
+
+
+# ---------------------------------------------------------------------------
+# Connecting with the scan's BLEDevice (v2.5.3): connecting by address made
+# bleak search again, which often missed a NotePin the scan had just found
+# ("Device with address … was not found" after 30 s, twice in a row).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_recent_devices(monkeypatch):
+    monkeypatch.setattr(dev, "_recent_ble_devices", {})
+
+
+def test_scan_remembers_the_ble_device(fake_scanner, no_recent_devices):
+    found = device(ADDR)
+    fake_scanner.append((found, adv(rssi=-60)))
+    asyncio.run(dev.scan_devices(scan_duration=0))
+    assert dev._fresh_ble_device(ADDR) is found
+    assert dev._fresh_ble_device(OTHER_ADDR) is None
+
+
+def test_remembered_device_expires(monkeypatch, no_recent_devices):
+    found = device(ADDR)
+    now = [1000.0]
+    monkeypatch.setattr(dev.time, "monotonic", lambda: now[0])
+    dev._remember_ble_device(found)
+    now[0] += dev.RECENT_DEVICE_MAX_AGE_S - 1
+    assert dev._fresh_ble_device(ADDR) is found
+    now[0] += 2
+    assert dev._fresh_ble_device(ADDR) is None
+
+
+def test_connect_uses_the_scanned_device_not_the_address(connect_env, monkeypatch, no_recent_devices):
+    scanned = device(ADDR)
+    dev._remember_ble_device(scanned)
+    notepin = FakeNotePin()
+    targets = []
+    factory = notepin.client_factory
+
+    def client_factory(target, *a, **kw):
+        targets.append(target)
+        return factory(target, *a, **kw)
+
+    monkeypatch.setattr(bleak, "BleakClient", client_factory)
+    monkeypatch.setattr(dev, "rsa_decrypt", notepin.session_plaintext)
+    monkeypatch.setattr(dev, "load_rsa_private_key", lambda *a: None)
+    assert asyncio.run(dev.connect_device(ADDR))["connected"] is True
+    assert targets == [scanned]
+
+
+def test_recent_sighting_skips_the_address_check(monkeypatch, no_recent_devices):
+    class ExplodingScanner:
+        @staticmethod
+        async def find_device_by_address(address, timeout):
+            raise AssertionError("should not scan again")
+
+    monkeypatch.undo()  # drop the conftest stub: test the real helper
+    monkeypatch.setattr(dev, "_recent_ble_devices", {})
+    monkeypatch.setattr(bleak, "BleakScanner", ExplodingScanner)
+    dev._remember_ble_device(device(ADDR))
+    assert asyncio.run(dev._address_visible(ADDR)) is True
+
+
+def test_address_check_remembers_what_it_finds(monkeypatch):
+    found = device(ADDR)
+
+    class Scanner:
+        @staticmethod
+        async def find_device_by_address(address, timeout):
+            return found if address == ADDR else None
+
+    monkeypatch.undo()
+    monkeypatch.setattr(dev, "_recent_ble_devices", {})
+    monkeypatch.setattr(bleak, "BleakScanner", Scanner)
+    assert asyncio.run(dev._address_visible(ADDR)) is True
+    assert dev._fresh_ble_device(ADDR) is found
+    assert asyncio.run(dev._address_visible(OTHER_ADDR)) is False
+
+
+def test_scan_known_skips_scanning_once_connected(monkeypatch, paired):
+    """Scan requests queued behind a slow connect used to scan (and find
+    nothing) one after another once it finished."""
+    from flask import Flask
+
+    from app.routes import device as routes
+
+    scans = []
+
+    async def scan(*a, **k):
+        scans.append(1)
+        return []
+
+    monkeypatch.setattr(dev, "scan_devices_with_retry", scan)
+    monkeypatch.setattr(dev, "is_connected", lambda: True)
+    monkeypatch.setattr(routes.dev, "run_async", lambda coro, **kw: asyncio.run(coro))
+    app = Flask(__name__)
+    app.register_blueprint(routes.bp, url_prefix="/device")
+    with app.test_request_context("/device/scan-known", method="POST"):
+        body = routes.scan_known().get_json()
+    assert body == {"found": False, "reason": "already_connected", "connected": True}
+    assert scans == []
