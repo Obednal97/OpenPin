@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 APP_NAME = "Open Pin"
 # Source repository (bug reports, OpenRouter's HTTP-Referer). GitHub redirects
 # the old slug if the repo is renamed; change it here and in app/renderer.js.
-PROJECT_URL = "https://github.com/Obednal97/Plaud-V2"
+PROJECT_URL = "https://github.com/Obednal97/OpenPin"
 
 # User data directory — outside the app bundle so it persists across updates.
 # 1. PLAUD_DATA_DIR env var, if set. The Rust shell always sets it: to
