@@ -46,6 +46,15 @@ class FakeResponse:
             raise self._body
         return self._body
 
+    @property
+    def content(self):
+        """Raw bytes like requests.Response: str/bytes bodies verbatim, else JSON."""
+        if isinstance(self._body, bytes):
+            return self._body
+        if isinstance(self._body, str):
+            return self._body.encode()
+        return json.dumps(self._body).encode()
+
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(f"{self.status_code} Error", response=self)
@@ -533,3 +542,45 @@ class TestCookieCapture:
         cloud._cloud_state.update(ut="u", urt="r")
         cloud.logout()
         assert cloud._cloud_state["ut"] is None and cloud._cloud_state["urt"] is None
+
+
+class TestRefreshUserToken:
+    @pytest.fixture
+    def with_urt(self, plaud):
+        cloud._cloud_state.update(logged_in=True, token="old.token", ut="old.ut", urt="the.urt")
+        return plaud
+
+    def test_no_refresh_token(self, plaud):
+        assert cloud.refresh_user_token() == {"refreshed": False, "error": "no refresh token"}
+
+    def test_refresh_updates_state_and_persists(self, with_urt):
+        with_urt.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [UT_CLEARER, f"pld_ut={NEW_UT}"]))
+        with_urt.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        result = cloud.refresh_user_token()
+        assert result["refreshed"] is True and result["user"]["id"] == "u123"
+        assert cloud._cloud_state["token"] == NEW_UT and cloud._cloud_state["ut"] == NEW_UT
+        assert saved_config() == {"token": NEW_UT, "api_domain": EU, "ut": NEW_UT, "urt": "the.urt"}
+        kw = with_urt.calls[0][2]
+        assert kw["cookies"] == {"pld_ut": "old.ut", "pld_urt": "the.urt"} and kw["json"] == {}
+
+    def test_no_new_cookie_leaves_state_alone(self, with_urt):
+        with_urt.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({"status": -1, "msg": "nope"}, [UT_CLEARER]))
+        result = cloud.refresh_user_token()
+        assert result["refreshed"] is False and "nope" in result["error"]
+        assert cloud._cloud_state["token"] == "old.token"
+
+    def test_new_token_rejected_by_user_me(self, with_urt):
+        with_urt.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [f"pld_ut={NEW_UT}"]))
+        with_urt.on("GET", f"{EU}/user/me", JUNK_TOKEN_REPLY)
+        assert cloud.refresh_user_token()["refreshed"] is False
+        assert cloud._cloud_state["token"] == "old.token"
+
+    def test_cloud_api_401_refreshes_once_and_retries(self, with_urt):
+        replies = iter([FakeResponse(EXPIRED_TOKEN_REPLY, 401), FakeResponse({"status": 0, "data_devices": []})])
+        with_urt.on("GET", f"{EU}/device/list", lambda **kw: next(replies))
+        with_urt.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [f"pld_ut={NEW_UT}"]))
+        with_urt.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        assert cloud.cloud_api("/device/list")["status"] == 0
+        assert [u for _m, u in with_urt.urls()].count(f"{EU}/auth/refresh-user-token") == 1
+        last = [c for c in with_urt.calls if c[1].endswith("/device/list")][-1]
+        assert last[2]["headers"]["Authorization"] == f"bearer {NEW_UT}"

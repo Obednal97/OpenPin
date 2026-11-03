@@ -138,6 +138,28 @@ def _json_or_empty(response):
     return body if isinstance(body, dict) else {}
 
 
+def _decode_body(raw):
+    """Parse a Plaud reply body that is either plain JSON or a Fernet blob.
+
+    A Fernet token is URL-safe base64 starting "gAAAAAB". Returns the decoded
+    dict, or {} when the body can't be read (never raises).
+    """
+    try:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
+        text = text.strip()
+        if text.startswith("gAAAAAB"):
+            try:
+                from cryptography.fernet import Fernet
+            except ImportError:
+                logging.warning("[Cloud] cryptography unavailable; can't decrypt Plaud's reply")
+                return {}
+            text = Fernet(PLAUD_FERNET_KEY).decrypt(text.encode()).decode("utf-8")
+        body = json.loads(text)
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
 def _cookies_from_response(response):
     """Last non-empty ``pld_ut`` / ``pld_urt`` in a response's Set-Cookie headers.
 
@@ -422,8 +444,63 @@ def cloud_api(endpoint, method="GET", params=None, json_body=None):
                     pass
                 continue  # retry with correct domain
 
+        # A 401 with a refresh token on hand is most likely the ~24h pld_ut
+        # having lapsed: refresh once and retry with the new token.
+        if attempt == 0 and r.status_code == 401 and _cloud_state.get("urt"):
+            if refresh_user_token().get("refreshed"):
+                continue
+
         r.raise_for_status()
         return r.json()
+
+
+def refresh_user_token():
+    """Renew the ~24h pld_ut using the ~30 day pld_urt.
+
+    POST /auth/refresh-user-token with the two cookies; the new pld_ut comes
+    back in Set-Cookie (last non-empty one wins, see _cookies_from_response).
+    The new token is checked on /user/me, then stored as ``ut`` and promoted to
+    the primary token (the REST path accepts it) and saved.
+
+    Returns ``{"refreshed": True, "user": ...}`` or ``{"refreshed": False, "error": ...}``.
+    """
+    with _cloud_state_lock:
+        ut = _cloud_state.get("ut")
+        urt = _cloud_state.get("urt")
+        domain = _cloud_state["api_domain"]
+    if not urt:
+        return {"refreshed": False, "error": "no refresh token"}
+    try:
+        r = http_requests.post(
+            f"{domain}/auth/refresh-user-token",
+            headers={"Content-Type": "application/json", "app-platform": "desktop", "User-Agent": "PlaudV2"},
+            cookies={"pld_ut": ut or "", "pld_urt": urt},
+            json={},
+            timeout=15,
+        )
+        new_ut = _cookies_from_response(r)["ut"]
+        if not new_ut:
+            body = _decode_body(getattr(r, "content", b"") or b"")
+            reason = _plaud_msg(body) or f"HTTP {r.status_code}"
+            logging.warning("[Cloud] Token refresh gave no new token (%s)", reason)
+            return {"refreshed": False, "error": f"Plaud didn't issue a new token ({reason})"}
+        user, domain = _try_token(new_ut, domain)
+    except PlaudAuthError as e:
+        return {"refreshed": False, "error": str(e)}
+    except Exception as e:
+        logging.warning("[Cloud] Token refresh failed: %s", e)
+        return {"refreshed": False, "error": _cloud_call_error(e)}
+    with _cloud_state_lock:
+        _cloud_state["ut"] = new_ut
+        _cloud_state["token"] = new_ut
+        _cloud_state["api_domain"] = domain
+        _cloud_state["user"] = user
+    try:
+        save_cloud_token(new_ut, domain, ut=new_ut, urt=urt)
+    except Exception as e:
+        logging.warning("[Cloud] Couldn't save the refreshed token: %s", e)
+    logging.info("[Cloud] Refreshed the user token")
+    return {"refreshed": True, "user": user}
 
 
 _LOGIN_UUID_KEY = "plaud_login_desktop_uuid"
