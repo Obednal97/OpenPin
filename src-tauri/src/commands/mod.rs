@@ -709,7 +709,7 @@ done
 [ -f "$dmg_path" ] || abort "update file missing"
 
 MNT=$(mktemp -d "${TMPDIR:-/tmp}/plaud-v2-update.XXXXXX") || abort "mktemp failed"
-hdiutil attach -nobrowse -noautoopen -readonly -mountpoint "$MNT" "$dmg_path" || abort "hdiutil attach failed"
+hdiutil attach -nobrowse -noautoopen -readonly -quiet -mountpoint "$MNT" "$dmg_path" || abort "hdiutil attach failed"
 
 NEW_APP=$(find "$MNT" -maxdepth 1 -name "*.app" -type d | head -1)
 [ -n "$NEW_APP" ] && [ -d "$NEW_APP/Contents/MacOS" ] || abort "no .app found in the update"
@@ -1822,10 +1822,11 @@ mod tests {
                 std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             };
-            // attach -nobrowse -noautoopen -readonly -mountpoint <mnt> <dmg>
+            // attach [flags…] -mountpoint <mnt> <dmg>: the mount point follows
+            // -mountpoint, the DMG is the last argument.
             stub(
                 "hdiutil",
-                r#"if [ "$1" = attach ]; then mnt="$6"; src=$(cat "$7"); cp -R "$src"/. "$mnt"/; fi; exit 0"#,
+                r#"if [ "$1" = attach ]; then while [ $# -gt 0 ]; do [ "$1" = -mountpoint ] && mnt="$2"; last="$1"; shift; done; src=$(cat "$last"); cp -R "$src"/. "$mnt"/; fi; exit 0"#,
             );
             // --verify fails for bundles named in $CODESIGN_FAIL (substring match)
             stub(
