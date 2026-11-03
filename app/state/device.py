@@ -17,7 +17,7 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from app.utils import ble_proto
+from app.utils import ble_proto, pairing_store
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
     HANDSHAKE_REJECTED,
@@ -724,14 +724,22 @@ async def connect_device(address=None):
 
         sn = _device_state.get("serial_number", "")
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
+        cloud_error = None  # Plaud's reason, if fetching the credentials failed
         if not sn_sig_b64 and sn and is_logged_in():
             try:
-                bind_result = bind_device(sn)
-                sig_result = fetch_sn_signature(sn)
+                bind_result = bind_device(sn) or {}
+                sig_result = fetch_sn_signature(sn) or {}
                 sn_sig_b64 = get_device_sn_signature(sn)
                 if not sn_sig_b64:
-                    logging.warning(f"Auto-fetch failed: bind={bind_result}, sig={sig_result}")
+                    # Errors only: a successful bind result carries the device token.
+                    cloud_error = sig_result.get("error") or bind_result.get("error")
+                    logging.warning(
+                        "Auto-fetch failed: bind=%s, sig=%s",
+                        bind_result.get("error") or "ok",
+                        sig_result.get("error") or "no signature",
+                    )
             except Exception as e:
+                cloud_error = str(e)
                 logging.warning(f"Auto-fetch exception: {e}")
         if not sn_sig_b64:
             # Hang up: a NotePin stays connected (and stops advertising, so
@@ -744,11 +752,20 @@ async def connect_device(address=None):
             if not is_logged_in():
                 return {
                     "connected": False,
-                    "error": "Not logged into Plaud Cloud. Go to Settings → Plaud Cloud to sign in, then try connecting again.",
+                    "error": (
+                        f"This Mac doesn't have the pairing credentials for this NotePin (serial ending {sn[-4:]}). "
+                        "They come from Plaud once per device: sign in under Settings › Plaud Cloud, connect, "
+                        "then you can sign out."
+                    ),
                 }
+            reason = f" {cloud_error.rstrip('.')}." if cloud_error else ""
             return {
                 "connected": False,
-                "error": f"Failed to get device credentials from Plaud Cloud for SN {sn}. Check your cloud account and try again.",
+                "error": (
+                    f"Couldn't get the pairing credentials for this NotePin (serial ending {sn[-4:]}) "
+                    f"from Plaud Cloud.{reason} Check you're signed in to the Plaud account this NotePin "
+                    "belongs to (Settings › Plaud Cloud), then connect again."
+                ),
             }
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
@@ -989,6 +1006,7 @@ async def depair_device():
 
     depair_ok = False
     depair_verified = False
+    depair_sn = _device_state.get("serial_number")
 
     try:
         r = await send_cmd(bytes([1, 5, 0]), timeout=5)
@@ -1048,12 +1066,19 @@ async def depair_device():
             except Exception:
                 pass
 
+    forgotten = {depair_sn} if depair_sn else set()
+
     def _forget_devices(config):
+        forgotten.update((config.get("paired_devices") or {}).keys())
         config["paired_devices"] = {}
         config.pop("known_devices_by_sn", None)
         config.pop("known_devices", None)
 
     _update_config(_forget_devices)
+    # The device is unpaired so it can pair elsewhere: drop the Keychain backup
+    # too, or the next launch would restore the pairing. (The credentials stay
+    # in the config, as before; only paired devices are backed up.)
+    pairing_store.forget_async(forgotten)
 
     sk_path = PROJECT_ROOT / "session_keys.json"
     if sk_path.exists():
@@ -2447,6 +2472,7 @@ def save_known_device(address, name=None, serial_number=None):
         config["paired_devices"] = paired
 
     _update_config(_remember)
+    pairing_store.backup_serial_async(sn, name)
 
 
 def get_paired_serials():

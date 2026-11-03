@@ -572,6 +572,19 @@
             </div>
           </div>
         </div>
+        <div class="settings-section" id="pairing-backup-section">
+          <h3>Pairing backup</h3>
+          <p class="settings-desc">
+            Your NotePin only connects with two keys that Plaud's cloud issues for it. Plaud V2 also keeps a copy in
+            your login Keychain, so the pairing survives a cleaner app deleting Plaud V2's data. You can also export
+            them to a file, for another Mac or as an extra backup.
+          </p>
+          <div class="dm-actions">
+            <button id="pairing-export-btn" class="action-btn subtle flex-1" disabled>Export pairing…</button>
+            <button id="pairing-import-btn" class="action-btn subtle flex-1">Import pairing…</button>
+          </div>
+          <p class="settings-hint mt-2" id="pairing-backup-hint">Connect your NotePin to export its pairing.</p>
+        </div>
       </div>
 
       <!-- ===== PROCESSING TAB ===== -->
@@ -676,14 +689,31 @@
               <button id="cloud-login-browser-btn" class="action-btn primary w-full justify-center mb-2">
                 Sign in with Plaud Account
               </button>
-              <div class="cloud-divider"><span>or paste token manually</span></div>
+              <div class="cloud-divider"><span>or paste it manually</span></div>
               <div class="token-input-row mt-2">
-                <input type="password" id="cloud-token-input" class="settings-input" placeholder="Paste bearer token...">
+                <input type="password" id="cloud-token-input" class="settings-input" placeholder="Paste the sign-in link, code or token…">
                 <button id="cloud-token-login-btn" class="btn-small">Login</button>
               </div>
               <p class="settings-hint mt-1">
                 Get your token from <a href="#" id="plaud-web-link" class="link">web.plaud.ai</a>
               </p>
+            </div>
+            <!-- Shown by renderCloudAccount() while app.cloudLoginPending (browser sign-in in progress) -->
+            <div id="cloud-login-waiting" class="hidden">
+              <div style="text-align:center;padding:16px 0;">
+                <div class="settings-desc" style="margin-bottom:12px;">Waiting for login in browser...</div>
+                <div style="color:var(--text-muted);font-size:12px;margin-bottom:16px;">
+                  Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.
+                </div>
+                <div class="cloud-divider" style="margin:12px 0;"><span>or paste the sign-in link or token</span></div>
+                <div class="token-input-row" style="margin-top:12px;">
+                  <input type="password" id="cloud-token-input-waiting" class="settings-input" placeholder="Paste the sign-in link, code or token…">
+                  <button id="cloud-token-login-btn-waiting" class="btn-small">Login</button>
+                </div>
+                <button id="cloud-cancel-login" class="action-btn subtle" style="margin-top:12px;width:100%;justify-content:center;font-size:12px;">
+                  Cancel
+                </button>
+              </div>
             </div>
             <div id="cloud-logged-in" class="hidden">
               <div class="cloud-user-card">
