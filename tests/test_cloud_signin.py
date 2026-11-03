@@ -60,7 +60,7 @@ class FakePlaud:
         self.HTTPError = requests.HTTPError
 
     def on(self, method, url, body, status_code=200):
-        self.routes[(method, url)] = body if callable(body) else FakeResponse(body, status_code)
+        self.routes[(method, url)] = body if callable(body) or isinstance(body, FakeResponse) else FakeResponse(body, status_code)
 
     def _send(self, method, url, **kw):
         self.calls.append((method, url, kw))
@@ -473,3 +473,63 @@ def test_exchange_uses_saved_login_id_after_restart(monkeypatch):
     monkeypatch.setattr(cloud_mod.http_requests, "post", fake_post)
     cloud_mod.exchange_token("abc::YXdzOmV1LWNlbnRyYWwtMQ")
     assert sent["desktop_uuid"] == uuid
+
+
+# ---------------------------------------------------------------------------
+# pld_ut / pld_urt capture, Android-header sn-sign with Fernet, token refresh
+# ---------------------------------------------------------------------------
+
+class CookieResponse(FakeResponse):
+    """FakeResponse whose raw.headers carries repeated Set-Cookie lines."""
+
+    def __init__(self, body, set_cookies=(), status_code=200):
+        super().__init__(body, status_code)
+
+        class _Raw:
+            headers = type("H", (), {"getlist": lambda self, name: list(set_cookies)})()
+
+        self.raw = _Raw()
+
+
+UT_CLEARER = "pld_ut=; Max-Age=0; Path=/"
+NEW_UT = "new.ut.token"
+
+
+class TestCookieCapture:
+    def test_helper_takes_last_non_empty_value(self):
+        r = CookieResponse({}, [UT_CLEARER, "pld_ut=real.ut; Path=/; HttpOnly", "PLD_URT=real.urt; Max-Age=99"])
+        assert cloud._cookies_from_response(r) == {"ut": "real.ut", "urt": "real.urt"}
+
+    def test_helper_falls_back_to_response_cookies(self):
+        r = FakeResponse({})
+        r.cookies = {"pld_ut": "c.ut"}
+        assert cloud._cookies_from_response(r) == {"ut": "c.ut", "urt": None}
+
+    def test_exchange_saves_ut_and_urt(self, plaud):
+        plaud.on("POST", f"{EU}/auth/access-token-auth-code",
+                 CookieResponse({"status": 0, "access_token": FAKE_TOKEN}, [UT_CLEARER, "pld_ut=real.ut", "pld_urt=real.urt"]))
+        plaud.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        assert cloud.exchange_token(region_code())["logged_in"] is True
+        assert cloud._cloud_state["ut"] == "real.ut" and cloud._cloud_state["urt"] == "real.urt"
+        assert saved_config() == {"token": FAKE_TOKEN, "api_domain": EU, "ut": "real.ut", "urt": "real.urt"}
+
+    def test_exchange_without_cookies_keeps_old_file_shape(self, plaud):
+        plaud.on("POST", f"{EU}/auth/access-token-auth-code", {"status": 0, "access_token": FAKE_TOKEN})
+        plaud.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        cloud.exchange_token(region_code())
+        assert saved_config() == {"token": FAKE_TOKEN, "api_domain": EU}
+
+    def test_load_reads_ut_and_urt_and_old_files_still_load(self, plaud, monkeypatch):
+        monkeypatch.setattr(cloud, "_validate_token_async", lambda *a, **k: None)
+        cloud.PLAUD_CONFIG_PATH.write_text(json.dumps({"token": "t", "api_domain": EU, "ut": "u", "urt": "r"}))
+        assert cloud.load_cloud_token() is True
+        assert (cloud._cloud_state["ut"], cloud._cloud_state["urt"]) == ("u", "r")
+        cloud.PLAUD_CONFIG_PATH.write_text(json.dumps({"token": "t2", "api_domain": EU}))
+        cloud._cloud_state.update(ut=None, urt=None)
+        assert cloud.load_cloud_token() is True
+        assert cloud._cloud_state["token"] == "t2" and cloud._cloud_state["ut"] is None
+
+    def test_logout_clears_ut_and_urt(self, plaud):
+        cloud._cloud_state.update(ut="u", urt="r")
+        cloud.logout()
+        assert cloud._cloud_state["ut"] is None and cloud._cloud_state["urt"] is None
