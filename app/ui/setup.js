@@ -43,8 +43,8 @@ function showSetupWelcome() {
 
   _renderSetup(`
     <div class="empty-icon">
-      <img src="assets/icon-white.png" alt="" class="app-wordmark-dark" height="56">
-      <img src="assets/icon-black.png" alt="" class="app-wordmark-light" height="56">
+      <img src="assets/icon-white.svg" alt="" class="app-wordmark-dark" height="56">
+      <img src="assets/icon-black.svg" alt="" class="app-wordmark-light" height="56">
     </div>
     <h2>Welcome to Open Pin</h2>
     <p>Your private, local voice recorder companion. Sync, transcribe, and organise recordings from your Plaud NotePin S — no cloud required.</p>
