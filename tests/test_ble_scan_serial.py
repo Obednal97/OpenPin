@@ -242,3 +242,69 @@ def test_missing_credentials_signed_in_passes_on_plauds_reason(connect_env, monk
     assert f"serial ending {SN[-4:]}" in error and SN not in error
     assert "Plaud wouldn't sign this NotePin's serial (device not bound)." in error
     assert "T" * 32 not in error
+
+
+def test_wrong_kind_of_sign_in_points_to_import_pairing(connect_env, monkeypatch):
+    """Issue #104: sn-sign's -3901 ("token type does not match parse mode") can't be
+    fixed by signing in again from this app, so point to Import pairing."""
+    from app.state.cloud import SN_SIGN_WRONG_TOKEN_STATUS
+
+    monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: None)
+    monkeypatch.setattr("app.state.cloud.is_logged_in", lambda: True)
+    monkeypatch.setattr("app.state.cloud.bind_device", lambda sn: {"token": "T" * 32, "sn": sn})
+    monkeypatch.setattr(
+        "app.state.cloud.fetch_sn_signature",
+        lambda sn: {
+            "error": "Plaud wouldn't sign this NotePin's serial (token type does not match parse mode)",
+            "status": SN_SIGN_WRONG_TOKEN_STATUS,
+        },
+    )
+    notepin = FakeNotePin()
+    result = _connect(monkeypatch, notepin, ADDR)
+    assert result["connected"] is False
+    assert f"serial ending {SN[-4:]}" in result["error"] and SN not in result["error"]
+    assert "Import pairing" in result["error"]
+    assert notepin.client.is_connected is False
+
+
+def test_stale_address_scans_by_serial_before_connecting(connect_env, monkeypatch):
+    """macOS changed the NotePin's address: find it by serial first instead of
+    letting BleakClient search for the old address for 30 s."""
+    new_addr = "NEW-ADDRESS"
+    checked, used = [], []
+
+    async def not_visible(address):
+        checked.append(address)
+        return False
+
+    async def fake_scan():
+        return {"found": True, "name": "Plaud NotePin S", "address": new_addr, "serial_number": SN}
+
+    notepin = FakeNotePin()
+    factory = notepin.client_factory
+
+    def client_factory(address, *a, **kw):
+        used.append(address)
+        return factory(address, *a, **kw)
+
+    monkeypatch.setattr(dev, "_address_visible", not_visible)
+    monkeypatch.setattr(dev, "scan_device", fake_scan)
+    monkeypatch.setattr(bleak, "BleakClient", client_factory)
+    monkeypatch.setattr(dev, "rsa_decrypt", notepin.session_plaintext)
+    monkeypatch.setattr(dev, "load_rsa_private_key", lambda *a: None)
+    result = asyncio.run(dev.connect_device(ADDR))
+    assert result["connected"] is True
+    assert checked == [ADDR] and used == [new_addr]
+
+
+def test_address_check_failure_means_try_anyway(monkeypatch):
+    """If the quick scan itself errors, connect as before rather than refuse."""
+
+    class BrokenScanner:
+        @staticmethod
+        async def find_device_by_address(address, timeout):
+            raise RuntimeError("Bluetooth busy")
+
+    monkeypatch.undo()  # drop the conftest stub: test the real helper
+    monkeypatch.setattr(bleak, "BleakScanner", BrokenScanner)
+    assert asyncio.run(dev._address_visible("X")) is True
