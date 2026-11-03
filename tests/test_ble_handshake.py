@@ -219,7 +219,7 @@ def test_rejected_on_port_version_9_does_not_retry_short(connect_env, monkeypatc
     device = FakeNotePin(port_version=9, token_len=16)
     with caplog.at_level("WARNING"):
         connect(monkeypatch, device)
-    assert [len(pt) - 6 for pt in device.received if pt[1] == 1] == [32, 32]
+    assert all(len(pt) - 6 == 32 for pt in device.received if pt[1] == 1)
     assert "retrying with a 16-byte token" not in caplog.text
 
 
@@ -230,3 +230,47 @@ def test_short_token_that_also_fails_is_reported(connect_env, monkeypatch, caplo
     assert result["connected"] is True  # FAIL_ON_HANDSHAKE_REJECTED is off
     assert "16-byte token didn't help either (rejected)" in caplog.text
     assert "Handshake looks rejected" in caplog.text
+
+
+def test_token_mismatch_retries_with_the_legacy_token_and_saves_it(connect_env, monkeypatch, caplog):
+    """A NotePin paired by v2.0–v2.4.2 is bound to the legacy token and answers
+    the user_id with status 1 (TOKEN_NOT_MATCH)."""
+    saved, backups = {}, []
+    monkeypatch.setattr(dev, "update_config", lambda mutate: mutate(saved))
+    monkeypatch.setattr("app.utils.pairing_store.backup_serial_async", lambda sn, *a: backups.append(sn))
+    device = FakeNotePin(port_version=20, bound_token=ble_proto.LEGACY_BIND_TOKEN)
+    with caplog.at_level("WARNING"):
+        result = connect(monkeypatch, device)
+    assert result["connected"] is True and result["battery"] == 77
+    tokens = [pt[6:] for pt in device.received if pt[1] == 1]
+    assert tokens == [TOKEN.encode()] * 2 + [ble_proto.LEGACY_BIND_TOKEN] * 2
+    assert "Token mismatch (status 1)" in caplog.text and "Legacy token accepted" in caplog.text
+    assert saved["device_bind_tokens"] == {"8820A00012345678": ble_proto.LEGACY_BIND_TOKEN.decode()}
+    assert backups == ["8820A00012345678"]
+    assert dev.get_last_handshake()["verdict"] == ble_proto.HANDSHAKE_OK
+
+
+def test_device_bound_to_another_token_still_reports_rejection(connect_env, monkeypatch, caplog):
+    saved = {}
+    monkeypatch.setattr(dev, "update_config", lambda mutate: mutate(saved))
+    device = FakeNotePin(port_version=20, bound_token=b"X" * 32)
+    with caplog.at_level("WARNING"):
+        connect(monkeypatch, device)
+    assert "Legacy token didn't help either (rejected)" in caplog.text
+    assert "Handshake looks rejected" in caplog.text
+    assert saved == {}  # nothing worked, nothing saved
+
+
+def test_legacy_token_already_stored_is_not_retried(connect_env, monkeypatch, caplog):
+    monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: ble_proto.LEGACY_BIND_TOKEN.decode())
+    device = FakeNotePin(port_version=20, bound_token=ble_proto.LEGACY_BIND_TOKEN)
+    with caplog.at_level("WARNING"):
+        assert connect(monkeypatch, device)["connected"] is True
+    assert [pt[6:] for pt in device.received if pt[1] == 1] == [ble_proto.LEGACY_BIND_TOKEN] * 2
+    assert "Token mismatch" not in caplog.text
+
+
+def test_legacy_token_is_the_public_jwt_header():
+    """Not a secret: base64url of the standard HS256 JWT header, first 32 chars."""
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=")
+    assert header[:32] == ble_proto.LEGACY_BIND_TOKEN

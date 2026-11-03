@@ -28,13 +28,24 @@ class FakeNotePin:
       reply_as    cmd id -> the cmd id the reply carries (e.g. 10 -> 13)
       token_len   if set, the only BIND_TOKEN length the device accepts: cmd 1
                   with another length gets status 1 and later commands no reply
+      bound_token if set, the only BIND_TOKEN (bytes) the device accepts, the
+                  same way
     """
 
     def __init__(
-        self, hs_status=0, port_version=9, silent=(), before=None, replies=None, reply_as=None, token_len=None
+        self,
+        hs_status=0,
+        port_version=9,
+        silent=(),
+        before=None,
+        replies=None,
+        reply_as=None,
+        token_len=None,
+        bound_token=None,
     ):
         self.token_len = token_len
-        self.token_ok = token_len is None
+        self.bound_token = bound_token
+        self.token_ok = token_len is None and bound_token is None
         self.hs_status = hs_status
         self.port_version = port_version
         self.silent = set(silent)
@@ -111,6 +122,8 @@ class FakeNotePin:
             loop.call_soon(self.notify, extra)
         if cid == 1 and self.token_len is not None:
             self.token_ok = len(pt) - 6 == self.token_len
+        if cid == 1 and self.bound_token is not None:
+            self.token_ok = pt[6:] == self.bound_token
         if cid == 1 and self.hs_status is None or cid in self.silent:
             return
         if cid != 1 and not self.token_ok:

@@ -91,7 +91,7 @@ answer them. Log lines to look for are in quotes.
    the 8-, 9- or 10-byte entry width? The app checks the start index and ignores entry bytes left
    over after the last whole entry: check "file list: … is not a multiple of 10; ignoring the
    last …" and "file list incomplete" never appear.
-7. **Handshake reply (cmd 1).** What does a rejected `BIND_TOKEN` look like? The app logs both
+7. **Handshake reply (cmd 1).** *Answered 3 November 2026: status 1 = token mismatch, after which the device ignores commands (COMMANDS.md, cmd 1). Once the legacy-token fallback is confirmed on hardware, `FAIL_ON_HANDSHAKE_REJECTED` can be turned on.* What does a rejected `BIND_TOKEN` look like? The app logs both
    replies ("Handshake replies: HS1=… HS2=…") and treats a non-zero status (byte 3) as a rejection
    only when the device then answers neither cmd 4 nor cmd 3. Even then the connect only fails if
    `ble_proto.FAIL_ON_HANDSHAKE_REJECTED` is on — it ships **off** in v2.4.1, so a "rejection" just
