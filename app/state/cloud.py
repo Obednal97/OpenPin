@@ -1302,6 +1302,11 @@ def get_device_bind_token(sn):
     return (pairing_store.restore_serial(sn) or {}).get("bind_token")
 
 
+# sn-sign's answer to a sign-in token of the wrong kind ("token type does not
+# match parse mode"): it wants the user token (pld_ut), not the web session one.
+SN_SIGN_WRONG_TOKEN_STATUS = -3901
+
+
 def fetch_sn_signature(sn):
     """Fetch the SN_SIG (snSignature) for a device from the cloud API.
 

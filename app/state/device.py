@@ -455,18 +455,23 @@ def run_async(coro, timeout=120, lock_timeout=None):
     """
     if lock_timeout is not None:
         if not _ble_lock.acquire(timeout=lock_timeout):
+            coro.close()  # never scheduled: close it, or Python warns it was never awaited
             raise TimeoutError("BLE busy — lock held by long-running operation")
         try:
-            loop = _get_loop()
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result(timeout=timeout)
+            return _run_on_loop(coro, timeout)
         finally:
             _ble_lock.release()
-    else:
-        with _ble_lock:
-            loop = _get_loop()
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result(timeout=timeout)
+    with _ble_lock:
+        return _run_on_loop(coro, timeout)
+
+
+def _run_on_loop(coro, timeout):
+    try:
+        loop = _get_loop()
+    except BaseException:
+        coro.close()
+        raise
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
 
 
 async def scan_devices(scan_duration=6):
@@ -597,6 +602,22 @@ async def scan_device():
     return {"found": False}
 
 
+ADDRESS_CHECK_S = 5.0
+
+
+async def _address_visible(address):
+    """Whether a device is advertising at `address` right now (a short scan).
+
+    If the check itself fails, answer True so the connect goes ahead as before.
+    """
+    try:
+        from bleak import BleakScanner
+
+        return await BleakScanner.find_device_by_address(address, timeout=ADDRESS_CHECK_S) is not None
+    except Exception:
+        return True
+
+
 async def connect_device(address=None):
     """Connect to device, perform handshake, return status."""
 
@@ -607,6 +628,12 @@ async def connect_device(address=None):
         except Exception:
             _reset_state()
 
+    if address and not await _address_visible(address):
+        # macOS gives the NotePin a new Bluetooth address from time to time. A
+        # stale one makes BleakClient look for it for its full 30 s timeout
+        # before failing, so find the paired device by its serial first.
+        print("[BLE] Last known address not in range; scanning for the paired device")
+        address = None
     if not address:
         scan_result = await scan_device()
         if not scan_result["found"]:
@@ -715,6 +742,7 @@ async def connect_device(address=None):
         # Get per-device SN_SIG from cloud API (stored in config)
         # If not cached, try fetching from cloud on the spot
         from app.state.cloud import (
+            SN_SIGN_WRONG_TOKEN_STATUS,
             bind_device,
             fetch_sn_signature,
             get_device_bind_token,
@@ -725,6 +753,7 @@ async def connect_device(address=None):
         sn = _device_state.get("serial_number", "")
         sn_sig_b64 = get_device_sn_signature(sn) if sn else None
         cloud_error = None  # Plaud's reason, if fetching the credentials failed
+        cloud_status = None  # Plaud's status code for that failure
         if not sn_sig_b64 and sn and is_logged_in():
             try:
                 bind_result = bind_device(sn) or {}
@@ -733,6 +762,7 @@ async def connect_device(address=None):
                 if not sn_sig_b64:
                     # Errors only: a successful bind result carries the device token.
                     cloud_error = sig_result.get("error") or bind_result.get("error")
+                    cloud_status = sig_result.get("status")
                     logging.warning(
                         "Auto-fetch failed: bind=%s, sig=%s",
                         bind_result.get("error") or "ok",
@@ -756,6 +786,15 @@ async def connect_device(address=None):
                         f"This Mac doesn't have the pairing credentials for this NotePin (serial ending {sn[-4:]}). "
                         "They come from Plaud once per device: sign in under Settings › Plaud Cloud, connect, "
                         "then you can sign out."
+                    ),
+                }
+            if cloud_status == SN_SIGN_WRONG_TOKEN_STATUS:
+                return {
+                    "connected": False,
+                    "error": (
+                        f"Plaud Cloud won't hand out the pairing for this NotePin (serial ending {sn[-4:]}) "
+                        "to this sign-in. Import a pairing file instead: export one in Settings › Device on a "
+                        "Mac where this NotePin already works, then choose Import pairing here."
                     ),
                 }
             reason = f" {cloud_error.rstrip('.')}." if cloud_error else ""

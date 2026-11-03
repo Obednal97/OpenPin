@@ -99,9 +99,10 @@ def connect():
         elif "not found" in raw:
             err["error"] = "Device went out of range before connecting. Try moving it closer and scanning again."
             err["raw_error"] = str(e)
-        elif "timeout" in raw:
+        elif "timeout" in raw or isinstance(e, TimeoutError):
+            # run_async's own timeout is a TimeoutError whose str() is empty.
             err["error"] = "Connection timed out. Try moving the device closer and reconnecting."
-            err["raw_error"] = str(e)
+            err["raw_error"] = str(e) or type(e).__name__
         return jsonify(err), 500
 
 

@@ -112,3 +112,15 @@ def sample_ogg():
         frames += frame
     ogg_data = wrap_opus_ogg(frames)
     return ogg_data, frames
+
+
+@pytest.fixture(autouse=True)
+def _no_real_bluetooth_address_check(monkeypatch):
+    """connect_device() checks a saved address with a real BLE scan first; tests
+    that fake the device answer "in range" (tests that need otherwise patch it)."""
+    import app.state.device as dev
+
+    async def visible(address):
+        return True
+
+    monkeypatch.setattr(dev, "_address_visible", visible)
