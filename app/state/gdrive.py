@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import html as _html
 import json
 import logging
 import os
@@ -14,6 +13,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests as http_requests
 
+from app.utils import oauth_page
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
     GDRIVE_API_BASE,
@@ -264,14 +264,16 @@ def _start_callback_server():
                 error = params.get("error", [None])[0]
 
                 if error:
-                    self._respond(
-                        f"<h2>Connection failed</h2><p>{_html.escape(error)}</p><p>You can close this tab.</p>"
-                    )
+                    if error == "access_denied":
+                        oauth_page.send(self, "gdrive", "cancelled")
+                    else:
+                        desc = params.get("error_description", [""])[0]
+                        oauth_page.send(self, "gdrive", "failed", f"{error}: {desc}" if desc else error)
                     self._signal({"error": error})
                     return
 
                 if state != _gdrive_state.get("state"):
-                    self._respond("<h2>Invalid state</h2><p>CSRF check failed. Try again.</p>")
+                    oauth_page.send(self, "gdrive", "expired")
                     self._signal({"error": "csrf_mismatch"})
                     return
 
@@ -313,30 +315,15 @@ def _start_callback_server():
                     _gdrive_state["connected"] = True
                     save()
 
-                    self._respond(
-                        "<h2 style='color:#30d158;'>Connected to Google Drive!</h2>"
-                        "<p>You can close this tab and return to Plaud V2.</p>"
-                        "<script>setTimeout(()=>window.close(),2000)</script>"
-                    )
+                    oauth_page.send(self, "gdrive", "connected")
                     self._signal({"ok": True})
                 except Exception as e:
                     logging.error(f"Google Drive token exchange failed: {e}")
-                    self._respond(f"<h2>Token exchange failed</h2><p>{_html.escape(str(e))}</p>")
+                    oauth_page.send(self, "gdrive", "failed", str(e))
                     self._signal({"error": str(e)})
             else:
                 self.send_response(404)
                 self.end_headers()
-
-        def _respond(self, html):
-            body = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-            <style>body{{font-family:system-ui;display:flex;align-items:center;justify-content:center;
-            height:100vh;margin:0;background:#1a1a2e;color:#f5f5f7;text-align:center;}}</style>
-            </head><body><div>{html}</div></body></html>""".encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
 
         def log_message(self, format, *args):
             pass

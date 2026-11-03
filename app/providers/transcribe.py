@@ -18,6 +18,55 @@ _WORDS_PER_SECOND = 2.5
 # Target length of an estimated segment (gpt-transcribe returns no timestamps).
 _EST_SEGMENT_SECONDS = 20.0
 
+# Provider limits (checked 2026-11-03). Going over them gets the request
+# rejected, so check before uploading and say why.
+# OpenAI and Groq (free tier; paid allows 100 MB) take files up to 25 MB.
+OPENAI_MAX_UPLOAD_BYTES = 25_000_000
+GROQ_MAX_UPLOAD_BYTES = 25_000_000
+# Groq's Whisper prompt is capped at 224 tokens: ~4 characters a token, with margin.
+GROQ_PROMPT_MAX_CHARS = 600
+# Deepgram: at most 500 tokens across all keyterms; it suggests 20-50 terms.
+DEEPGRAM_MAX_KEYTERMS = 50
+DEEPGRAM_KEYTERMS_MAX_CHARS = 1000
+
+
+class AudioTooLargeError(Exception):
+    """The recording is bigger than the provider accepts."""
+
+
+def _check_upload_size(audio_path, limit, label):
+    size = Path(audio_path).stat().st_size
+    if size > limit:
+        raise AudioTooLargeError(
+            f"recording is {size / 1_000_000:.0f} MB and {label} accepts up to {limit // 1_000_000} MB"
+        )
+
+
+def _clip_prompt(text, max_chars):
+    """Shorten a prompt to max_chars, cutting at a separator so no word is split."""
+    if not text or len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    for sep in (", ", ". ", " "):
+        i = cut.rfind(sep)
+        if i > 0:
+            return cut[:i].rstrip(" ,.")
+    return cut
+
+
+def _cap_keyterms(keywords):
+    """Deepgram keyterms: unique, non-empty, at most DEEPGRAM_MAX_KEYTERMS and the character budget."""
+    out, total = [], 0
+    for kw in keywords or []:
+        kw = str(kw).strip()
+        if not kw or kw in out:
+            continue
+        if len(out) >= DEEPGRAM_MAX_KEYTERMS or total + len(kw) > DEEPGRAM_KEYTERMS_MAX_CHARS:
+            break
+        out.append(kw)
+        total += len(kw)
+    return out
+
 
 def _audio_mime(audio_path):
     mime, _ = mimetypes.guess_type(str(audio_path))
@@ -116,6 +165,7 @@ def transcribe_openai(audio_path, api_key, language=None, vocab_prompt=None, key
     kws = _clean_keywords(keywords)
     if kws:
         data["keywords[]"] = kws
+    _check_upload_size(audio_path, OPENAI_MAX_UPLOAD_BYTES, "OpenAI")
     with open(audio_path, "rb") as f:
         r = http_requests.post(
             "https://api.openai.com/v1/audio/transcriptions",
@@ -156,7 +206,8 @@ def transcribe_groq(audio_path, api_key, language=None, vocab_prompt=None):
     if language:
         data["language"] = language
     if vocab_prompt:
-        data["prompt"] = vocab_prompt
+        data["prompt"] = _clip_prompt(vocab_prompt, GROQ_PROMPT_MAX_CHARS)
+    _check_upload_size(audio_path, GROQ_MAX_UPLOAD_BYTES, "Groq")
     with open(audio_path, "rb") as f:
         r = http_requests.post(
             "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -183,12 +234,10 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         params["detect_language"] = "true"
     if diarize:
         params["diarize"] = "true"
-    # Build query string manually — keywords need special handling
-    # (repeated params with colons that shouldn't be encoded by requests lib)
+    # Nova-3 keyterm prompting: one repeated, URL-encoded keyterm= per term
     qs_parts = [f"{k}={v}" for k, v in params.items()]
-    if keywords:
-        for kw in keywords:
-            qs_parts.append(f"keyterm={quote(kw)}")
+    for kw in _cap_keyterms(keywords):
+        qs_parts.append(f"keyterm={quote(kw)}")
     query_string = "&".join(qs_parts)
 
     with open(audio_path, "rb") as f:
@@ -218,12 +267,14 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         speaker = None
         if diarize and utt.get("speaker") is not None:
             speaker = f"Speaker {utt['speaker'] + 1}"
-        segments.append({
-            "start": utt.get("start", 0),
-            "end": utt.get("end", 0),
-            "text": utt.get("transcript", "").strip(),
-            "speaker": speaker,
-        })
+        segments.append(
+            {
+                "start": utt.get("start", 0),
+                "end": utt.get("end", 0),
+                "text": utt.get("transcript", "").strip(),
+                "speaker": speaker,
+            }
+        )
 
     # Collect unique speakers
     speakers = list({s["speaker"] for s in segments if s.get("speaker")})
