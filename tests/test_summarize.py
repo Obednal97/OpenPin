@@ -373,3 +373,64 @@ def test_local_model_not_cached_starts_background_download():
     ):
         S.summarize_local("some text " * 20)
     start.assert_called_once()
+
+
+# ---- generate_title (titles without a summary) ----
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ('"Quarterly planning review."', "Quarterly planning review"),
+        ("Title: Budget sync with finance\nExtra line", "Budget sync with finance"),
+        ("**Weekly one-to-one**", "Weekly one-to-one"),
+        ("", ""),
+    ],
+)
+def test_clean_title(raw, expected):
+    assert S._clean_title(raw) == expected
+
+
+def test_clean_title_caps_length():
+    assert len(S._clean_title("word " * 40)) <= S.TITLE_MAX_CHARS
+
+
+def _title_client(text):
+    client = MagicMock()
+    client.messages.create.return_value = SimpleNamespace(content=[SimpleNamespace(type="text", text=text)])
+    return client
+
+
+def test_generate_title_uses_claude_haiku_with_a_short_excerpt():
+    client = _title_client("Launch moves to May")
+    long_text = "We agreed the launch moves to May. " * 1000
+    with patch.object(S, "_anthropic_client", return_value=client), patch.object(S, "ollama_models", return_value=[]):
+        title, provider = S.generate_title(long_text, {"anthropic_api_key": "k"})
+    assert (title, provider) == ("Launch moves to May", "anthropic")
+    kw = client.messages.create.call_args.kwargs
+    assert kw["model"] == S.CLAUDE_TITLE == "claude-haiku-5-5"
+    assert len(kw["messages"][0]["content"]) <= S.TITLE_TRANSCRIPT_CHARS
+
+
+def test_generate_title_local_preference_never_uses_cloud():
+    client = _title_client("Should not be used")
+    with (
+        patch.object(S, "_anthropic_client", return_value=client),
+        patch.object(S, "ollama_models", return_value=[]),
+    ):
+        title, provider = S.generate_title(
+            "A transcript long enough to title.", {"anthropic_api_key": "k", "summarization_provider": "local"}
+        )
+    assert (title, provider) == ("", "none")
+    client.messages.create.assert_not_called()
+
+
+def test_generate_title_falls_back_and_never_raises():
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("overloaded")
+    with patch.object(S, "_anthropic_client", return_value=client), patch.object(S, "ollama_models", return_value=[]):
+        assert S.generate_title("A transcript long enough to title.", {"anthropic_api_key": "k"}) == ("", "none")
+
+
+def test_generate_title_skips_tiny_transcripts():
+    assert S.generate_title("hi", {"anthropic_api_key": "k"}) == ("", "none")

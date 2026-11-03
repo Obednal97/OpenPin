@@ -48,7 +48,7 @@ function showSetupWelcome() {
     </div>
     <h2>Welcome to Plaud V2</h2>
     <p>Your private, local voice recorder companion. Sync, transcribe, and organise recordings from your Plaud NotePin S — no cloud required.</p>
-    <button class="action-btn primary" id="setup-get-started">Get Started</button>
+    <button class="action-btn primary" id="setup-get-started">Get started</button>
     <button class="setup-skip" id="setup-skip-welcome">Skip for now</button>
   `);
 
@@ -79,13 +79,13 @@ function _showCloudLogin() {
         <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </div>
-    <h2>Sign into Plaud</h2>
+    <h2>Sign in to Plaud</h2>
     <p>Your Plaud account is needed to register your device. This is a one-time setup — after this, the app works fully offline.</p>
     <button class="action-btn primary" id="setup-cloud-login">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="margin-right:4px;">
         <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      Sign in with Browser
+      Sign in with your browser
     </button>
     <div style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg-input);border-radius:var(--radius-sm);text-align:left;">
       <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Having trouble with browser login?</div>
@@ -101,7 +101,7 @@ function _showCloudLogin() {
       <div class="token-input-row" style="margin-top:var(--sp-2);">
         <input type="password" id="setup-cloud-token" class="settings-input" placeholder="Paste the sign-in link, code or token…">
       </div>
-      <button class="action-btn subtle" id="setup-cloud-token-btn" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Login with Token</button>
+      <button class="action-btn subtle" id="setup-cloud-token-btn" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Sign in with a token</button>
     </div>
     <button class="setup-skip" id="setup-skip-cloud">Skip for now</button>
   `);
@@ -116,7 +116,7 @@ function _showCloudLogin() {
 
         _renderSetup(`
           <div class="setup-spinner"></div>
-          <h2>Waiting for Login</h2>
+          <h2>Waiting for you to sign in</h2>
           <p>Sign into your Plaud account in the browser and click <strong>Continue to desktop</strong>. Plaud V2 finishes signing in by itself.</p>
           <div style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg-input);border-radius:var(--radius-sm);text-align:left;">
             <div style="font-size:var(--text-xs);font-weight:var(--weight-semibold);margin-bottom:var(--sp-1);">Didn't come back to Plaud V2?</div>
@@ -131,7 +131,7 @@ function _showCloudLogin() {
             <div class="token-input-row" style="margin-top:var(--sp-2);">
               <input type="password" id="setup-cloud-token-waiting" class="settings-input" placeholder="Paste the sign-in link, code or token…">
             </div>
-            <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Login with Token</button>
+            <button class="action-btn subtle" id="setup-cloud-token-btn-waiting" style="margin-top:var(--sp-1);width:100%;justify-content:center;font-size:var(--text-xs);">Sign in with a token</button>
           </div>
           <button class="setup-skip" id="setup-cancel-cloud" style="margin-top:var(--sp-2);">Cancel</button>
         `);
@@ -194,20 +194,17 @@ async function _handleTokenLogin(input) {
 function _showPermissions() {
   _renderSetup(`
     <div class="setup-perm-icon">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" stroke="currentColor" stroke-width="1.8"/>
-        <circle cx="8.5" cy="10.5" r="1.5" fill="currentColor"/>
-        <circle cx="15.5" cy="10.5" r="1.5" fill="currentColor"/>
-        <path d="M8.5 14.5c0 0 1.5 2 3.5 2s3.5-2 3.5-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M7 7l10 10-5 5V2l5 5L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </div>
-    <h2>Bluetooth Access</h2>
+    <h2>Bluetooth access</h2>
     <p>Plaud V2 uses Bluetooth to find and communicate with your NotePin S device. macOS will ask for your permission when we start scanning.</p>
     <button class="action-btn primary" id="setup-enable-bt">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-right:4px;">
-        <path d="M6.5 6.5l11 11M17.5 6.5L12 12l5.5-5.5zM12 1v22M6.5 17.5L12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-right:4px;" aria-hidden="true">
+        <path d="M7 7l10 10-5 5V2l5 5L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      Enable &amp; Scan for Device
+      Allow and scan for your device
     </button>
     <button class="setup-skip" id="setup-skip-perm">Skip for now</button>
   `);
@@ -221,7 +218,7 @@ function _showPermissions() {
 async function _startScan() {
   _renderSetup(`
     <div class="setup-spinner"></div>
-    <h2>Scanning for Devices</h2>
+    <h2>Looking for devices</h2>
     <p>Looking for nearby Plaud devices...</p>
     <p class="setup-hint">Make sure your Plaud is nearby, charged, and not connected to the phone app.</p>
   `);
@@ -249,7 +246,7 @@ function _showDevices(devices) {
     const bars = heights.map((h, i) =>
       `<div class="dm-signal-bar ${i < level ? 'active' : ''}" style="height:${h}px;"></div>`
     ).join('');
-    const name = escapeHtml(d.name || 'Plaud Device');
+    const name = escapeHtml(prettyDeviceName(d.name) || 'Plaud device');
     const sn = d.serial_number ? `SN: ${escapeHtml(d.serial_number)}` : '';
     return `<div class="setup-device-row" data-addr="${escapeHtml(d.address)}" data-sn="${escapeHtml(d.serial_number || '')}" data-name="${name}">
       <div>
@@ -261,7 +258,7 @@ function _showDevices(devices) {
   }).join('');
 
   _renderSetup(`
-    <h2>Device${devices.length > 1 ? 's' : ''} Found</h2>
+    <h2>Device${devices.length > 1 ? 's' : ''} found</h2>
     <p>Tap a device to connect.</p>
     <div class="setup-device-list">${rows}</div>
     <button class="setup-skip" id="setup-skip-devices">Skip for now</button>
@@ -289,7 +286,7 @@ function _showNoDevices(errorMsg) {
         <path d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
     </div>
-    <h2>No Devices Found</h2>
+    <h2>No devices found</h2>
     <p>${errorMsg ? escapeHtml(errorMsg) : 'Could not find a Plaud device nearby.'}</p>
     <p class="setup-hint">
       Check that your Plaud NotePin S is:<br>
@@ -297,7 +294,7 @@ function _showNoDevices(errorMsg) {
       &bull; Charged and powered on<br>
       &bull; Not connected to the Plaud phone app
     </p>
-    <button class="action-btn primary" id="setup-retry">Try Again</button>
+    <button class="action-btn primary" id="setup-retry">Try again</button>
     <button class="setup-skip" id="setup-skip-notfound">Skip for now</button>
   `);
 
@@ -317,7 +314,7 @@ async function _connectDevice(address, serialNumber, name) {
   try {
     const result = await window.plaud.connect(address, serialNumber);
     if (result.connected) {
-      _showSuccess(result.device_name || name);
+      _showSuccess(prettyDeviceName(result.device_name) || name);
     } else {
       _showConnectError(result.error || 'Connection failed', address, serialNumber, name);
     }
@@ -334,9 +331,9 @@ function _showConnectError(error, address, serialNumber, name) {
         <path d="M12 8v5M12 16h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
       </svg>
     </div>
-    <h2>Connection Failed</h2>
+    <h2>Connection failed</h2>
     <p>${escapeHtml(error)}</p>
-    <button class="action-btn primary" id="setup-retry-connect">Try Again</button>
+    <button class="action-btn primary" id="setup-retry-connect">Try again</button>
     <button class="setup-skip" id="setup-skip-error">Skip for now</button>
   `);
 
@@ -368,39 +365,39 @@ function _showSuccess(deviceName) {
 
 function _showProfileSetup() {
   _renderSetup(`
-    <h2>About You</h2>
+    <h2>About you</h2>
     <p>Help the AI personalise transcriptions and summaries for you. You can always change this later in Settings.</p>
     <div class="setup-form" style="width:100%;">
       <div class="setup-field">
-        <label class="settings-label">Your Name</label>
+        <label class="settings-label">Your name</label>
         <input type="text" id="setup-name" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. John, John Doe, Johnny">
       </div>
       <div class="setup-field">
-        <label class="settings-label">Job Function</label>
-        <input type="text" id="setup-job" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Product Manager, Software Engineer">
+        <label class="settings-label">Job</label>
+        <input type="text" id="setup-job" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Product manager, software engineer">
       </div>
       <div class="setup-field">
         <label class="settings-label">Industry</label>
-        <input type="text" id="setup-industry" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Technology, Healthcare, Finance">
+        <input type="text" id="setup-industry" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Technology, healthcare, finance">
       </div>
       <div class="setup-field">
         <label class="settings-label">Seniority</label>
         <select id="setup-seniority" class="settings-select" style="width:100%;box-sizing:border-box;">
           <option value="">Not set</option>
-          <option value="individual">Individual Contributor</option>
-          <option value="lead">Team Lead</option>
+          <option value="individual">Individual contributor</option>
+          <option value="lead">Team lead</option>
           <option value="manager">Manager</option>
           <option value="director">Director</option>
           <option value="vp">VP</option>
-          <option value="c-level">C-Level / Founder</option>
+          <option value="c-level">C-level or founder</option>
         </select>
       </div>
       <div class="setup-field">
-        <label class="settings-label">Primary Use</label>
+        <label class="settings-label">What you record</label>
         <input type="text" id="setup-usecases" class="settings-input" style="width:100%;box-sizing:border-box;" placeholder="e.g. Meeting notes, interviews, brainstorming">
       </div>
     </div>
-    <button class="action-btn primary" id="setup-profile-save">Get Started</button>
+    <button class="action-btn primary" id="setup-profile-save">Get started</button>
     <button class="action-btn ghost" id="setup-profile-skip" style="margin-top:8px;">Skip for now</button>
   `);
 

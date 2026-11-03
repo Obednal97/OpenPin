@@ -22,6 +22,7 @@ function showThemeIcon(preference) {
   try {
     const { preference } = await window.plaud.getTheme();
     showThemeIcon(preference);
+    renderThemeSetting(preference);
   } catch {}
 })();
 
@@ -29,6 +30,7 @@ $('#theme-toggle-btn').addEventListener('click', async () => {
   try {
     const { preference } = await window.plaud.cycleTheme();
     showThemeIcon(preference);
+    renderThemeSetting(preference);
     const labels = { auto: 'Auto (system)', light: 'Light mode', dark: 'Dark mode' };
     toast(labels[preference], 'info');
   } catch {}
@@ -143,13 +145,7 @@ dom.settingsOverlay.addEventListener('click', closeSettings);
 dom.statusEl.addEventListener('click', () => {
   openSettings();
   loadSettings();
-  // Switch to Device tab
-  document.querySelectorAll('.settings-tab').forEach((t) => t.classList.remove('active'));
-  document.querySelectorAll('.settings-tab-content').forEach((c) => c.classList.remove('active'));
-  const deviceTab = document.querySelector('.settings-tab[data-tab="device"]');
-  const deviceContent = document.querySelector('.settings-tab-content[data-tab="device"]');
-  if (deviceTab) deviceTab.classList.add('active');
-  if (deviceContent) deviceContent.classList.add('active');
+  showSettingsTab('device');
 });
 
 // ---- Main Actions ----
@@ -163,7 +159,7 @@ dom.scanBtn.addEventListener('click', async () => {
     const result = await window.plaud.scan();
 
     if (result.found) {
-      toast(`Found ${result.name}`, 'success');
+      toast(`Found ${prettyDeviceName(result.name)}`, 'success');
       dom.statusText.textContent = 'Connecting...';
 
       // Auto-bind to cloud if logged in (gets per-device BIND_TOKEN + SN_SIG)
@@ -175,7 +171,7 @@ dom.scanBtn.addEventListener('click', async () => {
       }
       const conn = await window.plaud.connect(result.address, result.serial_number);
       if (conn.connected) {
-        toast(`Connected to ${conn.device_name || 'Plaud NotePin S'}`, 'success');
+        toast(`Connected to ${prettyDeviceName(conn.device_name) || 'Plaud NotePin S'}`, 'success');
         await updateDeviceStatus();
       } else {
         toast(`Connection failed: ${conn.error || 'Unknown error'}`, 'error');
@@ -206,7 +202,7 @@ function setSyncButtonMode(mode) {
   const syncing = mode === 'syncing';
   if (btn) {
     const label = btn.querySelector('span');
-    if (label) label.textContent = syncing ? 'Syncing…' : 'Sync Recordings';
+    if (label) label.textContent = syncing ? 'Syncing…' : 'Sync recordings';
     btn.classList.toggle('is-syncing', syncing);
     btn.title = syncing ? 'A sync is in progress' : '';
   }
@@ -459,6 +455,7 @@ window.plaud.onUpdateStatus((data) => {
   const banner = $('#update-banner');
   const message = $('#update-message');
   const actionBtn = $('#update-action');
+  if (data.status !== 'error' && data.status !== 'up-to-date') banner.classList.remove('update-banner-error');
 
   if (data.status === 'available') {
     banner.classList.remove('hidden');
@@ -472,7 +469,7 @@ window.plaud.onUpdateStatus((data) => {
     banner.classList.remove('hidden');
     message.textContent = `v${data.version} ready to install`;
     actionBtn.style.display = '';
-    actionBtn.textContent = 'Restart to Update';
+    actionBtn.textContent = 'Restart to update';
   } else if (data.status === 'major-update-downloading') {
     // Major version DMG downloading
     banner.classList.remove('hidden');
@@ -497,6 +494,7 @@ window.plaud.onUpdateStatus((data) => {
     // If an update was in progress (banner showing), say what went wrong
     // instead of leaving it on "Downloading…" / "Installing…".
     if (!banner.classList.contains('hidden')) {
+      banner.classList.add('update-banner-error');
       message.textContent = `Update failed: ${data.message || 'unknown error'}`;
       actionBtn.style.display = 'none';
       actionBtn.disabled = false;
@@ -521,6 +519,7 @@ $('#update-action').addEventListener('click', async () => {
       $('#update-action').disabled = false;
     }
   } catch (err) {
+    $('#update-banner').classList.add('update-banner-error');
     $('#update-message').textContent = `Update failed: ${err && err.message ? err.message : err}`;
     $('#update-action').disabled = false;
   }
@@ -541,20 +540,20 @@ function formatBytes(bytes) {
 
 function offerWifiSync(totalSize, fileCount, isBackground) {
   const sizeStr = formatBytes(totalSize);
-  const msg = `${fileCount} recording(s) (${sizeStr}) — WiFi transfer is ~50x faster`;
+  const msg = `${fileCount} recording(s) (${sizeStr}). Wi-Fi transfer is about 50 times faster.`;
 
   if (isBackground) {
     // App is in tray/background — show system notification
     window.plaud.showNotification(
       'Large recordings detected',
-      `${sizeStr} to sync. Tap to use WiFi transfer (temporarily disconnects internet).`,
+      `${sizeStr} to sync. Click to use Wi-Fi transfer (temporarily disconnects the internet).`,
       'wifi-sync',
     );
     return;
   }
 
   // App is visible — show action toast
-  toastAction(msg, 'Use WiFi', () => {
+  toastAction(msg, 'Use Wi-Fi', () => {
     startWifiSync();
   }, 15000);
 }
@@ -606,7 +605,7 @@ function _resetWifiConfirmView() {
 function startWifiSync(opts = {}) {
   if (app.syncing && app.syncKind === 'wifi') {
     _showWifiOverlay();
-    toast('Already syncing over WiFi', 'info');
+    toast('Already syncing over Wi-Fi', 'info');
     return;
   }
   if (!$('#wifi-confirm-overlay')) return;
@@ -664,16 +663,18 @@ function _renderWifiProgress(icon, title, detail, pct, state = 'syncing') {
   if (!host) return;
   _setWifiConfirmPartsVisible(false);
   host.classList.remove('hidden');
-  const iconClass = state === 'success' ? 'success' : state === 'error' ? 'error' : 'syncing';
-  const barClass = state === 'success' ? 'success' : state === 'error' ? 'error' : '';
+  const iconClass = ['success', 'error', 'warning'].includes(state) ? state : 'syncing';
+  const barClass = state === 'success' ? 'success' : '';
+  // A failed or "action needed" state has no meaningful progress: no bar, no "0%".
+  const showBar = state === 'syncing' || state === 'success';
 
   host.innerHTML = `
-    <div class="wifi-sync-progress">
+    <div class="wifi-sync-progress wifi-sync-${iconClass}">
       <div class="wifi-sync-stage-icon ${iconClass}">${_wifiIcons[icon] || _wifiIcons.preparing}</div>
       <h3 class="wifi-sync-stage-title">${escapeHtml(title)}</h3>
-      <p class="wifi-sync-stage-detail">${escapeHtml(detail)}</p>
-      <div class="wifi-sync-bar"><div class="wifi-sync-bar-fill ${barClass}" style="width: ${Math.round(pct)}%"></div></div>
-      <p class="wifi-sync-percent">${Math.round(pct)}%</p>
+      ${detail ? `<p class="wifi-sync-stage-detail">${escapeHtml(detail)}</p>` : ''}
+      ${showBar ? `<div class="wifi-sync-bar"><div class="wifi-sync-bar-fill ${barClass}" style="width: ${Math.round(pct)}%"></div></div>
+      <p class="wifi-sync-percent">${Math.round(pct)}%</p>` : ''}
     </div>
   `;
 }
@@ -711,7 +712,7 @@ async function executeWifiSync(claimedGen) {
         : Date.now() - pollStartedAt > POLL_FALLBACK_MAX_MS;
       if (timedOut) {
         pollActive = false;
-        _renderWifiProgress('error', 'Sync timed out', 'WiFi sync took longer than expected. Your WiFi settings are restored automatically.', 0, 'error');
+        _renderWifiProgress('error', 'Sync timed out', 'The Wi-Fi sync took longer than expected. Your Wi-Fi settings are restored automatically.', 0, 'error');
         const panel = $('#wifi-confirm-overlay .modal-panel');
         panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
           '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
@@ -741,7 +742,7 @@ async function executeWifiSync(claimedGen) {
     pollActive = false;
 
     if (isDeviceBusyResponse(result)) {
-      _renderWifiProgress('preparing', 'Already syncing', 'A sync with the device is already running. Try again when it finishes.', 0);
+      _renderWifiProgress('preparing', 'Already syncing', 'A sync with the device is already running. Try again when it finishes.', 0, 'warning');
       const panel = $('#wifi-confirm-overlay .modal-panel');
       panel.querySelector('.wifi-sync-progress').insertAdjacentHTML('beforeend',
         '<button class="action-btn primary" id="wifi-done-btn" style="margin-top:var(--sp-4);">Close</button>');
@@ -759,19 +760,6 @@ async function executeWifiSync(claimedGen) {
       return;
     }
 
-    // Check if WiFi restore needs manual intervention.
-    // Not an auto-bug: this is a known macOS limitation — networksetup returns
-    // -3900 after Bluetooth sharing toggles the interface, and manual reconnect
-    // is required. The user is informed via the in-app UI + system notification.
-    if (result.wifi_restore && result.wifi_restore.need_manual) {
-      const ssidName = result.wifi_restore.ssid || 'your WiFi';
-      _renderWifiProgress('wifi', 'Reconnect to WiFi', `Please reconnect to "${ssidName}" — WiFi settings should be open.`, 95, 'error');
-      window.plaud.showNotification(
-        'WiFi transfer complete',
-        `Please reconnect to "${ssidName}" in the WiFi settings panel.`,
-      );
-    }
-
     if (result.wifi_restore_notice) _maybeShowWifiRestoreNotice(result.wifi_restore_notice);
 
     const newFiles = (result.files || []).filter((f) => f.status === 'new');
@@ -780,13 +768,32 @@ async function executeWifiSync(claimedGen) {
     if (newFiles.length > 0) {
       await loadRecordings();
       await loadSettings();
-
-      // Show success
-      _renderWifiProgress('check', 'Transfer complete!', `${newFiles.length} recording(s) synced`, 100, 'success');
       // Transcribed in the background, after the transfer (see queueAutoProcess).
       queueAutoProcess(newFiles);
+    }
+    const syncedText = newFiles.length > 0
+      ? `${newFiles.length} recording${newFiles.length === 1 ? '' : 's'} synced.`
+      : 'No new recordings.';
+
+    // Wi-Fi couldn't be put back by itself. Not a bug: a known macOS limitation
+    // (networksetup returns -3900 after Bluetooth sharing toggles the
+    // interface), so the user reconnects by hand. This is the final state: it
+    // says what synced too, and isn't replaced by "Transfer complete".
+    if (result.wifi_restore && result.wifi_restore.need_manual) {
+      const ssidName = result.wifi_restore.ssid ? `"${result.wifi_restore.ssid}"` : 'your Wi-Fi network';
+      _renderWifiProgress(
+        'wifi',
+        'Transfer complete: reconnect to Wi-Fi',
+        `${syncedText} Reconnect to ${ssidName} in the Wi-Fi settings, which should be open.`,
+        100,
+        'warning',
+      );
+      window.plaud.showNotification(
+        'Wi-Fi transfer complete',
+        `${syncedText} Reconnect to ${ssidName} in the Wi-Fi settings.`,
+      );
     } else {
-      _renderWifiProgress('check', 'Transfer complete', 'No new recordings found', 100, 'success');
+      _renderWifiProgress('check', 'Transfer complete', syncedText, 100, 'success');
     }
 
     // Add done button
@@ -814,7 +821,7 @@ async function executeWifiSync(claimedGen) {
       if (scan.found) {
         const conn = await window.plaud.connect(scan.address, scan.serial_number);
         if (conn.connected) {
-          toast(`Reconnected to ${scan.name}`, 'success');
+          toast(`Reconnected to ${prettyDeviceName(scan.name)}`, 'success');
         }
       }
     } catch {}
@@ -908,7 +915,7 @@ window.plaud.onSystemWake(async () => {
       if (scan.found) {
         const conn = await window.plaud.connect(scan.address, scan.serial_number);
         if (conn.connected) {
-          toast(`Reconnected to ${scan.name}`, 'success');
+          toast(`Reconnected to ${prettyDeviceName(scan.name)}`, 'success');
           await updateDeviceStatus();
 
           // Auto-sync if enabled (and nothing else is syncing)
@@ -1027,7 +1034,7 @@ async function init() {
         if (scan.found) {
           const conn = await window.plaud.connect(scan.address, scan.serial_number);
           if (conn.connected) {
-            toast(`Connected to ${scan.name}`, 'success');
+            toast(`Connected to ${prettyDeviceName(scan.name)}`, 'success');
             await updateDeviceStatus();
           }
         }
@@ -1199,7 +1206,7 @@ function _startBgPoll() {
           if (conn.connected) {
             _deviceConnected = true;
             _restartTimers();
-            toast(`Auto-connected to ${scan.name}`, 'success');
+            toast(`Connected to ${prettyDeviceName(scan.name)}`, 'success');
             await updateDeviceStatus();
           }
         }

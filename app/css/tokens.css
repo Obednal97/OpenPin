@@ -68,17 +68,30 @@
   --bg-hover:     rgba(58, 58, 60, 0.6);
   --bg-input:     rgba(28, 28, 30, 0.8);
   --bg-glass:     rgba(44, 44, 46, 0.45);
-  --accent:       #0a84ff;
-  --accent-hover: #409cff;
+  /* --accent is for text and glyphs (5.3:1 on cards); white text sits on --accent-fill */
+  --accent:       #3395ff;
+  --accent-hover: #5aa9ff;
   --accent-subtle:rgba(10, 132, 255, 0.12);
+  --accent-fill:  #0071e3;
+  --accent-fill-hover: #0a7cf0;
   --destructive:  #ff453a;
   --destructive-hover: #ff6961;
+  --destructive-fill: #d70015;
+  --destructive-fill-hover: #e5182b;
   --green:        #30d158;
   --yellow:       #ffd60a;
   --orange:       #ff9f0a;
+  /* Text versions of the status colours (WCAG AA on cards and tinted badges) */
+  --green-text:   #30d158;
+  --yellow-text:  #ffd60a;
+  --orange-text:  #ff9f0a;
+  /* Filled badge background (text in --badge-on-color) */
+  --green-fill:   #30d158;
+  /* Off toggles, inactive dots and bars, audio track */
+  --control-off:  #6e6e73;
   --text:         #f5f5f7;
   --text-secondary:#98989d;
-  --text-tertiary: #636366;
+  --text-tertiary: #8e8e93;
   --border:       rgba(84, 84, 88, 0.36);
   --border-strong:rgba(84, 84, 88, 0.65);
   --overlay:      rgba(0, 0, 0, 0.5);
@@ -102,17 +115,26 @@
   --bg-hover:     rgba(0, 0, 0, 0.04);
   --bg-input:     rgba(118, 118, 128, 0.08);
   --bg-glass:     rgba(255, 255, 255, 0.6);
-  --accent:       #007aff;
-  --accent-hover: #0066d6;
+  --accent:       #0062cc;
+  --accent-hover: #0052ab;
   --accent-subtle:rgba(0, 122, 255, 0.08);
-  --destructive:  #ff3b30;
-  --destructive-hover: #d62d24;
+  --accent-fill:  #0062cc;
+  --accent-fill-hover: #0052ab;
+  --destructive:  #d70015;
+  --destructive-hover: #b50012;
+  --destructive-fill: #d70015;
+  --destructive-fill-hover: #b50012;
   --green:        #28cd41;
   --yellow:       #fc0;
   --orange:       #ff9500;
+  --green-text:   #177233;
+  --yellow-text:  #8a6100;
+  --orange-text:  #9a5700;
+  --green-fill:   #1a7f37;
+  --control-off:  #aeaeb2;
   --text:         #1d1d1f;
-  --text-secondary:#86868b;
-  --text-tertiary: #aeaeb2;
+  --text-secondary:#5c5c61;
+  --text-tertiary: #68686d;
   --border:       rgba(0, 0, 0, 0.08);
   --border-strong:rgba(0, 0, 0, 0.15);
   --overlay:      rgba(0, 0, 0, 0.3);

@@ -26,6 +26,8 @@ from app.providers._models import (
     CLAUDE_SUMMARIZE,
     CLAUDE_SUMMARIZE_EFFORT,
     CLAUDE_SUMMARIZE_MAX_TOKENS,
+    CLAUDE_TITLE,
+    CLAUDE_TITLE_MAX_TOKENS,
     LOCAL_SUMMARIZE,
     OLLAMA_PREFERRED_MODELS,
     OLLAMA_SUGGESTED_MODEL,
@@ -645,3 +647,123 @@ def summarize(full_text, config, tag_context="", segments=None):
             logging.warning(f"Summarize with {prov_name} failed: {e}")
 
     return None, "", "none", errors
+
+
+# ---- Titles without a summary ----------------------------------------------
+
+TITLE_INSTRUCTIONS = (
+    "You name voice recordings. Reply with only a concise, descriptive title "
+    "(3-10 words) for the recording whose transcript you are given: no quotes, "
+    "no trailing full stop, no preamble. Use the transcript's language."
+)
+TITLE_TRANSCRIPT_CHARS = 8000  # the opening of a recording is enough to name it
+TITLE_MAX_CHARS = 80
+TITLE_TIMEOUT_S = 30
+
+
+def _clean_title(text):
+    """First non-empty line, without quotes, a 'Title:' prefix or a final full stop."""
+    line = next((ln.strip() for ln in str(text or "").splitlines() if ln.strip()), "")
+    line = re.sub(r"^(title\s*:\s*)", "", line, flags=re.I).strip().strip("\"'“”‘’*#").strip()
+    line = line.rstrip(".").strip()
+    if len(line) > TITLE_MAX_CHARS:
+        line = line[: TITLE_MAX_CHARS - 1].rstrip() + "…"
+    return line
+
+
+def _title_anthropic(excerpt, api_key):
+    client = _anthropic_client(api_key)
+    message = client.messages.create(
+        model=CLAUDE_TITLE,
+        max_tokens=CLAUDE_TITLE_MAX_TOKENS,
+        system=TITLE_INSTRUCTIONS,
+        messages=[{"role": "user", "content": excerpt}],
+        timeout=TITLE_TIMEOUT_S,
+    )
+    return "".join(b.text for b in message.content if b.type == "text")
+
+
+def _title_chat(url, headers, model, excerpt, provider, extra=None):
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": TITLE_INSTRUCTIONS},
+            {"role": "user", "content": excerpt},
+        ],
+    }
+    body.update(extra or {})
+    r = http_requests.post(url, headers=headers, json=body, timeout=(10, TITLE_TIMEOUT_S))
+    if r.status_code >= 400:
+        raise SummaryError(f"{provider} returned HTTP {r.status_code}")
+    data = r.json()
+    return ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
+def generate_title(full_text, config, segments=None):
+    """A short title for a transcript, from the configured AI provider.
+
+    Used when a recording is transcribed but not summarised (a summary brings
+    its own title). Follows the summary provider preference, cloud first, then
+    Ollama if it's running; never DistilBART. Returns (title, provider) or
+    ("", "none") when nothing is configured or every call failed.
+    """
+    transcript = format_transcript(segments, full_text)[:TITLE_TRANSCRIPT_CHARS].strip()
+    if len(transcript) < 20:
+        return "", "none"
+    preferred = config.get("summarization_provider", "anthropic")
+    or_key = config.get("openrouter_api_key")
+    attempts = []
+    if config.get("anthropic_api_key"):
+        attempts.append(("anthropic", lambda: _title_anthropic(transcript, config["anthropic_api_key"])))
+    if config.get("openai_api_key"):
+        attempts.append(
+            (
+                "openai",
+                lambda: _title_chat(
+                    "https://api.openai.com/v1/chat/completions",
+                    {"Authorization": f"Bearer {config['openai_api_key']}"},
+                    OPENAI_SUMMARIZE,
+                    transcript,
+                    "OpenAI",
+                    {"reasoning_effort": OPENAI_REASONING_EFFORT, "max_completion_tokens": 2000},
+                ),
+            )
+        )
+    if or_key:
+        attempts.append(
+            (
+                "openrouter",
+                lambda: _title_chat(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    {"Authorization": f"Bearer {or_key}", "X-Title": "Plaud V2"},
+                    OPENROUTER_CLAUDE_SUMMARIZE,
+                    transcript,
+                    "OpenRouter",
+                    {"max_tokens": CLAUDE_TITLE_MAX_TOKENS},
+                ),
+            )
+        )
+    if preferred == "openai":
+        attempts.sort(key=lambda a: a[0] != "openai")
+    elif preferred == "openrouter":
+        attempts.sort(key=lambda a: a[0] != "openrouter")
+    elif preferred == "local":
+        attempts = []  # local only: don't send the transcript anywhere
+
+    def _ollama():
+        # Checked only if the cloud providers didn't answer (it's a local call).
+        model = pick_ollama_model(ollama_models(), config.get("ollama_model"))
+        if not model:
+            raise SummaryError("Ollama isn't running or has no model")
+        return _title_chat(f"{OLLAMA_URL}/v1/chat/completions", {}, model, transcript, "Ollama")
+
+    attempts.append(("ollama", _ollama))
+
+    for name, fn in attempts:
+        try:
+            title = _clean_title(fn())
+            if len(title) >= 3:
+                return title, name
+        except Exception as e:
+            logging.warning(f"Title with {name} failed: {e}")
+    return "", "none"
