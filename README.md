@@ -51,7 +51,7 @@ aren't supported.
 ## Install
 
 1. Download the DMG (`Open.Pin_<version>_aarch64.dmg`) from the
-   [latest release](https://github.com/Obednal97/Plaud-V2/releases/latest).
+   [latest release](https://github.com/Obednal97/OpenPin/releases/latest).
 2. Open it and drag **Open Pin** to **Applications**. Run it from Applications: run from the DMG
    or Downloads, it can't update itself.
 3. Open it. It's signed and notarised, so macOS opens it without warnings. Allow Bluetooth when
@@ -122,7 +122,7 @@ details, a few checks (signed in or not, which keys are set, the last NotePin ha
 recent logs. Your home folder, user name, device serial numbers, Bluetooth IDs, API keys, tokens,
 e-mail addresses and Notion and Google Drive links are removed, and recordings, transcripts and
 summaries are never included. Look through the zip, then attach it to a
-[new issue](https://github.com/Obednal97/Plaud-V2/issues/new?template=bug_report.yml).
+[new issue](https://github.com/Obednal97/OpenPin/issues/new?template=bug_report.yml).
 
 Logs, if you'd rather look yourself:
 
