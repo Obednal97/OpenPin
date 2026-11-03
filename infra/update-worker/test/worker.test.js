@@ -18,6 +18,7 @@ import worker, {
   plainTitle,
   RATE_LIMIT_PER_MINUTE,
   ReportLimiter,
+  REPO,
   sanitizeIssueText,
   takeCounters,
   UNVERIFIED_NOTICE,
@@ -46,6 +47,9 @@ test('tag and asset allow-lists', () => {
   assert.ok(!isAllowedTag('v2.3'));
   assert.ok(isAllowedAssetName('Plaud.V2_2.3.0_aarch64.dmg'));
   assert.ok(isAllowedAssetName('Plaud.V2_2.3.0_aarch64.dmg.sha256'));
+  // Release assets after the rename to Open Pin
+  assert.ok(isAllowedAssetName('Open.Pin_2.6.0_aarch64.dmg'));
+  assert.ok(isAllowedAssetName('Open.Pin_2.6.0_aarch64.dmg.sha256'));
   assert.ok(!isAllowedAssetName('source.zip'));
   assert.ok(!isAllowedAssetName('../x.dmg'));
   assert.ok(!isAllowedAssetName('a/b.dmg'));
@@ -69,6 +73,7 @@ test('parseChecksum handles bare digests, shasum output and SHA256SUMS', () => {
   // GitHub renames "Plaud V2_…" to "Plaud.V2_…" on upload
   assert.equal(parseChecksum(`${HEX}  Plaud V2_2.4.0_aarch64.dmg\n`, 'Plaud.V2_2.4.0_aarch64.dmg'), HEX);
   assert.equal(parseChecksum(`${HEX}  /path/to/Plaud V2_2.4.0_aarch64.dmg\n`, 'Plaud.V2_2.4.0_aarch64.dmg'), HEX);
+  assert.equal(parseChecksum(`${HEX}  Open Pin_2.6.0_aarch64.dmg\n`, 'Open.Pin_2.6.0_aarch64.dmg'), HEX);
   // a dedicated <dmg>.sha256 with one digest is trusted whatever name it lists
   assert.equal(parseChecksum(`${HEX}  renamed.dmg\n`, 'x.dmg', { dedicated: true }), HEX);
   assert.equal(parseChecksum(`${HEX}  renamed.dmg\n`, 'x.dmg'), null);
@@ -406,4 +411,46 @@ test('router: a forged fingerprint on a non-worker issue creates a new issue ins
     assert.equal(writes.length, 1);
     assert.equal(writes[0].kind, 'issue');
   });
+});
+
+test('latest + download pass a renamed DMG (Open.Pin_…) through unchanged', async () => {
+  const realFetch = globalThis.fetch;
+  const HEX = 'c'.repeat(64);
+  const dmgName = 'Open.Pin_2.6.0_aarch64.dmg';
+  const release = {
+    tag_name: 'v2.6.0',
+    name: 'v2.6.0',
+    body: 'notes',
+    draft: false,
+    prerelease: false,
+    assets: [
+      { name: dmgName, size: 1234, url: 'https://api.github.com/repos/x/y/releases/assets/1' },
+      { name: `${dmgName}.sha256`, size: 90, url: 'https://api.github.com/repos/x/y/releases/assets/2' },
+    ],
+  };
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    if (u.pathname === `/repos/${REPO}/releases/latest` || u.pathname === `/repos/${REPO}/releases/tags/v2.6.0`) {
+      return new Response(JSON.stringify(release), { headers: { 'Content-Type': 'application/json' } });
+    }
+    if (u.pathname.endsWith('/assets/1')) return new Response(null, { status: 302, headers: { Location: 'https://objects.example/dmg' } });
+    if (u.pathname.endsWith('/assets/2')) return new Response(null, { status: 302, headers: { Location: 'https://objects.example/sum' } });
+    if (u.href === 'https://objects.example/sum') return new Response(`${HEX}  Open Pin_2.6.0_aarch64.dmg\n`);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  try {
+    const env = makeEnv();
+    const ctx = { waitUntil() {} };
+    const r = await worker.fetch(new Request('https://w.example/v1/latest'), env, ctx);
+    assert.equal(r.status, 200);
+    const data = await r.json();
+    assert.equal(data.version, '2.6.0');
+    assert.deepEqual(data.asset, { name: dmgName, size: 1234, sha256: HEX });
+    assert.equal(data.download_url, `https://w.example/v1/download/v2.6.0/${dmgName}`);
+    const d = await worker.fetch(new Request(data.download_url), env, ctx);
+    assert.equal(d.status, 302);
+    assert.equal(d.headers.get('Location'), 'https://objects.example/dmg');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

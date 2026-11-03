@@ -1,6 +1,8 @@
 /**
  * plaud-v2-updates — Cloudflare Worker that fronts every GitHub call the
- * Plaud V2 desktop app makes, so no GitHub token ships inside the DMG.
+ * Open Pin desktop app makes, so no GitHub token ships inside the DMG.
+ * (The Worker, its URL and the markers below keep the app's pre-rename name:
+ * installed apps and existing issues depend on them.)
  *
  *   GET  /v1/latest                     latest published release (cached ~5 min)
  *   GET  /v1/download/<tag>/<asset>     302 to GitHub's signed, token-free asset URL
@@ -14,6 +16,8 @@
  * — no app release needed.
  */
 
+// The GitHub repo releases and issues live in. GitHub redirects API calls for
+// a renamed repo, but update this when the repo is renamed (then redeploy).
 export const REPO = 'Obednal97/Plaud-V2';
 export const USER_AGENT = 'plaud-v2-updates-worker';
 const GH_API = 'https://api.github.com';
@@ -38,7 +42,7 @@ const MAX_REQUEST_BYTES = 32 * 1024;
 
 /** First line of every issue this Worker creates; only such issues get comments. */
 export const WORKER_MARKER = '<!-- plaud-v2-worker -->';
-export const UNVERIFIED_NOTICE = 'Automated report submitted by a Plaud V2 install — unverified content';
+export const UNVERIFIED_NOTICE = 'Automated report submitted by an Open Pin install — unverified content';
 /** GitHub author associations only the PAT's owner / collaborators can have. */
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
@@ -87,8 +91,8 @@ export function parseChecksum(text, fileName, { dedicated = false } = {}) {
     const m = raw.trim().match(/^([0-9a-fA-F]{64})(?:\s+\*?(.+))?$/);
     if (m) entries.push({ digest: m[1].toLowerCase(), name: m[2] ? m[2].trim() : null });
   }
-  // GitHub turns spaces in uploaded asset names into dots ("Plaud V2_…" →
-  // "Plaud.V2_…"), so compare names with that normalisation too.
+  // GitHub turns spaces in uploaded asset names into dots ("Open Pin_…" →
+  // "Open.Pin_…"), so compare names with that normalisation too.
   const norm = (n) => n.replace(/^.*\//, '').replace(/ /g, '.');
   const named = entries.find((e) => e.name && fileName && norm(e.name) === norm(fileName));
   if (named) return named.digest;
@@ -222,7 +226,7 @@ export function validateReport(payload) {
 function reportMeta(report) {
   const os = plainInline(report.os, 64) || 'unknown';
   const kind = report.kind === 'user' ? 'user report' : 'auto report';
-  return `Plaud V2 ${plainInline(report.appVersion, 32)} · macOS ${os} · ${kind}`;
+  return `Open Pin ${plainInline(report.appVersion, 32)} · macOS ${os} · ${kind}`;
 }
 
 export function buildIssueBody(report) {
