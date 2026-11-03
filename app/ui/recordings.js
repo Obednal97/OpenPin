@@ -678,6 +678,8 @@ function _showContextMenu(x, y, sessionId) {
           if (result.pushed) {
             toast('Pushed to Notion', 'success');
             if (result.url) window.plaud.openExternal(result.url);
+          } else if (result.needs_review) {
+            toast('This recording may already be in Notion. Open it to choose which page to use.', 'info');
           } else {
             toast(result.error || 'Push failed', 'error');
           }

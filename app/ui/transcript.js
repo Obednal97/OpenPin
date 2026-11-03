@@ -519,25 +519,98 @@ function openTranscript(sessionId, autoPlay = false) {
     notionBtn.dataset.notionUrl = url;
     if (notionUpdateBtn) notionUpdateBtn.classList.remove('hidden');
   };
+  // The push found a page an older version of the app made that may hold
+  // this recording: let the owner use it or create a new page.
+  const hideNotionReview = () => {
+    const box = $('#notion-review');
+    if (box) box.remove();
+  };
+  const showNotionReview = (candidates) => {
+    hideNotionReview();
+    const pages = (candidates || []).filter((c) => c && c.url);
+    // Only while this recording is still the one shown.
+    if (!pages.length || app.currentSessionId !== sessionId || (notionBtn && !notionBtn.isConnected)) return;
+    const box = document.createElement('div');
+    box.id = 'notion-review';
+    box.className = 'redownload-notice';
+    box.style.flexWrap = 'wrap';
+    const text = document.createElement('span');
+    const pageLink = (c) => {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.textContent = c.title || 'the Notion page';
+      a.style.color = 'inherit';
+      a.style.textDecoration = 'underline';
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.plaud.openExternal(c.url);
+      });
+      return a;
+    };
+    const choose = async (btn, opts) => {
+      box.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      setLoading(btn, true);
+      try {
+        reportNotionPush(await window.plaud.notionPush(sessionId, opts));
+      } catch (err) {
+        toast(`Error: ${err.message}`, 'error');
+      } finally {
+        if (btn.isConnected) {
+          setLoading(btn, false);
+          box.querySelectorAll('button').forEach((b) => (b.disabled = false));
+        }
+      }
+    };
+    const button = (label, opts) => {
+      const b = document.createElement('button');
+      b.className = 'action-btn subtle';
+      b.textContent = label;
+      b.addEventListener('click', () => choose(b, opts));
+      return b;
+    };
+    if (pages.length === 1) {
+      text.append('Looks like this recording is already in Notion: ', pageLink(pages[0]), '.');
+      box.append(text, button('Use that page', { link_url: pages[0].url }));
+    } else {
+      text.textContent = 'Looks like this recording is already in Notion, on one of these pages:';
+      box.append(text);
+      pages.forEach((c) => {
+        const row = document.createElement('span');
+        row.style.flexBasis = '100%';
+        row.append(pageLink(c), ' ', button('Use this page', { link_url: c.url }));
+        box.append(row);
+      });
+    }
+    box.append(button('Create a new page', { force_new: true }));
+    actionsBar.insertAdjacentElement('afterend', box);
+  };
   const reportNotionPush = (result) => {
     if (result.error) {
       toast(`Notion push failed: ${result.error}`, 'error');
+      return;
+    }
+    if (result.needs_review) {
+      showNotionReview(result.candidates);
       return;
     }
     if (result.queued) {
       toast(result.message || 'Sending to Notion in the background', 'info');
       return;
     }
+    hideNotionReview();
     toast(result.updated ? 'Updated in Notion' : 'Pushed to Notion!', 'success');
     if (result.content_note) toast(result.content_note, 'info');
     if (result.url) showNotionPageLinked(result.url);
   };
+  hideNotionReview();
   if (notionBtn) {
-    // Check if this recording already has a Notion page
+    // Check if this recording already has a Notion page, or is waiting for
+    // the owner to choose one (found by a background push).
     (async () => {
       try {
         const pageInfo = await window.plaud.notionPageUrl(sessionId);
         if (pageInfo.has_page) showNotionPageLinked(pageInfo.url);
+        else if (pageInfo.needs_review) showNotionReview(pageInfo.candidates);
       } catch {}
     })();
 
