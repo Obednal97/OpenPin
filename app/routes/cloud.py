@@ -49,7 +49,9 @@ def exchange_token():
         return jsonify({"error": "No auth code provided"}), 400
 
     try:
-        result = cloud.exchange_token(auth_code, desktop_uuid)
+        # "link": the code came from a plaud:// link (any web page can open one)
+        from_link = data.get("source") == "link"
+        result = cloud.exchange_token(auth_code, desktop_uuid, from_link=from_link)
         if result.get("error"):
             return jsonify(result), 400
         return jsonify(result)

@@ -664,6 +664,63 @@ class TestRefreshUserToken:
 
 
 # ---------------------------------------------------------------------------
+# plaud:// links only count while a sign-in started here is pending
+# ---------------------------------------------------------------------------
+
+
+class TestSignInLinkGate:
+    @pytest.fixture
+    def disk(self, plaud, monkeypatch):
+        saved = {}
+        monkeypatch.setattr(cloud, "update_config", lambda fn: fn(saved))
+        monkeypatch.setattr(cloud, "load_config", lambda: dict(saved))
+        plaud.on("POST", f"{EU}/auth/access-token-auth-code", {"status": 0, "access_token": FAKE_TOKEN})
+        plaud.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        cloud._cloud_state.update(desktop_uuid=None, login_started_at=None)
+        return saved
+
+    def test_link_without_a_sign_in_is_ignored(self, plaud, disk):
+        result = cloud.exchange_token(region_code(), "uuid-from-page", from_link=True)
+        assert result["unrequested"] is True and "Ignored a Plaud sign-in link" in result["error"]
+        assert plaud.calls == []  # never sent to Plaud
+        assert_signed_out()
+
+    def test_link_ignores_a_stale_sign_in(self, plaud, disk, monkeypatch):
+        cloud.get_login_url("eu")
+        later = cloud.time.time() + cloud.LOGIN_LINK_TTL_S + 1
+        monkeypatch.setattr(cloud.time, "time", lambda: later)
+        assert cloud.exchange_token(region_code(), from_link=True).get("unrequested") is True
+        assert plaud.calls == []
+
+    def test_link_during_a_sign_in_uses_its_id_once(self, plaud, disk):
+        _url, uuid = cloud.get_login_url("eu")
+        result = cloud.exchange_token(region_code(), "uuid-from-page", from_link=True)
+        assert result["logged_in"] is True
+        assert plaud.calls[0][2]["json"]["desktop_uuid"] == uuid  # ours, not the caller's
+        assert cloud._cloud_state["desktop_uuid"] is None
+        assert cloud._LOGIN_UUID_KEY not in disk and cloud._LOGIN_STARTED_KEY not in disk
+        # The same (or any) link again is now refused
+        assert cloud.exchange_token(region_code(), from_link=True).get("unrequested") is True
+
+    def test_link_after_a_restart_uses_the_saved_id(self, plaud, disk):
+        _url, uuid = cloud.get_login_url("eu")
+        cloud._cloud_state.update(desktop_uuid=None, login_started_at=None)  # "restart"
+        assert cloud.exchange_token(region_code(), from_link=True)["logged_in"] is True
+        assert plaud.calls[0][2]["json"]["desktop_uuid"] == uuid
+
+    def test_old_saved_id_without_a_time_is_not_enough(self, plaud, disk):
+        disk[cloud._LOGIN_UUID_KEY] = "uuid-from-v2.4.2"
+        assert cloud.exchange_token(region_code(), from_link=True).get("unrequested") is True
+
+    def test_pasted_code_needs_no_pending_sign_in(self, plaud, disk):
+        assert cloud.exchange_token(region_code())["logged_in"] is True
+
+    def test_route_passes_the_link_source(self, plaud, disk, flask_client):
+        r = flask_client.post("/cloud/exchange-token", json={"auth_code": region_code(), "source": "link"})
+        assert r.status_code == 400 and r.get_json()["unrequested"] is True
+
+
+# ---------------------------------------------------------------------------
 # Startup: an expired saved token is renewed before anyone is signed out
 # ---------------------------------------------------------------------------
 

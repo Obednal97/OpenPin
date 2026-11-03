@@ -36,6 +36,7 @@ _cloud_state = {
     "api_domain": PLAUD_API_DOMAINS["eu"],
     "user": None,
     "desktop_uuid": None,
+    "login_started_at": None,  # time.time() when get_login_url issued desktop_uuid
     "device_id": None,  # stable per-install x-device-id (lazy, see _client_device_id)
     "timezone": None,  # system IANA timezone (lazy, see _system_timezone)
     "ut": None,  # pld_ut user token (~24h): what sn-sign wants. See refresh_user_token
@@ -553,6 +554,56 @@ def refresh_user_token():
 
 
 _LOGIN_UUID_KEY = "plaud_login_desktop_uuid"
+_LOGIN_STARTED_KEY = "plaud_login_started_at"
+# How long a plaud://login link is accepted after the user starts a sign-in.
+LOGIN_LINK_TTL_S = 15 * 60
+UNREQUESTED_LINK_MESSAGE = (
+    "Ignored a Plaud sign-in link because no sign-in was started from Plaud V2 "
+    "in the last 15 minutes. To sign in, use Settings › Plaud Cloud."
+)
+
+
+def _pending_sign_in():
+    """The desktop_uuid of a sign-in started in the last LOGIN_LINK_TTL_S, else None.
+
+    Checks memory first, then the copy on disk (the link can arrive after a restart).
+    """
+    now = time.time()
+    with _cloud_state_lock:
+        uuid_mem = _cloud_state.get("desktop_uuid")
+        started_mem = _cloud_state.get("login_started_at")
+    if uuid_mem and isinstance(started_mem, (int, float)) and 0 <= now - started_mem <= LOGIN_LINK_TTL_S:
+        return uuid_mem
+    try:
+        cfg = load_config()
+    except Exception:
+        return None
+    uuid_disk = cfg.get(_LOGIN_UUID_KEY)
+    started_disk = cfg.get(_LOGIN_STARTED_KEY)
+    if (
+        isinstance(uuid_disk, str)
+        and uuid_disk
+        and isinstance(started_disk, (int, float))
+        and 0 <= now - started_disk <= LOGIN_LINK_TTL_S
+    ):
+        return uuid_disk
+    return None
+
+
+def _clear_pending_sign_in():
+    """Forget the sign-in id once it has been used, so a later link can't reuse it."""
+    with _cloud_state_lock:
+        _cloud_state["desktop_uuid"] = None
+        _cloud_state["login_started_at"] = None
+
+    def _drop(c):
+        c.pop(_LOGIN_UUID_KEY, None)
+        c.pop(_LOGIN_STARTED_KEY, None)
+
+    try:
+        update_config(_drop)
+    except Exception as e:
+        logging.warning("[Cloud] Couldn't clear the sign-in id: %s", e)
 
 
 def get_login_url(region="eu"):
@@ -560,15 +611,22 @@ def get_login_url(region="eu"):
     import uuid as uuid_mod
 
     desktop_uuid = str(uuid_mod.uuid4())
+    started_at = time.time()
     api_domain = PLAUD_API_DOMAINS.get(region, PLAUD_API_DOMAINS["eu"])
     with _cloud_state_lock:
         _cloud_state["desktop_uuid"] = desktop_uuid
+        _cloud_state["login_started_at"] = started_at
         _cloud_state["api_domain"] = api_domain
+
     # Also on disk: the browser's plaud:// link can arrive after the backend
     # (or the whole app) restarted, and the exchange needs this id. It isn't a
     # secret (it's in the sign-in URL); it's only good with a fresh code.
+    def _save(c):
+        c[_LOGIN_UUID_KEY] = desktop_uuid
+        c[_LOGIN_STARTED_KEY] = started_at
+
     try:
-        update_config(lambda c: c.__setitem__(_LOGIN_UUID_KEY, desktop_uuid))
+        update_config(_save)
     except Exception as e:
         logging.warning("[Cloud] Couldn't save the sign-in id: %s", e)
     login_url = f"{PLAUD_WEB_HOST}/launch-desktop?from=desktop&desktop_uuid={desktop_uuid}"
@@ -650,16 +708,27 @@ def _sign_in(token, api_domain, user, ut=None, urt=None):
     return {"logged_in": True, "user": user}
 
 
-def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None):
+def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None, from_link=False):
     """Exchange a sign-in code for a bearer token, check it, and sign in.
 
     Returns ``{"logged_in": True, "user": ...}`` or ``{"error": ...}`` with
     Plaud's reason. Nothing is saved, and the current login is untouched,
     unless Plaud both issues a token and accepts it on /user/me.
+
+    ``from_link``: the code came from a plaud://login link, which any web page
+    can open. It is only used when the user started a sign-in in the last
+    LOGIN_LINK_TTL_S, and with the id that sign-in issued. A code the user
+    pasted themselves is accepted any time.
     """
     code = _normalise_auth_code(auth_code)
     if not code:
         return {"error": "No sign-in code provided"}
+    if from_link:
+        pending = _pending_sign_in()
+        if not pending:
+            logging.warning("[Cloud] Ignored a plaud:// sign-in link: no sign-in in progress")
+            return {"error": UNREQUESTED_LINK_MESSAGE, "unrequested": True}
+        desktop_uuid = pending
     with _cloud_state_lock:
         desktop_uuid = desktop_uuid or _cloud_state.get("desktop_uuid") or ""
         domain = _domain_for_auth_code(code) or fallback_domain or _cloud_state["api_domain"]
@@ -686,7 +755,9 @@ def exchange_token(auth_code, desktop_uuid=None, *, fallback_domain=None):
     except PlaudAuthError as e:
         return {"error": str(e)}
     cookies = _cookies_from_response(r)  # best effort: not every sign-in sets them
-    return _sign_in(token, domain, user, ut=cookies["ut"], urt=cookies["urt"])
+    result = _sign_in(token, domain, user, ut=cookies["ut"], urt=cookies["urt"])
+    _clear_pending_sign_in()
+    return result
 
 
 def login_with_token(token, region="eu"):

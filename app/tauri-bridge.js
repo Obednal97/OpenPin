@@ -213,6 +213,7 @@ async function apiCall(method, endpoint, body = null) {
     'already in progress',
     'powered off',
     'invalid or has expired', // expired Plaud sign-in code: the user signs in again
+    'ignored a plaud sign-in link', // a plaud:// link nobody asked for
   ];
   // 409 / busy = "a sync is already running" — expected, never a bug.
   const isTransient = res.status === 409 || data.busy === true || TRANSIENT_MARKERS.some((m) => errMsg.includes(m));
@@ -397,8 +398,10 @@ window.plaud = {
   // Cloud account
   cloudStatus: () => apiCall('GET', '/cloud/status'),
   cloudLoginUrl: (region) => apiCall('POST', '/cloud/login-url', { region }),
-  cloudExchangeToken: (auth_code, desktop_uuid) =>
-    apiCall('POST', '/cloud/exchange-token', { auth_code, desktop_uuid }),
+  // source 'link': the code came from a plaud:// link, so the backend only uses it
+  // while a sign-in started here is pending (any web page can open such a link)
+  cloudExchangeToken: (auth_code, desktop_uuid, source) =>
+    apiCall('POST', '/cloud/exchange-token', { auth_code, desktop_uuid, source: source || 'paste' }),
   cloudLoginToken: (token, region) => apiCall('POST', '/cloud/login-token', { token, region }),
   cloudLogout: () => apiCall('POST', '/cloud/logout'),
   cloudRecordings: () => apiCall('GET', '/cloud/recordings'),
