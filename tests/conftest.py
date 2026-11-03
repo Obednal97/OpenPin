@@ -124,3 +124,13 @@ def _no_real_bluetooth_address_check(monkeypatch):
         return True
 
     monkeypatch.setattr(dev, "_address_visible", visible)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_title_generation(monkeypatch):
+    """/transcribe names unsummarised recordings with an AI call (generate_title).
+    Tests never reach a real provider, local Ollama included; tests of the
+    title code patch it themselves."""
+    import app.routes.transcribe as transcribe_routes
+
+    monkeypatch.setattr(transcribe_routes, "generate_title", lambda *a, **k: ("", "none"))

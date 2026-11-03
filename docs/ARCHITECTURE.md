@@ -277,6 +277,12 @@ text` lines with the user's profile and tags as context, and return JSON with a 
 title (if a provider gives none, the first sentence of the summary is used). Webhooks fire on `summarize`, and
 Notion auto-push runs if enabled.
 
+**Titles without a summary** (`generate_title`, called by `/transcribe` through `_auto_title`): when
+auto-summarise is off and the recording has no name yet, a short title-only call names it (Claude
+`claude-haiku-5-5`, else OpenAI or OpenRouter, else Ollama; nothing leaves the Mac when the summary
+provider is Local). It's stored as `auto_title` with `auto_title_source: "transcript"`, so a later
+summary's title replaces it, unless the user renamed the recording in between.
+
 ## Notion (`app/state/notion.py`, `app/routes/notion.py`, `app/utils/notion_queue.py`)
 
 - Uses Notion's **hosted MCP server** (`https://mcp.notion.com/mcp`, Streamable HTTP). There is no
