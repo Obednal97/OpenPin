@@ -250,12 +250,21 @@ pub(crate) mod sha256;
 /// Base URL of the update Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://plaud-v2-updates.leave-hacker-feedback.workers.dev";
 
-/// Bundle identity the installer insists on before swapping the app.
+/// Bundle identity the installer insists on before swapping the app. The
+/// identifier is the app's original one and must not change (Bluetooth
+/// permission, the Keychain backup and the support folder hang off it).
 const EXPECTED_BUNDLE_ID: &str = "com.plaud.v2";
-const EXPECTED_TEAM_ID: &str = "4SN93PWF7Z";
+/// Apple team that must have signed an update: `APPLE_TEAM_ID` at build time
+/// (see docs/RELEASING.md), else the official releases' team.
+const EXPECTED_TEAM_ID: &str = match option_env!("APPLE_TEAM_ID") {
+    Some(team) if !team.is_empty() => team,
+    _ => OFFICIAL_TEAM_ID,
+};
+/// Team ID of the official Open Pin releases.
+const OFFICIAL_TEAM_ID: &str = "4SN93PWF7Z";
 
 fn worker_user_agent() -> String {
-    format!("Plaud-V2/{}", app_version())
+    format!("Open-Pin/{}", app_version())
 }
 
 /// Client for small JSON calls to the Worker.
@@ -338,7 +347,7 @@ fn is_translocated(app_path: &str) -> bool {
 }
 
 const TRANSLOCATED_MESSAGE: &str =
-    "Plaud V2 is running from a temporary location, so it can't update itself. Quit it, drag Plaud V2 into your Applications folder, and open it from there.";
+    "Open Pin is running from a temporary location, so it can't update itself. Quit it, drag Open Pin into your Applications folder, and open it from there.";
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct LatestAsset {
@@ -411,8 +420,8 @@ fn update_log_path() -> std::path::PathBuf {
     crate::paths::log_dir().join("update.log")
 }
 
-fn running_app_path() -> String {
-    // /Applications/Plaud V2.app/Contents/MacOS/plaud-v2 → /Applications/Plaud V2.app
+pub(crate) fn running_app_path() -> String {
+    // /Applications/Open Pin.app/Contents/MacOS/plaud-v2 → /Applications/Open Pin.app
     let exe_path = std::env::current_exe().unwrap_or_default();
     exe_path
         .parent()
@@ -644,6 +653,17 @@ pub struct UpdateResult {
 /// Installer run by a detached bash after the app quits. Every value is a
 /// positional argument ($1…$5), never interpolated into the script body, so a
 /// crafted asset name can't inject shell.
+///
+/// Where the new app goes: normally over the running one (`$app_path`), keeping
+/// whatever name and folder the user gave it. The one exception is the rename
+/// to Open Pin: when the running bundle still has the old default name
+/// (`Plaud V2.app`) and the DMG holds a differently named bundle
+/// (`Open Pin.app`), the new app is installed next to it under the new name,
+/// and the old bundle is deleted only after the copy verified. An existing
+/// bundle at the new name is replaced only if it is this app (same bundle id);
+/// otherwise the update goes over the old bundle in place. Any failure leaves
+/// the old app where it was and relaunches it. `install_script_*` tests run
+/// this script against stub `hdiutil`/`codesign`/`spctl`/`open`.
 const INSTALL_SCRIPT: &str = r#"
 dmg_path="$1"
 app_path="$2"
@@ -652,6 +672,7 @@ old_pid="$4"
 log_file="$5"
 EXPECTED_BUNDLE_ID="__BUNDLE_ID__"
 EXPECTED_TEAM="__TEAM_ID__"
+LEGACY_BUNDLE_NAME="__LEGACY_BUNDLE__"
 
 mkdir -p "$(dirname "$log_file")"
 exec >>"$log_file" 2>&1
@@ -705,34 +726,68 @@ codesign -dv --verbose=4 "$NEW_APP" 2>&1 | grep -qx "TeamIdentifier=$EXPECTED_TE
 spctl -a -t exec -vv "$NEW_APP" || abort "Gatekeeper (spctl) rejected the update"
 log "Verified $NEW_APP (v$new_version, team $EXPECTED_TEAM)"
 
-backup="${app_path}.old-update"
-rm -rf "$backup"
-mv "$app_path" "$backup" || abort "couldn't move the old app aside (permissions?)"
+# Where to install: over the running app, unless it still has the old default
+# name and the update is named differently (the rename to Open Pin).
+target="$app_path"
+new_name=$(basename "$NEW_APP")
+if [ "$(basename "$app_path")" = "$LEGACY_BUNDLE_NAME" ] && [ "$new_name" != "$LEGACY_BUNDLE_NAME" ]; then
+  candidate="$(dirname "$app_path")/$new_name"
+  if [ ! -e "$candidate" ]; then
+    target="$candidate"
+  elif [ "$(plutil -extract CFBundleIdentifier raw -o - "$candidate/Contents/Info.plist" 2>/dev/null)" = "$EXPECTED_BUNDLE_ID" ]; then
+    target="$candidate"
+  else
+    log "$candidate exists and isn't this app; updating $app_path in place"
+  fi
+fi
+[ "$target" = "$app_path" ] || log "Renaming: installing to $target, then removing $app_path"
 
-if ditto "$NEW_APP" "$app_path" \
-   && [ "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist" 2>/dev/null)" = "$expected_version" ] \
-   && codesign --verify --deep --strict "$app_path"; then
+# Move whatever is at the target aside, so a failed copy can be undone.
+backup="${target}.old-update"
+rm -rf "$backup"
+had_target=0
+if [ -e "$target" ]; then
+  mv "$target" "$backup" || abort "couldn't move the old app aside (permissions?)"
+  had_target=1
+fi
+
+if ditto "$NEW_APP" "$target" \
+   && [ "$(plutil -extract CFBundleShortVersionString raw -o - "$target/Contents/Info.plist" 2>/dev/null)" = "$expected_version" ] \
+   && codesign --verify --deep --strict "$target"; then
   rm -rf "$backup"
-  xattr -dr com.apple.quarantine "$app_path" 2>/dev/null
+  if [ "$target" != "$app_path" ]; then
+    # The new app is in place and verified: only now remove the old bundle.
+    if rm -rf "$app_path"; then
+      log "Removed the old app at $app_path"
+    else
+      log "WARNING: couldn't remove the old app at $app_path; delete it by hand"
+    fi
+  fi
+  xattr -dr com.apple.quarantine "$target" 2>/dev/null
   cleanup
   rm -f "$dmg_path"
-  log "Installed v$expected_version; relaunching"
-  open "$app_path"
+  log "Installed v$expected_version at $target; relaunching"
+  open "$target"
   exit 0
 fi
 
 log "Copy failed or the copied app didn't verify; restoring the old app"
-rm -rf "$app_path"
-if ! mv "$backup" "$app_path"; then
+rm -rf "$target"
+if [ "$had_target" = 1 ] && ! mv "$backup" "$target"; then
   log "CRITICAL: couldn't restore the old app; it is at $backup"
 fi
 abort "install failed"
 "#;
 
+/// Bundle name the app had before the rename to Open Pin. The installer and
+/// `migrate` treat a bundle with exactly this name as "not renamed yet".
+pub(crate) const LEGACY_BUNDLE_NAME: &str = "Plaud V2.app";
+
 fn install_script() -> String {
     INSTALL_SCRIPT
         .replace("__BUNDLE_ID__", EXPECTED_BUNDLE_ID)
         .replace("__TEAM_ID__", EXPECTED_TEAM_ID)
+        .replace("__LEGACY_BUNDLE__", LEGACY_BUNDLE_NAME)
 }
 
 #[tauri::command]
@@ -1206,7 +1261,7 @@ pub fn open_diagnostics_log() -> Result<(), String> {
         .append(true)
         .open(&path)
         .map_err(|e| e.to_string())?;
-    // macOS: use the system `open` command. Plaud V2 is macOS-only, so this is fine.
+    // macOS: use the system `open` command. Open Pin is macOS-only, so this is fine.
     std::process::Command::new("open")
         .arg(&path)
         .spawn()
@@ -1439,7 +1494,7 @@ fn build_report_md(inp: &ReportInputs) -> String {
         None => "_Not available_".to_string(),
     };
     format!(
-        "# Plaud V2 bug report\n\n\
+        "# Open Pin bug report\n\n\
          ## What did you expect to happen?\n{expected}\n\n\
          ## What actually happened?\n{actual}\n\n\
          ## Steps to reproduce\n{steps}\n\n\
@@ -1450,7 +1505,7 @@ fn build_report_md(inp: &ReportInputs) -> String {
          ## Checks\n{checks}\n\n\
          ## Recent errors\n{errors}\n\n\
          ---\n\
-         _Exported from Plaud V2 {version}. Personal details (home folder, user name, serial numbers, \
+         _Exported from Open Pin {version}. Personal details (home folder, user name, serial numbers, \
          email addresses, tokens) were removed. Look through the files before you share them._\n",
         expected = answer_or_placeholder(&inp.expected),
         actual = answer_or_placeholder(&inp.actual),
@@ -1502,7 +1557,7 @@ fn report_files(inp: &ReportInputs, scrub: impl Fn(&str) -> String) -> Vec<(&'st
 }
 
 fn bug_report_name(now: chrono::DateTime<chrono::Local>) -> String {
-    format!("Plaud V2 bug report {}", now.format("%Y-%m-%d %H%M"))
+    format!("Open Pin bug report {}", now.format("%Y-%m-%d %H%M"))
 }
 
 /// `<dir>/<base>.zip`, or `<base> 2.zip`, `<base> 3.zip`… if that's taken.
@@ -1722,6 +1777,8 @@ mod tests {
     #[test]
     fn asset_name_and_checksum_checks() {
         assert!(is_safe_asset_name("Plaud.V2_2.3.0_aarch64.dmg"));
+        assert!(is_safe_asset_name("Open.Pin_2.6.0_aarch64.dmg"));
+        assert!(is_safe_asset_name("Open Pin_2.6.0_aarch64.dmg"));
         assert!(!is_safe_asset_name("../evil.dmg"));
         assert!(!is_safe_asset_name("a/b.dmg"));
         assert!(!is_safe_asset_name(".hidden.dmg"));
@@ -1729,16 +1786,273 @@ mod tests {
         assert!(is_hex_sha256(&"a".repeat(64)));
         assert!(!is_hex_sha256(&"g".repeat(64)));
         assert!(!is_hex_sha256("abc"));
-        assert!(is_translocated("/private/var/folders/x/AppTranslocation/ABC/d/Plaud V2.app"));
-        assert!(!is_translocated("/Applications/Plaud V2.app"));
+        assert!(is_translocated("/private/var/folders/x/AppTranslocation/ABC/d/Open Pin.app"));
+        assert!(!is_translocated("/Applications/Open Pin.app"));
+    }
+
+    /// Runs the real install script against fake bundles, with stub
+    /// `hdiutil` (the "DMG" is a file naming a folder to "mount"), `codesign`,
+    /// `spctl` and `open` (which records what it was asked to open) first on
+    /// PATH. `ditto`, `plutil` and `xattr` are the real ones.
+    #[cfg(target_os = "macos")]
+    struct InstallHarness {
+        root: std::path::PathBuf,
+        apps: std::path::PathBuf,
+        dmg: std::path::PathBuf,
+        log: std::path::PathBuf,
+        opened: std::path::PathBuf,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl InstallHarness {
+        fn new(tag: &str) -> InstallHarness {
+            use std::os::unix::fs::PermissionsExt;
+            let root = std::env::temp_dir().join(format!(
+                "plaud-v2-install-{tag}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ));
+            let bin = root.join("bin");
+            let apps = root.join("Applications");
+            for d in [&bin, &apps, &root.join("dmg-contents"), &root.join("tmp")] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let stub = |name: &str, body: &str| {
+                let path = bin.join(name);
+                std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            // attach -nobrowse -noautoopen -readonly -mountpoint <mnt> <dmg>
+            stub(
+                "hdiutil",
+                r#"if [ "$1" = attach ]; then mnt="$6"; src=$(cat "$7"); cp -R "$src"/. "$mnt"/; fi; exit 0"#,
+            );
+            // --verify fails for bundles named in $CODESIGN_FAIL (substring match)
+            stub(
+                "codesign",
+                &format!(
+                    r#"case "$1" in
+  --verify) for a; do :; done; if [ -n "$CODESIGN_FAIL" ] && [[ "$a" == *"$CODESIGN_FAIL"* ]]; then exit 1; fi; exit 0 ;;
+  -dv) echo "TeamIdentifier={EXPECTED_TEAM_ID}" >&2; exit 0 ;;
+esac
+exit 0"#
+                ),
+            );
+            stub("spctl", "exit 0");
+            stub("open", r#"echo "$1" >> "$OPENED""#);
+            let dmg = root.join("update.dmg");
+            std::fs::write(&dmg, root.join("dmg-contents").to_string_lossy().as_bytes()).unwrap();
+            InstallHarness {
+                log: root.join("logs/update.log"),
+                opened: root.join("opened.txt"),
+                apps,
+                dmg,
+                root,
+            }
+        }
+
+        /// A minimal bundle: Info.plist + an executable.
+        fn bundle(dir: &std::path::Path, name: &str, bundle_id: &str, version: &str) -> std::path::PathBuf {
+            let app = dir.join(name);
+            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            std::fs::write(app.join("Contents/MacOS/plaud-v2"), version).unwrap();
+            std::fs::write(
+                app.join("Contents/Info.plist"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{bundle_id}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>
+"#
+                ),
+            )
+            .unwrap();
+            app
+        }
+
+        fn installed(&self, name: &str) -> std::path::PathBuf {
+            Self::bundle(&self.apps, name, EXPECTED_BUNDLE_ID, "2.5.3")
+        }
+
+        fn update_named(&self, name: &str, version: &str) {
+            Self::bundle(&self.root.join("dmg-contents"), name, EXPECTED_BUNDLE_ID, version);
+        }
+
+        /// Run the installer for `app` (the running bundle); returns the exit code.
+        fn run(&self, app: &std::path::Path, version: &str, codesign_fail: &str) -> i32 {
+            let mut done = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            let dead_pid = done.id();
+            done.wait().unwrap();
+            let status = std::process::Command::new("/bin/bash")
+                .args(["-c", &install_script(), "plaud-v2-install-update"])
+                .arg(&self.dmg)
+                .arg(app)
+                .arg(version)
+                .arg(dead_pid.to_string())
+                .arg(&self.log)
+                .env("PATH", format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.root.join("bin").display()))
+                .env("TMPDIR", self.root.join("tmp"))
+                .env("OPENED", &self.opened)
+                .env("CODESIGN_FAIL", codesign_fail)
+                .status()
+                .unwrap();
+            status.code().unwrap_or(-1)
+        }
+
+        fn opened(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.opened)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn version_of(app: &std::path::Path) -> String {
+            std::fs::read_to_string(app.join("Contents/MacOS/plaud-v2")).unwrap_or_default()
+        }
+
+        fn log_text(&self) -> String {
+            std::fs::read_to_string(&self.log).unwrap_or_default()
+        }
+
+        fn entries(&self) -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(&self.apps)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            v.sort();
+            v
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for InstallHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_renames_the_legacy_bundle() {
+        let h = InstallHarness::new("rename");
+        let old = h.installed("Plaud V2.app");
+        h.update_named("Open Pin.app", "2.6.0");
+        assert_eq!(h.run(&old, "2.6.0", ""), 0, "{}", h.log_text());
+        let new = h.apps.join("Open Pin.app");
+        assert_eq!(InstallHarness::version_of(&new), "2.6.0");
+        assert!(!old.exists(), "old bundle should be gone once the new one verified");
+        assert_eq!(h.entries(), vec!["Open Pin.app"]);
+        assert_eq!(h.opened(), vec![new.to_string_lossy().to_string()]);
+        assert!(!h.dmg.exists());
+        assert!(h.log_text().contains("Removed the old app"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_keeps_a_name_the_user_chose() {
+        // Renamed by the user: updated in place, name kept.
+        let h = InstallHarness::new("custom");
+        let app = h.installed("Recorder.app");
+        h.update_named("Open Pin.app", "2.6.0");
+        assert_eq!(h.run(&app, "2.6.0", ""), 0, "{}", h.log_text());
+        assert_eq!(InstallHarness::version_of(&app), "2.6.0");
+        assert_eq!(h.entries(), vec!["Recorder.app"]);
+        assert_eq!(h.opened(), vec![app.to_string_lossy().to_string()]);
+
+        // Already renamed: an ordinary in-place update.
+        let h = InstallHarness::new("inplace");
+        let app = h.installed("Open Pin.app");
+        h.update_named("Open Pin.app", "2.6.1");
+        assert_eq!(h.run(&app, "2.6.1", ""), 0, "{}", h.log_text());
+        assert_eq!(InstallHarness::version_of(&app), "2.6.1");
+        assert_eq!(h.entries(), vec!["Open Pin.app"]);
+        assert_eq!(h.opened(), vec![app.to_string_lossy().to_string()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_failed_rename_leaves_the_old_app() {
+        let h = InstallHarness::new("fail");
+        let old = h.installed("Plaud V2.app");
+        h.update_named("Open Pin.app", "2.6.0");
+        // The copy at the new path doesn't verify.
+        let target = h.apps.join("Open Pin.app");
+        assert_eq!(h.run(&old, "2.6.0", &target.to_string_lossy()), 1);
+        assert_eq!(InstallHarness::version_of(&old), "2.5.3");
+        assert_eq!(h.entries(), vec!["Plaud V2.app"]);
+        assert_eq!(h.opened(), vec![old.to_string_lossy().to_string()]);
+        assert!(h.log_text().contains("ABORT: install failed"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_replaces_a_copy_already_at_the_new_name() {
+        // Someone dragged Open Pin.app in by hand next to the old app.
+        let h = InstallHarness::new("both");
+        let old = h.installed("Plaud V2.app");
+        let manual = h.installed("Open Pin.app");
+        h.update_named("Open Pin.app", "2.6.0");
+        assert_eq!(h.run(&old, "2.6.0", ""), 0, "{}", h.log_text());
+        assert_eq!(InstallHarness::version_of(&manual), "2.6.0");
+        assert_eq!(h.entries(), vec!["Open Pin.app"]);
+
+        // If that fails, both copies are back as they were.
+        let h = InstallHarness::new("both-fail");
+        let old = h.installed("Plaud V2.app");
+        let manual = h.installed("Open Pin.app");
+        h.update_named("Open Pin.app", "2.6.0");
+        assert_eq!(h.run(&old, "2.6.0", &manual.to_string_lossy()), 1);
+        assert_eq!(InstallHarness::version_of(&manual), "2.5.3");
+        assert_eq!(InstallHarness::version_of(&old), "2.5.3");
+        assert_eq!(h.entries(), vec!["Open Pin.app", "Plaud V2.app"]);
+        assert_eq!(h.opened(), vec![old.to_string_lossy().to_string()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_leaves_a_different_app_at_the_new_name_alone() {
+        let h = InstallHarness::new("other");
+        let old = h.installed("Plaud V2.app");
+        let other = InstallHarness::bundle(&h.apps, "Open Pin.app", "com.example.other", "9.9.9");
+        h.update_named("Open Pin.app", "2.6.0");
+        assert_eq!(h.run(&old, "2.6.0", ""), 0, "{}", h.log_text());
+        assert_eq!(InstallHarness::version_of(&other), "9.9.9");
+        assert_eq!(InstallHarness::version_of(&old), "2.6.0");
+        assert_eq!(h.opened(), vec![old.to_string_lossy().to_string()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_script_refuses_a_wrong_bundle_id_or_version() {
+        let h = InstallHarness::new("wrong");
+        let old = h.installed("Plaud V2.app");
+        InstallHarness::bundle(&h.root.join("dmg-contents"), "Open Pin.app", "com.example.evil", "2.6.0");
+        assert_eq!(h.run(&old, "2.6.0", ""), 1);
+        assert_eq!(h.entries(), vec!["Plaud V2.app"]);
+        assert!(h.log_text().contains("bundle id is 'com.example.evil'"));
+
+        let h = InstallHarness::new("wrongver");
+        let old = h.installed("Plaud V2.app");
+        h.update_named("Open Pin.app", "2.5.9");
+        assert_eq!(h.run(&old, "2.6.0", ""), 1);
+        assert_eq!(h.entries(), vec!["Plaud V2.app"]);
+        assert_eq!(InstallHarness::version_of(&old), "2.5.3");
     }
 
     #[test]
     fn install_script_has_constants_filled_in() {
         let s = install_script();
         assert!(s.contains("EXPECTED_BUNDLE_ID=\"com.plaud.v2\""));
-        assert!(s.contains("EXPECTED_TEAM=\"4SN93PWF7Z\""));
-        assert!(!s.contains("__BUNDLE_ID__") && !s.contains("__TEAM_ID__"));
+        assert!(s.contains(&format!("EXPECTED_TEAM=\"{EXPECTED_TEAM_ID}\"")));
+        assert!(s.contains("LEGACY_BUNDLE_NAME=\"Plaud V2.app\""));
+        assert!(!s.contains("__BUNDLE_ID__") && !s.contains("__TEAM_ID__") && !s.contains("__LEGACY_BUNDLE__"));
+        if option_env!("APPLE_TEAM_ID").map_or(true, str::is_empty) {
+            assert_eq!(EXPECTED_TEAM_ID, "4SN93PWF7Z");
+        }
     }
 
     #[test]
@@ -1988,7 +2302,7 @@ mod tests {
             ..Default::default()
         };
         let md = build_report_md(&inp);
-        assert!(md.starts_with("# Plaud V2 bug report\n"));
+        assert!(md.starts_with("# Open Pin bug report\n"));
         assert!(
             md.contains("## What did you expect to happen?\n_Not provided_\n"),
             "{md}"
@@ -2004,7 +2318,7 @@ mod tests {
         assert!(md.contains("## System\n- **Build:** release\n- **Backend (as the app last saw it):** up\n- **Version:** 2.4.6"));
         assert!(md.contains("## Checks\n- cloud.signed_in: false\n"));
         assert!(md.contains("## Recent errors\n_None_\n"));
-        assert!(md.contains("Exported from Plaud V2 2.4.6."));
+        assert!(md.contains("Exported from Open Pin 2.4.6."));
         assert!(md.contains("Look through the files before you share them."));
         let no_checks = build_report_md(&ReportInputs::default());
         assert!(no_checks.contains("## Checks\n_Not available_\n"));
@@ -2127,7 +2441,7 @@ mod tests {
     #[test]
     fn zip_names_get_a_number_when_taken() {
         let dir = scratch_dir("zipname");
-        let base = "Plaud V2 bug report 2026-11-03 1430";
+        let base = "Open Pin bug report 2026-11-03 1430";
         assert_eq!(unique_zip_path(&dir, base), dir.join(format!("{base}.zip")));
         std::fs::write(dir.join(format!("{base}.zip")), b"x").unwrap();
         assert_eq!(
@@ -2145,7 +2459,7 @@ mod tests {
         let when = chrono::Local
             .with_ymd_and_hms(2026, 11, 3, 9, 5, 0)
             .unwrap();
-        assert_eq!(bug_report_name(when), "Plaud V2 bug report 2026-11-03 0905");
+        assert_eq!(bug_report_name(when), "Open Pin bug report 2026-11-03 0905");
     }
 
     #[test]
@@ -2164,11 +2478,11 @@ mod tests {
         let mut inputs = planted_inputs();
         inputs.actual = Some(format!("{} and {home_file}", inputs.actual.unwrap()));
         let zip = export_report(&inputs, when, &temp_root, &dest).expect("export");
-        assert_eq!(zip, dest.join("Plaud V2 bug report 2026-11-03 1430.zip"));
+        assert_eq!(zip, dest.join("Open Pin bug report 2026-11-03 1430.zip"));
         let second = export_report(&inputs, when, &temp_root, &dest).expect("second export");
         assert_eq!(
             second,
-            dest.join("Plaud V2 bug report 2026-11-03 1430 2.zip")
+            dest.join("Open Pin bug report 2026-11-03 1430 2.zip")
         );
         assert_eq!(
             std::fs::read_dir(&temp_root).unwrap().count(),
@@ -2184,7 +2498,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let folder = out.join("Plaud V2 bug report 2026-11-03 1430");
+        let folder = out.join("Open Pin bug report 2026-11-03 1430");
         for rel in [
             "report.md",
             "logs/app.log",
