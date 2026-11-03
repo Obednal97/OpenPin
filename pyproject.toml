@@ -1,6 +1,6 @@
 [project]
 name = "plaud-v2"
-version = "2.5.2"
+version = "2.5.3"
 # The app only runs on its managed CPython 3.12 (REQUIRED_PYTHON in
 # src-tauri/src/python.rs; app/requirements/*.txt are cp312-only).
 requires-python = ">=3.12,<3.13"
