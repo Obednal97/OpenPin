@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import worker, {
+  _resetLatestCache,
   buildCommentBody,
   buildIssueBody,
   DAILY_CREATE_LIMIT,
@@ -9,6 +10,7 @@ import worker, {
   GLOBAL_RATE_LIMIT_PER_MINUTE,
   isAllowedAssetName,
   isAllowedTag,
+  isCanary,
   isWorkerIssue,
   ISSUE_TITLE_CHARS,
   parseChecksum,
@@ -453,4 +455,82 @@ test('latest + download pass a renamed DMG (Open.Pin_…) through unchanged', as
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+
+// ---- Canary channel and per-host cache ------------------------------------
+
+function releaseFixture(tag, prerelease) {
+  const dmg = `Open.Pin_${tag.slice(1)}_aarch64.dmg`;
+  return {
+    tag_name: tag,
+    name: tag,
+    body: 'notes',
+    draft: false,
+    prerelease,
+    published_at: '2026-11-03T00:00:00Z',
+    assets: [{ name: dmg, size: 10, url: `https://api.github.com/repos/x/y/releases/assets/${tag}` }],
+  };
+}
+
+async function withReleases(fn) {
+  const realFetch = globalThis.fetch;
+  const stable = releaseFixture('v2.5.3', false);
+  const pre = releaseFixture('v2.6.0', true);
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    calls.push(u.pathname + u.search);
+    if (u.pathname === `/repos/${REPO}/releases/latest`) return Response.json(stable);
+    if (u.pathname === `/repos/${REPO}/releases`) return Response.json([pre, stable]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  _resetLatestCache();
+  try {
+    await fn(calls);
+  } finally {
+    globalThis.fetch = realFetch;
+    _resetLatestCache();
+  }
+}
+
+const latestFrom = (host, ip) =>
+  new Request(`https://${host}/v1/latest`, { headers: ip ? { 'CF-Connecting-IP': ip } : {} });
+
+test('isCanary matches only listed caller IPs', () => {
+  const env = { CANARY_IPS: ' 203.0.113.7 , 198.51.100.2' };
+  assert.equal(isCanary(latestFrom('w.example', '203.0.113.7'), env), true);
+  assert.equal(isCanary(latestFrom('w.example', '198.51.100.2'), env), true);
+  assert.equal(isCanary(latestFrom('w.example', '203.0.113.8'), env), false);
+  assert.equal(isCanary(latestFrom('w.example'), env), false);
+  assert.equal(isCanary(latestFrom('w.example', '203.0.113.7'), {}), false);
+});
+
+test('canary callers get the newest pre-release; everyone else the latest stable', async () => {
+  await withReleases(async () => {
+    const env = { ...makeEnv(), CANARY_IPS: '203.0.113.7' };
+    const ctx = { waitUntil() {} };
+    const canary = await worker.fetch(latestFrom('w.example', '203.0.113.7'), env, ctx);
+    assert.equal(canary.headers.get('X-Open-Pin-Channel'), 'canary');
+    assert.equal((await canary.json()).version, '2.6.0');
+    const stable = await worker.fetch(latestFrom('w.example', '198.51.100.9'), env, ctx);
+    assert.equal(stable.headers.get('X-Open-Pin-Channel'), 'stable');
+    assert.equal((await stable.json()).version, '2.5.3');
+    // And again from memory: still separate.
+    assert.equal((await (await worker.fetch(latestFrom('w.example', '198.51.100.9'), env, ctx)).json()).version, '2.5.3');
+  });
+});
+
+test("the cached answer never hands one host's download URL to another host", async () => {
+  await withReleases(async (calls) => {
+    const env = makeEnv();
+    const ctx = { waitUntil() {} };
+    const a = await (await worker.fetch(latestFrom('openpin.example'), env, ctx)).json();
+    const b = await (await worker.fetch(latestFrom('old.workers.example'), env, ctx)).json();
+    assert.ok(a.download_url.startsWith('https://openpin.example/v1/download/'));
+    assert.ok(b.download_url.startsWith('https://old.workers.example/v1/download/'));
+    const again = await (await worker.fetch(latestFrom('openpin.example'), env, ctx)).json();
+    assert.ok(again.download_url.startsWith('https://openpin.example/'));
+    assert.equal(calls.filter((c) => c.endsWith('/releases/latest')).length, 2); // one per host, then memory
+  });
 });
