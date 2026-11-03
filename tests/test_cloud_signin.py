@@ -488,6 +488,9 @@ def test_exchange_uses_saved_login_id_after_restart(monkeypatch):
 # pld_ut / pld_urt capture, Android-header sn-sign with Fernet, token refresh
 # ---------------------------------------------------------------------------
 
+from cryptography.fernet import Fernet  # noqa: E402
+
+
 class CookieResponse(FakeResponse):
     """FakeResponse whose raw.headers carries repeated Set-Cookie lines."""
 
@@ -542,6 +545,67 @@ class TestCookieCapture:
         cloud._cloud_state.update(ut="u", urt="r")
         cloud.logout()
         assert cloud._cloud_state["ut"] is None and cloud._cloud_state["urt"] is None
+
+
+class TestSnSignAndroid:
+    SN = "SN_ABC"
+
+    @pytest.fixture
+    def signed_in(self, plaud, tmp_config):
+        cloud._cloud_state.update(logged_in=True, token=FAKE_TOKEN, ut="the.ut", urt="the.urt")
+        return plaud
+
+    def test_sends_android_headers_and_prefers_ut(self, signed_in):
+        signed_in.on("POST", f"{EU}/device/sn-sign", {"status": 0, "data": {"signature": {self.SN: "SIG"}}})
+        assert cloud.fetch_sn_signature(self.SN) == {"signature": "SIG", "sn": self.SN}
+        _m, _u, kw = signed_in.calls[0]
+        h = kw["headers"]
+        assert h["Authorization"] == "Bearer the.ut"
+        assert h["app-platform"] == "android" and h["edit-from"] == "android"
+        assert h["app-version"] == "4.2.0 (1297)"
+        assert h["X-Encrypt-Response"] == "1"
+        assert h["User-Agent"] == "PLAUD/4.2.0(build:1297;Android 14)"
+        assert kw["json"] == {"sns": [self.SN]}
+
+    def test_falls_back_to_rest_token_without_ut(self, signed_in):
+        cloud._cloud_state.update(ut=None)
+        signed_in.on("POST", f"{EU}/device/sn-sign", {"status": 0, "data": {"signature": {self.SN: "SIG"}}})
+        cloud.fetch_sn_signature(self.SN)
+        assert signed_in.calls[0][2]["headers"]["Authorization"] == f"Bearer {FAKE_TOKEN}"
+
+    def test_fernet_body_is_decrypted(self, signed_in):
+        payload = {"status": 0, "data": {"signature": {self.SN: "DECRYPTED_SIG"}}}
+        blob = Fernet(cloud.PLAUD_FERNET_KEY).encrypt(json.dumps(payload).encode())
+        assert blob.startswith(b"gAAAAAB")
+        signed_in.on("POST", f"{EU}/device/sn-sign", blob)
+        assert cloud.fetch_sn_signature(self.SN)["signature"] == "DECRYPTED_SIG"
+        assert cloud.get_device_sn_signature(self.SN) == "DECRYPTED_SIG"
+
+    def test_decode_body_garbage_is_empty(self):
+        assert cloud._decode_body(b"gAAAAABnot-a-token") == {}
+        assert cloud._decode_body(b"<html>") == {}
+
+    def test_stale_ut_refreshes_once_then_succeeds(self, signed_in):
+        replies = iter([FakeResponse({"status": -3900, "msg": "invalid auth header"}, 401),
+                        FakeResponse({"status": 0, "data": {"signature": {self.SN: "SIG2"}}})])
+        signed_in.on("POST", f"{EU}/device/sn-sign", lambda **kw: next(replies))
+        signed_in.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [UT_CLEARER, f"pld_ut={NEW_UT}"]))
+        signed_in.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        assert cloud.fetch_sn_signature(self.SN)["signature"] == "SIG2"
+        urls = [u for _m, u in signed_in.urls()]
+        assert urls.count(f"{EU}/device/sn-sign") == 2
+        assert urls.count(f"{EU}/auth/refresh-user-token") == 1
+        sign_calls = [c for c in signed_in.calls if c[1].endswith("/device/sn-sign")]
+        assert sign_calls[1][2]["headers"]["Authorization"] == f"Bearer {NEW_UT}"
+
+    def test_refresh_is_attempted_only_once(self, signed_in):
+        signed_in.on("POST", f"{EU}/device/sn-sign", {"status": -3900, "msg": "invalid auth header"}, status_code=401)
+        signed_in.on("POST", f"{EU}/auth/refresh-user-token", CookieResponse({}, [f"pld_ut={NEW_UT}"]))
+        signed_in.on("GET", f"{EU}/user/me", GOOD_USER_REPLY)
+        assert "error" in cloud.fetch_sn_signature(self.SN)
+        urls = [u for _m, u in signed_in.urls()]
+        assert urls.count(f"{EU}/auth/refresh-user-token") == 1
+        assert urls.count(f"{EU}/device/sn-sign") == 2
 
 
 class TestRefreshUserToken:

@@ -138,6 +138,34 @@ def _json_or_empty(response):
     return body if isinstance(body, dict) else {}
 
 
+# Plaud's response-encryption key. Fixed and identical for every Plaud user (it
+# ships in the Android app and the web app), so it's a constant, not a secret.
+PLAUD_FERNET_KEY = b"8rRmMCskL3NaUiGr-UsmEEeI8NKH-ZfeGbpRGqSLpuI="
+
+
+def _sn_sign_headers(token):
+    """The Android app's header set, the only one under which a user (UT) token
+    works as a bearer for /device/sn-sign.
+
+    Under the desktop/web headers the same token gets HTTP 401 / -3900, and the
+    workspace (WT) token gets -3901. X-Encrypt-Response asks for a Fernet body.
+    Built fresh per call (new x-request-id).
+    """
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "app-platform": "android",
+        "app-version": "4.2.0 (1297)",
+        "edit-from": "android",
+        "app-language": "en",
+        "User-Agent": "PLAUD/4.2.0(build:1297;Android 14)",
+        "x-device-id": _client_device_id(),
+        "x-request-id": uuid.uuid4().hex,
+        "timezone": _system_timezone(),
+        "X-Encrypt-Response": "1",
+    }
+
+
 def _decode_body(raw):
     """Parse a Plaud reply body that is either plain JSON or a Fernet blob.
 
@@ -1185,20 +1213,39 @@ def get_device_bind_token(sn):
 def fetch_sn_signature(sn):
     """Fetch the SN_SIG (snSignature) for a device from the cloud API.
 
-    POST /device/sn-sign with {"sns": ["<serial_number>"]}
-    Returns the per-device RSA signature needed for BLE handshake.
-    Stores it in config for offline use.
+    POST /device/sn-sign with {"sns": ["<serial_number>"]} (plural: a singular
+    "sn" returns status 0 with an empty signature). Returns the per-device RSA
+    signature needed for the BLE handshake and stores it in config for offline use.
 
-    Plaud answers -3901 ("token type does not match parse mode") when the
-    login token is the wrong kind: sn-sign wants the user token from the
-    desktop sign-in, not the web app's workspace (WT) token. The official app
-    picks the token by path, with no sn-sign-specific header or field.
+    Plaud answers -3901 ("token type does not match parse mode") for the web
+    app's workspace (WT) token: sn-sign wants the user token (pld_ut), so this
+    prefers ``ut`` over the REST token. It only works under the Android app's
+    header set (see _sn_sign_headers), and with X-Encrypt-Response the reply is
+    a Fernet blob (decoded by _decode_body). A stale ut (HTTP 401 / -3900) is
+    refreshed once with the stored pld_urt and the request retried.
     """
     if not _cloud_state["logged_in"] or not _cloud_state["token"]:
         return {"error": "Not logged in to Plaud cloud"}
 
     try:
-        data = cloud_api("/device/sn-sign", method="POST", json_body={"sns": [sn]})
+        refreshed = False
+        while True:
+            token = _cloud_state.get("ut") or _cloud_state["token"]
+            domain = _cloud_state["api_domain"]
+            r = http_requests.post(
+                f"{domain}/device/sn-sign",
+                headers=_sn_sign_headers(token),
+                json={"sns": [sn]},
+                timeout=30,
+            )
+            data = _decode_body(r.content)
+            stale = r.status_code == 401 or data.get("status") == -3900
+            if stale and not refreshed and _cloud_state.get("urt"):
+                refreshed = True
+                if refresh_user_token().get("refreshed"):
+                    continue
+            break
+        r.raise_for_status()  # HTTP errors surface as before (e.g. 401 -> "sign in again")
         if data.get("status") == 0:
             signatures = (data.get("data") or {}).get("signature") or {}
             sig = signatures.get(sn)

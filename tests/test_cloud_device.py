@@ -1,10 +1,13 @@
 """Tests for per-device cloud credentials (SN_SIG + BIND_TOKEN)."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+_STATE = {"logged_in": True, "token": "tok", "api_domain": "https://api-euc1.plaud.ai", "ut": None, "urt": None}
 
 
 class TestNoHardcodedCredentials:
@@ -90,8 +93,10 @@ class TestCloudDeviceCredentials:
             "status": 0,
             "data": {"signature": {"SN_ABC": "test_sig_base64=="}}
         }
-        with patch("app.state.cloud.cloud_api", return_value=mock_response), \
-             patch("app.state.cloud._cloud_state", {"logged_in": True, "token": "user_token"}):
+        resp = type("R", (), {"status_code": 200, "content": json.dumps(mock_response).encode(),
+                              "raise_for_status": lambda self: None})()
+        with patch("app.state.cloud.http_requests.post", return_value=resp), \
+             patch("app.state.cloud._cloud_state", dict(_STATE, token="user_token")):
             from app.state.cloud import fetch_sn_signature, get_device_sn_signature
             result = fetch_sn_signature("SN_ABC")
             assert result["signature"] == "test_sig_base64=="
@@ -114,17 +119,17 @@ class TestCloudDeviceCredentials:
     def test_sn_sign_endpoint_uses_sns_array(self, tmp_config):
         """The API call must use 'sns' (array) not 'sn' (string)."""
         call_args = {}
-        def mock_api(endpoint, method="GET", json_body=None, **kwargs):
-            call_args["endpoint"] = endpoint
-            call_args["method"] = method
-            call_args["json_body"] = json_body
-            return {"status": 0, "data": {"signature": {"SN_ABC": "sig=="}}}
 
-        with patch("app.state.cloud.cloud_api", side_effect=mock_api), \
-             patch("app.state.cloud._cloud_state", {"logged_in": True, "token": "tok"}):
+        def mock_post(url, headers=None, json=None, **kwargs):
+            call_args.update(url=url, headers=headers, json_body=json)
+            body = {"status": 0, "data": {"signature": {"SN_ABC": "sig=="}}}
+            return type("R", (), {"status_code": 200, "content": json.dumps(body).encode(),
+                                  "raise_for_status": lambda self: None})()
+
+        with patch("app.state.cloud.http_requests.post", side_effect=mock_post), \
+             patch("app.state.cloud._cloud_state", dict(_STATE, token="tok")):
             from app.state.cloud import fetch_sn_signature
             fetch_sn_signature("SN_ABC")
 
-        assert call_args["endpoint"] == "/device/sn-sign"
-        assert call_args["method"] == "POST"
+        assert call_args["url"].endswith("/device/sn-sign")
         assert call_args["json_body"] == {"sns": ["SN_ABC"]}
