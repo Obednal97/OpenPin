@@ -32,11 +32,14 @@ def _schema(**over):
 
 @pytest.fixture
 def env(flask_client, tmp_path):
-    """Push plumbing with schema handling and the Session ID lookup stubbed
-    (they have their own tests below); tests may re-patch either."""
+    """Push plumbing with schema handling, the Session ID lookup and the
+    legacy-page lookup stubbed (they have their own tests, the last in
+    test_notion_legacy.py); tests may re-patch any of them."""
     from app.routes import notion as rn
 
-    real = types.SimpleNamespace(find=rn._find_page_by_session_id, ensure_schema=rn._ensure_schema)
+    real = types.SimpleNamespace(
+        find=rn._find_page_by_session_id, ensure_schema=rn._ensure_schema, match_legacy=rn._match_legacy_page
+    )
     trn = tmp_path / "transcripts"
     trn.mkdir()
     with (
@@ -45,6 +48,7 @@ def env(flask_client, tmp_path):
         patch("app.state.notion.get_database_id", return_value="db-id"),
         patch("app.routes.notion._ensure_schema", return_value=_schema()),
         patch("app.routes.notion._find_page_by_session_id", return_value=None),
+        patch("app.routes.notion._match_legacy_page", return_value=("none", [])),
         patch("app.routes.notion._sleep"),
     ):
         yield types.SimpleNamespace(client=flask_client, trn=trn, root=tmp_path, real=real)
