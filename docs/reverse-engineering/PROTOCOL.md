@@ -83,7 +83,7 @@ The handshake needs three things. None of them is the owner's Plaud account pass
 |---|---|---|---|
 | App RSA key pair | RSA-2048 key pair shipped in the Android app. Identical in every install | Extracted from the APK. Kept in `keys/e2ee_private.pem` and `keys/e2ee_public.pem`, which are not in git | Files |
 | `SN_SIG` | 256-byte signature over the serial | `POST /device/sn-sign` | Config `device_sn_signatures[SN]`, base64 |
-| `BIND_TOKEN` | Per-device token | `POST /device/bind` (`access_token` in the reply) | Config `device_bind_tokens[SN]` |
+| `BIND_TOKEN` | Per-device token: the account's `user_id` (Plaud's current app; v2.4.3+), or for NotePins paired by v2.0–v2.4.2 the legacy constant `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX` (the first 32 characters of the old `/device/bind` `access_token`, identical for every HS256 JWT). See COMMANDS.md cmd 1 | `user_id` from `/user/me`; the legacy constant is built in | Config `device_bind_tokens[SN]` |
 
 `app/state/cloud.py` (`bind_device()`, `fetch_sn_signature()`) fetches `SN_SIG` and `BIND_TOKEN`
 once per device, when the user is signed in to Plaud Cloud. After that the app works offline. If
@@ -420,7 +420,7 @@ Region lock: a reply with `status` −302 or `msg` "user region mismatch" names 
 |---|---|---|
 | GET | `/user/me` | Validate the token |
 | GET | `/device/list` | Devices on the account (`data_devices`) |
-| POST | `/device/bind` | `{"sn", "name", "model": "882", "version_number": 65546}` → `data.access_token` = `BIND_TOKEN` |
+| POST | `/device/bind` | `{"sn", "name", "model": "882", "version_number": 65546}` → since November 2026 no `access_token` in the reply (it used to carry the device JWT whose first 32 characters were the `BIND_TOKEN`) |
 | POST | `/device/sn-sign` | `{"sns": [SN]}` → `data.signature[SN]` = `SN_SIG` (base64) |
 | GET | `/file/simple/web` | List recordings (`skip`, `limit`, `is_trash=0`, `sort_by=start_time`, `is_desc=true`) |
 | GET | `/file/temp-url/{id}?is_opus=1` | Presigned URL (`temp_url_opus` or `temp_url`) |

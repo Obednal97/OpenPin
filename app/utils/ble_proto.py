@@ -73,6 +73,18 @@ HANDSHAKE_MAX_REPLY_WAITS = 4
 SHORT_TOKEN_BELOW_PORT_VERSION = 9
 SHORT_TOKEN_LEN = 16
 
+# cmd 1 status 1 is the SDK's TOKEN_NOT_MARCH ("token mismatch",
+# Constants$ConnectBleFailed.java; a07.java turns it into DEVICE_TOKEN_NOT_MATCH).
+HANDSHAKE_STATUS_TOKEN_MISMATCH = 1
+
+# The token this app sent from March 2026 to v2.4.2: the first 32 characters of
+# the device JWT from POST /device/bind. They are the same for every HS256 JWT
+# (base64url of {"alg":"HS256","typ":"JWT"}), so it is a public constant, not a
+# secret. NotePins paired by those versions are bound to it; v2.4.3 switched to
+# the account's user_id (what Plaud's current app sends), which they reject
+# with status 1. Plaud's app retries older tokens on a mismatch too.
+LEGACY_BIND_TOKEN = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX"
+
 
 def handshake_request(token32, flag):
     """cmd 1 request: [1,1,0][version 2][audio channel 0][flag] + 32-byte BIND_TOKEN."""
@@ -200,6 +212,14 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
             f"[BLE] {SHORT_TOKEN_LEN}-byte token "
             + ("accepted" if verdict == HANDSHAKE_OK else f"didn't help either ({verdict})")
         )
+    mismatch = any(h is not None and h["status"] == HANDSHAKE_STATUS_TOKEN_MISMATCH for h in hs)
+    if verdict == HANDSHAKE_REJECTED and mismatch and token32 != LEGACY_BIND_TOKEN:
+        logging.warning("[BLE] Token mismatch (status 1): retrying with the token app versions up to 2.4.2 sent")
+        token = LEGACY_BIND_TOKEN
+        verdict, hs, port_version, r4 = await attempt(token)
+        logging.warning(
+            "[BLE] Legacy token " + ("accepted" if verdict == HANDSHAKE_OK else f"didn't help either ({verdict})")
+        )
     statuses = [h["status"] for h in hs if h is not None]
     if verdict == HANDSHAKE_OK and any(s != 0 for s in statuses):
         logging.warning(
@@ -220,7 +240,15 @@ async def bind_handshake(send, token32, log=None, now=None, utc_offset_minutes=N
                 else " — continuing anyway (FAIL_ON_HANDSHAKE_REJECTED is off); please report"
             )
         )
-    return verdict, {"hs": hs, "port_version": port_version, "time_sync_reply": r4, "token_len": len(token)}
+    return verdict, {
+        "hs": hs,
+        "port_version": port_version,
+        "time_sync_reply": r4,
+        "token_len": len(token),
+        # The token the device accepted, when it isn't the one passed in (the
+        # caller saves it so the next connect starts with it).
+        "accepted_token": token if verdict == HANDSHAKE_OK and token != token32 else None,
+    }
 
 
 # -- cmd 4: time sync ---------------------------------------------------------------

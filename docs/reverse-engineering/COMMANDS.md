@@ -124,6 +124,16 @@ alone isn't treated as a failure. Each reply is waited for at most 1.5 s
 (`ble_proto.HANDSHAKE_REPLY_TIMEOUT_S`) and at most four are awaited (cmd 1 twice, cmd 4, the cmd 3
 probe), so a silent device adds at most 6 s to a connect.
 
+**Status 1 = token mismatch (Confirmed, 3 November 2026).** The SDK's `ConnectBleFailed` codes
+(`Constants$ConnectBleFailed.java`): 1 `TOKEN_NOT_MARCH` (token mismatch), 2 recording now, 3 user
+refused, 4 SSN failed, 255 not in pairing mode. The owner's NotePin S answered the `user_id` token
+with status 1 (`010100011400…`) and then ignored every command; its March 2026 sessions with the
+legacy token got status 0. Since v2.5.0, a status-1 rejection is retried once with the legacy token
+(`ble_proto.LEGACY_BIND_TOKEN`, see PROTOCOL.md), and a token that works is saved as the device's
+`BIND_TOKEN` (config and Keychain backup). Plaud's own app does more on a mismatch: it tries older
+tokens from the cloud's `check-sn-info` token list, unbinds and re-binds with the new token
+(`vua.java`, `a07.java` ForceUnbind). That isn't implemented.
+
 **Token length (Implemented, v2.4.5).** Plaud's app sends the `BIND_TOKEN` as 32 bytes from port
 version 9 and as its first 16 bytes below that (`kwb.java`: `n = portVersion >= 9 ? 32 : 16`). The
 app always sends 32 first; if that looks rejected and the reply reports a port version below 9, it

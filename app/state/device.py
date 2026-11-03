@@ -643,6 +643,21 @@ async def _address_visible(address):
         return True
 
 
+def _remember_bind_token(sn, token_bytes):
+    """Save the token the NotePin accepted (a fallback in bind_handshake) as its
+    BIND_TOKEN, in the config and the Keychain backup, so the next connect and
+    an exported pairing file use it."""
+    try:
+        token = token_bytes.rstrip(b"\x00").decode("ascii")
+    except UnicodeDecodeError:
+        return
+    from app.utils import pairing_store
+
+    update_config(lambda c: c.setdefault("device_bind_tokens", {}).__setitem__(sn, token))
+    pairing_store.backup_serial_async(sn)  # Keychain copy, off the BLE loop
+    logging.warning(f"[BLE] Saved the token this NotePin accepted (serial ending {sn[-4:]})")
+
+
 async def connect_device(address=None):
     """Connect to device, perform handshake, return status."""
 
@@ -981,6 +996,8 @@ async def connect_device(address=None):
     # bind_handshake() and the connect carries on, as in v2.4.0.
     verdict, hs_info = await bind_handshake(lambda pt: send_cmd(pt, timeout=_HANDSHAKE_REPLY_TIMEOUT_S), token32)
     _record_handshake(verdict, hs_info)
+    if hs_info.get("accepted_token") and sn:
+        _remember_bind_token(sn, hs_info["accepted_token"])
     if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
         await _disconnect_quietly(cl)
         _reset_state()
