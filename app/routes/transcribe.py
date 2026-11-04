@@ -10,6 +10,7 @@ from pathlib import Path
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
+from app.coaching import store as coaching_store
 from app.providers.summarize import generate_title, summarize
 from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
 from app.providers.validate import validate_key as do_validate_key
@@ -139,6 +140,9 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
         _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
         if txt_text is not None:
             _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
+    # After releasing the transcript lock: the coaching store has its own lock.
+    if existing.get("text") != new_fields.get("text"):
+        coaching_store.mark_stale(session_id)
     return merged
 
 
