@@ -364,7 +364,7 @@ sequenceDiagram
     W->>GH: releases/latest (cached 5 min)
     W-->>App: version, asset name/size/sha256, download_url
     App->>W: GET /v1/download/<tag>/<asset>
-    W-->>App: 302 to a short-lived GitHub URL
+    W-->>App: 302 to the public GitHub download URL
     App->>GH: download DMG, check size and SHA-256
     Note over App: banner: Restart to Update
     App->>App: helper script: mount DMG, check bundle ID, version,<br/>codesign, team ID, Gatekeeper, swap, relaunch

@@ -28,7 +28,7 @@ The repository it reads releases from is `REPO` in `src/index.js`.
 | Method + path | What it does |
 |---|---|
 | `GET /v1/latest` | Latest published release (GitHub `releases/latest`, so no drafts or pre-releases; canary callers get the newest including pre-releases): `{version, tag, name, notes, published_at, asset: {name, size, sha256 \| null}, download_url}`. `sha256` comes from a `<dmg name>.sha256` asset (or `SHA256SUMS`) on the release, else `null`. Cached per host 5 min in a per-isolate memory cache, with the Cache API as a best-effort second layer; the `X-Plaud-Cache` header says which (`miss`, `cache`, `memory`), and `X-Open-Pin-Channel` says `stable` or `canary`. |
-| `GET /v1/download/<tag>/<asset>` | Looks the asset up on that release and answers **302** to GitHub's short-lived signed URL (no token in it), so the DMG never streams through the Worker. Only `.dmg` and `.sha256` assets; anything unknown is 404. |
+| `GET /v1/download/<tag>/<asset>` | Answers **302** to the asset's public URL (`https://github.com/<repo>/releases/download/<tag>/<asset>`), which GitHub redirects to a short-lived signed URL, so the DMG never streams through the Worker. No GitHub API call: unauthenticated API calls share a 60/hour limit per Cloudflare egress IP, which failed v2.6.1 downloads with 502. A draft or missing asset 404s at GitHub. Only `.dmg` and `.sha256` assets; anything unknown is 404. |
 | anything else | 404 |
 
 ## Caching
@@ -62,7 +62,7 @@ Only needed if unauthenticated reads ever hit GitHub's rate limit.
 ```bash
 W=https://openpin.bednal.com
 curl -s $W/v1/latest | jq '{version, asset}'
-curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$W/v1/download/v2.6.0/Open.Pin_2.6.0_aarch64.dmg"   # 302 → githubusercontent
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "$W/v1/download/v2.6.0/Open.Pin_2.6.0_aarch64.dmg"   # 302 → github.com/…/releases/download/
 ```
 
 Logs: `npx --yes wrangler@4 tail` (observability is on in `wrangler.toml`).
