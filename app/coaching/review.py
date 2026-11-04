@@ -7,6 +7,7 @@ transcript, so every judgement the user sees points at a real moment.
 """
 
 import json
+import math
 
 from app.providers.llm_json import call_llm_json
 from app.providers.summarize import _fmt_ts
@@ -105,7 +106,11 @@ def _near(t, times, tol):
 
 
 def _number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _list(v):
+    return v if isinstance(v, list) else []
 
 
 def ground(review: dict, segments: list[dict], tolerance_s: float = 2.0, interruption_candidates=None) -> dict:
@@ -115,27 +120,37 @@ def ground(review: dict, segments: list[dict], tolerance_s: float = 2.0, interru
     dropped; scores are clamped to 0-100; ``next_time`` loses empty strings and keeps at most 3.
     When ``interruption_candidates`` (times) is given, ``interruptions_confirmed`` keeps only
     entries within tolerance of a candidate: the model can confirm candidates, not invent them.
+    Malformed shapes (non-dict entries, non-list arrays, non-finite times) are skipped, never raised.
     """
     starts = [s["start"] for s in segments]
     out = dict(review)
 
     scores = {}
-    for k, v in (review.get("scores") or {}).items():
+    raw_scores = review.get("scores")
+    for k, v in raw_scores.items() if isinstance(raw_scores, dict) else []:
+        if not isinstance(v, dict):
+            continue
         v = dict(v)
         try:
             v["score"] = max(0, min(100, int(round(float(v.get("score", 0))))))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             v["score"] = 0
         scores[k] = v
     out["scores"] = scores
 
     for key in ("reactions", "moments"):
-        out[key] = [x for x in review.get(key) or [] if _number(x.get("t")) and _near(x["t"], starts, tolerance_s)]
+        out[key] = [
+            x
+            for x in _list(review.get(key))
+            if isinstance(x, dict) and _number(x.get("t")) and _near(x["t"], starts, tolerance_s)
+        ]
 
-    nxt = [s.strip() for s in review.get("next_time") or [] if isinstance(s, str) and s.strip()]
+    nxt = [s.strip() for s in _list(review.get("next_time")) if isinstance(s, str) and s.strip()]
     out["next_time"] = nxt[:MAX_NEXT_TIME]
 
-    confirmed = [t for t in review.get("interruptions_confirmed") or [] if _number(t) and _near(t, starts, tolerance_s)]
+    confirmed = [
+        t for t in _list(review.get("interruptions_confirmed")) if _number(t) and _near(t, starts, tolerance_s)
+    ]
     if interruption_candidates is not None:
         confirmed = [t for t in confirmed if _near(t, interruption_candidates, tolerance_s)]
     out["interruptions_confirmed"] = confirmed
@@ -160,8 +175,8 @@ def review_conversation(segments, owner_labels, metrics, config, owner_name: str
     if parsed is None:
         return {"review": None, "provider": provider, "errors": errors}
     candidates = [m["t"] for m in metrics.get("moments", []) if m.get("kind") == "interruption"]
-    return {
-        "review": ground(parsed, segments, interruption_candidates=candidates),
-        "provider": provider,
-        "errors": errors,
-    }
+    try:
+        grounded = ground(parsed, segments, interruption_candidates=candidates)
+    except Exception as e:  # broken model output must never crash the caller
+        return {"review": None, "provider": provider, "errors": [*errors, f"invalid review shape: {e}"]}
+    return {"review": grounded, "provider": provider, "errors": errors}
