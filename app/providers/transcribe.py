@@ -6,6 +6,7 @@ omit the language field entirely; Deepgram sends ``detect_language=true``.
 
 import mimetypes
 import re
+import string
 from pathlib import Path
 from urllib.parse import quote
 
@@ -220,6 +221,23 @@ def transcribe_groq(audio_path, api_key, language=None, vocab_prompt=None):
     return r.json()
 
 
+FILLER_TOKENS = frozenset({"um", "uh", "uhm", "umm", "er", "erm", "hmm", "mm", "mhm"})
+
+
+def _is_filler(token):
+    return token.lower().strip(string.punctuation + " ") in FILLER_TOKENS
+
+
+def _clean_words_text(words):
+    """Join Deepgram word dicts into text, dropping filler tokens."""
+    kept = []
+    for w in words:
+        token = w.get("punctuated_word") or w.get("word") or ""
+        if token and not _is_filler(token):
+            kept.append(token)
+    return " ".join(kept)
+
+
 def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywords=None):
     """Transcribe using Deepgram Nova-3. Returns OpenAI-compatible result shape."""
     params = {
@@ -227,6 +245,7 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         "punctuate": "true",
         "smart_format": "true",
         "utterances": "true",
+        "filler_words": "true",
     }
     if language and language != "auto":
         params["language"] = language
@@ -256,7 +275,10 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
     # Extract results
     channel = data.get("results", {}).get("channels", [{}])[0]
     alt = channel.get("alternatives", [{}])[0]
-    full_text = alt.get("transcript", "")
+    # Fillers are requested so coaching can count them, but the transcript the
+    # user reads stays clean: rebuild the text without them.
+    raw_words = alt.get("words") or []
+    full_text = _clean_words_text(raw_words) if raw_words else alt.get("transcript", "")
     detected_lang = channel.get("detected_language") or (language if language != "auto" else None) or ""
     metadata = data.get("metadata", {})
     duration = metadata.get("duration", 0)
@@ -267,12 +289,29 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         speaker = None
         if diarize and utt.get("speaker") is not None:
             speaker = f"Speaker {utt['speaker'] + 1}"
+        utt_words = utt.get("words")
+        text = _clean_words_text(utt_words) if utt_words else utt.get("transcript", "").strip()
+        if utt_words and not text:
+            continue  # the utterance was only fillers
         segments.append(
             {
                 "start": utt.get("start", 0),
                 "end": utt.get("end", 0),
-                "text": utt.get("transcript", "").strip(),
+                "text": text,
                 "speaker": speaker,
+            }
+        )
+
+    words = []
+    for w in raw_words:
+        spk = w.get("speaker")
+        words.append(
+            {
+                "word": w.get("punctuated_word") or w.get("word") or "",
+                "start": w.get("start", 0),
+                "end": w.get("end", 0),
+                "speaker": f"Speaker {spk + 1}" if diarize and spk is not None else None,
+                "confidence": w.get("confidence"),
             }
         )
 
@@ -285,4 +324,5 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         "duration": duration,
         "language": detected_lang,
         "speakers": speakers,
+        "words": words,
     }
