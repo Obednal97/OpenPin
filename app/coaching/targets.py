@@ -22,6 +22,9 @@ MIN_COACHING_SECONDS = 120
 # An owner turn starting within this many seconds of the other turn ending can count as a likely interruption.
 INTERRUPT_MAX_GAP_S = 0.2
 
+# A same-side run of segments is split into separate turns when the silence between them exceeds this (seconds).
+TURN_SPLIT_GAP_S = 10.0
+
 BACKCHANNELS = frozenset(
     {"yeah", "yes", "yep", "mm", "mhm", "right", "ok", "okay", "sure", "uh-huh", "true", "exactly"}
 )

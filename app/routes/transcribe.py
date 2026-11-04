@@ -1,5 +1,6 @@
 """Transcription and summarization routes."""
 
+import hashlib
 import json
 import logging
 import os
@@ -25,6 +26,17 @@ from app.utils.paths import (
 )
 from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
+
+
+def _save_coaching_words(session_id, words, text):
+    """Replace the coaching sidecar's verbatim words after a transcription.
+
+    Providers without verbatim words (Groq, OpenAI, local Whisper) pass []
+    so fillers from an earlier Deepgram run are never reused. The words stay
+    out of the transcript JSON, the .txt, the summary input and webhooks.
+    """
+    text_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+    coaching_store.update(session_id, lambda d: d.update(words=words or [], transcript_text_hash=text_hash))
 
 
 def _extract_spoken_tags(text):
@@ -429,6 +441,7 @@ def transcribe_file():
                     break
 
         if _used_cloud:
+            verbatim_words = result.pop("words", None) or []
             text = result.get("text", "")
             segments = []
             for seg in result.get("segments", []):
@@ -482,6 +495,7 @@ def transcribe_file():
                 else:
                     run_local_diarization, diarization_message = _plan_local_diarization(t_data)
             _merge_transcript(session_id, transcript_path, t_data, txt_text=text)
+            _save_coaching_words(session_id, verbatim_words, text)
 
             # Auto-detect spoken tags from the beginning of the transcript
             spoken_tags = _apply_spoken_tags(session_id, text)
@@ -577,6 +591,7 @@ def transcribe_file():
             if diarize:
                 run_local_diarization, diarization_message = _plan_local_diarization(local_fields)
             _merge_transcript(session_id, transcript_path, local_fields, txt_text=t.formatted)
+            _save_coaching_words(session_id, [], t.text)
 
             # Auto-detect spoken tags
             local_spoken_tags = _apply_spoken_tags(session_id, t.text)
