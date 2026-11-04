@@ -8,6 +8,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
+from app.coaching import store as coaching_store
 from app.utils import redownload_backup
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
@@ -911,6 +912,7 @@ def update_transcript():
 
     with get_transcript_lock(session_id):
         transcript = json.loads(json_path.read_text())
+        old_text = transcript.get("text")
 
         if "segments" in data:
             transcript["segments"] = data["segments"]
@@ -923,7 +925,11 @@ def update_transcript():
 
         json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
         txt_path.write_text(transcript.get("text", ""))
+        text_changed = transcript.get("text") != old_text
 
+    # After releasing the transcript lock: the coaching store has its own lock.
+    if text_changed:
+        coaching_store.mark_stale(session_id)
     return jsonify({"saved": True})
 
 
