@@ -1,0 +1,167 @@
+"""AI coaching review of one conversation, with timestamp grounding.
+
+One structured-output LLM call per recording. The model sees the transcript with the owner
+marked, plus the measured metrics, and returns scores, a summary, actions and timestamped
+reactions and moments. ``ground`` then drops anything citing a time that is not in the
+transcript, so every judgement the user sees points at a real moment.
+"""
+
+import json
+
+from app.providers.llm_json import call_llm_json
+from app.providers.summarize import _fmt_ts
+
+from .metrics import owner_turns
+
+MAX_TURNS = 400
+SCORE_KEYS = ("clarity", "warmth", "charisma", "listening", "reception")
+RESPONSES = ["engaged", "agreed", "pushed_back", "deflected", "short", "follow_up"]
+MAX_NEXT_TIME = 3
+
+
+def _obj(properties):
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+_SCORE = _obj({"score": {"type": "integer"}, "reason": {"type": "string"}})
+
+REVIEW_SCHEMA = _obj(
+    {
+        "scores": _obj(dict.fromkeys(SCORE_KEYS, _SCORE)),
+        "summary": {"type": "string"},
+        "next_time": {"type": "array", "items": {"type": "string"}},
+        "reactions": {
+            "type": "array",
+            "items": _obj(
+                {
+                    "t": {"type": "number"},
+                    "owner_point": {"type": "string"},
+                    "response": {"type": "string", "enum": RESPONSES},
+                    "evidence": {"type": "string"},
+                }
+            ),
+        },
+        "moments": {
+            "type": "array",
+            "items": _obj({"t": {"type": "number"}, "kind": {"type": "string"}, "note": {"type": "string"}}),
+        },
+        "interruptions_confirmed": {"type": "array", "items": {"type": "number"}},
+    }
+)
+
+
+def _system_prompt(owner_name, british, truncated):
+    if owner_name:
+        who = f"The person you are coaching is {owner_name}; their lines are marked (you)."
+    else:
+        who = "The person you are coaching is the one whose lines are marked (you)."
+    parts = [
+        "You are a conversation coach reviewing one recorded conversation. " + who,
+        "Be blunt, specific and kind but honest. Coach the (you) speaker only; never judge anyone else.",
+        "Scores are integers from 0 to 100 with a one-line reason each: clarity, warmth, charisma, "
+        "listening, and reception (how the other people responded to them). Give 2 to 3 concrete "
+        "next_time actions. In reactions, for the (you) speaker's key points, say what the other "
+        "person did next. In moments, note things like a strong question, a point that landed, "
+        "rambling or hedging.",
+        "Every reaction and moment must cite a time t in seconds taken from a line you were given "
+        "(the [mm:ss] at the start of that line, converted to seconds). Never invent a timestamp or "
+        "quote words that are not in the transcript.",
+        "The recording is single-channel audio, so the interruptions listed in the metrics are only "
+        "likely interruptions. In interruptions_confirmed, list the t of each listed candidate you "
+        "agree is a real interruption by the (you) speaker; reject the rest by leaving them out. "
+        "Never add a time that is not listed.",
+        "The measured metrics are exact where marked and estimated otherwise; use them, do not recompute them.",
+    ]
+    if truncated:
+        parts.append(f"The transcript was cut to the first {MAX_TURNS} turns around the (you) speaker's turns.")
+    if british:
+        parts.append("Use British English spelling and phrasing (colour, organisation, summarise).")
+    return "\n\n".join(parts)
+
+
+def _select_turns(turns):
+    """First MAX_TURNS turns that are the owner's or next to the owner's."""
+    keep = [
+        t
+        for i, t in enumerate(turns)
+        if t["owner"] or (i > 0 and turns[i - 1]["owner"]) or (i + 1 < len(turns) and turns[i + 1]["owner"])
+    ]
+    return keep[:MAX_TURNS], len(keep) > MAX_TURNS
+
+
+def _line(turn):
+    who = turn.get("speaker") or "Unknown"
+    mark = " (you)" if turn["owner"] else ""
+    return f"[{_fmt_ts(turn['start'])}] {who}{mark}: {turn['text']}"
+
+
+def _near(t, times, tol):
+    return any(abs(t - s) <= tol for s in times)
+
+
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def ground(review: dict, segments: list[dict], tolerance_s: float = 2.0, interruption_candidates=None) -> dict:
+    """Return a copy of ``review`` with ungrounded content removed and values tidied.
+
+    Reactions and moments whose ``t`` is not within ``tolerance_s`` of a segment start are
+    dropped; scores are clamped to 0-100; ``next_time`` loses empty strings and keeps at most 3.
+    When ``interruption_candidates`` (times) is given, ``interruptions_confirmed`` keeps only
+    entries within tolerance of a candidate: the model can confirm candidates, not invent them.
+    """
+    starts = [s["start"] for s in segments]
+    out = dict(review)
+
+    scores = {}
+    for k, v in (review.get("scores") or {}).items():
+        v = dict(v)
+        try:
+            v["score"] = max(0, min(100, int(round(float(v.get("score", 0))))))
+        except (TypeError, ValueError):
+            v["score"] = 0
+        scores[k] = v
+    out["scores"] = scores
+
+    for key in ("reactions", "moments"):
+        out[key] = [x for x in review.get(key) or [] if _number(x.get("t")) and _near(x["t"], starts, tolerance_s)]
+
+    nxt = [s.strip() for s in review.get("next_time") or [] if isinstance(s, str) and s.strip()]
+    out["next_time"] = nxt[:MAX_NEXT_TIME]
+
+    confirmed = [t for t in review.get("interruptions_confirmed") or [] if _number(t) and _near(t, starts, tolerance_s)]
+    if interruption_candidates is not None:
+        confirmed = [t for t in confirmed if _near(t, interruption_candidates, tolerance_s)]
+    out["interruptions_confirmed"] = confirmed
+    return out
+
+
+def review_conversation(segments, owner_labels, metrics, config, owner_name: str = "") -> dict:
+    """Ask the configured LLM for a coaching review and ground it.
+
+    Returns ``{"review": dict | None, "provider": str, "errors": [str]}``.
+    """
+    name = owner_name or (config.get("profile") or {}).get("name") or ""
+    turns, truncated = _select_turns(owner_turns(segments, set(owner_labels)))
+    system = _system_prompt(name, config.get("english_variant") == "gb", truncated)
+    user = (
+        "Transcript (times are [mm:ss] from the start):\n"
+        + "\n".join(_line(t) for t in turns)
+        + "\n\nMeasured metrics and flagged moments (JSON):\n"
+        + json.dumps(metrics, ensure_ascii=False, default=str)
+    )
+    parsed, provider, errors = call_llm_json(system, user, REVIEW_SCHEMA, config, schema_name="coaching_review")
+    if parsed is None:
+        return {"review": None, "provider": provider, "errors": errors}
+    candidates = [m["t"] for m in metrics.get("moments", []) if m.get("kind") == "interruption"]
+    return {
+        "review": ground(parsed, segments, interruption_candidates=candidates),
+        "provider": provider,
+        "errors": errors,
+    }
