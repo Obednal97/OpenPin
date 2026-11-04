@@ -126,6 +126,15 @@ def _no_real_bluetooth_address_check(monkeypatch):
     monkeypatch.setattr(dev, "_address_visible", visible)
     # Scanned BLEDevices are remembered module-wide: none leak between tests.
     monkeypatch.setattr(dev, "_recent_ble_devices", {})
+    # A scan that finds nothing asks CoreBluetooth for already-connected
+    # NotePins: never the real Mac's Bluetooth in tests. Dropped clients are
+    # module-wide too.
+
+    async def none_connected():
+        return []
+
+    monkeypatch.setattr(dev, "_system_connected_notepins", none_connected)
+    monkeypatch.setattr(dev, "_orphaned_clients", [])
 
 
 @pytest.fixture(autouse=True)
