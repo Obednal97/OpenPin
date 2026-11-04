@@ -145,3 +145,15 @@ def _no_real_title_generation(monkeypatch):
     import app.routes.transcribe as transcribe_routes
 
     monkeypatch.setattr(transcribe_routes, "generate_title", lambda *a, **k: ("", "none"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_voice_embeddings(monkeypatch):
+    """Tests never load the WeSpeaker model; voice tests inject a fake embedder."""
+    import app.coaching.voice as voice
+
+    def refuse(path):
+        raise AssertionError("no real embeddings in tests")
+
+    refuse.real = voice._embed_wav  # for the one test that covers the real wrapper
+    monkeypatch.setattr(voice, "_embed_wav", refuse)
