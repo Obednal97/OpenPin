@@ -46,14 +46,15 @@ def owner_turns(segments: list[dict], owner_labels: set[str]) -> list[dict]:
 
     Each turn is {"start", "end", "text", "speaker", "owner"}. Consecutive segments on the
     same side (owner vs not-owner) merge into one turn, so two owner labels back to back, or
-    two different other speakers back to back, are each one turn. "speaker" is the label of
+    two different other speakers back to back, are each one turn. A same-side turn is split
+    when the gap between its consecutive segments exceeds targets.TURN_SPLIT_GAP_S. "speaker" is the label of
     the turn's first segment; "owner" is True when that side is the owner. Segments with no
     speaker label count as not-owner.
     """
     turns: list[dict] = []
     for s in sorted(segments, key=lambda x: x["start"]):
         is_owner = s.get("speaker") in owner_labels
-        if turns and turns[-1]["owner"] == is_owner:
+        if turns and turns[-1]["owner"] == is_owner and s["start"] - turns[-1]["end"] <= T.TURN_SPLIT_GAP_S:
             t = turns[-1]
             t["end"] = max(t["end"], s["end"])
             t["text"] = f"{t['text']} {s['text']}".strip()
@@ -123,7 +124,7 @@ def _filler_hits(owner_words: list[dict]) -> list[float]:
     """Start times of owner fillers, from verbatim words. Approximate: see targets.FILLER_PHRASES."""
     toks = []
     for w in owner_words:
-        raw = w["word"].strip()
+        raw = (w.get("punctuated_word") or w.get("word") or "").strip()
         norm = _norm(raw)
         toks.append((norm[0] if norm else "", raw.endswith(","), w["start"]))
     hit = [False] * len(toks)
@@ -205,6 +206,36 @@ def compute_metrics(
     av: dict = {}
     moments: list[dict] = []
 
+    if not own_turns:
+        keys = [
+            "pace_wpm",
+            "talk_share",
+            "longest_monologue_s",
+            "interruptions_made",
+            "interruption_rate",
+            "interrupted_by_others",
+            "patience_s",
+            "questions",
+            "questions_per_hour",
+            "fillers",
+            "fillers_per_min",
+            "interactivity",
+        ]
+        return {
+            "per_speaker": {
+                k: {
+                    "wpm": None if timestamps_estimated else v["wpm"],
+                    "talk_s": v["talk_s"],
+                    "talk_share": v["talk_share"],
+                    "turns": v["turns"],
+                }
+                for k, v in per.items()
+            },
+            "owner": dict.fromkeys(keys),
+            "availability": dict.fromkeys(keys, "unavailable"),
+            "moments": [],
+        }
+
     def put(key, value, availability):
         o[key], av[key] = value, (availability if value is not None else unavailable)
 
@@ -247,7 +278,7 @@ def compute_metrics(
         gaps = [
             max(0.0, cur["start"] - prev["end"])
             for prev, cur in zip(turns, turns[1:], strict=False)
-            if cur["owner"] and not prev["owner"]
+            if cur["owner"] and not prev["owner"] and not _is_backchannel(cur["text"])
         ]
         put("patience_s", round(statistics.median(gaps), 3) if gaps else None, "exact")
     for t in made + by_others:
@@ -301,7 +332,15 @@ def compute_metrics(
 
     moments.sort(key=lambda m: m["t"])
     return {
-        "per_speaker": {k: {f: v[f] for f in ("wpm", "talk_s", "talk_share", "turns")} for k, v in per.items()},
+        "per_speaker": {
+            k: {
+                "wpm": None if timestamps_estimated else v["wpm"],
+                "talk_s": v["talk_s"],
+                "talk_share": v["talk_share"],
+                "turns": v["turns"],
+            }
+            for k, v in per.items()
+        },
         "owner": o,
         "availability": av,
         "moments": moments,

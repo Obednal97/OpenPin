@@ -194,3 +194,71 @@ def test_fast_stretch_moment():
     segs = [seg(0, 10, fast, "Speaker 1"), seg(10, 20, "ok", "Speaker 2")]
     m = run(segs, duration=20.0)
     assert any(x["kind"] == "fast" for x in m["moments"])
+
+
+def test_filler_like_comma_uses_stored_word_shape():
+    words = [
+        {"word": "so", "start": 0.0, "end": 0.3, "speaker": "Speaker 1", "confidence": 0.9},
+        {"word": "like,", "start": 0.4, "end": 0.7, "speaker": "Speaker 1", "confidence": 0.9},
+        {"word": "it", "start": 0.8, "end": 1.0, "speaker": "Speaker 1", "confidence": 0.9},
+    ]
+    segs = [seg(0, 1, "so it", "Speaker 1")]
+    assert run(segs, words=words, duration=60.0)["owner"]["fillers"] == 1
+
+
+def test_per_speaker_wpm_none_when_timestamps_estimated():
+    segs = [seg(0, 30, " ".join(["a"] * 60), "Speaker 1"), seg(30, 60, " ".join(["b"] * 12), "Speaker 2")]
+    per = run(segs, duration=60.0, estimated=True)["per_speaker"]
+    assert per["Speaker 1"]["wpm"] is None and per["Speaker 2"]["wpm"] is None
+
+
+def test_long_same_side_gap_splits_turn():
+    segs = [seg(0, 5, "first", "Speaker 1"), seg(405, 410, "second", "Speaker 1")]
+    turns = owner_turns(segs, OWNER)
+    assert len(turns) == 2
+    m = run(segs, duration=410.0)
+    assert m["owner"]["longest_monologue_s"] == 5.0
+    assert not any(
+        x["kind"] in ("monologue", "fast") and x["t"] == 0 and x["quote"] == "first second" for x in m["moments"]
+    )
+
+
+def test_backchannel_turns_excluded_from_patience_but_not_rate_denominator():
+    segs = [
+        seg(0, 10, "tell me more about it", "Speaker 2"),
+        seg(10.0, 11, "Yeah.", "Speaker 1"),
+        seg(11, 20, "and then we went on.", "Speaker 2"),
+        seg(21.0, 30, "That sounds good.", "Speaker 1"),
+    ]
+    o = run(segs, duration=30.0)["owner"]
+    assert o["patience_s"] == 1.0
+    # the backchannel is not an interruption, the real turn follows a finished sentence
+    assert o["interruptions_made"] == 0
+    assert o["interruption_rate"] == 0.0
+
+
+def test_owner_with_zero_turns_gives_all_none():
+    segs = [seg(0, 10, "hello", "Speaker 2"), seg(10, 20, "there", "Speaker 3")]
+    m = run(segs, duration=20.0)
+    assert all(v is None for v in m["owner"].values())
+    assert all(v == "unavailable" for v in m["availability"].values())
+    assert m["moments"] == []
+
+
+def test_adjacent_other_speakers_then_owner_cut_in_counts_once():
+    segs = [
+        seg(0, 10, "we should talk", "Speaker 2"),
+        seg(10, 20, "about the plan and", "Speaker 3"),
+        seg(20.1, 30, "Let me stop you there.", "Speaker 1"),
+    ]
+    m = run(segs, duration=30.0)
+    assert m["owner"]["interruptions_made"] == 1
+    assert [x["likely"] for x in m["moments"] if x["kind"] == "interruption"] == [True]
+
+
+def test_filler_burst_moment():
+    words = words_of("um uh er so then", 5.0, "Speaker 1", step=1.0)
+    segs = [seg(0, 20, "so then", "Speaker 1")]
+    m = run(segs, words=words, duration=60.0)
+    bursts = [x for x in m["moments"] if x["kind"] == "filler_burst"]
+    assert len(bursts) == 1 and bursts[0]["t"] == 5.0
