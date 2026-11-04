@@ -65,10 +65,12 @@ Two ways to use it, both wanted:
   feedback ("You rushed the pricing section and talked over them twice"), and specific clickable
   moments ("You interrupted 4 times, here's 12:40"). Blunt is fine.
 - Recordings where the owner is the only speaker (voice notes) are skipped.
-- **Speaker labels get turned on.** Speaker labelling (`diarize`) is off by default today
-  (`app/routes/settings.py`), and coaching needs it. Coaching (default on) switches speaker labels
-  on everywhere, for new installs and for existing ones when they update to this version.
-  Transcripts and Notion pages will show speaker names from then on; the user accepted this. If
+- **Speaker labels get turned on.** Speaker labelling (`diarize`) defaults to off in the code
+  (`app/routes/settings.py`), though the owner's own install already has it on. Coaching needs it.
+  Coaching (default on) switches speaker labels on for any install where they're off: new installs,
+  and existing ones when they update to this version. Installs that already have them on see no
+  change. From then on, transcripts and Notion pages show speaker names everywhere, as they already
+  do for the owner; the user accepted this. If
   the user later turns speaker labels off, automatic coaching turns off with them (and the
   settings say why).
 
