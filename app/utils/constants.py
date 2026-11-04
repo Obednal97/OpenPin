@@ -49,6 +49,7 @@ REQUIREMENTS_DIR_ENV = "PLAUD_REQUIREMENTS_DIR"
 BUNDLED_REQUIREMENTS_DIR = PROJECT_ROOT / "app" / "requirements"
 
 # BLE UUIDs
+BLE_SERVICE_UUID = "00001910-0000-1000-8000-00805f9b34fb"  # Plaud data service
 BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
 BLE_NOTIFY_UUID = "00002bb0-0000-1000-8000-00805f9b34fb"
 BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
@@ -132,16 +133,46 @@ PLAUD_WEB_HOST = "https://web.plaud.ai"
 # README (https://github.com/openai/whisper#available-models-and-languages).
 # The JSON response sorts keys alphabetically, so the UI orders by download_mb.
 WHISPER_MODELS = {
-    "base": {"ram_gb": 1, "size": "145 MB", "download_mb": 145, "params": "74M",
-             "speed": "Fast", "accuracy": "Good enough for clear speech"},
-    "small": {"ram_gb": 2, "size": "484 MB", "download_mb": 484, "params": "244M",
-              "speed": "Moderate", "accuracy": "Good - recommended default"},
-    "medium": {"ram_gb": 5, "size": "1.5 GB", "download_mb": 1528, "params": "769M",
-               "speed": "Slower", "accuracy": "Very good - handles accents well"},
-    "turbo": {"ram_gb": 6, "size": "1.6 GB", "download_mb": 1618, "params": "809M",
-              "speed": "Moderate", "accuracy": "Near-best (large-v3-turbo) - best speed/accuracy balance"},
-    "large": {"ram_gb": 10, "size": "3.1 GB", "download_mb": 3087, "params": "1550M",
-              "speed": "Slowest", "accuracy": "Best available (large-v3)"},
+    "base": {
+        "ram_gb": 1,
+        "size": "145 MB",
+        "download_mb": 145,
+        "params": "74M",
+        "speed": "Fast",
+        "accuracy": "Good enough for clear speech",
+    },
+    "small": {
+        "ram_gb": 2,
+        "size": "484 MB",
+        "download_mb": 484,
+        "params": "244M",
+        "speed": "Moderate",
+        "accuracy": "Good - recommended default",
+    },
+    "medium": {
+        "ram_gb": 5,
+        "size": "1.5 GB",
+        "download_mb": 1528,
+        "params": "769M",
+        "speed": "Slower",
+        "accuracy": "Very good - handles accents well",
+    },
+    "turbo": {
+        "ram_gb": 6,
+        "size": "1.6 GB",
+        "download_mb": 1618,
+        "params": "809M",
+        "speed": "Moderate",
+        "accuracy": "Near-best (large-v3-turbo) - best speed/accuracy balance",
+    },
+    "large": {
+        "ram_gb": 10,
+        "size": "3.1 GB",
+        "download_mb": 3087,
+        "params": "1550M",
+        "speed": "Slowest",
+        "accuracy": "Best available (large-v3)",
+    },
 }
 
 # Notion MCP

@@ -31,6 +31,7 @@ from app.utils.ble_proto import (
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
     APP_KEY_PATH,
+    BLE_SERVICE_UUID,
     DATA_DIR,
     PROJECT_ROOT,
     SESSIONS_DIR,
@@ -147,6 +148,50 @@ def _on_disconnect(client):
     _reset_state()
 
 
+def _cancel_link(cl):
+    """Tell CoreBluetooth to drop `cl`'s link, whatever state bleak thinks it's in.
+
+    bleak's disconnect() returns without doing anything unless the peripheral
+    reports exactly "connected". After a macOS sleep it can report another state
+    while macOS still holds the link. That leaked link keeps the NotePin
+    connected to the Mac, and a connected NotePin stops advertising, so every
+    scan finds nothing until the app restarts. Cancelling an idle link is
+    harmless. Returns True if the cancel was sent.
+    """
+    backend = getattr(cl, "_backend", None)
+    peripheral = getattr(backend, "_peripheral", None)
+    manager = getattr(backend, "_central_manager_delegate", None)
+    central = getattr(manager, "central_manager", None)
+    if peripheral is None or central is None:
+        return False
+    try:
+        central.cancelPeripheralConnection_(peripheral)
+        return True
+    except Exception as e:
+        logging.debug(f"cancelPeripheralConnection failed (ignored): {e}")
+        return False
+
+
+# BleakClients we stopped tracking (stale after sleep, replaced, failed connects).
+# Kept so their links can be cancelled again if the NotePin later turns out to
+# still be connected to this Mac (see _system_connected_notepins).
+_orphaned_clients = []
+_ORPHAN_LIMIT = 8
+
+
+def _orphan(cl):
+    if cl is not None and cl not in _orphaned_clients:
+        _orphaned_clients.append(cl)
+        del _orphaned_clients[:-_ORPHAN_LIMIT]
+
+
+def _release_orphaned_links():
+    """Cancel the links of every BleakClient we dropped. Returns how many were sent."""
+    sent = sum(1 for cl in list(_orphaned_clients) if _cancel_link(cl))
+    _orphaned_clients.clear()
+    return sent
+
+
 async def _disconnect_quietly(cl, timeout=5):
     """Best-effort disconnect of a BleakClient we no longer track."""
     try:
@@ -157,6 +202,9 @@ async def _disconnect_quietly(cl, timeout=5):
         await asyncio.wait_for(cl.disconnect(), timeout=timeout)
     except Exception as e:
         logging.debug(f"Disconnect of stale BLE client failed (ignored): {e}")
+    # bleak may have skipped the disconnect (see _cancel_link); make sure.
+    _cancel_link(cl)
+    _orphan(cl)
 
 
 _END_OFFSET = 0xFFFFFFFF
@@ -562,12 +610,73 @@ async def scan_devices(scan_duration=6):
     await asyncio.sleep(scan_duration)
     await scanner.stop()
 
+    if not found and not _device_state["connected"]:
+        found.extend(await _recover_stale_links())
+
     found.sort(key=lambda d: d.get("rssi", -100), reverse=True)
     summary = ", ".join(
-        f"{d.get('name')} ({d.get('rssi')} dBm, serial {'advertised' if d.get('serial_number') else 'not advertised'})"
+        f"{d.get('name')} (already connected to this Mac)"
+        if d.get("connected_to_mac")
+        else f"{d.get('name')} ({d.get('rssi')} dBm, serial {'advertised' if d.get('serial_number') else 'not advertised'})"
         for d in found
     )
     print(f"[BLE] Scan found {len(found)} Plaud device(s){': ' + summary if found else ''}")
+    return found
+
+
+async def _system_connected_notepins():
+    """BLEDevices for NotePins macOS reports as connected to this Mac.
+
+    A connected NotePin doesn't advertise, so scans can't see it. This asks
+    CoreBluetooth directly (retrieveConnectedPeripheralsWithServices) for
+    peripherals with the Plaud data service. Each BLEDevice carries its own
+    central manager, so BleakClient can connect to it straight away (connecting
+    to an already-connected peripheral just reuses the link). Returns [] off
+    macOS or on any error.
+    """
+    if sys.platform != "darwin":
+        return []
+    try:
+        from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
+        from bleak.backends.device import BLEDevice
+        from CoreBluetooth import CBUUID
+
+        manager = CentralManagerDelegate()
+        await asyncio.wait_for(manager.wait_until_ready(), timeout=5)
+        peripherals = manager.central_manager.retrieveConnectedPeripheralsWithServices_(
+            [CBUUID.UUIDWithString_(BLE_SERVICE_UUID)]
+        )
+        return [
+            BLEDevice(p.identifier().UUIDString(), p.name() or "Plaud Device", (p, manager))
+            for p in (peripherals or [])
+        ]
+    except Exception as e:
+        logging.debug(f"Connected-peripheral lookup failed (ignored): {e}")
+        return []
+
+
+async def _recover_stale_links():
+    """Scan-result dicts for NotePins stuck connected to this Mac but not to us.
+
+    That's a leaked link: after a sleep a dropped BleakClient can stay connected
+    at the OS level (see _cancel_link), and the NotePin then stops advertising.
+    Cancels the links of every client we dropped, and returns the connected
+    NotePins (their BLEDevices remembered, so connect_device reuses the link if
+    it's still up). They advertise nothing, so callers match them to a paired
+    serial by address (paired_serial_for_address), as for any serial-less packet.
+    """
+    devices = await _system_connected_notepins()
+    if not devices:
+        return []
+    released = _release_orphaned_links()
+    print(
+        f"[BLE] {len(devices)} Plaud device(s) still connected to this Mac but not to the app "
+        f"(stale link; cancelled {released} dropped connection(s)); connecting through it"
+    )
+    found = []
+    for device in devices:
+        _remember_ble_device(device)
+        found.append({"name": device.name, "address": device.address, "connected_to_mac": True})
     return found
 
 
@@ -755,10 +864,7 @@ async def connect_device(address=None):
 
             # Services empty after connect — disconnect and retry
             print(f"[BLE] Connect attempt {attempt + 1}/3: connected but service discovery failed, retrying...")
-            try:
-                await cl.disconnect()
-            except Exception:
-                pass
+            await _disconnect_quietly(cl)
             cl = None
             await asyncio.sleep(2 + attempt)
 
@@ -766,10 +872,7 @@ async def connect_device(address=None):
             err_msg = str(e).lower()
             print(f"[BLE] Connect attempt {attempt + 1}/3 failed: {e}")
             if cl:
-                try:
-                    await cl.disconnect()
-                except Exception:
-                    pass
+                await _disconnect_quietly(cl)
                 cl = None
 
             if attempt < 2 and "not found" in err_msg:
@@ -790,10 +893,7 @@ async def connect_device(address=None):
 
     if not cl or not _has_services(cl):
         if cl:
-            try:
-                await cl.disconnect()
-            except Exception:
-                pass
+            await _disconnect_quietly(cl)
         sn = _device_state.get("serial_number", "unknown")
         return {
             "connected": False,
@@ -1118,6 +1218,7 @@ async def disconnect_device():
             await cl.disconnect()
         except Exception:
             pass
+        _cancel_link(cl)
     _reset_state()
     return {"disconnected": True}
 
