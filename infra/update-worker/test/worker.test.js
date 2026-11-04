@@ -9,6 +9,7 @@ import worker, {
   parseChecksum,
   pickChecksumAsset,
   pickDmgAsset,
+  publicAssetUrl,
   REPO,
   versionFromTag,
 } from '../src/index.js';
@@ -86,9 +87,7 @@ test('latest + download pass a renamed DMG (Open.Pin_…) through unchanged', as
     if (u.pathname === `/repos/${REPO}/releases/latest` || u.pathname === `/repos/${REPO}/releases/tags/v2.6.0`) {
       return new Response(JSON.stringify(release), { headers: { 'Content-Type': 'application/json' } });
     }
-    if (u.pathname.endsWith('/assets/1')) return new Response(null, { status: 302, headers: { Location: 'https://objects.example/dmg' } });
-    if (u.pathname.endsWith('/assets/2')) return new Response(null, { status: 302, headers: { Location: 'https://objects.example/sum' } });
-    if (u.href === 'https://objects.example/sum') return new Response(`${HEX}  Open Pin_2.6.0_aarch64.dmg\n`);
+    if (u.href === publicAssetUrl('v2.6.0', `${dmgName}.sha256`)) return new Response(`${HEX}  Open Pin_2.6.0_aarch64.dmg\n`);
     throw new Error(`unexpected fetch ${url}`);
   };
   try {
@@ -102,7 +101,7 @@ test('latest + download pass a renamed DMG (Open.Pin_…) through unchanged', as
     assert.equal(data.download_url, `https://w.example/v1/download/v2.6.0/${dmgName}`);
     const d = await worker.fetch(new Request(data.download_url), env, ctx);
     assert.equal(d.status, 302);
-    assert.equal(d.headers.get('Location'), 'https://objects.example/dmg');
+    assert.equal(d.headers.get('Location'), `https://github.com/${REPO}/releases/download/v2.6.0/${dmgName}`);
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -184,4 +183,25 @@ test("the cached answer never hands one host's download URL to another host", as
     assert.ok(again.download_url.startsWith('https://openpin.example/'));
     assert.equal(calls.filter((c) => c.endsWith('/releases/latest')).length, 2); // one per host, then memory
   });
+});
+
+
+test('download redirects to the public URL without calling the GitHub API', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    throw new Error(`no fetch expected, got ${url}`);
+  };
+  try {
+    const ctx = { waitUntil() {} };
+    const d = await worker.fetch(new Request('https://w.example/v1/download/v2.6.1/Open.Pin_2.6.1_aarch64.dmg'), makeEnv(), ctx);
+    assert.equal(d.status, 302);
+    assert.equal(d.headers.get('Location'), `https://github.com/${REPO}/releases/download/v2.6.1/Open.Pin_2.6.1_aarch64.dmg`);
+    assert.equal(d.headers.get('Cache-Control'), 'no-store');
+    const bad = await worker.fetch(new Request('https://w.example/v1/download/..%2Fx/Open.Pin_2.6.1_aarch64.dmg'), makeEnv(), ctx);
+    assert.equal(bad.status, 404);
+    const badName = await worker.fetch(new Request('https://w.example/v1/download/v2.6.1/source.zip'), makeEnv(), ctx);
+    assert.equal(badName.status, 404);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

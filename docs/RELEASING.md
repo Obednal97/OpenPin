@@ -36,12 +36,15 @@ The token can be rotated without a release. Installs up to v2.5.x call the same 
    **published** release (no drafts or pre-releases), cached for 5 minutes by the Worker.
    **Test channel:** callers whose IP is in the Worker secret `CANARY_IPS` get the newest release
    including pre-releases. To try a build on your own Macs first, publish it as a GitHub
-   pre-release, then promote it (`gh release edit <tag> --prerelease=false`) for everyone.
+   pre-release, then promote it (`gh release edit <tag> --prerelease=false --latest`) for
+   everyone. `--latest` matters: without it GitHub keeps the previous release as "Latest", and
+   `/v1/latest` keeps serving that.
 2. Versions compare as `major.minor.patch`; anything after `-` or `+` is ignored, so
    `2.4.0-beta` is never newer than `2.4.0`. Any non-2xx answer is shown as an update error, never
    as "up to date".
-3. If it's newer, the app downloads `GET /v1/download/<tag>/<asset>` (a 302 to a short-lived GitHub
-   URL) to `~/Library/Application Support/com.plaud.v2/updates/<name>.part`, with a 15 s connect
+3. If it's newer, the app downloads `GET /v1/download/<tag>/<asset>` (a 302 to the asset's public
+   `github.com/…/releases/download/` URL, which GitHub redirects to a short-lived signed URL; no
+   GitHub API call, so no rate limit) to `~/Library/Application Support/com.plaud.v2/updates/<name>.part`, with a 15 s connect
    timeout and a 60 s idle timeout. It checks the **size** and, if the release has a
    `<dmg>.sha256` asset, the **SHA-256**, then renames the file into place.
 4. A banner offers **Restart to Update**. A detached helper script (`INSTALL_SCRIPT`; log:

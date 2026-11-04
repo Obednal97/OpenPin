@@ -2211,7 +2211,7 @@ exit 0"#
             .unwrap();
         assert_eq!(resp.status().as_u16(), 302);
         let loc = resp.headers().get("location").unwrap().to_str().unwrap();
-        assert!(loc.starts_with("https://") && loc.contains("githubusercontent.com"), "{loc}");
+        assert!(loc.starts_with("https://github.com/") && loc.contains("/releases/download/"), "{loc}");
 
         // Full download path: .part → size/sha check → rename. Use a wrong
         // checksum first (must fail and leave nothing behind), then the right one.

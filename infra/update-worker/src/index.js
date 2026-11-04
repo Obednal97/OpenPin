@@ -123,24 +123,19 @@ async function ghJson(env, path, init = {}) {
 }
 
 /**
- * Resolve a release asset's API URL to GitHub's short-lived, signed download
- * URL (no token in it). Returns the Location string or null.
+ * The public download URL of a release asset. The repo is public, so
+ * github.com serves it (302 to a signed githubusercontent.com URL) with no
+ * GitHub API call: no rate limit. Unauthenticated API calls share a 60/hour
+ * limit per egress IP, and Cloudflare's egress IPs are shared, so resolving
+ * assets through the API failed downloads with 502 (v2.6.1, 2026-11-04).
  */
-async function signedAssetLocation(env, assetApiUrl) {
-  const resp = await fetch(assetApiUrl, {
-    headers: ghHeaders(env, 'application/octet-stream'),
-    redirect: 'manual',
-  });
-  const loc = resp.headers.get('Location');
-  if (resp.status >= 300 && resp.status < 400 && loc && loc.startsWith('https://')) return loc;
-  return null;
+export function publicAssetUrl(tag, name) {
+  return `https://github.com/${REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
 }
 
-async function readChecksum(env, asset, dmgName) {
+async function readChecksum(tag, asset, dmgName) {
   try {
-    const loc = await signedAssetLocation(env, asset.url);
-    if (!loc) return null;
-    const resp = await fetch(loc, { headers: { 'User-Agent': USER_AGENT } });
+    const resp = await fetch(publicAssetUrl(tag, asset.name), { headers: { 'User-Agent': USER_AGENT } });
     if (!resp.ok) return null;
     const text = (await resp.text()).slice(0, 64 * 1024);
     return parseChecksum(text, dmgName, { dedicated: asset.name === `${dmgName}.sha256` });
@@ -157,8 +152,8 @@ async function readChecksum(env, asset, dmgName) {
 // is only a best-effort second layer: it is per data centre, and Cloudflare
 // documents it as functional on custom domains, not on workers.dev (it did
 // store entries there when tested on 2026-11-02, but nothing relies on that).
-// Its errors are swallowed. A full miss costs 1-3 GitHub calls against the
-// PAT's 5,000/hour quota.
+// Its errors are swallowed. A full miss costs one GitHub API call (the
+// checksum comes from the public download URL).
 // Keyed by `${origin}|${channel}`: the body holds a download_url on the host
 // the request came to, and installed apps only accept their own Worker host
 // (old installs: *.workers.dev; newer: the custom domain). One shared entry
@@ -223,7 +218,7 @@ async function handleLatest(request, env, ctx) {
   const dmg = pickDmgAsset(release.assets);
   if (!dmg) return json({ ok: false, error: 'latest release has no .dmg asset' }, 502);
   const sumAsset = pickChecksumAsset(release.assets, dmg.name);
-  const sha256 = sumAsset ? await readChecksum(env, sumAsset, dmg.name) : null;
+  const sha256 = sumAsset ? await readChecksum(release.tag_name, sumAsset, dmg.name) : null;
 
   const data = {
     version: versionFromTag(release.tag_name),
@@ -258,17 +253,11 @@ function latestHeaders(source, channel = 'stable') {
 // GET /v1/download/<tag>/<asset>
 // ---------------------------------------------------------------------------
 
-async function handleDownload(tag, assetName, env) {
+// Redirects to the public download URL: no GitHub API call (see
+// publicAssetUrl). Draft and unknown assets 404 at GitHub, as before here.
+function handleDownload(tag, assetName) {
   if (!isAllowedTag(tag) || !isAllowedAssetName(assetName)) return notFound();
-  const rel = await ghJson(env, `/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`);
-  if (rel.status === 404) return notFound();
-  if (!rel.ok || !rel.data) return json({ ok: false, error: `GitHub returned ${rel.status}` }, 502);
-  if (rel.data.draft) return notFound();
-  const asset = (rel.data.assets || []).find((a) => a.name === assetName);
-  if (!asset) return notFound();
-  const loc = await signedAssetLocation(env, asset.url);
-  if (!loc) return json({ ok: false, error: 'GitHub did not return a download location' }, 502);
-  return new Response(null, { status: 302, headers: { Location: loc, 'Cache-Control': 'no-store' } });
+  return new Response(null, { status: 302, headers: { Location: publicAssetUrl(tag, assetName), 'Cache-Control': 'no-store' } });
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +281,7 @@ export default {
         } catch {
           return notFound();
         }
-        return await handleDownload(tag, name, env);
+        return handleDownload(tag, name);
       }
     } catch (e) {
       return json({ ok: false, error: 'internal error' }, 500);
