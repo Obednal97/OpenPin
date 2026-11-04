@@ -155,4 +155,5 @@ def _no_real_voice_embeddings(monkeypatch):
     def refuse(path):
         raise AssertionError("no real embeddings in tests")
 
+    refuse.real = voice._embed_wav  # for the one test that covers the real wrapper
     monkeypatch.setattr(voice, "_embed_wav", refuse)

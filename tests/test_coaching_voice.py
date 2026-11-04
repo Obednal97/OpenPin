@@ -141,3 +141,59 @@ def test_corrupt_profile_is_treated_as_missing(monkeypatch):
     voice.PROFILE_PATH.write_text("{nope")
     _fake(monkeypatch, {"A": OWNER})
     assert voice.match_owner("a.wav", _segs("A"))["reason"] == "no voice profile"
+
+
+def _stub_runtime(monkeypatch, shape):
+    import sys
+    import types
+
+    np = pytest.importorskip("numpy")
+
+    class Speaker:
+        def __init__(self, lang):
+            assert lang == "en"
+
+        def extract_embedding(self, path):
+            return np.full(shape, 0.5, dtype=np.float32)
+
+    fake = types.ModuleType("wespeakerruntime")
+    fake.Speaker = Speaker
+    monkeypatch.setitem(sys.modules, "wespeakerruntime", fake)
+    monkeypatch.setattr(voice, "_speaker_model", None)
+    return voice._embed_wav.real
+
+
+def test_embed_wav_flattens_real_library_shape(monkeypatch):
+    """The real runtime returns an array shaped [1, 256]."""
+    emb = _stub_runtime(monkeypatch, (1, 256))("x.wav")
+    assert isinstance(emb, list) and len(emb) == 256 and emb[0] == 0.5
+
+
+def test_embed_wav_rejects_wrong_size(monkeypatch):
+    with pytest.raises(ValueError):
+        _stub_runtime(monkeypatch, (1, 10))("x.wav")
+
+
+def test_speaker_clips_cuts_real_audio(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    sf = pytest.importorskip("soundfile")
+    wav = tmp_path / "c.wav"
+    sf.write(wav, (0.1 * np.random.default_rng(0).standard_normal(16000 * 12)).astype("float32"), 16000)
+    import src.transcribe as tr
+
+    monkeypatch.setattr(
+        tr,
+        "_to_wav16k",
+        lambda p: str(tmp_path / "copy.wav") if (tmp_path / "copy.wav").write_bytes(wav.read_bytes()) else None,
+    )
+    segs = [
+        {"start": 0.0, "end": 5.0, "speaker": "A"},
+        {"start": 5.0, "end": 5.5, "speaker": "A"},  # too short
+        {"start": 6.0, "end": 11.0, "speaker": "B"},
+    ]
+    clips = voice._speaker_clips(str(wav), segs, 60.0)
+    try:
+        assert {k: len(v) for k, v in clips.items()} == {"A": 1, "B": 1}
+        assert sf.info(clips["A"][0]).frames == 16000 * 5
+    finally:
+        voice._remove_clips(clips)

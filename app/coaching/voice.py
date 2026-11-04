@@ -25,6 +25,7 @@ MAX_EXEMPLARS = 20
 MATCH_THRESHOLD = 0.55  # cosine
 MARGIN = 0.10  # a label counts as the owner if within this of the best match
 MIN_CLIP_SECONDS = 1.0
+EMBEDDING_DIM = 256
 
 _speaker_model = None
 _model_lock = threading.Lock()
@@ -88,7 +89,46 @@ def _embed_wav(path: str) -> list[float]:
 
             _speaker_model = wespeaker.Speaker(lang="en")
         model = _speaker_model
-    return [float(x) for x in model.extract_embedding(path)]
+    try:
+        emb = model.extract_embedding(path)
+    except ImportError:
+        # torchaudio >= 2.9 can't load files without torchcodec: read the clip
+        # with soundfile and feed the runtime its fbank features instead.
+        emb = _embed_via_fbank(model, path)
+    # The runtime returns a numpy array shaped [1, dim]; flatten to a list.
+    flat = emb.reshape(-1).tolist() if hasattr(emb, "reshape") else _flatten(emb)
+    if len(flat) != EMBEDDING_DIM:
+        raise ValueError(f"unexpected embedding size {len(flat)}")
+    return [float(x) for x in flat]
+
+
+def _embed_via_fbank(model, path: str):
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from torchaudio.compliance import kaldi
+
+    data, rate = sf.read(path, dtype="float32", always_2d=True)
+    wave = torch.from_numpy(np.ascontiguousarray(data.T[:1])) * (1 << 15)
+    feats = kaldi.fbank(
+        wave,
+        num_mel_bins=80,
+        frame_length=25,
+        frame_shift=10,
+        dither=0.0,
+        sample_frequency=rate,
+        window_type="hamming",
+        use_energy=False,
+    ).numpy()
+    feats = feats - np.mean(feats, axis=0)
+    return model.extract_embedding_feat(np.expand_dims(feats, 0), cmn=False)
+
+
+def _flatten(v) -> list:
+    out: list = []
+    for x in v:
+        out.extend(_flatten(x) if hasattr(x, "__iter__") else [x])
+    return out
 
 
 # --------------------------------------------------------------------- clips
