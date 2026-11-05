@@ -3,6 +3,7 @@
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
+from app.mcp import access as mcp_access
 from app.utils.config import load_config, update_config
 from app.utils.constants import DEFAULT_RECORDINGS_DIR, DEFAULT_TAGS, HF_WHOAMI_URL, WHISPER_MODELS, get_recordings_dir
 from app.utils.system import get_ram_info
@@ -35,6 +36,15 @@ def validate_hf_token(token):
 
 @bp.route("/settings", methods=["GET"])
 def get_settings():
+    """The settings the window shows.
+
+    AI tool access has two fields:
+    - ``mcp_enabled``: the saved switch ("Let AI tools on this Mac use Open Pin").
+    - ``mcp_active``: whether access is actually on now (an MCP key exists).
+      It can be False while ``mcp_enabled`` is True if turning it on failed at
+      startup (the connection file or launcher couldn't be written); the
+      window shows an error when they differ.
+    """
     config = load_config()
     total_gb, used_gb = get_ram_info()
     headroom_gb = total_gb * 0.85 - used_gb
@@ -85,6 +95,9 @@ def get_settings():
             "save_directory": str(get_recordings_dir()),
             "default_save_directory": str(DEFAULT_RECORDINGS_DIR),
             "historical_directories": config.get("historical_directories", []),
+            # "Let AI tools on this Mac use Open Pin" (app/mcp/access.py). Off by default.
+            "mcp_enabled": config.get("mcp_enabled", False) is True,
+            "mcp_active": mcp_access.current_key() is not None,
         }
     )
 
@@ -209,4 +222,39 @@ def save_settings():
                 config.pop("save_directory", None)
 
     update_config(_apply)
+
+    if "mcp_enabled" in data:
+        error = _apply_mcp_enabled(data["mcp_enabled"] is True)
+        if error:
+            return jsonify({"error": error}), 500
     return jsonify({"saved": True})
+
+
+def _request_port() -> int | None:
+    try:
+        return int(request.environ.get("SERVER_PORT", ""))
+    except ValueError:
+        return None
+
+
+def _apply_mcp_enabled(on: bool) -> str | None:
+    """Turn AI tool access on or off now and save the setting. Returns an error or None.
+
+    Only a JSON true turns it on. If the key files can't be written, access
+    stays off and the setting is saved as off.
+    """
+    if not on:
+        update_config(lambda c: c.__setitem__("mcp_enabled", False))
+        mcp_access.disable()
+        return None
+    port = mcp_access.bound_port() or _request_port()
+    try:
+        if port is None:
+            raise OSError("the backend's port isn't known")
+        mcp_access.enable(port)
+    except OSError as e:
+        mcp_access.disable()
+        update_config(lambda c: c.__setitem__("mcp_enabled", False))
+        return f"Couldn't turn on AI tool access: {e}"
+    update_config(lambda c: c.__setitem__("mcp_enabled", True))
+    return None
