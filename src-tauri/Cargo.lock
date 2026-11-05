@@ -2934,7 +2934,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plaud-v2"
-version = "2.7.2"
+version = "2.8.0"
 dependencies = [
  "block2",
  "chrono",
