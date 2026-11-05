@@ -63,6 +63,8 @@ const _COACH_NEEDS_OWNER = {
 
 // Mirrors REVIEW_OFF in app/coaching/runner.py: the run skipped the AI review by choice
 const _COACH_REVIEW_OFF = 'AI review is off';
+// Mirrors REVIEW_KEPT: coached again, the new AI review failed, so the previous one is shown
+const _COACH_REVIEW_KEPT = 'The AI review couldn’t be refreshed, so this is the previous one.';
 
 // A laugh's chip plays from this many seconds before it (never before your line), so you
 // hear what you said and then the laugh
@@ -660,15 +662,20 @@ function _coachExcludedHtml() {
 
 /** The whole tab for one sidecar. segments are the transcript's, for the speaker picker;
     names its speaker names ({label: name}), shown wherever a speaker is.
-    Every state but an excluded one (or an error) ends with "Don't coach this recording". */
+    Every state but an excluded one (or an error) ends with "Don't coach this recording";
+    a finished report also offers "Coach again" there (a forced run that keeps who's you
+    and never learns the voice), so a report made before a new section can gain it. */
 function _coachReportHtml(sidecar, baseline, segments, names = {}) {
   _coachNames = names && typeof names === 'object' ? names : {};
   const sc = sidecar || {};
   if (sc.error) return _coachReportBodyHtml(sc, baseline, segments);
   if (sc.excluded || sc.status === 'excluded') return _coachExcludedHtml();
+  const again = sc.status === 'done'
+    ? '<button type="button" class="coach-link coach-again" data-coach-action="coach-again">Coach again</button><span class="coach-sep" aria-hidden="true">·</span>'
+    : '';
   return `${_coachReportBodyHtml(sc, baseline, segments)}
     <div class="coach-exclude-row">
-      <button type="button" class="coach-link coach-exclude" data-coach-action="exclude">Don’t coach this recording</button>
+      ${again}<button type="button" class="coach-link coach-exclude" data-coach-action="exclude">Don’t coach this recording</button>
     </div>`;
 }
 
@@ -731,6 +738,8 @@ function _coachReportBodyHtml(sc, baseline, segments) {
     parts.push(_coachReviewOffHtml());
   } else if (!review) {
     parts.push(_coachNotice(escapeHtml(sc.status_reason || 'This report has measured metrics only.'), '', '', 'info'));
+  } else if (sc.status_reason === _COACH_REVIEW_KEPT) {
+    parts.push(_coachNotice(escapeHtml(_COACH_REVIEW_KEPT), '', '', 'info'));
   }
   if (review) parts.push(_coachScoresHtml(review, baseline), _coachSummaryHtml(review));
   if (hasMetrics || status === 'done') {
@@ -1007,7 +1016,7 @@ function _coachDraw(container, sessionId, sidecar, baseline) {
     const action = btn.dataset.coachAction;
     if (action === 'change-owner') _coachTogglePicker(container, btn.getAttribute('aria-expanded') !== 'true');
     else if (action === 'cancel-owner') _coachTogglePicker(container, false);
-    else if (action === 'run') _coachRun(container, sessionId, sidecar, btn);
+    else if (action === 'run' || action === 'coach-again') _coachRun(container, sessionId, sidecar, btn);
     else if (action === 'save-owner') _coachSaveOwner(container, sessionId, sidecar, btn);
     else if (action === 'reload') renderCoachingTab(container, sessionId);
     else if (action === 'voice-settings') _coachOpenVoiceSettings();

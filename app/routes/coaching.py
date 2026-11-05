@@ -2,8 +2,8 @@
 
 The verbatim ``words`` never leave the backend through these routes: they live in
 their own file, and ``_sidecar_response`` strips any an older sidecar still holds.
-``/coaching/progress`` and ``/coaching/voice`` are fixed paths, registered before
-the ``<sid>`` routes (and "progress"/"voice" are not session ids anyway). The
+``/coaching/progress``, ``/coaching/voice`` and ``/coaching/rerun-all`` are fixed paths,
+registered before the ``<sid>`` routes (and none of them is a session id anyway). The
 store's other files ("voice_profile", "<sid>.words") are never session ids here.
 """
 
@@ -102,6 +102,28 @@ def get_progress():
         except OSError:
             continue
     return jsonify(compute_progress(sidecars, now=time.time(), weeks=weeks))
+
+
+@bp.route("/coaching/rerun-all", methods=["GET"])
+def rerun_all_status():
+    """Progress's "Coach them again": how many reports still lack Engagement, and the bulk run's progress."""
+    status = runner.rerun_all_status()
+    # While a bulk run goes, the view shows its progress, not the count: skip reading every sidecar
+    pending = 0 if status["running"] else len(runner.rerun_candidates())
+    return jsonify({"pending_count": pending, **status})
+
+
+@bp.route("/coaching/rerun-all", methods=["POST"])
+def rerun_all_start():
+    if not runner.start_rerun_all():
+        return jsonify({"error": "already coaching older reports again"}), 409
+    return jsonify({"started": True, **runner.rerun_all_status()})
+
+
+@bp.route("/coaching/rerun-all/cancel", methods=["POST"])
+def rerun_all_cancel():
+    """Stops after the recording in progress."""
+    return jsonify({"cancelled": runner.cancel_rerun_all()})
 
 
 @bp.route("/coaching/voice", methods=["GET"])

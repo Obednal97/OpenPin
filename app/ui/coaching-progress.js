@@ -215,10 +215,17 @@ async function openProgressView() {
   panel.offsetHeight;
   panel.classList.add('visible');
   overlay.classList.add('visible');
+  await _coachProgLoad();
+}
 
+/** Load and draw the progress, and the "Coach them again" line. reload: keep what's
+    shown until the new data is in (after a bulk re-run ends). */
+async function _coachProgLoad(reload = false) {
   const body = $('#progress-body');
   const seq = ++_coachProgSeq;
-  body.innerHTML = '<p class="coach-prog-loading">Loading your progress…</p>';
+  _coachProgRerunWasRunning = false;
+  _coachProgRerunRefresh();
+  if (!reload) body.innerHTML = '<p class="coach-prog-loading">Loading your progress…</p>';
   let data;
   try {
     data = await window.plaud.coachingProgress(COACH_PROG_WEEKS);
@@ -243,7 +250,132 @@ async function openProgressView() {
   $('#coach-prog-retry').addEventListener('click', openProgressView);
 }
 
+// ---- "Coach them again": older reports saved before Engagement existed ----
+// The backend coaches them one at a time (app/coaching/runner.py start_rerun_all) and keeps
+// going when the view closes; while the view is open, its status is polled every 3 s.
+
+const COACH_PROG_RERUN_POLL_MS = 3000;
+let _coachProgRerunTimer = null;
+let _coachProgRerunStatus = null; // the last status drawn
+let _coachProgRerunWasRunning = false; // so the end of a run reloads the progress once
+let _coachProgRerunStopping = false;
+
+function _coachProgIsOpen() {
+  return $('#progress-view').classList.contains('visible');
+}
+
+/** "Include an AI review" (Settings › Your voice & coaching) as it is now. */
+function _coachProgReviewOn() {
+  return !(app.settings && app.settings.coaching_ai_review === false);
+}
+
+function _coachProgRerunHtml(st) {
+  if (st.running) {
+    const stop = _coachProgRerunStopping
+      ? '<span class="coach-prog-rerun-note">Stopping after this conversation…</span>'
+      : '<button type="button" class="coach-link" id="coach-prog-rerun-stop">Stop</button>';
+    return `<span class="coach-prog-rerun-text">Coaching again: ${Number(st.done) || 0} of ${Number(st.total) || 0}</span>${stop}`;
+  }
+  const n = Number(st.pending_count) || 0;
+  if (n <= 0) return '';
+  const text = n === 1 ? '1 older report doesn’t have Engagement yet.' : `${n} older reports don’t have Engagement yet.`;
+  return `<span class="coach-prog-rerun-text">${text}</span>
+    <button type="button" class="action-btn subtle settings-btn-compact" id="coach-prog-rerun-btn">Coach them again</button>`;
+}
+
+function _coachProgRerunDraw(st) {
+  const bar = $('#progress-rerun');
+  if (!bar) return;
+  const html = st ? _coachProgRerunHtml(st) : '';
+  bar.innerHTML = html;
+  bar.classList.toggle('hidden', !html);
+  const start = $('#coach-prog-rerun-btn');
+  if (start) start.addEventListener('click', _coachProgRerunStart);
+  const stop = $('#coach-prog-rerun-stop');
+  if (stop) stop.addEventListener('click', _coachProgRerunStop);
+}
+
+function _coachProgRerunStopPoll() {
+  if (_coachProgRerunTimer) clearTimeout(_coachProgRerunTimer);
+  _coachProgRerunTimer = null;
+}
+
+async function _coachProgRerunRefresh() {
+  _coachProgRerunStopPoll();
+  const seq = _coachProgSeq;
+  let st;
+  try {
+    st = await window.plaud.coachingRerunAllStatus();
+  } catch (err) {
+    st = { error: (err && err.message) || String(err) };
+  }
+  if (seq !== _coachProgSeq || !_coachProgIsOpen()) return;
+  if (!st || st.error) {
+    // A run in progress keeps its last status and is asked again; otherwise there's nothing to offer
+    if (_coachProgRerunWasRunning) _coachProgRerunTimer = setTimeout(_coachProgRerunRefresh, COACH_PROG_RERUN_POLL_MS);
+    else _coachProgRerunDraw(null);
+    return;
+  }
+  _coachProgRerunStatus = st;
+  if (!st.running) _coachProgRerunStopping = false;
+  if (!st.running && _coachProgRerunWasRunning) {
+    _coachProgLoad(true); // the re-coached reports change the progress
+    return;
+  }
+  _coachProgRerunWasRunning = !!st.running;
+  _coachProgRerunDraw(st);
+  if (st.running) {
+    _coachProgRerunStopPoll();
+    _coachProgRerunTimer = setTimeout(_coachProgRerunRefresh, COACH_PROG_RERUN_POLL_MS);
+  }
+}
+
+async function _coachProgRerunStart(e) {
+  const btn = e && e.currentTarget;
+  const n = Number((_coachProgRerunStatus || {}).pending_count) || 0;
+  if (n <= 0) return;
+  let message = `Open Pin will coach ${n === 1 ? '1 conversation' : `${n} conversations`} again, one at a time.`;
+  if (_coachProgReviewOn()) message += ` With the AI review on, that’s about ${n === 1 ? '1 AI call' : `${n} AI calls`} to your AI provider.`;
+  const choice = await showConfirmDialog({
+    title: 'Coach older reports again?',
+    message,
+    actions: [{ id: 'rerun', label: 'Coach them again' }],
+    cancelLabel: 'Cancel',
+  });
+  if (choice !== 'rerun') return;
+  if (btn) setLoading(btn, true);
+  let res;
+  try {
+    res = await window.plaud.coachingRerunAll();
+  } catch (err) {
+    res = { error: (err && err.message) || String(err) };
+  }
+  // Already going (409) is fine: the status below shows it
+  if (!res || (res.error && !/already/i.test(res.error))) {
+    toast(`Couldn’t start coaching again: ${(res && res.error) || 'no reply'}`, 'error');
+  }
+  _coachProgRerunStopping = false;
+  await _coachProgRerunRefresh();
+}
+
+async function _coachProgRerunStop() {
+  _coachProgRerunStopping = true;
+  if (_coachProgRerunStatus) _coachProgRerunDraw(_coachProgRerunStatus);
+  let res;
+  try {
+    res = await window.plaud.coachingRerunAllCancel();
+  } catch (err) {
+    res = { error: (err && err.message) || String(err) };
+  }
+  if (!res || res.error) {
+    _coachProgRerunStopping = false;
+    toast(`Couldn’t stop: ${(res && res.error) || 'no reply'}`, 'error');
+  }
+  await _coachProgRerunRefresh();
+}
+
 function _coachProgClose() {
+  _coachProgRerunStopPoll(); // a bulk re-run keeps going; reopening shows it
   const panel = $('#progress-view');
   const overlay = $('#progress-overlay');
   panel.classList.remove('visible');

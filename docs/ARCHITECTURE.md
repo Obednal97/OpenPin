@@ -430,6 +430,21 @@ setup refuse the recording (409), so the voice profile never learns from it, and
 skips it. Re-transcribing keeps it: `mark_stale` and `save_words` leave the flag alone. "Coach this
 recording" clears it (`{"exclude": false}`) and then runs `/run`.
 
+Reports saved before a new section existed (Engagement, v2.9.0) gain it by being coached again.
+"Coach again" on any finished report is `/run` (forced: the saved owner is kept and the voice
+profile isn't taught; only an owner pick teaches it). "Coach them again" in Progress
+(`runner.start_rerun_all`) coaches every recording whose sidecar is `done`, has no `engagement`,
+isn't excluded and has a transcript: one at a time on one daemon thread, each through
+`run_coaching(sid, None, force=True)`, so the run locks, run numbers, stale checks and
+`coaching_ai_review` apply as for one recording. Each is checked again just before its turn, a
+failure on one doesn't stop the rest, only one bulk run goes at a time, and cancelling stops it
+after the recording in progress. Coaching a `done` report again never costs it its AI review: if
+the new review fails (provider error, bad key, Ollama not running), the run saves the new metrics
+and engagement but keeps the previous review and status `done`, with `REVIEW_KEPT` as the reason
+(the tab shows it as a quiet note), as long as that review was made for the same transcript and
+owner; otherwise the run fails as usual. It keeps going when Progress closes; the state lives only in the
+process, so quitting the app ends it (the recordings not reached still count as pending).
+
 Deleting a recording (`/recordings/delete`) or its transcript (`/transcripts/delete`) moves its
 sidecar and words file to the Trash with the transcript, and `/coaching/progress` skips any
 sidecar whose transcript is gone. The owner's voice profile is
@@ -446,6 +461,9 @@ session ids by the routes.
 | `POST /coaching/<id>/mixed-up` | Flag or unflag "speakers mixed up" |
 | `POST /coaching/<id>/exclude` | "Don't coach this recording" (`{"exclude": true}`) or undo it (`false`) |
 | `GET /coaching/progress` | Aggregated progress |
+| `GET /coaching/rerun-all` | Older reports without Engagement (`pending_count`) and the bulk run's `running`, `done`, `total`, `current` |
+| `POST /coaching/rerun-all` | Coach them again, one at a time (409 if a bulk run is already going) |
+| `POST /coaching/rerun-all/cancel` | Stop the bulk run after the recording in progress |
 | `GET`/`DELETE /coaching/voice` | Voice profile status, remove it |
 | `POST /coaching/voice/install` | Install the WeSpeaker model (the `diarize` extra) |
 | `POST /coaching/voice/setup` | Build the profile from a speaker in a past recording |
@@ -474,8 +492,12 @@ line too), the reason when laughter couldn't be checked, and one note that quiet
 missed. In Progress the Engagement score sits after the Overall score and its parts after the
 other measures; each row shows only when its series has data. Every
 state of the tab but an excluded one ends with "Don't coach this recording", which asks first
-(`showConfirmDialog`); an excluded recording shows "This recording isn't coached." with "Coach this
-recording".
+(`showConfirmDialog`); a finished report also has a quiet "Coach again" beside it. An excluded
+recording shows "This recording isn't coached." with "Coach this recording". When older reports
+lack Engagement, Progress says how many with "Coach them again", which asks first (saying how many
+AI calls that is, about one per report, with the AI review on), then shows "Coaching again: k of N"
+with Stop, polls every 3 s while open (a failed poll keeps the last status and polls again) and
+reloads the progress when the run ends.
 
 ### Privacy
 

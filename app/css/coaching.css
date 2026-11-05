@@ -32,7 +32,11 @@
 .coach-link:hover { text-decoration: underline; }
 
 /* "Don't coach this recording", at the foot of every coaching state */
-.coach-exclude-row { display: flex; justify-content: center; padding-top: var(--sp-2); }
+.coach-exclude-row { display: flex; justify-content: center; align-items: center; gap: var(--sp-2); padding-top: var(--sp-2); }
+.coach-exclude-row .coach-sep { font-size: var(--text-sm); }
+/* "Coach again", beside it on a finished report: just as quiet */
+.coach-link.coach-again { color: var(--text-tertiary); font-size: var(--text-sm); }
+.coach-link.coach-again:hover { color: var(--accent); }
 .coach-link.coach-exclude { color: var(--text-tertiary); font-size: var(--text-sm); }
 .coach-link.coach-exclude:hover { color: var(--destructive); }
 

@@ -152,6 +152,9 @@ class TestTauriBridgeAPISurface:
         "/notion/set-database-url",
         "/notion/push",
         "/notion/page-url/",
+        # Coaching: "Coach them again" in Progress
+        "/coaching/rerun-all",
+        "/coaching/rerun-all/cancel",
     ]
 
     def test_bridge_references_all_endpoints(self):
@@ -269,6 +272,9 @@ class TestTauriBridgeAPISurface:
         "cloudBindDevice",
         "cloudSnSign",
         "cloudTrash",
+        "coachingRerunAll",
+        "coachingRerunAllStatus",
+        "coachingRerunAllCancel",
     ]
 
     def test_bridge_exposes_all_plaud_methods(self):
@@ -312,6 +318,18 @@ class TestTauriBridgeAPISurface:
         critical = ["/device/connect", "/transcribe", "/cloud/sync"]
         for ep in critical:
             assert ep in self.bridge_src
+
+    def test_rerun_all_bridge_calls_its_routes(self, flask_client):
+        """The three "Coach them again" methods call the routes with the right verbs, and each route exists."""
+        from app.api_server import app
+
+        for method, verb, path in (
+            ("coachingRerunAllStatus", "GET", "/coaching/rerun-all"),
+            ("coachingRerunAll", "POST", "/coaching/rerun-all"),
+            ("coachingRerunAllCancel", "POST", "/coaching/rerun-all/cancel"),
+        ):
+            assert re.search(rf"\b{method}: \(\) => apiCall\('{verb}', '{re.escape(path)}'\)", self.bridge_src), method
+            assert any(r.rule == path and verb in r.methods for r in app.url_map.iter_rules()), path
 
     def test_long_coaching_calls_never_time_out(self):
         """Installing the speaker model and a first voice setup can both run for minutes."""
@@ -1008,10 +1026,7 @@ class TestSidecarManagement:
         package missing from it makes the installed backend fail to import."""
         conf = json.loads((PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text())
         bundled = set(conf["bundle"]["resources"].values())
-        packages = {
-            d.name for d in (PROJECT_ROOT / "app").iterdir()
-            if d.is_dir() and any(d.glob("*.py"))
-        }
+        packages = {d.name for d in (PROJECT_ROOT / "app").iterdir() if d.is_dir() and any(d.glob("*.py"))}
         assert packages, "no app packages found"
         missing = sorted(p for p in packages if f"app/{p}/" not in bundled)
         assert not missing, f"not bundled: {missing}"

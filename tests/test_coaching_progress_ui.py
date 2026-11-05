@@ -447,3 +447,198 @@ class TestCoachingSwitches:
         assert sync_out["reviewShownOff"]
         assert sync_out["reviewSetting"] is True
         assert {"coaching_ai_review": True} in sync_out["saved"]
+
+
+# ---------------------------------------------------------------- "Coach them again" (older reports)
+#
+# coaching-progress.js in node with fake elements that keep their classes, a fake
+# setTimeout (so each 3 s poll is run by hand) and a fake bridge answering from a queue.
+
+_RERUN_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const realSetTimeout = setTimeout;
+const els = {};
+const mk = (id) => {
+  const classes = new Set(id === '#progress-rerun' || id === '#progress-view' ? ['hidden'] : []);
+  const base = {
+    id, innerHTML: '', dataset: {}, style: {}, disabled: false, offsetHeight: 0,
+    classList: {
+      add: (...c) => c.forEach((x) => classes.add(x)), remove: (...c) => c.forEach((x) => classes.delete(x)),
+      toggle: (c, on) => { const v = on === undefined ? !classes.has(c) : !!on; if (v) classes.add(c); else classes.delete(c); return v; },
+      contains: (c) => classes.has(c),
+    },
+    addEventListener() {}, removeEventListener() {}, querySelectorAll: () => [], scrollIntoView() {},
+  };
+  return base;
+};
+const el = (sel) => els[sel] || (els[sel] = mk(sel));
+const timers = new Map();
+let nextId = 1;
+const calls = [];
+const dialogs = [];
+let answer = 'cancel';
+let statuses = [];
+const ctx = {
+  console, Date, Number, String, Math, Promise,
+  setTimeout: (fn, ms) => { timers.set(nextId, { fn, ms }); return nextId++; },
+  clearTimeout: (id) => timers.delete(id),
+  document: { addEventListener() {} },
+  $: (sel) => el(sel),
+  escapeHtml: (t) => String(t ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
+  app: { settings: { diarize: true, coaching_auto: true }, recordings: [], transcripts: {} },
+  toast: (msg, kind) => calls.push(['toast', kind]),
+  setLoading() {},
+  showConfirmDialog: async (opts) => { dialogs.push(opts); return answer; },
+  window: { plaud: {
+    coachingProgress: async () => { calls.push('progress'); return { count: 0 }; },
+    coachingRerunAllStatus: async () => { calls.push('status'); return statuses.length > 1 ? statuses.shift() : statuses[0]; },
+    coachingRerunAll: async () => { calls.push('start'); return { started: true }; },
+    coachingRerunAllCancel: async () => { calls.push('cancel'); return { cancelled: true }; },
+  } },
+};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), ctx);
+const r = (code) => vm.runInContext(code, ctx);
+const settle = () => new Promise((res) => realSetTimeout(res, 5));
+const bar = () => el('#progress-rerun');
+const shown = () => (bar().classList.contains('hidden') ? '' : bar().innerHTML);
+const polls = () => [...timers.values()].map((t) => t.ms);
+const tick = async () => { const due = [...timers.entries()]; timers.clear(); for (const [, t] of due) await t.fn(); await settle(); };
+(async () => {
+  const out = {};
+  // Nothing to do: no line at all
+  statuses = [{ pending_count: 0, running: false, done: 0, total: 0, current: null }];
+  await r('openProgressView')(); await settle();
+  out.none = shown();
+  // One, then three older reports
+  statuses = [{ pending_count: 1, running: false, done: 0, total: 0, current: null }];
+  await r('openProgressView')(); await settle();
+  out.one = shown();
+  statuses = [{ pending_count: 3, running: false, done: 0, total: 0, current: null }];
+  await r('openProgressView')(); await settle();
+  out.three = shown();
+  out.idlePolls = polls();
+  calls.splice(0);
+  // Asks first; Cancel sends nothing
+  await r('_coachProgRerunStart')(); await settle();
+  out.cancelCalls = calls.splice(0);
+  out.dialog = dialogs[0];
+  // AI review off: no AI-calls sentence
+  ctx.app.settings.coaching_ai_review = false;
+  await r('_coachProgRerunStart')(); await settle();
+  out.dialogReviewOff = dialogs[1].message;
+  ctx.app.settings.coaching_ai_review = true;
+  calls.splice(0);
+  // Confirmed: started, then "Coaching again: k of N" with Stop, polled every 3 s
+  answer = 'rerun';
+  statuses = [{ pending_count: 3, running: true, done: 0, total: 3, current: 'a' },
+    { pending_count: 2, running: true, done: 1, total: 3, current: 'b' }];
+  await r('_coachProgRerunStart')(); await settle();
+  out.startCalls = calls.splice(0);
+  out.running0 = shown();
+  out.runningPolls = polls();
+  await tick();
+  out.running1 = shown();
+  out.pollCalls = calls.splice(0);
+  out.stillPolling = polls();
+  // Closed: no more polls, but it keeps running; reopening shows it and polls again
+  r('_coachProgClose')();
+  out.pollsAfterClose = polls();
+  statuses = [{ pending_count: 1, running: true, done: 2, total: 3, current: 'c' }];
+  await r('openProgressView')(); await settle();
+  out.reopened = shown();
+  out.reopenedPolls = polls();
+  // One failed poll: the last status stays, and polling carries on
+  const answer0 = ctx.window.plaud.coachingRerunAllStatus;
+  ctx.window.plaud.coachingRerunAllStatus = async () => { calls.push('status'); throw new Error('timeout'); };
+  await tick();
+  out.afterFailedPoll = shown();
+  out.pollsAfterFailure = polls();
+  ctx.window.plaud.coachingRerunAllStatus = async () => { calls.push('status'); return { error: 'busy' }; };
+  await tick();
+  out.afterErrorPoll = shown();
+  out.pollsAfterError = polls();
+  ctx.window.plaud.coachingRerunAllStatus = answer0;
+  calls.splice(0);
+  // Stop
+  await r('_coachProgRerunStop')(); await settle();
+  out.stopCalls = calls.splice(0);
+  out.stopping = shown();
+  // Finished: the progress is loaded again, once
+  statuses = [{ pending_count: 0, running: false, done: 3, total: 3, current: null }];
+  await tick(); await settle();
+  out.finishCalls = calls.splice(0);
+  out.finished = shown();
+  out.finalPolls = polls();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def rerun_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "-e", _RERUN_JS, str(APP / "ui" / "coaching-progress.js")], capture_output=True, text=True
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+class TestCoachThemAgain:
+    def test_bar_between_header_and_body(self):
+        panel = HTML[HTML.index('id="progress-view"') :]
+        panel = panel[: panel.index('id="progress-body"')]
+        assert re.search(r'<div id="progress-rerun" class="[^"]*\bhidden\b[^"]*"', panel)
+        assert panel.index("</div>") < panel.index('id="progress-rerun"')  # after the header
+
+    def test_shows_how_many_older_reports_lack_engagement(self, rerun_out):
+        assert rerun_out["none"] == ""
+        assert "1 older report doesn’t have Engagement yet." in rerun_out["one"]
+        assert "3 older reports don’t have Engagement yet." in rerun_out["three"]
+        assert ">Coach them again</button>" in rerun_out["three"]
+        assert rerun_out["idlePolls"] == []
+
+    def test_asks_first_with_the_number_of_ai_calls(self, rerun_out):
+        assert rerun_out["cancelCalls"] == []
+        d = rerun_out["dialog"]
+        assert d["message"] == (
+            "Open Pin will coach 3 conversations again, one at a time. "
+            "With the AI review on, that’s about 3 AI calls to your AI provider."
+        )
+        assert d["actions"] == [{"id": "rerun", "label": "Coach them again"}]
+        assert d["cancelLabel"] == "Cancel"
+        assert rerun_out["dialogReviewOff"] == "Open Pin will coach 3 conversations again, one at a time."
+        assert "\u2014" not in d["message"] + d["title"]
+
+    def test_running_shows_k_of_n_with_stop_and_polls_every_3_seconds(self, rerun_out):
+        assert rerun_out["startCalls"] == ["start", "status"]
+        assert "Coaching again: 0 of 3" in rerun_out["running0"]
+        assert 'id="coach-prog-rerun-stop"' in rerun_out["running0"] and ">Stop</button>" in rerun_out["running0"]
+        assert rerun_out["runningPolls"] == [3000]
+        assert "Coaching again: 1 of 3" in rerun_out["running1"]
+        assert rerun_out["pollCalls"] == ["status"]
+        assert rerun_out["stillPolling"] == [3000]
+
+    def test_keeps_running_when_closed_and_reopening_shows_it(self, rerun_out):
+        assert rerun_out["pollsAfterClose"] == []
+        assert "Coaching again: 2 of 3" in rerun_out["reopened"]
+        assert rerun_out["reopenedPolls"] == [3000]
+
+    def test_a_failed_poll_keeps_the_status_and_keeps_polling(self, rerun_out):
+        assert "Coaching again: 2 of 3" in rerun_out["afterFailedPoll"]
+        assert rerun_out["pollsAfterFailure"] == [3000]
+        assert "Coaching again: 2 of 3" in rerun_out["afterErrorPoll"]
+        assert rerun_out["pollsAfterError"] == [3000]
+
+    def test_stop(self, rerun_out):
+        assert rerun_out["stopCalls"][0] == "cancel"
+        assert "Stopping after this conversation" in rerun_out["stopping"]
+        assert "coach-prog-rerun-stop" not in rerun_out["stopping"]
+
+    def test_reloads_the_progress_when_it_finishes(self, rerun_out):
+        assert rerun_out["finishCalls"].count("progress") == 1
+        assert rerun_out["finished"] == ""
+        assert rerun_out["finalPolls"] == []

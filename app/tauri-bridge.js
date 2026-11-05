@@ -421,6 +421,10 @@ window.plaud = {
   coachingExclude: (session_id, exclude) =>
     apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/exclude`, { exclude: !!exclude }),
   coachingProgress: (weeks) => apiCall('GET', `/coaching/progress?weeks=${encodeURIComponent(weeks ?? 12)}`),
+  // "Coach them again" in Progress: older reports without Engagement, coached one at a time
+  coachingRerunAllStatus: () => apiCall('GET', '/coaching/rerun-all'),
+  coachingRerunAll: () => apiCall('POST', '/coaching/rerun-all'),
+  coachingRerunAllCancel: () => apiCall('POST', '/coaching/rerun-all/cancel'),
   voiceStatus: () => apiCall('GET', '/coaching/voice'),
   voiceInstall: () => apiCall('POST', '/coaching/voice/install'),
   voiceSetup: (session_id, labels, replace) =>
