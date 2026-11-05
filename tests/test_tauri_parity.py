@@ -307,6 +307,13 @@ class TestTauriBridgeAPISurface:
         for ep in critical:
             assert ep in self.bridge_src
 
+    def test_long_coaching_calls_never_time_out(self):
+        """Installing the speaker model and a first voice setup can both run for minutes."""
+        block = self.bridge_src[self.bridge_src.index("const NO_TIMEOUT_ENDPOINTS") :]
+        block = block[: block.index("]);")]
+        for ep in ("'/coaching/voice/install'", "'/coaching/voice/setup'"):
+            assert ep in block
+
 
 # ---------------------------------------------------------------------------
 # Flask endpoint JSON shapes

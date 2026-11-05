@@ -7,14 +7,15 @@
 
 // Mirrors app/coaching/targets.py TARGETS (low/high in the backend's units, e.g.
 // talk_share is a 0-1 fraction); tests/test_coaching_progress_ui.py keeps them in
-// step. scale/dec/unit only shape how a number is written. overall_score is the
+// step. scale/dec/unit only shape how a number is written; targetDec, when set,
+// writes the target band with other decimals ("at most 1 in 10 turns"). overall_score is the
 // mean of the five AI scores and has no target.
 const _coachProgMetrics = {
   overall_score: { label: 'Overall score', low: null, high: null, scale: 1, dec: 0, unit: ' / 100', hint: 'Average of the five AI scores' },
   pace_wpm: { label: 'Pace', low: 110, high: 160, scale: 1, dec: 0, unit: ' wpm', hint: 'Words per minute while you speak' },
   talk_share: { label: 'Talk share', low: 0.4, high: 0.6, scale: 100, dec: 0, unit: '%', hint: 'Your share of the talking' },
   longest_monologue_s: { label: 'Longest monologue', low: null, high: 150, scale: 1, dec: 0, unit: '', hint: 'Your longest turn without a break' },
-  interruption_rate: { label: 'Likely interruptions', low: null, high: 0.1, scale: 10, dec: 1, unit: ' in 10 turns', hint: 'How often you likely cut someone off' },
+  interruption_rate: { label: 'Likely interruptions', low: null, high: 0.1, scale: 10, dec: 1, targetDec: 0, unit: ' in 10 turns', hint: 'How often you likely cut someone off' },
   patience_s: { label: 'Patience', low: 0.5, high: 1.5, scale: 1, dec: 1, unit: ' s', hint: 'Usual pause before you reply' },
   questions_per_hour: { label: 'Questions', low: 10, high: 18, scale: 1, dec: 0, unit: ' an hour', hint: 'Questions you ask' },
   fillers_per_min: { label: 'Filler words', low: 0.6, high: 3, scale: 1, dec: 1, unit: ' a minute', hint: 'Um, uh, like, you know' },
@@ -26,7 +27,7 @@ let _coachProgSeq = 0;
 
 // ---- Number formatting ----
 
-function _coachProgNum(metric, v) {
+function _coachProgNum(metric, v, dec) {
   const m = _coachProgMetrics[metric];
   if (!m) return String(Math.round(v * 100) / 100); // a metric the backend added later
   if (metric === 'longest_monologue_s') {
@@ -34,7 +35,8 @@ function _coachProgNum(metric, v) {
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
   }
   const n = v * m.scale;
-  return m.dec ? n.toFixed(m.dec) : String(Math.round(n));
+  const d = dec ?? m.dec;
+  return d ? n.toFixed(d) : String(Math.round(n));
 }
 
 function _coachProgValue(metric, v) {
@@ -46,9 +48,10 @@ function _coachProgValue(metric, v) {
 function _coachProgTarget(metric) {
   const m = _coachProgMetrics[metric];
   if (!m) return '';
-  if (m.low !== null && m.high !== null) return `${_coachProgNum(metric, m.low)}–${_coachProgNum(metric, m.high)}${m.unit}`;
-  if (m.low !== null) return `at least ${_coachProgNum(metric, m.low)}${m.unit}`;
-  if (m.high !== null) return `at most ${_coachProgNum(metric, m.high)}${m.unit}`;
+  const num = (v) => _coachProgNum(metric, v, m.targetDec);
+  if (m.low !== null && m.high !== null) return `${num(m.low)}–${num(m.high)}${m.unit}`;
+  if (m.low !== null) return `at least ${num(m.low)}${m.unit}`;
+  if (m.high !== null) return `at most ${num(m.high)}${m.unit}`;
   return '';
 }
 

@@ -212,7 +212,7 @@ class TestBehaviour:
     def test_interruption_band_matches_backend(self, node_out):
         # progress.py counts value > high as outside, so exactly 0.1 is on target ("at most").
         assert node_out["interruptOnAtBound"] is True
-        assert node_out["interruptTarget"] == "at most 1.0 in 10 turns"
+        assert node_out["interruptTarget"] == "at most 1 in 10 turns"
 
     def test_voice_renders_never_overlap(self, node_out):
         assert node_out["maxInFlight"] == 1

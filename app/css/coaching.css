@@ -182,6 +182,26 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+/* The times a score is based on: each plays from there */
+.coach-area-evidence {
+  grid-column: 2 / 4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+.coach-chip {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  cursor: pointer;
+  transition: color var(--duration) var(--ease), border-color var(--duration) var(--ease);
+}
+.coach-chip:hover { color: var(--accent); border-color: var(--accent); }
 
 /* Summary and Next time */
 .coach-summary { font-size: var(--text-base); line-height: 1.7; overflow-wrap: anywhere; }

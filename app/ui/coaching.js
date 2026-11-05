@@ -44,6 +44,23 @@ const _COACH_MOMENT_KINDS = {
   filler_burst: 'Run of filler words',
 };
 
+// Why the runner couldn't pick you (needs_owner status_reason, app/coaching/runner.py
+// and voice.py): what happened, then how to fix it for next time (already escaped).
+const _COACH_VOICE_SETTINGS_LINK =
+  '<button type="button" class="coach-link" data-coach-action="voice-settings">Settings › Transcription &amp; AI › Your voice &amp; coaching</button>';
+const _COACH_NEEDS_OWNER = {
+  'no voice profile': [
+    'You haven’t set up your voice yet, so the app can’t tell which speaker is you.',
+    `Set it up in ${_COACH_VOICE_SETTINGS_LINK} so the app recognises you in later recordings.`,
+  ],
+  'voice model not installed': [
+    'The voice model isn’t installed, so the app can’t tell which speaker is you.',
+    `Install it in ${_COACH_VOICE_SETTINGS_LINK} so the app can learn your voice.`,
+  ],
+  'no confident match': ['The app couldn’t tell from your voice which speaker is you.', ''],
+  'no audio file': ['There’s no audio for this recording, so there’s nothing to match your voice against.', ''],
+};
+
 // Mirrors MIN_COACHING_SECONDS in app/coaching/targets.py (shorter recordings are skipped)
 const _COACH_MIN_COACHING_SECONDS = 120;
 // AI moment kinds that describe an interruption ("talked over", "cut in"...)
@@ -140,7 +157,8 @@ function _coachBandState(value, target) {
 
 /* ---------- Data helpers ---------- */
 
-/** Mean of the five area scores, rounded (as progress.py's overall_score); null without scores. */
+/** Mean of the area scores present, rounded (as progress.py's overall_score); null without scores.
+    The review drops a score none of whose evidence matches the transcript. */
 function _coachOverall(review) {
   const scores = (review && review.scores) || {};
   const vals = _COACH_AREAS.map(([k]) => scores[k] && scores[k].score).filter(_coachIsNum);
@@ -281,6 +299,20 @@ function _coachPickerHtml(sidecar, segments, inline) {
     </div>`;
 }
 
+// The transcript times a score is based on, as chips that play from there
+function _coachEvidenceHtml(evidence) {
+  const times = [...new Set((Array.isArray(evidence) ? evidence : []).filter((t) => _coachIsNum(t) && t >= 0))];
+  if (!times.length) return '';
+  const chips = times
+    .sort((a, b) => a - b)
+    .map((t) => {
+      const label = escapeHtml(formatTime(t));
+      return `<button type="button" class="coach-chip" ${_coachSeekAttr(t)} title="Play from ${label}">${label}</button>`;
+    })
+    .join('');
+  return `<span class="coach-area-evidence" role="group" aria-label="Based on these moments">${chips}</span>`;
+}
+
 function _coachScoresHtml(review, baseline) {
   const overall = _coachOverall(review);
   if (overall === null) return '';
@@ -295,6 +327,7 @@ function _coachScoresHtml(review, baseline) {
         <span class="coach-bar" role="img" aria-label="${score} out of 100"><span class="coach-bar-fill" style="width:${score}%"></span></span>
         <span class="coach-area-score">${score}</span>
         ${s.reason ? `<span class="coach-area-reason">${escapeHtml(s.reason)}</span>` : ''}
+        ${_coachEvidenceHtml(s.evidence)}
       </div>`;
   }).join('');
   return `
@@ -493,10 +526,12 @@ function _coachReportHtml(sidecar, baseline, segments) {
   const status = sc.status;
   if (status === 'running') return _coachSpinnerHtml('Coaching this conversation…');
   if (status === 'needs_owner') {
+    const [why, fix] = _COACH_NEEDS_OWNER[sc.status_reason] || ['The app couldn’t tell which speaker is you.', ''];
     return `
       <section class="coach-card">
         <h3 class="coach-h">Which one is you?</h3>
-        <p class="coach-muted">The app couldn’t tell from your voice. Nothing is coached until you choose.</p>
+        <p class="coach-muted">${why} Nothing is coached until you choose.</p>
+        ${fix ? `<p class="coach-muted coach-needs-fix">${fix}</p>` : ''}
         ${_coachPickerHtml(sc, segments, true)}
       </section>`;
   }
@@ -509,17 +544,22 @@ function _coachReportHtml(sidecar, baseline, segments) {
       </div>`;
   }
 
-  const review = sc.review && typeof sc.review === 'object' ? sc.review : null;
+  // A failed run that still holds a review never got as far as replacing the last report
+  // (it crashed, or the app quit mid-run): that review, and the metrics with it, are the
+  // previous run's, maybe for another owner. Only a run's own results are shown.
+  const previous = status === 'failed' && !!(sc.review && typeof sc.review === 'object');
+  const review = !previous && sc.review && typeof sc.review === 'object' ? sc.review : null;
   const parts = [];
-  if (sc.report_stale) parts.push(_coachNotice('Transcript changed:', 'Update coaching'));
+  if (sc.report_stale && !previous) parts.push(_coachNotice('Transcript changed:', 'Update coaching'));
   if ((sc.owner && (sc.owner.labels || []).length) || status === 'done') {
     parts.push(_coachOwnerLine(sc), _coachPickerHtml(sc, segments, false));
   }
   if (sc.mixed_up) {
     parts.push(_coachNotice('Marked as speakers mixed up, so this report is left out of your progress.', '', '', 'info'));
   }
-  // A run that failed or was interrupted before measuring anything has no metrics
-  const hasMetrics = !!(sc.metrics && sc.metrics.owner);
+  // A run whose AI review failed still measured the metrics; one that failed or was
+  // interrupted before measuring anything has none of its own
+  const hasMetrics = !previous && !!(sc.metrics && sc.metrics.owner);
   if (status === 'failed') {
     const errors = _coachErrors(sc.status_reason);
     parts.push(`
@@ -527,6 +567,7 @@ function _coachReportHtml(sidecar, baseline, segments) {
         <h3 class="coach-h">${hasMetrics ? 'The AI review didn’t finish' : 'Coaching didn’t finish'}</h3>
         ${errors.length ? `<ul class="coach-errors">${errors.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>` : ''}
         ${hasMetrics ? '<p class="coach-muted">The measured metrics below are still right.</p>' : ''}
+        ${previous ? '<p class="coach-muted">The previous report is hidden, as it may no longer match.</p>' : ''}
         <button type="button" class="action-btn subtle" data-coach-action="run">Try again</button>
       </section>`);
   } else if (!review) {
@@ -555,14 +596,22 @@ function _coachStopPoll() {
   _coachPollHandle = null;
 }
 
-// Poll like the background diarization poll in transcript.js: every 5 s until
-// the run ends, then redraw. Stops as soon as the tab is no longer on screen.
-// before: the sidecar as it was when a run was asked for. The background run
-// may not have marked itself "running" yet (voice matching comes first), so
-// an unchanged sidecar doesn't end the poll during the first seconds.
+/** What identifies one run's outcome: every finished run stamps a new created_at. */
+function _coachRunMark(sc) {
+  const s = sc || {};
+  return JSON.stringify([s.status || '', s.created_at || '', s.status_reason || '']);
+}
+
+// Poll like the background diarization poll in transcript.js: every 5 s while the
+// sidecar says "running", then redraw. Stops as soon as the tab is no longer on screen.
+// before: _coachRunMark of the sidecar when a run was asked for (Coach anyway, Try
+// again), whose response doesn't say "running". Until the poll has seen "running", a
+// sidecar with that same mark is the old outcome, not this run's, so it doesn't end
+// the poll during the first seconds.
 function _coachStartPoll(container, sessionId, before = null) {
   _coachStopPoll();
   const started = Date.now();
+  let seenRunning = false;
   const handle = setInterval(async () => {
     if (!_coachStillShowing(container, sessionId) || Date.now() - started > _COACH_POLL_MAX_MS) {
       if (_coachPollHandle === handle) _coachStopPoll();
@@ -575,8 +624,13 @@ function _coachStartPoll(container, sessionId, before = null) {
       return;
     }
     if (_coachPollHandle !== handle || !_coachStillShowing(container, sessionId)) return;
-    if (!sc || sc.error || sc.status === 'running') return;
-    if (before !== null && Date.now() - started < _COACH_RUN_GRACE_MS && JSON.stringify(sc) === before) return;
+    if (!sc || sc.error) return;
+    if (sc.status === 'running') {
+      seenRunning = true;
+      return;
+    }
+    const waiting = before !== null && !seenRunning && Date.now() - started < _COACH_RUN_GRACE_MS;
+    if (waiting && _coachRunMark(sc) === before) return;
     _coachStopPoll();
     _coachBaseline = null; // a finished run can move "your usual"
     renderCoachingTab(container, sessionId);
@@ -617,7 +671,7 @@ async function _coachRun(container, sessionId, sidecar, btn) {
     return;
   }
   _coachShowRunning(container);
-  _coachStartPoll(container, sessionId, JSON.stringify(sidecar));
+  _coachStartPoll(container, sessionId, _coachRunMark(sidecar));
 }
 
 async function _coachSaveOwner(container, sessionId, sidecar, btn) {
@@ -644,16 +698,24 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
       // A mixed-up recording isn't used to learn your voice
       const res = await window.plaud.coachingSetOwner(sessionId, labels, !mixed);
       if (!res || res.error) throw new Error((res && res.error) || 'no response');
-      if (res.started) {
-        // Coaching runs again in the background: the response is the sidecar as it
-        // was before that run, so wait for it to change, like Coach anyway.
-        const { started: _started, ...snapshot } = res;
+      const { started, ...saved } = res;
+      if (started) {
+        // Coaching runs again in the background. The response is the sidecar already
+        // marked "running": draw it, and _coachDraw polls until the run ends.
         if (!_coachStillShowing(container, sessionId)) return;
-        _coachShowRunning(container);
-        _coachStartPoll(container, sessionId, JSON.stringify(snapshot));
+        _coachSeq++; // drop any render still in flight
+        _coachBaseline = null;
+        if (saved.status === 'running') {
+          _coachDraw(container, sessionId, saved, null);
+        } else {
+          // Not marked "running" (yet, or the run already ended): wait for an outcome
+          // other than the one before the save, like Coach anyway
+          _coachShowRunning(container);
+          _coachStartPoll(container, sessionId, _coachRunMark(latest));
+        }
         return;
       }
-      latest = res;
+      latest = saved;
     }
   } catch (err) {
     toast(`Couldn’t save: ${(err && err.message) || 'no response'}`, 'error');
@@ -663,6 +725,15 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
   const seq = ++_coachSeq;
   const baseline = await _coachLoadBaseline();
   if (seq === _coachSeq && _coachStillShowing(container, sessionId)) _coachDraw(container, sessionId, latest, baseline);
+}
+
+// The same place the Progress view's "set up your voice" link opens
+function _coachOpenVoiceSettings() {
+  openSettings();
+  loadSettings();
+  showSettingsTab('ai');
+  const section = document.querySelector('#voice-coaching-section');
+  if (section) section.scrollIntoView({ block: 'start' });
 }
 
 function _coachTogglePicker(container, open) {
@@ -711,6 +782,7 @@ function _coachDraw(container, sessionId, sidecar, baseline) {
     else if (action === 'run') _coachRun(container, sessionId, sidecar, btn);
     else if (action === 'save-owner') _coachSaveOwner(container, sessionId, sidecar, btn);
     else if (action === 'reload') renderCoachingTab(container, sessionId);
+    else if (action === 'voice-settings') _coachOpenVoiceSettings();
   };
   container.onchange = () => {
     const save = container.querySelector('[data-coach-action="save-owner"]');
