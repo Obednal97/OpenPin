@@ -7,7 +7,8 @@
 
 <p align="center">
 A macOS app for the <b>Plaud NotePin S</b> voice recorder.<br>
-It syncs recordings over Bluetooth or Wi-Fi, decrypts them on your Mac, and transcribes and summarises them.
+It syncs recordings over Bluetooth or Wi-Fi, decrypts them on your Mac, transcribes and summarises them,<br>
+coaches you on how your conversations went, and lets Claude work with your recordings.
 </p>
 
 Open Pin is an alternative to the official Plaud app. It downloads recordings straight from the
@@ -34,6 +35,9 @@ aren't supported.
   downloads are kept and retried, never saved as broken audio.
 - **Wi-Fi sync**: for large files the Mac joins the device's own hotspot for a much faster
   transfer, then reconnects to your usual Wi-Fi.
+- **Clear sync progress**: both say how many new recordings there are and how big they are
+  ("2 new recordings to sync (5.4 MB)"), then "Syncing recording 1 of 2", with a bar that follows
+  the data received.
 - **Local decryption**: audio is decrypted on the Mac and saved as Ogg/Opus.
 - **Transcription**: Deepgram, Groq Whisper, OpenAI, or Whisper running on your Mac. Custom
   vocabulary and speaker labels.
@@ -45,10 +49,16 @@ aren't supported.
   counts laughs after your lines (detected on your Mac), follow-up questions to you and points
   others built on, each with moments you can click to hear. Turn the AI review off to keep
   coaching to the measured results, with nothing leaving your Mac, and turn coaching off for any
-  one recording. A Progress view shows whether you are improving over weeks. You set up your voice
-  once so it knows which speaker is you; voice data and your verbatim words stay on your Mac.
-- **Speaker names**: click Speaker 2 in a transcript and give it a name. It shows in the transcript,
-  summary, coaching and Notion, and you can clear it any time.
+  one recording. A Progress view shows whether you are improving over weeks. **Coach again** re-runs
+  any report, and Progress offers to coach your older reports again so they gain newer measures.
+  You set up your voice once so it knows which speaker is you; voice data and your verbatim words
+  stay on your Mac.
+- **Speaker names**: click Speaker 2 in a transcript and give it a name, or let Claude work it out.
+  It shows in the transcript, summary, exports, coaching and Notion, and names you've used before
+  are suggested. Your own name goes on your speaker once you've told coaching which one is you.
+- **Use with Claude**: Claude Desktop and Claude Code can search and read your recordings, name
+  speakers and tag them, through a connector built into Open Pin. Off until you turn it on; see
+  [Use with Claude](#use-with-claude).
 - **Editing**: crop audio, fix transcript lines, edit summaries as Markdown, tag, rename and file
   recordings into folders.
 - **Integrations**: Notion (a page per recording, your own notes on the page are kept), Google
