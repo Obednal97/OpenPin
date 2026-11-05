@@ -49,6 +49,7 @@ def get_settings():
         {
             "model": config.get("whisper_model", "small"),
             "diarize": config.get("diarize", False),
+            "coaching_auto": config.get("coaching_auto", True),
             "language": config.get("language", "auto"),
             "english_variant": config.get("english_variant", "us"),
             "models": models,
@@ -122,6 +123,10 @@ def save_settings():
             config["whisper_model"] = data["model"]
         if "diarize" in data:
             config["diarize"] = data["diarize"]
+            if not data["diarize"]:
+                config["coaching_auto"] = False  # coaching needs speaker labels
+        if "coaching_auto" in data:
+            config["coaching_auto"] = data["coaching_auto"]
         if "language" in data:
             config["language"] = data["language"]
         if "english_variant" in data:
