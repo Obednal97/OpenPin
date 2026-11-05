@@ -537,12 +537,16 @@ function _coachEngagementHtml(eng, review, baseline) {
     rows.push(_coachEngagementRowHtml('Laughs after your lines', '<span class="coach-muted">Not available</span>', why));
   }
 
-  // Follow-up questions to you: the share is of your turns, so the turns are count / share
+  // Follow-up questions to you: N of your M turns. M is follow_up_turns; a block saved before
+  // that field existed gives it back as count / share.
   const follow = Array.isArray(eng.follow_ups) ? eng.follow_ups.filter((f) => f && _coachIsNum(f.t)) : [];
+  let followTurns = null;
+  if (_coachIsNum(eng.follow_up_turns)) followTurns = eng.follow_up_turns;
+  else if (follow.length && _coachIsNum(eng.follow_up_share) && eng.follow_up_share > 0) followTurns = Math.round(follow.length / eng.follow_up_share);
   let followValue;
   if (!_coachIsNum(eng.follow_up_share)) followValue = '<span class="coach-muted">Not enough of your turns to tell</span>';
-  else if (!follow.length || eng.follow_up_share <= 0) followValue = 'None';
-  else followValue = escapeHtml(`${follow.length} of ${Math.round(follow.length / eng.follow_up_share)} of your turns`);
+  else if (followTurns === null) followValue = follow.length ? String(follow.length) : 'None';
+  else followValue = escapeHtml(`${follow.length ? follow.length : 'None'} of ${followTurns} of your turns`);
   rows.push(_coachEngagementRowHtml(
     'Follow-up questions to you',
     followValue,

@@ -1,6 +1,6 @@
 """Engagement block: laughs after your lines, follow-up questions to you, points others built on.
 
-Pure functions apart from ``owner_loudness_db``, which reads a synthetic WAV.
+Pure functions apart from ``measure_loudness``, which reads a synthetic WAV.
 """
 
 import math
@@ -30,8 +30,23 @@ def ev(start, end=None, loudness=-40.0, score=0.5):
     return {"start": start, "end": start + 1.0 if end is None else end, "score": score, "loudness_db": loudness}
 
 
-def compute(events=(), status="done", reason="", review=None, duration=HOUR, loud=-20.0, segs=SEGS):
-    return E.compute(segs, OWNER, list(events), status, reason, review, duration, loud)
+def measured(events, loud=-20.0, segs=SEGS):
+    """What ``measure_loudness`` would return: in these tests an event's ``loudness_db`` stands
+    for the loudness the audio has over its candidate window."""
+    if loud is None:
+        return None
+    evs = E._events(list(events))
+    return {
+        "owner_db": loud,
+        "windows": [evs[c["event"]]["loudness_db"] for c in E.laugh_candidates(segs, OWNER, events)],
+    }
+
+
+def compute(events=(), status="done", reason="", review=None, duration=HOUR, loud=-20.0, segs=SEGS, loudness=...):
+    events = list(events)
+    if loudness is ...:
+        loudness = measured(events, loud, segs)
+    return E.compute(segs, OWNER, events, status, reason, review, duration, loudness)
 
 
 def reactions(*responses):
@@ -71,8 +86,11 @@ def test_laugh_just_after_your_line_counts_with_the_line():
     [
         (ev(12.0), True),  # starts exactly 2.0 s after your turn ends
         (ev(12.01), False),  # just past the 2.0 s window
-        (ev(8.0, 9.0), True),  # ends exactly where your turn's last 1.0 s begins
-        (ev(8.0, 8.99), False),  # ends just before your turn's last 1.0 s
+        (ev(8.0, 8.99), False),  # ends before your turn's last 1.0 s
+        # Overlapping your turn's last 1.0 s, but measured only after your line ends (to end + 0.5 s):
+        (ev(9.0, 9.75), True),  # exactly 0.25 s left to measure
+        (ev(9.0, 9.74), False),  # under 0.25 s left
+        (ev(8.0, 9.0), False),  # entirely inside your line: nothing of it after your line
         (ev(9.5, 10.5), True),  # overlaps the end of your turn
     ],
 )
@@ -122,6 +140,26 @@ def test_unavailable_laughter_counts_nothing_and_keeps_the_reason():
     out = compute([ev(11.0)], status="unavailable", reason="no model")
     assert out["laughter_status"] == "unavailable" and out["laughter_reason"] == "no model"
     assert out["laughs"] == [] and out["laughs_count"] is None and out["laughs_per_hour"] is None
+
+
+def test_laugh_windows_start_after_your_line_and_stop_at_your_next():
+    cands = E.laugh_candidates(SEGS, OWNER, [ev(9.5, 12.5), ev(29.0, 40.8)])
+    # The detector's event reaches back into your line; the window starts where your line ends.
+    assert [(c["t"], c["line_start"], c["window"]) for c in cands] == [
+        (9.5, 0.0, (10.0, 13.0)),
+        (29.0, 21.0, (30.0, 41.0)),  # cut at your next line (41.0), not 41.3
+    ]
+
+
+def test_never_falls_back_to_the_detectors_loudness():
+    """An unmeasured window isn't counted, even when the detector's own loudness looks quiet."""
+    out = compute([ev(11.0, loudness=-40.0)], loudness={"owner_db": -20.0, "windows": [None]})
+    assert out["laughter_status"] == "done" and out["laughs_count"] == 0
+
+
+def test_loudness_for_other_windows_is_unavailable():
+    out = compute([ev(11.0)], loudness={"owner_db": -20.0, "windows": []})
+    assert out["laughter_status"] == "unavailable" and out["laughs_count"] is None
 
 
 def test_malformed_events_are_skipped():
@@ -235,7 +273,7 @@ def _wav_copy(tmp_path, monkeypatch, data, rate=16000):
     return copy
 
 
-def test_owner_loudness_is_the_median_of_your_lines_peak_frames(tmp_path, monkeypatch):
+def test_measure_loudness_reads_your_lines_and_the_windows_once(tmp_path, monkeypatch):
     np = pytest.importorskip("numpy")
     sf = pytest.importorskip("soundfile")
     second = 16000
@@ -245,9 +283,15 @@ def test_owner_loudness_is_the_median_of_your_lines_peak_frames(tmp_path, monkey
             np.full(second, 0.9),  # them, much louder
             np.full(second, 0.2),  # you: about -14 dBFS
             np.full(second, 0.05),  # you: about -26 dBFS
+            np.full(second, 0.025),  # a laugh: about -32 dBFS
         ]
     ).astype("float32")
     copy = _wav_copy(tmp_path, monkeypatch, data)
+    import src.transcribe as tr
+
+    convert = tr._to_wav16k
+    conversions = []
+    monkeypatch.setattr(tr, "_to_wav16k", lambda p: conversions.append(p) or convert(p))
     reads = []
     real_read = sf.read
 
@@ -263,18 +307,70 @@ def test_owner_loudness_is_the_median_of_your_lines_peak_frames(tmp_path, monkey
         {"start": 2.0, "end": 3.0, "speaker": "Speaker 1"},
         {"start": 3.0, "end": 4.0, "speaker": "Speaker 1"},
     ]
-    assert E.owner_loudness_db("x.ogg", segs, OWNER) == pytest.approx(-20.0, abs=0.01)
-    # Only your lines are read, in chunks, never the whole file.
-    assert len(reads) == 3 * 4
+    out = E.measure_loudness("x.ogg", segs, OWNER, [(4.0, 5.0), (5.0, 5.5)])
+    assert out["owner_db"] == pytest.approx(-20.0, abs=0.01)
+    assert out["windows"][0] == pytest.approx(-32.04, abs=0.01)
+    assert out["windows"][1] is None  # past the end of the audio: nothing to measure
+    assert conversions == ["x.ogg"]  # one conversion for everything
+    # Only your lines and the windows are read, in chunks, never the whole file.
+    assert len(reads) == 3 * 4 + 4 + 1
     assert all(r.get("dtype") == "float32" and r.get("frames") <= 4000 for r in reads)
     assert not copy.exists()
 
 
-def test_owner_loudness_none_without_your_lines_or_audio(tmp_path, monkeypatch):
-    np = pytest.importorskip("numpy")
-    _wav_copy(tmp_path, monkeypatch, np.full(16000, 0.5).astype("float32"))
-    assert E.owner_loudness_db("x.ogg", [{"start": 0.0, "end": 1.0, "speaker": "Speaker 2"}], OWNER) is None
+def test_measure_loudness_none_without_audio(monkeypatch):
     import src.transcribe as tr
 
     monkeypatch.setattr(tr, "_to_wav16k", lambda p: None)
-    assert E.owner_loudness_db("x.ogg", [{"start": 0.0, "end": 1.0, "speaker": "Speaker 1"}], OWNER) is None
+    assert E.measure_loudness("x.ogg", SEGS, OWNER, [(10.0, 11.0)]) is None
+
+
+def test_measure_loudness_without_your_lines_has_no_owner_level(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    _wav_copy(tmp_path, monkeypatch, np.full(16000, 0.5).astype("float32"))
+    out = E.measure_loudness("x.ogg", [{"start": 0.0, "end": 1.0, "speaker": "Speaker 2"}], OWNER, [])
+    assert out == {"owner_db": None, "windows": []}
+
+
+def _laugh_after_your_line(tmp_path, monkeypatch, laugh_amplitude):
+    """You at -20 dBFS until 10.0 s, a laugh from 10.3 to 11.8 s, them speaking from 14 s.
+
+    The detector's event reaches back into your line and carries your loudness (-20 dBFS)."""
+    np = pytest.importorskip("numpy")
+    rate = 16000
+    audio = np.zeros(rate * 20, dtype="float32")
+    audio[: rate * 10] = 0.1
+    audio[int(rate * 10.3) : int(rate * 11.8)] = laugh_amplitude
+    audio[rate * 14 :] = 0.05
+    _wav_copy(tmp_path, monkeypatch, audio)
+    segs = [
+        {"start": 0.0, "end": 10.0, "text": "And that was the whole of the launch plan.", "speaker": "Speaker 1"},
+        {"start": 14.0, "end": 20.0, "text": "Brilliant, thank you.", "speaker": "Speaker 2"},
+    ]
+    events = [{"start": 9.5, "end": 12.5, "score": 0.6, "loudness_db": -20.0}]
+    windows = [c["window"] for c in E.laugh_candidates(segs, OWNER, events)]
+    loudness = E.measure_loudness("x.ogg", segs, OWNER, windows)
+    return E.compute(segs, OWNER, events, "done", "", None, 1800.0, loudness)
+
+
+def test_a_quiet_laugh_straight_after_your_loud_line_counts(tmp_path, monkeypatch):
+    """Review fix: the laugh is measured after your line, not over the detector's windows."""
+    out = _laugh_after_your_line(tmp_path, monkeypatch, 0.025)  # about -32 dBFS
+    assert out["laughs_count"] == 1
+    assert out["laughs"][0]["t"] == 9.5
+
+
+def test_your_own_loud_laugh_after_your_line_still_does_not_count(tmp_path, monkeypatch):
+    out = _laugh_after_your_line(tmp_path, monkeypatch, 0.126)  # about -18 dBFS: you
+    assert out["laughter_status"] == "done" and out["laughs_count"] == 0
+
+
+def test_architecture_describes_the_loudness_rule_and_the_voice_level_reason():
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    section = doc[doc.index("### Engagement and laughter") :]
+    section = section[: section.index("\n### ", 1)]
+    assert "voice level couldn't be" in section  # listed with the other unavailable reasons
+    assert "measure_loudness" in section and "never before your" in section and "0.25 s" in section
+    assert "within 1 s" in section

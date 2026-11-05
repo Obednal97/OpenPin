@@ -61,7 +61,13 @@ def env(tmp_path):
         "review": MagicMock(return_value={"review": REVIEW, "provider": "anthropic", "errors": []}),
         "find_audio": MagicMock(return_value=str(audio)),
         "detect": MagicMock(return_value={"status": "unavailable", "events": [], "reason": "stubbed"}),
-        "owner_loudness": MagicMock(return_value=-20.0),
+        # Your voice at -20 dBFS; a laugh window measured after 100 s is loud (you), before it quiet.
+        "measure_loudness": MagicMock(
+            side_effect=lambda audio, segs, labels, windows: {
+                "owner_db": -20.0,
+                "windows": [-18.0 if a > 100 else -40.0 for a, _b in windows],
+            }
+        ),
     }
     with (
         patch("app.coaching.store.COACHING_DIR", tmp_path / "coaching"),
@@ -74,7 +80,7 @@ def env(tmp_path):
         patch("app.coaching.runner.review_conversation", stubs["review"]),
         patch("app.coaching.runner._find_audio", stubs["find_audio"]),
         patch("app.coaching.runner.laughter.detect", stubs["detect"]),
-        patch("app.coaching.runner.engagement.owner_loudness_db", stubs["owner_loudness"]),
+        patch("app.coaching.runner.engagement.measure_loudness", stubs["measure_loudness"]),
         patch("app.coaching.runner.Thread", _SyncThread),
     ):
         yield stubs
@@ -869,6 +875,9 @@ def test_engagement_block_is_stored_and_its_parts_copied_into_the_metrics(env):
     assert owner["laughs_per_hour"] == 20.0
     assert owner["follow_up_share"] == eng["follow_up_share"]
     assert owner["built_on_share"] is None  # REVIEW has no reactions
+    # One measurement: your lines plus each candidate's window, starting where your line ends.
+    env["measure_loudness"].assert_called_once()
+    assert env["measure_loudness"].call_args.args[3] == [(20.0, 22.5), (120.0, 122.5)]
     # The counted laugh went to the review prompt, before the review ran.
     assert env["review"].call_args.kwargs["laughs"] == eng["laughs"]
 
@@ -915,7 +924,7 @@ def test_laughter_unavailable_keeps_its_reason_and_coaching_carries_on(env):
     assert out["engagement"]["laughter_status"] == "unavailable"
     assert out["engagement"]["laughter_reason"] == "no model"
     assert out["metrics"]["owner"]["laughs_per_hour"] is None
-    env["owner_loudness"].assert_not_called()
+    env["measure_loudness"].assert_not_called()
 
 
 def test_laughter_raising_never_breaks_coaching(env):
@@ -941,7 +950,7 @@ def test_no_laughs_found_needs_no_voice_level(env):
     _laughs(env, [])
     out = runner.run_coaching(SID, env["audio"])
     assert out["engagement"]["laughs_count"] == 0
-    env["owner_loudness"].assert_not_called()
+    env["measure_loudness"].assert_not_called()
 
 
 def test_over_three_hours_skips_laughter_without_converting(env):
@@ -978,3 +987,11 @@ def test_needs_owner_drops_an_old_engagement_block(env):
     out = runner.run_coaching(SID, env["audio"])
     assert out["status"] == "needs_owner"
     assert "engagement" not in out
+
+
+def test_laughs_far_from_your_lines_need_no_measuring(env):
+    _write_transcript(env["trn"])
+    _laughs(env, [{"start": 40.0, "end": 41.0, "score": 0.6, "loudness_db": -40.0}])
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["engagement"]["laughter_status"] == "done" and out["engagement"]["laughs_count"] == 0
+    env["measure_loudness"].assert_not_called()
