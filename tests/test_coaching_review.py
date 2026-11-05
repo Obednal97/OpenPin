@@ -129,3 +129,51 @@ def test_schema_is_strict_compatible():
 
     check(R.REVIEW_SCHEMA)
     json.dumps(R.REVIEW_SCHEMA)
+
+
+def test_ground_malformed_shapes_do_not_raise():
+    bad = {
+        "scores": {"clarity": "high", "warmth": {"score": float("inf")}, "ok": {"score": 70, "reason": "r"}},
+        "next_time": "not a list",
+        "reactions": ["str", None, {"t": float("inf")}, {"t": float("nan")}, {"t": "5"}, {"t": 5.0}],
+        "moments": {"t": 5.0},
+        "interruptions_confirmed": [float("inf"), "x", 5.0],
+    }
+    out = R.ground(bad, SEGS)
+    assert set(out["scores"]) == {"warmth", "ok"}
+    assert out["scores"]["warmth"]["score"] == 0 and out["scores"]["ok"]["score"] == 70
+    assert out["next_time"] == [] and out["moments"] == []
+    assert [x["t"] for x in out["reactions"]] == [5.0]
+    assert out["interruptions_confirmed"] == [5.0]
+    assert R.ground({"scores": None}, SEGS)["scores"] == {}
+    R.ground({}, SEGS)
+
+
+def test_review_conversation_returns_errors_if_grounding_raises():
+    with (
+        patch.object(R, "call_llm_json", lambda *a, **k: ({}, "ollama", [])),
+        patch.object(R, "ground", side_effect=ValueError("boom")),
+    ):
+        res = R.review_conversation(SEGS, {"Speaker 1"}, METRICS, {})
+    assert res["review"] is None and res["provider"] == "ollama"
+    assert any("invalid review shape" in e for e in res["errors"])
+
+
+def test_long_transcript_truncated_to_400_turns_with_note():
+    segs = []
+    for i in range(500):
+        segs.append({"start": i * 2.0, "end": i * 2.0 + 1, "text": f"line{i}.", "speaker": f"Speaker {1 + i % 2}"})
+    _, cap = (None, {})
+    with patch.object(
+        R, "call_llm_json", lambda s, u, sc, c, schema_name="r": (cap.update(system=s, user=u) or review(), "x", [])
+    ):
+        R.review_conversation(segs, {"Speaker 1"}, {"moments": []}, {})
+    lines = [ln for ln in cap["user"].splitlines() if ln.startswith("[")]
+    assert len(lines) == 400
+    assert "cut to the first 400 turns" in cap["system"]
+
+
+def test_citation_within_tolerance_of_segment_start_grounds():
+    segs = [{"start": 61.7, "end": 65.0, "text": "x", "speaker": "Speaker 1"}]
+    out = R.ground(review(moments=[{"t": 61, "kind": "k", "note": "n"}]), segs)
+    assert len(out["moments"]) == 1
