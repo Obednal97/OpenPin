@@ -13,12 +13,18 @@ SEGS = [
 METRICS = {
     "owner": {"wpm": 187},
     "availability": {"wpm": "exact"},
-    "moments": [{"t": 5.0, "kind": "interruption", "speaker": "Speaker 2", "quote": "Hi", "likely": True}],
+    "moments": [
+        {"t": 5.0, "kind": "interruption", "speaker": "Speaker 2", "quote": "Hi", "likely": True},
+        {"t": 60.0, "kind": "interruption", "speaker": "Speaker 1", "quote": "I wanted", "likely": True},
+    ],
 }
 
 
 def scores(**over):
-    base = {k: {"score": 50, "reason": "ok"} for k in ("clarity", "warmth", "charisma", "listening", "reception")}
+    base = {
+        k: {"score": 50, "reason": "ok", "evidence": [0.0]}
+        for k in ("clarity", "warmth", "charisma", "listening", "reception")
+    }
     base.update(over)
     return base
 
@@ -54,7 +60,13 @@ def test_ground_drops_invented_timestamps():
 
 def test_ground_clamps_scores():
     out = R.ground(
-        review(scores=scores(clarity={"score": 140, "reason": "a"}, warmth={"score": -3, "reason": "b"})), SEGS
+        review(
+            scores=scores(
+                clarity={"score": 140, "reason": "a", "evidence": [0.0]},
+                warmth={"score": -3, "reason": "b", "evidence": [5.0]},
+            )
+        ),
+        SEGS,
     )
     assert out["scores"]["clarity"]["score"] == 100
     assert out["scores"]["warmth"]["score"] == 0
@@ -80,7 +92,7 @@ def run(config, **kw):
         return (
             review(
                 reactions=[{"t": 99.0, "owner_point": "x", "response": "agreed", "evidence": "e"}],
-                interruptions_confirmed=[5.0, 60.0],
+                interruptions_confirmed=[5.0, 60.0, 0.0],
             ),
             "anthropic",
             [],
@@ -99,7 +111,8 @@ def test_prompt_marks_owner_and_includes_metrics():
     assert "likely" in cap["system"] and "British English" in cap["system"]
     assert res["provider"] == "anthropic" and res["errors"] == []
     assert res["review"]["reactions"] == []  # t=99 is invented
-    assert res["review"]["interruptions_confirmed"] == [5.0]  # 60.0 is not a candidate
+    # 60.0 is the owner's interruption; 5.0 is Speaker 2 interrupting the owner, 0.0 no candidate.
+    assert res["review"]["interruptions_confirmed"] == [60.0]
 
 
 def test_failed_llm_returns_none_with_errors():
@@ -133,7 +146,13 @@ def test_schema_is_strict_compatible():
 
 def test_ground_malformed_shapes_do_not_raise():
     bad = {
-        "scores": {"clarity": "high", "warmth": {"score": float("inf")}, "ok": {"score": 70, "reason": "r"}},
+        "scores": {
+            "clarity": "high",
+            "warmth": {"score": float("inf"), "evidence": [0.0]},
+            "ok": {"score": 70, "reason": "r", "evidence": [60.0]},
+            "no_evidence": {"score": 70, "reason": "r"},
+            "bad_evidence": {"score": 70, "reason": "r", "evidence": "5.0"},
+        },
         "next_time": "not a list",
         "reactions": ["str", None, {"t": float("inf")}, {"t": float("nan")}, {"t": "5"}, {"t": 5.0}],
         "moments": {"t": 5.0},
@@ -177,3 +196,42 @@ def test_citation_within_tolerance_of_segment_start_grounds():
     segs = [{"start": 61.7, "end": 65.0, "text": "x", "speaker": "Speaker 1"}]
     out = R.ground(review(moments=[{"t": 61, "kind": "k", "note": "n"}]), segs)
     assert len(out["moments"]) == 1
+
+
+def test_score_evidence_is_grounded_and_ungrounded_scores_dropped():
+    r = review(
+        scores=scores(
+            clarity={"score": 80, "reason": "a", "evidence": [0.5, 300.0, float("nan"), "5", True]},
+            warmth={"score": 70, "reason": "b", "evidence": [300.0]},
+            charisma={"score": 70, "reason": "c", "evidence": []},
+        )
+    )
+    out = R.ground(r, SEGS)
+    assert out["scores"]["clarity"] == {"score": 80, "reason": "a", "evidence": [0.5]}
+    assert "warmth" not in out["scores"] and "charisma" not in out["scores"]
+    assert set(out["scores"]) == {"clarity", "listening", "reception"}
+
+
+def test_schema_scores_carry_evidence_and_prompt_asks_for_it():
+    score = R.REVIEW_SCHEMA["properties"]["scores"]["properties"]["clarity"]
+    assert score["properties"]["evidence"] == {"type": "array", "items": {"type": "number"}}
+    assert set(score["required"]) == {"score", "reason", "evidence"}
+    _, cap = run({})
+    assert "evidence" in cap["system"]
+
+
+def test_only_the_owners_interruptions_are_candidates():
+    metrics = {
+        "moments": [
+            {"t": 5.0, "kind": "interruption", "speaker": "Speaker 2", "likely": True},
+            {"t": 60.0, "kind": "interruption", "speaker": "Speaker 1", "likely": True},
+            {"t": 0.0, "kind": "monologue", "speaker": "Speaker 1", "likely": False},
+        ]
+    }
+    confirmed = review(interruptions_confirmed=[0.0, 5.0, 60.0])
+    with patch.object(R, "call_llm_json", lambda *a, **k: (confirmed, "x", [])):
+        res = R.review_conversation(SEGS, {"Speaker 1"}, metrics, {})
+    assert res["review"]["interruptions_confirmed"] == [60.0]
+    with patch.object(R, "call_llm_json", lambda *a, **k: (confirmed, "x", [])):
+        res = R.review_conversation(SEGS, {"Speaker 2"}, metrics, {})
+    assert res["review"]["interruptions_confirmed"] == [5.0]

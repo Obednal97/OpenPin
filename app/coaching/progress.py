@@ -4,7 +4,7 @@ Input is a list of (session_id, recorded_at_epoch, sidecar). Only sidecars with
 status "done" and mixed_up False count. Every key of targets.TARGETS is a series,
 read from sidecar["metrics"]["owner"] (the units there already match the target
 bands, e.g. talk_share is a 0-1 fraction). One extra series, "overall_score", is the
-mean of the five review scores; it has no band and is left out of most_improved,
+mean of the review scores present (ungrounded ones are dropped); it has no band and is left out of most_improved,
 most_stuck and focus. None values are skipped, never counted as zero.
 
 Weeks are ISO weeks starting Monday, in UTC.
@@ -23,16 +23,18 @@ BASELINE_DAYS = 30
 RECENT_DAYS = 28  # "last 4 weeks"; compared with the 28 days before
 FOCUS_DAYS = 14  # "last 2 weeks"
 
-# (multiplier, decimals, unit suffix) used when writing values into the focus sentence.
-_FORMAT = {
-    "pace_wpm": (1, 0, " words per minute"),
-    "talk_share": (100, 0, "%"),
-    "longest_monologue_s": (1, 0, " seconds"),
-    "interruption_rate": (1, 2, ""),
-    "patience_s": (1, 1, " seconds"),
-    "questions_per_hour": (1, 0, ""),
-    "fillers_per_min": (1, 1, ""),
-    "interactivity": (1, 1, ""),
+# How each metric reads in the focus sentence:
+# (multiplier, decimals, opening words, unit after the value, unit after the target band).
+# In the value unit, "{s}" becomes "s" unless the value reads exactly "1".
+_FOCUS = {
+    "pace_wpm": (1, 0, "Your pace was", " word{s} per minute", " words per minute"),
+    "talk_share": (100, 0, "Your share of the talking was", "%", "%"),
+    "longest_monologue_s": (1, 0, "Your longest monologue was", " second{s}", " seconds"),
+    "interruption_rate": (10, 1, "You made about", " likely interruption{s} in 10 turns", " in 10 turns"),
+    "patience_s": (1, 1, "Your usual pause before you spoke was", " second{s}", " seconds"),
+    "questions_per_hour": (1, 0, "You asked", " question{s} an hour", " questions an hour"),
+    "fillers_per_min": (1, 1, "You used", " filler word{s} a speaking minute", " a speaking minute"),
+    "interactivity": (1, 1, "Speakers switched", " time{s} every 5 minutes", " switches every 5 minutes"),
 }
 
 
@@ -76,12 +78,12 @@ def _median(rows: list[dict], metric: str, start: float, end: float) -> float | 
 
 
 def _num_text(metric: str, value: float) -> str:
-    mult, dec, _ = _FORMAT[metric]
+    mult, dec = _FOCUS[metric][:2]
     return f"{round(value * mult, dec):g}"
 
 
 def _band_text(metric: str) -> str:
-    t, unit = T.TARGETS[metric], _FORMAT[metric][2]
+    t, unit = T.TARGETS[metric], _FOCUS[metric][4]
     low, high = t["low"], t["high"]
     if low is not None and high is not None:
         return f"{_num_text(metric, low)}–{_num_text(metric, high)}{unit}"
@@ -91,11 +93,10 @@ def _band_text(metric: str) -> str:
 
 
 def _focus_text(metric: str, value: float) -> str:
-    name = T.TARGETS[metric]["label"].split(" (")[0]
-    return (
-        f"{name} was {_num_text(metric, value)}{_FORMAT[metric][2]} over the last two weeks; "
-        f"aim for {_band_text(metric)}."
-    )
+    opening, unit = _FOCUS[metric][2:4]
+    number = _num_text(metric, value)
+    unit = unit.replace("{s}", "" if number == "1" else "s")
+    return f"{opening} {number}{unit} over the last two weeks; aim for {_band_text(metric)}."
 
 
 def _week_start(t: float) -> str:
@@ -112,9 +113,11 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
     - most_improved: among banded metrics, the one that moved furthest toward its band,
       comparing the median of the last 4 weeks with the 4 weeks before. Needs both medians.
       Distances are scaled by band size so metrics are comparable. None if nothing improved.
-    - most_stuck: among banded metrics whose last-4-weeks median is outside its band, the one
-      that moved least toward it (a move away counts as less than none). Without an earlier
-      4-week median the movement is taken as zero. Ties go to the one furthest outside.
+    - most_stuck: among banded metrics whose last-4-weeks median is outside its band and that
+      did not move toward it (gain <= 0), the one that moved least (a move away counts as less
+      than none). Without an earlier 4-week median the movement is taken as zero. Ties go to
+      the one furthest outside. An improving metric is never "still stuck", so it is never the
+      same metric as most_improved.
     - focus: the banded metric furthest outside its band over the last 2 weeks (scaled by band
       size), with a templated sentence.
     """
@@ -160,7 +163,7 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
         if last is not None and _distance(m, last) > 0:
             gain = 0.0 if before is None else _distance(m, before) - _distance(m, last)
             key = (gain, -_distance(m, last))
-            if worst is None or key < worst:
+            if gain <= 0 and (worst is None or key < worst):
                 worst = key
                 t = T.TARGETS[m]
                 stuck = {"metric": m, "value": last, "target": {"low": t["low"], "high": t["high"]}}
