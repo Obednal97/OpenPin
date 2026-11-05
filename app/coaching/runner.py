@@ -403,7 +403,11 @@ def _owner_pick(session_id: str, labels) -> tuple[list[dict], list[str], dict]:
 
 
 def _save_pick(session_id: str, owner: dict) -> dict:
-    """Save the owner and status "running" in one write, before any learning or run starts."""
+    """Save the owner and status "running" in one write, before any learning or run starts.
+
+    The caller must have registered the run (``_enter``) first and keep it registered until
+    the run ends, or ``current`` would rewrite this "running" as interrupted.
+    """
     return store.update(session_id, lambda d: d.update(owner=owner, status="running", status_reason=""))
 
 

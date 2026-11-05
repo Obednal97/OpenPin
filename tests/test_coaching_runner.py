@@ -450,6 +450,47 @@ def test_set_owner_saves_owner_and_running_before_learning(env):
     assert seen == [("running", ["Speaker 2"])]
 
 
+@pytest.mark.parametrize("learn", [True, False])
+def test_current_says_running_between_the_owner_write_and_the_run(env, learn):
+    """The session is registered before the owner + running write, so current() never calls it interrupted."""
+    _write_transcript(env["trn"])
+    store.update(SID, lambda d: d.update(status="needs_owner", status_reason="no voice profile"))
+    seen = []
+    real_save, real_run = runner._save_pick, runner._run_once
+
+    def save_pick(session_id, owner):
+        seen.append(("before write", runner.is_running(session_id)))
+        return real_save(session_id, owner)
+
+    def run_once(session_id, audio_path, force):
+        seen.append(("before run", runner.current(session_id)["status"], store.load(session_id)["status"]))
+        return real_run(session_id, audio_path, force)
+
+    with patch.object(runner, "_save_pick", save_pick), patch.object(runner, "_run_once", run_once):
+        out = runner.set_owner(SID, ["Speaker 2"], learn=learn)
+    assert seen == [("before write", True), ("before run", "running", "running")]
+    assert out["status"] == "done"
+    assert runner.current(SID)["status"] == "done" and not runner.is_running(SID)
+
+
+def test_start_set_owner_registers_before_writing_running(env):
+    _write_transcript(env["trn"])
+    seen = []
+    real_save = runner._save_pick
+
+    def save_pick(session_id, owner):
+        seen.append(runner.is_running(session_id))
+        return real_save(session_id, owner)
+
+    with (
+        patch.object(runner, "_save_pick", save_pick),
+        patch("app.coaching.runner.Thread", lambda target, kwargs, daemon: MagicMock(start=lambda: None)),
+    ):
+        runner.start_set_owner(SID, ["Speaker 2"])
+    assert seen == [True]
+    assert runner.current(SID)["status"] == "running"
+
+
 def test_start_set_owner_returns_running_then_coaches_in_background(env):
     _write_transcript(env["trn"])
     store.update(SID, lambda d: d.update(status="needs_owner", status_reason="no voice profile"))
