@@ -158,6 +158,24 @@ function _coachBandState(value, target) {
   return 'in';
 }
 
+/* ---------- Speaker names ----------
+   The open recording's speaker names ({label: name}, the transcript's speaker_names,
+   your own name included once you picked yourself). _coachReportHtml sets them for
+   the report it builds; the *Html helpers below read them while it runs. */
+let _coachNames = {};
+
+/** A speaker as HTML: the name with the label beside it, or the label alone. */
+function _coachWho(label) {
+  const name = _coachNames[label];
+  if (!name || name === label) return escapeHtml(label);
+  return `${escapeHtml(name)} <span class="coach-label">${escapeHtml(label)}</span>`;
+}
+
+/** Text the AI or the measures wrote, as HTML, with names in place of labels. */
+function _coachText(text) {
+  return escapeHtml(applySpeakerNames(String(text), _coachNames));
+}
+
 /* ---------- Data helpers ---------- */
 
 /** Mean of the area scores present, rounded (as progress.py's overall_score); null without scores.
@@ -267,7 +285,7 @@ function _coachOwnerLine(sidecar) {
   }
   return `
     <div class="coach-owner">
-      <span>This is you: <strong>${labels.length ? labels.map(escapeHtml).join(' + ') : 'not set'}</strong></span>
+      <span>This is you: <strong>${labels.length ? labels.map(_coachWho).join(' + ') : 'not set'}</strong></span>
       ${how ? `<span class="coach-sep" aria-hidden="true">·</span>${how}` : ''}
       <span class="coach-sep" aria-hidden="true">·</span>
       <button type="button" class="coach-link" data-coach-action="change-owner" aria-expanded="false">Change</button>
@@ -281,7 +299,7 @@ function _coachPickerHtml(sidecar, segments, inline) {
       (s) => `
       <label class="coach-picker-row">
         <input type="checkbox" name="coach-owner" value="${escapeHtml(s.label)}"${chosen.has(s.label) ? ' checked' : ''}>
-        <span class="coach-picker-label">${escapeHtml(s.label)}</span>
+        <span class="coach-picker-label" title="${escapeHtml(_coachNames[s.label] ? `${_coachNames[s.label]} (${s.label})` : s.label)}">${_coachWho(s.label)}</span>
         <span class="coach-picker-line">${s.firstLine ? `“${escapeHtml(s.firstLine)}”` : '<em>No lines</em>'}</span>
         ${s.loud ? '<span class="coach-badge coach-badge-hint" title="Loudest voice, so probably nearest the mic">loudest</span>' : ''}
       </label>`,
@@ -329,7 +347,7 @@ function _coachScoresHtml(review, baseline) {
         <span class="coach-area-name">${name}</span>
         <span class="coach-bar" role="img" aria-label="${score} out of 100"><span class="coach-bar-fill" style="width:${score}%"></span></span>
         <span class="coach-area-score">${score}</span>
-        ${s.reason ? `<span class="coach-area-reason">${escapeHtml(s.reason)}</span>` : ''}
+        ${s.reason ? `<span class="coach-area-reason">${_coachText(s.reason)}</span>` : ''}
         ${_coachEvidenceHtml(s.evidence)}
       </div>`;
   }).join('');
@@ -350,8 +368,8 @@ function _coachSummaryHtml(review) {
   if (!review.summary && !next.length) return '';
   return `
     <section class="coach-card">
-      ${review.summary ? `<p class="coach-summary">${escapeHtml(review.summary)}</p>` : ''}
-      ${next.length ? `<h3 class="coach-h">Next time</h3><ol class="coach-next">${next.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ol>` : ''}
+      ${review.summary ? `<p class="coach-summary">${_coachText(review.summary)}</p>` : ''}
+      ${next.length ? `<h3 class="coach-h">Next time</h3><ol class="coach-next">${next.map((s) => `<li>${_coachText(s)}</li>`).join('')}</ol>` : ''}
     </section>`;
 }
 
@@ -386,7 +404,7 @@ function _coachMeasuresHtml(sidecar, baseline) {
   );
   const speakerRows = per.map(([label, s]) => `
       <tr>
-        <th scope="row">${escapeHtml(label)}${ownerLabels.has(label) ? ' <span class="coach-you">you</span>' : ''}</th>
+        <th scope="row">${_coachWho(label)}${ownerLabels.has(label) ? ' <span class="coach-you">you</span>' : ''}</th>
         <td>${_coachIsNum(s.wpm) ? `${_coachNum(s.wpm)} wpm` : '—'}</td>
         <td>${_coachIsNum(s.talk_share) ? `${_coachNum(s.talk_share * 100)}%` : '—'}</td>
         <td>${_coachIsNum(s.turns) ? s.turns : '—'}</td>
@@ -423,10 +441,10 @@ function _coachMomentsHtml(sidecar) {
           <span class="coach-row-body">
             <span class="coach-row-head">
               <span class="coach-tag${m.kind === 'interruption' ? ' coach-tag-warn' : ''}">${escapeHtml(m.label)}</span>
-              ${m.speaker ? `<span class="coach-row-speaker">${escapeHtml(m.speaker)}</span>` : ''}
+              ${m.speaker ? `<span class="coach-row-speaker">${escapeHtml(speakerName(m.speaker, _coachNames))}</span>` : ''}
               ${m.agreed ? '<span class="coach-muted">review agrees</span>' : ''}
             </span>
-            ${m.text ? `<span class="coach-row-text">${escapeHtml(m.text)}</span>` : ''}
+            ${m.text ? `<span class="coach-row-text">${_coachText(m.text)}</span>` : ''}
           </span>
         </button>
       </li>`).join('');
@@ -447,10 +465,10 @@ function _coachReactionsHtml(review) {
           ${_coachTime(r.t)}
           <span class="coach-row-body">
             <span class="coach-row-head">
-              ${r.owner_point ? `<span class="coach-row-point">${escapeHtml(r.owner_point)}</span>` : ''}
+              ${r.owner_point ? `<span class="coach-row-point">${_coachText(r.owner_point)}</span>` : ''}
               ${label ? `<span class="coach-tag${tone ? ` coach-tag-${tone}` : ''}">${escapeHtml(label)}</span>` : ''}
             </span>
-            ${r.evidence ? `<span class="coach-row-text">${escapeHtml(r.evidence)}</span>` : ''}
+            ${r.evidence ? `<span class="coach-row-text">${_coachText(r.evidence)}</span>` : ''}
           </span>
         </button>
       </li>`;
@@ -538,9 +556,11 @@ function _coachExcludedHtml() {
     </div>`;
 }
 
-/** The whole tab for one sidecar. segments are the transcript's, for the speaker picker.
+/** The whole tab for one sidecar. segments are the transcript's, for the speaker picker;
+    names its speaker names ({label: name}), shown wherever a speaker is.
     Every state but an excluded one (or an error) ends with "Don't coach this recording". */
-function _coachReportHtml(sidecar, baseline, segments) {
+function _coachReportHtml(sidecar, baseline, segments, names = {}) {
+  _coachNames = names && typeof names === 'object' ? names : {};
   const sc = sidecar || {};
   if (sc.error) return _coachReportBodyHtml(sc, baseline, segments);
   if (sc.excluded || sc.status === 'excluded') return _coachExcludedHtml();
@@ -711,6 +731,15 @@ async function _coachRun(container, sessionId, sidecar, btn) {
   _coachStartPoll(container, sessionId, _coachRunMark(sidecar));
 }
 
+// Who's you decides whether your profile name is on a speaker (only once you picked
+// yourself, and not when mixed up or excluded): re-read the names after such a change.
+// refreshSpeakerNames lives in transcript.js. Never throws.
+async function _coachRefreshNames(sessionId) {
+  try {
+    if (typeof refreshSpeakerNames === 'function') await refreshSpeakerNames(sessionId);
+  } catch {}
+}
+
 async function _coachSaveOwner(container, sessionId, sidecar, btn) {
   const labels = [...container.querySelectorAll('input[name="coach-owner"]:checked')].map((i) => i.value);
   const mixedBox = container.querySelector('input[name="coach-mixed"]');
@@ -737,6 +766,7 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
       if (!res || res.error) throw new Error((res && res.error) || 'no response');
       const { started, ...saved } = res;
       if (started) {
+        _coachRefreshNames(sessionId); // drawn by the poll once the run ends
         // Coaching runs again in the background. The response is the sidecar already
         // marked "running": draw it, and _coachDraw polls until the run ends.
         if (!_coachStillShowing(container, sessionId)) return;
@@ -760,6 +790,7 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
     return;
   }
   const seq = ++_coachSeq;
+  if (latest !== sidecar) await _coachRefreshNames(sessionId);
   const baseline = await _coachLoadBaseline();
   if (seq === _coachSeq && _coachStillShowing(container, sessionId)) _coachDraw(container, sessionId, latest, baseline);
 }
@@ -789,6 +820,7 @@ async function _coachExclude(container, sessionId, btn) {
     return;
   }
   _coachBaseline = null; // the report no longer counts towards "your usual"
+  _coachRefreshNames(sessionId);
   toast('This recording won’t be coached', 'success');
   if (!_coachStillShowing(container, sessionId)) return;
   _coachSeq++; // drop any render still in flight
@@ -810,6 +842,7 @@ async function _coachInclude(container, sessionId, btn) {
     toast(`Couldn’t start coaching: ${(res && res.error) || 'no response'}`, 'error');
     return;
   }
+  _coachRefreshNames(sessionId);
   await _coachRun(container, sessionId, res, btn);
 }
 
@@ -852,7 +885,7 @@ async function renderCoachingTab(container, sessionId) {
 function _coachDraw(container, sessionId, sidecar, baseline) {
   _coachStopPoll();
   const t = app.transcripts[sessionId];
-  container.innerHTML = _coachReportHtml(sidecar, baseline, (t && t.segments) || []);
+  container.innerHTML = _coachReportHtml(sidecar, baseline, (t && t.segments) || [], (t && t.speaker_names) || {});
 
   container.onclick = (e) => {
     const seek = e.target.closest('[data-coach-seek]');

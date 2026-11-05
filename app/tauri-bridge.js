@@ -402,6 +402,14 @@ window.plaud = {
   updateTranscript: (session_id, updates) =>
     apiCall('POST', '/transcripts/update', { session_id, ...updates }),
   summarize: (session_id) => apiCall('POST', '/summarize', { session_id }),
+  // Speaker names. names maps labels to a name, or null to clear it. Returns
+  // { speaker_names } (the names as stored) or { error } with a message to show.
+  setSpeakerNames: (session_id, names) =>
+    apiCall('POST', '/transcripts/speaker-names', { session_id, names }),
+  ackSpeakerNamesCleared: (session_id) =>
+    apiCall('POST', '/transcripts/speaker-names/ack-cleared', { session_id }),
+  // Every name typed for a speaker, [{ name, recordings }], most used first
+  people: () => apiCall('GET', '/people'),
 
   // Conversation coaching
   coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),
