@@ -63,7 +63,7 @@ def env(tmp_path):
         "detect": MagicMock(return_value={"status": "unavailable", "events": [], "reason": "stubbed"}),
         # Your voice at -20 dBFS; a laugh window measured after 100 s is loud (you), before it quiet.
         "measure_loudness": MagicMock(
-            side_effect=lambda audio, segs, labels, windows: {
+            side_effect=lambda audio, segs, labels, windows, **kw: {
                 "owner_db": -20.0,
                 "windows": [-18.0 if a > 100 else -40.0 for a, _b in windows],
             }
@@ -865,7 +865,7 @@ def test_engagement_block_is_stored_and_its_parts_copied_into_the_metrics(env):
     _laughs(env)
     out = runner.run_coaching(SID, env["audio"])
     eng = out["engagement"]
-    env["detect"].assert_called_once_with(env["audio"])
+    env["detect"].assert_called_once_with(env["audio"], keep_wav=True)
     assert eng["laughter_status"] == "done"
     assert eng["laughs"] == [{"t": 20.5, "line_start": 0.0, "line_text": SEGMENTS[0]["text"]}]
     assert eng["laughs_count"] == 1
@@ -995,3 +995,87 @@ def test_laughs_far_from_your_lines_need_no_measuring(env):
     out = runner.run_coaching(SID, env["audio"])
     assert out["engagement"]["laughter_status"] == "done" and out["engagement"]["laughs_count"] == 0
     env["measure_loudness"].assert_not_called()
+
+
+# ---------------------------------------------------------------- final review fixes
+
+MALFORMED_REVIEW = {
+    **REVIEW,
+    "reactions": [{"t": 0.0, "owner_point": "p", "response": ["engaged"], "evidence": "e"}] * 3,
+}
+
+
+def test_a_malformed_review_never_fails_the_run(env):
+    _write_transcript(env["trn"])
+    env["review"].return_value = {"review": MALFORMED_REVIEW, "provider": "anthropic", "errors": []}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["review"] == MALFORMED_REVIEW
+    assert out["engagement"]["built_on"] == {"count": 0, "of": 3}
+
+
+def test_engagement_failing_keeps_metrics_and_review(env):
+    _write_transcript(env["trn"])
+    _laughs(env)
+    with patch("app.coaching.runner.engagement.laugh_candidates", side_effect=RuntimeError("boom")):
+        out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["review"] == REVIEW
+    assert out["metrics"]["owner"]["talk_share"] is not None
+    eng = out["engagement"]
+    assert eng["laughter_status"] == "unavailable"
+    assert eng["laughter_reason"] == "Laughter detection didn't run"
+    assert eng["follow_up_turns"] == 2  # the other parts are still worked out
+
+
+def test_engagement_compute_failing_keeps_metrics_and_review(env):
+    _write_transcript(env["trn"])
+    with patch("app.coaching.runner.engagement.compute", side_effect=RuntimeError("boom")):
+        out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["review"] == REVIEW
+    assert out["metrics"]["owner"]["talk_share"] is not None
+    assert "engagement" not in out
+
+
+def test_measuring_loudness_failing_keeps_metrics_and_review(env):
+    _write_transcript(env["trn"])
+    _laughs(env)
+    env["measure_loudness"].side_effect = RuntimeError("boom")
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done" and out["review"] == REVIEW
+    assert out["engagement"]["laughter_reason"] == "Laughter detection didn't run"
+
+
+def test_reasons_match_the_detectors_wording(env, tmp_path):
+    from app.coaching import laughter
+
+    _write_transcript(env["trn"])
+    env["detect"].side_effect = RuntimeError("onnx exploded")
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["engagement"]["laughter_reason"] == laughter.REASON_FAILED == "Laughter detection didn't run"
+    env["find_audio"].return_value = None
+    out = runner.set_owner(SID, ["Speaker 1"], learn=False)
+    assert out["engagement"]["laughter_reason"] == laughter.REASON_NO_AUDIO == "No audio on this Mac"
+
+
+def test_the_detectors_wav_is_reused_for_loudness_then_deleted(env, tmp_path):
+    _write_transcript(env["trn"])
+    wav = tmp_path / "converted.wav"
+    wav.write_bytes(b"RIFF")
+    env["detect"].return_value = {"status": "done", "events": LAUGH_EVENTS, "reason": "", "wav": str(wav)}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["engagement"]["laughs_count"] == 1
+    assert env["measure_loudness"].call_args.kwargs["wav"] == str(wav)
+    assert not wav.exists()
+
+
+@pytest.mark.parametrize("events", [[], [{"start": 40.0, "end": 41.0, "score": 0.6, "loudness_db": -40.0}]])
+def test_the_detectors_wav_is_deleted_when_nothing_is_measured(env, tmp_path, events):
+    _write_transcript(env["trn"])
+    wav = tmp_path / "converted.wav"
+    wav.write_bytes(b"RIFF")
+    env["detect"].return_value = {"status": "done", "events": events, "reason": "", "wav": str(wav)}
+    runner.run_coaching(SID, env["audio"])
+    env["measure_loudness"].assert_not_called()
+    assert not wav.exists()

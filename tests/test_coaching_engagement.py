@@ -374,3 +374,77 @@ def test_architecture_describes_the_loudness_rule_and_the_voice_level_reason():
     assert "voice level couldn't be" in section  # listed with the other unavailable reasons
     assert "measure_loudness" in section and "never before your" in section and "0.25 s" in section
     assert "within 1 s" in section
+
+
+# ---------------------------------------------------------------- final review fixes
+
+
+def test_a_non_string_response_never_raises():
+    review = {
+        "reactions": [
+            {"t": 0.0, "response": ["engaged"]},  # unhashable
+            {"t": 0.0, "response": {"x": 1}},
+            {"t": 0.0, "response": None},
+            {"t": 0.0, "response": "engaged"},
+        ]
+    }
+    out = compute(review=review)
+    assert out["built_on"] == {"count": 1, "of": 4}
+
+
+def test_a_laugh_between_two_of_your_lines_counts():
+    """Your lines 0-5 and 7-12 merge into one turn; the laugh at 5.2 follows your first line."""
+    segs = [
+        {"start": 0.0, "end": 5.0, "text": "So I told him the price.", "speaker": "Speaker 1"},
+        {"start": 7.0, "end": 12.0, "text": "And he just walked out.", "speaker": "Speaker 1"},
+        {"start": 13.0, "end": 20.0, "text": "No way, really?", "speaker": "Speaker 2"},
+    ]
+    events = [ev(5.2, 6.8)]
+    cands = E.laugh_candidates(segs, OWNER, events)
+    # Anchored on the end of your line at 5.0, cut at your next line at 7.0.
+    assert [(c["line_start"], c["window"]) for c in cands] == [(0.0, (5.0, 7.0))]
+    out = compute(events, segs=segs)
+    assert out["laughs_count"] == 1
+    assert out["laughs"] == [{"t": 5.2, "line_start": 0.0, "line_text": "So I told him the price."}]
+
+
+def test_one_laugh_per_line_of_yours():
+    segs = [
+        {"start": 0.0, "end": 5.0, "text": "So I told him the price.", "speaker": "Speaker 1"},
+        {"start": 9.0, "end": 12.0, "text": "And he just walked out.", "speaker": "Speaker 1"},
+        {"start": 13.0, "end": 20.0, "text": "No way, really?", "speaker": "Speaker 2"},
+    ]
+    out = compute([ev(5.2, 6.0), ev(6.5, 7.5), ev(12.5, 13.5)], segs=segs)
+    assert [x["t"] for x in out["laughs"]] == [5.2, 12.5]
+
+
+def test_measure_loudness_reuses_a_given_wav_and_leaves_it_to_the_caller(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    sf = pytest.importorskip("soundfile")
+    wav = tmp_path / "detector.wav"
+    sf.write(wav, np.full(16000 * 2, 0.1, dtype="float32"), 16000)
+    import src.transcribe as tr
+
+    monkeypatch.setattr(tr, "_to_wav16k", lambda p: pytest.fail("converted again"))
+    segs = [{"start": 0.0, "end": 1.0, "speaker": "Speaker 1"}]
+    out = E.measure_loudness("x.ogg", segs, OWNER, [(1.0, 2.0)], wav=str(wav))
+    assert out["owner_db"] == pytest.approx(-20.0, abs=0.01)
+    assert out["windows"][0] == pytest.approx(-20.0, abs=0.01)
+    assert wav.exists()
+
+
+def test_architecture_uses_the_same_reason_wording_and_the_final_rules():
+    from pathlib import Path
+
+    from app.coaching import laughter
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    section = doc[doc.index("### Engagement and laughter") :]
+    section = " ".join(section[: section.index("\n### ", 1)].split())
+    for reason in (laughter.REASON_NO_AUDIO, laughter.REASON_TOO_LONG, laughter.REASON_FAILED, E.NO_VOICE_LEVEL):
+        assert f'"{reason}"' in section, reason
+    assert "No audio file on this Mac" not in doc and "Laughter detection failed" not in doc
+    assert "one of your lines" in section  # anchored on your segments, not merged turns
+    assert "an hour" in section  # the download retry pause
+    assert "never the focus" in section  # laughs per hour isn't coached on
+    assert "keep_wav" in section  # the detector's WAV is reused

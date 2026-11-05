@@ -4,14 +4,16 @@ Three parts, each scored 0-100 against its target in targets.TARGETS, and a scor
 the rounded mean of the parts available (a missing part never counts as 0):
 
 - Laughs after your lines: laughter events (from app/coaching/laughter.py) that start within
-  LAUGH_AFTER_S after one of your turns ends, or overlap its last LAUGH_OVERLAP_S. Each is a
-  candidate for that turn. Its loudness is measured again from the audio over just the part
-  after your line: from max(event start - LAUGH_MEASURE_PAD_S, your turn's end) to event end +
-  LAUGH_MEASURE_PAD_S, cut at your next line. (The detector's own loudness covers its 2 s
-  windows, which reach back into your last words, so it would make every laugh straight after
-  you look like yours.) A candidate with under LAUGH_MIN_MEASURE_S of audio left isn't counted.
-  A laugh at least as loud as your median speech loudness minus OWN_LAUGH_MARGIN_DB is probably
-  yours (your clip-on mic hears you loudest) and is not counted. At most one laugh per turn.
+  LAUGH_AFTER_S after one of your lines (transcript segments) ends, or overlap its last
+  LAUGH_OVERLAP_S. Lines, not merged turns: a laugh between two of your lines has no segment of
+  its own, so the turn merges straight over it. Each is a candidate for that line. Its loudness
+  is measured again from the audio over just the part after your line: from max(event start -
+  LAUGH_MEASURE_PAD_S, your line's end) to event end + LAUGH_MEASURE_PAD_S, cut at your next
+  line. (The detector's own loudness covers its 2 s windows, which reach back into your last
+  words, so it would make every laugh straight after you look like yours.) A candidate with
+  under LAUGH_MIN_MEASURE_S of audio left isn't counted. A laugh at least as loud as your median
+  speech loudness minus OWN_LAUGH_MARGIN_DB is probably yours (your clip-on mic hears you
+  loudest) and is not counted. At most one laugh per line.
 - Follow-up questions to you: the other person's turn straight after one of yours has a "?"
   within its first FOLLOW_UP_WORDS words. Your turns under FOLLOW_UP_MIN_TURN_WORDS words
   (backchannels) don't count.
@@ -54,21 +56,32 @@ def _events(events) -> list[dict]:
     return sorted(out, key=lambda e: e["start"])
 
 
-def laugh_candidates(segments: list[dict], owner_labels, events) -> list[dict]:
-    """Every (turn of yours, laughter event) pair that could be a laugh after your line.
+def _your_lines(segments: list[dict], owner_labels) -> list[dict]:
+    owners = set(owner_labels)
+    lines = [
+        s
+        for s in segments
+        if isinstance(s, dict) and s.get("speaker") in owners and _number(s.get("start")) and _number(s.get("end"))
+    ]
+    return sorted(lines, key=lambda s: s["start"])
 
-    In turn order, then event order. Each is ``{"turn", "event", "t", "line_start",
-    "line_text", "window"}``: ``turn`` counts your turns, ``event`` indexes the well-formed
-    events by start, and ``window`` is ``(start, end)``, the stretch to measure the laugh's
-    loudness over (see the module docstring). Pairs with under LAUGH_MIN_MEASURE_S to
-    measure are left out. Pure: no audio is read.
+
+def laugh_candidates(segments: list[dict], owner_labels, events) -> list[dict]:
+    """Every (line of yours, laughter event) pair that could be a laugh after your line.
+
+    Anchored on your transcript segments, not merged turns. In line order, then event order.
+    Each is ``{"line", "event", "t", "line_start", "line_text", "window"}``: ``line`` counts
+    your lines, ``event`` indexes the well-formed events by start, and ``window`` is
+    ``(start, end)``, the stretch to measure the laugh's loudness over (see the module
+    docstring). Pairs with under LAUGH_MIN_MEASURE_S to measure are left out. Pure: no audio
+    is read.
     """
-    turns = [t for t in owner_turns(segments, set(owner_labels)) if t["owner"]]
+    lines = _your_lines(segments, owner_labels)
     evs = _events(events)
     out = []
-    for n, turn in enumerate(turns):
-        end = turn["end"]
-        next_line = turns[n + 1]["start"] if n + 1 < len(turns) else math.inf
+    for n, line in enumerate(lines):
+        end = line["end"]
+        next_line = lines[n + 1]["start"] if n + 1 < len(lines) else math.inf
         for i, e in enumerate(evs):
             if e["start"] > end + T.LAUGH_AFTER_S or e["end"] < end - T.LAUGH_OVERLAP_S:
                 continue
@@ -77,11 +90,11 @@ def laugh_candidates(segments: list[dict], owner_labels, events) -> list[dict]:
                 continue
             out.append(
                 {
-                    "turn": n,
+                    "line": n,
                     "event": i,
                     "t": e["start"],
-                    "line_start": turn["start"],
-                    "line_text": _quote(turn["text"]),
+                    "line_start": line["start"],
+                    "line_text": _quote(str(line.get("text") or "")),
                     "window": window,
                 }
             )
@@ -89,19 +102,19 @@ def laugh_candidates(segments: list[dict], owner_labels, events) -> list[dict]:
 
 
 def _laughs(candidates: list[dict], window_dbs: list, owner_db: float) -> list[dict]:
-    """At most one laugh per turn of yours, each event used once, your own laughs left out.
+    """At most one laugh per line of yours, each event used once, your own laughs left out.
 
     Only the loudness measured over each candidate's window counts; a window that couldn't
     be measured is never counted."""
-    used_turns: set[int] = set()
+    used_lines: set[int] = set()
     used_events: set[int] = set()
     out = []
     for c, db in zip(candidates, window_dbs, strict=True):
-        if c["turn"] in used_turns or c["event"] in used_events or not _number(db):
+        if c["line"] in used_lines or c["event"] in used_events or not _number(db):
             continue
         if db >= owner_db - T.OWN_LAUGH_MARGIN_DB:
             continue  # probably you laughing
-        used_turns.add(c["turn"])
+        used_lines.add(c["line"])
         used_events.add(c["event"])
         out.append({"t": c["t"], "line_start": c["line_start"], "line_text": c["line_text"]})
     return sorted(out, key=lambda x: x["t"])
@@ -125,7 +138,8 @@ def _built_on(review) -> dict | None:
     reactions = [r for r in reactions if isinstance(r, dict)] if isinstance(reactions, list) else []
     if len(reactions) < T.ENGAGEMENT_MIN_BASE:
         return None
-    count = sum(1 for r in reactions if r.get("response") in T.BUILT_ON_RESPONSES)
+    # Only string responses count: a malformed one (a list, a dict) is never "built on" and never raises.
+    count = sum(1 for r in reactions if isinstance(r.get("response"), str) and r["response"] in T.BUILT_ON_RESPONSES)
     return {"count": count, "of": len(reactions)}
 
 
@@ -222,25 +236,31 @@ def _peak_db(sf, np, wav: str, rate: int, start_s: float, end_s: float, frame: i
     return 20 * math.log10(peak) if peak > 0 else None
 
 
-def measure_loudness(audio_path: str, segments: list[dict], owner_labels, windows) -> dict | None:
+def measure_loudness(
+    audio_path: str, segments: list[dict], owner_labels, windows, wav: str | None = None
+) -> dict | None:
     """Your median speech loudness and each laugh window's, from one conversion of the audio.
 
     Returns ``{"owner_db": float | None, "windows": [float | None per window]}`` in dBFS:
     the loudest 25 ms frame's RMS, per line of yours (then the median) and per window
     (``laugh_candidates``' windows). Reads in chunks of READ_CHUNK_FRAMES samples, so an
-    hour-long recording never sits in memory whole, and deletes the temporary WAV. None when
-    the audio can't be converted or read.
+    hour-long recording never sits in memory whole. None when the audio can't be converted
+    or read.
+
+    ``wav`` is a 16 kHz WAV already converted from ``audio_path`` (the laughter detector's,
+    with ``keep_wav``): it is read instead of converting again, and the caller deletes it.
+    Otherwise the audio is converted here and the temporary WAV deleted.
     """
-    owners = set(owner_labels)
-    mine = [s for s in segments if s.get("speaker") in owners]
-    wav = None
+    mine = _your_lines(segments, owner_labels)
+    given = wav
     try:
         import numpy as np
         import soundfile as sf
 
-        from src.transcribe import _to_wav16k
+        if not wav:
+            from src.transcribe import _to_wav16k
 
-        wav = _to_wav16k(audio_path)
+            wav = _to_wav16k(audio_path)
         if not wav:
             return None
         rate = sf.info(wav).samplerate
@@ -257,7 +277,7 @@ def measure_loudness(audio_path: str, segments: list[dict], owner_labels, window
         log.warning("measuring loudness for laughter failed: %s", e)
         return None
     finally:
-        if wav:
+        if wav and not given:
             try:
                 os.unlink(wav)
             except OSError:
