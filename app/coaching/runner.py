@@ -248,7 +248,10 @@ def _analyse(
         bool(transcript.get("timestamps_estimated")),
     )
     laugh_status, laugh_reason, events = _detect_laughter(audio, duration)
-    loudness = engagement.owner_loudness_db(audio, segments, owner_labels) if events else None
+    # One conversion of the audio measures your voice and each candidate laugh after your lines.
+    candidates = engagement.laugh_candidates(segments, owner_labels, events) if events else []
+    windows = [c["window"] for c in candidates]
+    loudness = engagement.measure_loudness(audio, segments, owner_labels, windows) if candidates else None
 
     def _engagement(review: dict | None) -> dict:
         return engagement.compute(

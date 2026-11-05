@@ -369,6 +369,13 @@ in [superpowers/specs/2026-11-05-engagement-design.md](superpowers/specs/2026-11
   laughter events; events over 8 s (TV, a crowd) are dropped. `engagement.py` counts an event that
   starts within 2 s after one of your turns, or overlaps its last second, unless it is about as
   loud as your own speech (then it is probably your laugh). At most one per turn.
+  The loudness check doesn't use the detector's own loudness: its 2 s windows reach back into your
+  last words, so a laugh straight after you would look as loud as you. Instead `measure_loudness`
+  measures each candidate again from the audio, from 0.5 s before the laugh (but never before your
+  line ends) to 0.5 s after it, cut at your next line, as the loudest 25 ms frame's RMS. Your level
+  is the median of the same measure over your lines. A laugh within 3 dB of your level, or louder,
+  isn't counted, and nor is one with under 0.25 s left to measure. The audio is converted once for
+  all of this, read in chunks, and the temporary WAV deleted.
 - **Follow-up questions to you.** The next speaker's turn straight after yours, with a `?` in its
   first 30 words. Your turns under three words don't count.
 - **Points others built on.** From the AI review's reactions (engaged or a follow-up), so only
@@ -376,10 +383,12 @@ in [superpowers/specs/2026-11-05-engagement-design.md](superpowers/specs/2026-11
 
 Each part maps to 0-100 against its target in `targets.py` (laughs per hour, follow-up share,
 built-on share), and the score is the mean of the parts available. A part that couldn't be
-measured (no audio on the Mac, no model, recordings over 3 hours, too few turns or reactions, the
-review off) is left out, never counted as 0. The runner detects laughter before the review, so the
+measured (no audio on the Mac, no model, recordings over 3 hours, your voice level couldn't be
+measured so laughs can't be told apart from yours, too few turns or reactions, the review off) is
+left out, never counted as 0. The runner detects laughter before the review, so the
 review's prompt lists the laughs (and charisma may use them; laugh times are valid evidence for
-`ground`), and computes engagement after it. It stores `sidecar["engagement"]` and copies the three
+`ground`, within 1 s since the prompt shows them as `[mm:ss]`, while line starts keep 2 s), and
+computes engagement after it. It stores `sidecar["engagement"]` and copies the three
 parts into `metrics.owner`, so Progress tracks them like the other measures; `engagement_score` is
 one more Progress series, kept out of `overall_score`.
 

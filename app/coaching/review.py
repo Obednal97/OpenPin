@@ -23,6 +23,8 @@ SCORE_KEYS = ("clarity", "warmth", "charisma", "listening", "reception")
 RESPONSES = ["engaged", "agreed", "pushed_back", "deflected", "short", "follow_up"]
 MAX_NEXT_TIME = 3
 LAUGH_LINE_CHARS = 80
+# The prompt gives laugh times as [mm:ss], so a cited laugh time is at most a second out.
+LAUGH_TOLERANCE_S = 1.0
 
 
 def _obj(properties):
@@ -143,7 +145,7 @@ def ground(
     Reactions and moments whose ``t`` is not within ``tolerance_s`` of a segment start are
     dropped. Each score keeps only the ``evidence`` times within tolerance of a segment start
     and is dropped when none are left; kept scores are clamped to 0-100. ``allowed_times``
-    (the measured laugh times) are valid too, with the same tolerance, for score evidence and
+    (the measured laugh times) are valid too, within LAUGH_TOLERANCE_S, for score evidence and
     moments only: reactions are about the owner's lines, and interruptions about turns. ``next_time`` loses
     empty strings and keeps at most 3.
     When ``interruption_candidates`` (times) is given, ``interruptions_confirmed`` keeps only
@@ -151,8 +153,14 @@ def ground(
     Malformed shapes (non-dict entries, non-list arrays, non-finite times) are skipped, never raised.
     """
     starts = [s["start"] for s in segments]
-    cited = starts + [t for t in _list(allowed_times) if _number(t)]
+    laughs = [t for t in _list(allowed_times) if _number(t)]
     out = dict(review)
+
+    def cited(t) -> bool:
+        return _number(t) and (_near(t, starts, tolerance_s) or _near(t, laughs, LAUGH_TOLERANCE_S))
+
+    def line(t) -> bool:
+        return _number(t) and _near(t, starts, tolerance_s)
 
     scores = {}
     raw_scores = review.get("scores")
@@ -160,7 +168,7 @@ def ground(
         if not isinstance(v, dict):
             continue
         v = dict(v)
-        v["evidence"] = [t for t in _list(v.get("evidence")) if _number(t) and _near(t, cited, tolerance_s)]
+        v["evidence"] = [t for t in _list(v.get("evidence")) if cited(t)]
         if not v["evidence"]:
             continue
         try:
@@ -170,12 +178,8 @@ def ground(
         scores[k] = v
     out["scores"] = scores
 
-    for key, times in (("reactions", starts), ("moments", cited)):
-        out[key] = [
-            x
-            for x in _list(review.get(key))
-            if isinstance(x, dict) and _number(x.get("t")) and _near(x["t"], times, tolerance_s)
-        ]
+    for key, ok in (("reactions", line), ("moments", cited)):
+        out[key] = [x for x in _list(review.get(key)) if isinstance(x, dict) and ok(x.get("t"))]
 
     nxt = [s.strip() for s in _list(review.get("next_time")) if isinstance(s, str) and s.strip()]
     out["next_time"] = nxt[:MAX_NEXT_TIME]

@@ -238,6 +238,7 @@ ENGAGEMENT = {
     "laughs_per_hour": 4.46,
     "follow_ups": [{"t": 61.7, "text": "So the price is <script>x</script>?"}],
     "follow_up_share": 0.25,
+    "follow_up_turns": 4,
     "built_on": {"count": 2, "of": 3},
     "built_on_share": 0.667,
     "laughter_status": "done",
@@ -302,11 +303,18 @@ CASES = {
                 "laughs_per_hour": 0.0,
                 "follow_ups": [],
                 "follow_up_share": 0.0,
+                "follow_up_turns": 5,
                 "built_on": {"count": 0, "of": 4},
                 "built_on_share": 0.0,
             },
         }
     },
+    # Many turns: the 4-decimal share can't give back the turn count (1 / 0.0033 is 303)
+    "eng_manyturns": {
+        "sidecar": {**DONE, "engagement": {**ENGAGEMENT, "follow_up_share": 0.0033, "follow_up_turns": 300}}
+    },
+    # A block saved before follow_up_turns existed: the turn count comes from the share
+    "eng_noturns": {"sidecar": {**DONE, "engagement": {k: v for k, v in ENGAGEMENT.items() if k != "follow_up_turns"}}},
     "nobaseline": {"sidecar": DONE},
     "stale": {"sidecar": {**DONE, "report_stale": True}},
     "metricsonly": {"sidecar": {**DONE, "review": None, "status_reason": "measured metrics only (no AI provider)"}},
@@ -634,9 +642,14 @@ class TestEngagement:
     def test_three_rows(self, out):
         html = out["done"]
         assert "2 (4.5 per hour)" in _eng_row(html, "Laughs after your lines")
-        # 1 follow-up at a 0.25 share: 1 of 4 of your turns
+        # 1 follow-up, 4 of your turns
         assert "1 of 4 of your turns" in _eng_row(html, "Follow-up questions to you")
         assert "2 of 3" in _eng_row(html, "Your points others built on")
+
+    def test_follow_up_turns_from_the_block(self, out):
+        assert "1 of 300 of your turns" in _eng_row(out["eng_manyturns"], "Follow-up questions to you")
+        # Without the field, worked out from the share (1 at 0.25: 4 turns)
+        assert "1 of 4 of your turns" in _eng_row(out["eng_noturns"], "Follow-up questions to you")
 
     def test_chips_seek(self, out):
         laughs = _eng_row(out["done"], "Laughs after your lines")
@@ -690,7 +703,7 @@ class TestEngagement:
         html = out["eng_none"]
         assert '<span class="coach-overall-score">0</span>' in _engagement(html)
         assert "None" in _eng_row(html, "Laughs after your lines")
-        assert "None" in _eng_row(html, "Follow-up questions to you")
+        assert "None of 5 of your turns" in _eng_row(html, "Follow-up questions to you")
         assert "0 of 4" in _eng_row(html, "Your points others built on")
 
     def test_absent_or_previous_run_shows_nothing(self, out):

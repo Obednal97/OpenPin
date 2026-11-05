@@ -299,3 +299,20 @@ def test_laugh_times_never_confirm_interruptions():
     with patch.object(R, "call_llm_json", lambda *a, **k: (confirmed, "x", [])):
         out = R.review_conversation(SEGS, {"Speaker 1"}, METRICS, {}, laughs=LAUGHS)["review"]
     assert out["interruptions_confirmed"] == []
+
+
+def test_laugh_times_ground_within_one_second_line_starts_within_two():
+    """The prompt shows laughs as [mm:ss], so a cited laugh is at most a second out."""
+    r = review(
+        scores=scores(
+            charisma={"score": 80, "reason": "laugh", "evidence": [33.9]},
+            warmth={"score": 70, "reason": "too far", "evidence": [34.5]},
+            clarity={"score": 60, "reason": "line", "evidence": [1.9]},  # 1.9 s from the line at 0.0
+        ),
+        moments=[{"t": 32.0, "kind": "landed", "note": "ok"}, {"t": 31.5, "kind": "landed", "note": "too far"}],
+    )
+    out = R.ground(r, SEGS, allowed_times=[33.0])
+    assert out["scores"]["charisma"]["evidence"] == [33.9]
+    assert "warmth" not in out["scores"]
+    assert out["scores"]["clarity"]["evidence"] == [1.9]
+    assert [m["t"] for m in out["moments"]] == [32.0]

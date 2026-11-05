@@ -34,6 +34,11 @@ TURN_SPLIT_GAP_S = 10.0
 LAUGH_AFTER_S = 2.0
 # ...or overlaps this many final seconds of the turn.
 LAUGH_OVERLAP_S = 1.0
+# A laugh's loudness is measured from the audio from this long before it starts (but never before
+# your line ends) to this long after it ends, cut at your next line...
+LAUGH_MEASURE_PAD_S = 0.5
+# ...and a laugh with less than this much audio left to measure isn't counted.
+LAUGH_MIN_MEASURE_S = 0.25
 # A laugh at least this loud, relative to your median speech loudness minus this margin (dB), is probably yours.
 OWN_LAUGH_MARGIN_DB = 3.0
 # Laughter is not checked on recordings longer than this (seconds).
