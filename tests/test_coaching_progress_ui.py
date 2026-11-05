@@ -24,6 +24,10 @@ SETTINGS_JS = (APP / "ui" / "settings.js").read_text()
 STYLES = (APP / "styles.css").read_text()
 
 
+# Spec 2026-11-05-engagement-design.md: the three engagement parts and their targets (low, high)
+ENGAGEMENT_PARTS = {"laughs_per_hour": (6.0, None), "follow_up_share": (0.25, None), "built_on_share": (0.5, None)}
+
+
 def _ai_tab():
     start = HTML.index('<div class="settings-tab-content" data-tab="ai"')
     end = HTML.index('<div class="settings-tab-content" data-tab="automation"')
@@ -98,11 +102,14 @@ class TestScript:
             m.group(1): (m.group(2), m.group(3))
             for m in re.finditer(r"^\s+(\w+): \{ label: '[^']+', low: (null|[\d.]+), high: (null|[\d.]+),", JS, re.M)
         }
-        assert set(found) == set(T.TARGETS) | {"overall_score"}
-        for key, t in T.TARGETS.items():
+        # The engagement parts join TARGETS with the engagement backend; their bands are the spec's either way
+        bands = {**ENGAGEMENT_PARTS, **{k: (t["low"], t["high"]) for k, t in T.TARGETS.items()}}
+        assert set(found) == set(bands) | {"overall_score", "engagement_score"}
+        for key, (want_low, want_high) in bands.items():
             low, high = found[key]
-            assert (None if low == "null" else float(low)) == t["low"], key
-            assert (None if high == "null" else float(high)) == t["high"], key
+            assert (None if low == "null" else float(low)) == want_low, key
+            assert (None if high == "null" else float(high)) == want_high, key
+        assert found["engagement_score"] == ("null", "null")
 
     def test_text_is_escaped(self):
         """Every interpolation into innerHTML goes through escapeHtml or a number formatter."""
@@ -179,13 +186,29 @@ const r = (code) => vm.runInContext(code, ctx);
     baseline: { pace_wpm: 125 }, weekly: [], most_improved: unknown, most_stuck: unknown, focus: null,
   });
   const progress = els['#progress-body'].innerHTML;
+  // Engagement: the score next to the overall score, its parts with the measures
+  const pts = (...v) => v.map((value, i) => ({ t: 1700000000 + i * 86400, value }));
+  r('_coachProgRender')({
+    count: 4,
+    series: {
+      overall_score: pts(60, 70), engagement_score: pts(40, 55), pace_wpm: pts(120, 130),
+      laughs_per_hour: pts(2.5, 7.25), follow_up_share: pts(0.2, 0.125), built_on_share: pts(0.5),
+    },
+    baseline: { engagement_score: 47.5, laughs_per_hour: 4.875 }, weekly: [], most_improved: null, most_stuck: null, focus: null,
+  });
+  const engaged = els['#progress-body'].innerHTML;
+  r('_coachProgRender')({
+    count: 4, series: { overall_score: pts(60, 70), pace_wpm: pts(120, 130) },
+    baseline: {}, weekly: [], most_improved: null, most_stuck: null, focus: null,
+  });
+  const notEngaged = els['#progress-body'].innerHTML;
   await Promise.all([r('renderVoiceSettings')(), r('renderVoiceSettings')(), r('renderVoiceSettings')()]);
   console.log(JSON.stringify({
     value: r('_coachProgValue')('new_metric', 1.234),
     target: r('_coachProgTarget')('new_metric'),
     interruptOnAtBound: r('_coachProgOnTarget')('interruption_rate', 0.1),
     interruptTarget: r('_coachProgTarget')('interruption_rate'),
-    progress, maxInFlight, statusCalls,
+    progress, engaged, notEngaged, maxInFlight, statusCalls,
     status: els['#voice-status'].innerHTML,
   }));
 })();
@@ -221,6 +244,39 @@ class TestBehaviour:
     def test_exemplar_count_is_a_number(self, node_out):
         assert "<b>" not in node_out["status"]
         assert "from 0 samples" in node_out["status"]
+
+    def test_engagement_with_the_scores_and_its_parts_with_the_measures(self, node_out):
+        html = node_out["engaged"]
+        labels = re.findall(r'<div class="coach-prog-row-label">([^<]+?) ?(?:<|$)', html, re.M)
+        assert labels == [
+            "Overall score",
+            "Engagement score",
+            "Pace",
+            "Laughs after your lines",
+            "Follow-up questions to you",
+            "Your points others built on",
+        ]
+
+    def test_engagement_values_and_targets(self, node_out):
+        html = node_out["engaged"]
+        assert "55 / 100" in html and "Your usual 48 / 100" in html
+        assert "7.3 an hour" in html and "target at least 6 an hour" in html
+        assert "13% of your turns" in html and "target at least 25% of your turns" in html
+        assert "target at least 50%" in html
+        # Laughs at 7.3 an hour is on target; follow-ups at 13% are not; the score has no band
+        rows = html.split('<div class="coach-prog-row">')[1:]
+        state = {
+            re.search(r'row-label">([^<]+?) ?<', r).group(1): re.search(r"coach-prog-state (on|off)", r) for r in rows
+        }
+        assert state["Engagement score"] is None
+        assert state["Laughs after your lines"].group(1) == "on"
+        assert state["Follow-up questions to you"].group(1) == "off"
+
+    def test_no_engagement_series_no_engagement_rows(self, node_out):
+        html = node_out["notEngaged"]
+        assert "Overall score" in html and "Pace" in html
+        for label in ("Engagement", "Laughs", "Follow-up", "built on"):
+            assert label not in html
 
     def test_redo_replaces_in_one_call(self):
         save = JS[JS.index("async function _voiceSave(") :]

@@ -271,6 +271,7 @@
 .coach-badge-estimated { background: var(--yellow-subtle); color: var(--yellow-text); }
 .coach-badge-unavailable { background: var(--bg-hover); color: var(--text-tertiary); }
 .coach-badge-hint { background: var(--accent-subtle); color: var(--accent); }
+.coach-badge-measured { background: var(--bg-input); color: var(--text-secondary); }
 
 /* Moments and reactions: each row jumps to its time */
 .coach-list { list-style: none; display: flex; flex-direction: column; gap: 1px; }
@@ -317,6 +318,27 @@
 .coach-tag-warn { background: var(--yellow-subtle); color: var(--orange-text); }
 .coach-tag-good { background: var(--green-subtle); color: var(--green-text); }
 
+/* Engagement: the score on the left like Overall, its three parts on the right */
+.coach-engagement { display: flex; gap: var(--sp-6); align-items: flex-start; }
+.coach-engagement .coach-overall-label { display: flex; align-items: center; gap: var(--sp-1_5); }
+.coach-eng-rows { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-3); }
+.coach-eng-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--sp-2); font-size: var(--text-sm); }
+.coach-eng-name { font-weight: var(--weight-medium); }
+.coach-eng-value { font-variant-numeric: tabular-nums; }
+.coach-eng-why { margin-top: var(--sp-0_5); font-size: var(--text-xs); }
+.coach-eng-items { list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-1_5); }
+.coach-eng-item { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.coach-eng-item .coach-chip { flex-shrink: 0; }
+.coach-eng-quote {
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.coach-eng-rows .coach-footnote { margin-top: 0; }
+
 /* Failed review */
 .coach-failed { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
 .coach-failed .coach-h { margin-bottom: 0; }
@@ -332,7 +354,7 @@
 .segment.coach-seek-flash { background: var(--accent-subtle); box-shadow: inset 3px 0 0 var(--accent); }
 
 @media (max-width: 560px) {
-  .coach-scores { flex-direction: column; gap: var(--sp-4); }
+  .coach-scores, .coach-engagement { flex-direction: column; gap: var(--sp-4); }
   .coach-picker-row { grid-template-columns: auto minmax(0, 1fr) auto; }
   .coach-picker-line { grid-column: 2 / -1; }
 }

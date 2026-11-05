@@ -64,6 +64,10 @@ const _COACH_NEEDS_OWNER = {
 // Mirrors REVIEW_OFF in app/coaching/runner.py: the run skipped the AI review by choice
 const _COACH_REVIEW_OFF = 'AI review is off';
 
+// A laugh's chip plays from this many seconds before it (never before your line), so you
+// hear what you said and then the laugh
+const _COACH_LAUGH_LEAD_S = 4;
+
 // Mirrors MIN_COACHING_SECONDS in app/coaching/targets.py (shorter recordings are skipped)
 const _COACH_MIN_COACHING_SECONDS = 120;
 // AI moment kinds that describe an interruption ("talked over", "cut in"...)
@@ -480,6 +484,97 @@ function _coachReactionsHtml(review) {
     </section>`;
 }
 
+/* ---------- Engagement ----------
+   sidecar.engagement (app/coaching/engagement.py): laughs after your lines, follow-up
+   questions to you and, with the AI review, your points others built on. Measured, so it
+   sits after the measures, with a score of its own. Missing parts aren't scored as 0:
+   the backend leaves them null, and so does this. */
+
+/** Times as chips that play from there, each with the line it quotes. items: {t, seek, text}. */
+function _coachEngagementItemsHtml(items, label) {
+  const rows = items
+    .filter((it) => it && _coachIsNum(it.t) && it.t >= 0)
+    .sort((a, b) => a.t - b.t)
+    .map((it) => {
+      const time = escapeHtml(formatTime(it.t));
+      const seek = _coachIsNum(it.seek) && it.seek >= 0 ? it.seek : it.t;
+      return `
+        <li class="coach-eng-item">
+          <button type="button" class="coach-chip" ${_coachSeekAttr(seek)} title="${escapeHtml(label)} ${time}">${time}</button>
+          ${it.text ? `<span class="coach-eng-quote">“${_coachText(it.text)}”</span>` : ''}
+        </li>`;
+    })
+    .join('');
+  return rows ? `<ul class="coach-eng-items">${rows}</ul>` : '';
+}
+
+function _coachEngagementRowHtml(name, value, extra = '') {
+  return `
+      <div class="coach-eng-row">
+        <div class="coach-eng-head"><span class="coach-eng-name">${name}</span><span class="coach-eng-value">${value}</span></div>
+        ${extra}
+      </div>`;
+}
+
+function _coachEngagementHtml(eng, review, baseline) {
+  const laughsRan = eng.laughter_status === 'done';
+  const rows = [];
+
+  // Laughs after your lines
+  if (laughsRan) {
+    const laughs = Array.isArray(eng.laughs) ? eng.laughs.filter((l) => l && _coachIsNum(l.t)) : [];
+    const count = _coachIsNum(eng.laughs_count) ? eng.laughs_count : laughs.length;
+    let value = count === 0 ? 'None' : String(count);
+    if (count > 0 && _coachIsNum(eng.laughs_per_hour)) value += ` (${_coachNum(eng.laughs_per_hour, 1)} per hour)`;
+    const items = laughs.map((l) => {
+      const from = _coachIsNum(l.line_start) ? Math.min(l.t, l.line_start) : 0;
+      const seek = Math.max(from, Math.round((l.t - _COACH_LAUGH_LEAD_S) * 10) / 10, 0);
+      return { t: l.t, seek, text: l.line_text || '' };
+    });
+    rows.push(_coachEngagementRowHtml('Laughs after your lines', escapeHtml(value), _coachEngagementItemsHtml(items, 'Laugh at')));
+  } else {
+    const why = eng.laughter_reason ? `<p class="coach-muted coach-eng-why">${escapeHtml(eng.laughter_reason)}</p>` : '';
+    rows.push(_coachEngagementRowHtml('Laughs after your lines', '<span class="coach-muted">Not available</span>', why));
+  }
+
+  // Follow-up questions to you: the share is of your turns, so the turns are count / share
+  const follow = Array.isArray(eng.follow_ups) ? eng.follow_ups.filter((f) => f && _coachIsNum(f.t)) : [];
+  let followValue;
+  if (!_coachIsNum(eng.follow_up_share)) followValue = '<span class="coach-muted">Not enough of your turns to tell</span>';
+  else if (!follow.length || eng.follow_up_share <= 0) followValue = 'None';
+  else followValue = escapeHtml(`${follow.length} of ${Math.round(follow.length / eng.follow_up_share)} of your turns`);
+  rows.push(_coachEngagementRowHtml(
+    'Follow-up questions to you',
+    followValue,
+    _coachEngagementItemsHtml(follow.map((f) => ({ t: f.t, text: f.text || '' })), 'Follow-up at'),
+  ));
+
+  // Your points others built on: from the AI review's reactions, so only with a review
+  if (review) {
+    const b = eng.built_on;
+    const known = _coachIsNum(eng.built_on_share) && b && _coachIsNum(b.count) && _coachIsNum(b.of);
+    const value = known ? escapeHtml(`${b.count} of ${b.of}`) : '<span class="coach-muted">Too few of your points to tell</span>';
+    rows.push(_coachEngagementRowHtml('Your points others built on', value));
+  }
+
+  const hasScore = _coachIsNum(eng.score);
+  const score = hasScore ? Math.max(0, Math.min(100, Math.round(eng.score))) : null;
+  const usual = baseline && _coachIsNum(baseline.engagement_score) ? Math.round(baseline.engagement_score) : null;
+  const measured = '<span class="coach-badge coach-badge-measured" title="Measured from the recording, not judged by AI">measured</span>';
+  return `
+    <section class="coach-card coach-engagement">
+      <div class="coach-overall">
+        <span class="coach-overall-label">Engagement ${measured}</span>
+        ${hasScore ? `<span class="coach-overall-score">${score}</span><span class="coach-muted">out of 100</span>` : '<span class="coach-muted">Not enough to score</span>'}
+        ${usual !== null ? `<span class="coach-usual">Your usual ${usual}</span>` : ''}
+      </div>
+      <div class="coach-eng-rows">
+        ${rows.join('')}
+        ${laughsRan ? '<p class="coach-muted coach-footnote">Laughter detection can miss quiet chuckles.</p>' : ''}
+      </div>
+    </section>`;
+}
+
 function _coachSpinnerHtml(text) {
   return `
     <div class="coach-state" role="status">
@@ -631,7 +726,14 @@ function _coachReportBodyHtml(sc, baseline, segments) {
     parts.push(_coachNotice(escapeHtml(sc.status_reason || 'This report has measured metrics only.'), '', '', 'info'));
   }
   if (review) parts.push(_coachScoresHtml(review, baseline), _coachSummaryHtml(review));
-  if (hasMetrics || status === 'done') parts.push(_coachMeasuresHtml(sc, baseline), _coachMomentsHtml(sc));
+  if (hasMetrics || status === 'done') {
+    parts.push(_coachMeasuresHtml(sc, baseline));
+    // Like the measures, never a previous run's (that's a failed run with no metrics of its own)
+    if (sc.engagement && typeof sc.engagement === 'object') {
+      parts.push(_coachEngagementHtml(sc.engagement, review, baseline));
+    }
+    parts.push(_coachMomentsHtml(sc));
+  }
   if (review) parts.push(_coachReactionsHtml(review));
   return parts.join('');
 }

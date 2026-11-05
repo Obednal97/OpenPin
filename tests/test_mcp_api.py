@@ -398,6 +398,33 @@ def test_coaching_shown_with_names(env):
     assert body["coaching_status"] == "done"
 
 
+def test_coaching_includes_engagement_with_names(env):
+    _recording(env, SID, speaker_names={"Speaker 2": "Sarah"})
+    engagement = {
+        "score": 64,
+        "laughs": [{"t": 12.0, "line_start": 8.0, "line_text": "Tell Speaker 2 the joke"}],
+        "laughs_count": 1,
+        "laughs_per_hour": 51.4,
+        "follow_ups": [{"t": 20.0, "text": "Speaker 2 asked why?"}],
+        "follow_up_share": 0.5,
+        "built_on": None,
+        "built_on_share": None,
+        "laughter_status": "done",
+        "laughter_reason": "",
+    }
+    sidecar = {"status": "done", "owner": _user_owner(["Speaker 1"]), "metrics": {}, "review": None}
+    _sidecar(env, SID, {**sidecar, "engagement": engagement})
+    coaching = _get(env, f"/mcp/v1/recordings/{SID}")[1]["coaching"]
+    assert coaching["engagement"] == {
+        **engagement,
+        "laughs": [{"t": 12.0, "line_start": 8.0, "line_text": "Tell Sarah the joke"}],
+        "follow_ups": [{"t": 20.0, "text": "Sarah asked why?"}],
+    }
+    # A report from before engagement existed has no engagement key at all
+    _sidecar(env, SID, sidecar)
+    assert "engagement" not in _get(env, f"/mcp/v1/recordings/{SID}")[1]["coaching"]
+
+
 def test_excluded_recordings_have_no_coaching(env):
     _recording(env, SID)
     _sidecar(env, SID, {"status": "excluded", "excluded": True, "metrics": {"x": 1}, "review": {"y": 2}})
