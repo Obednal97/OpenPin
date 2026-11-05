@@ -571,14 +571,22 @@ function _coachStopPoll() {
   _coachPollHandle = null;
 }
 
-// Poll like the background diarization poll in transcript.js: every 5 s until
-// the run ends, then redraw. Stops as soon as the tab is no longer on screen.
-// before: the sidecar as it was when a run was asked for. The background run
-// may not have marked itself "running" yet (voice matching comes first), so
-// an unchanged sidecar doesn't end the poll during the first seconds.
+/** What identifies one run's outcome: every finished run stamps a new created_at. */
+function _coachRunMark(sc) {
+  const s = sc || {};
+  return JSON.stringify([s.status || '', s.created_at || '', s.status_reason || '']);
+}
+
+// Poll like the background diarization poll in transcript.js: every 5 s while the
+// sidecar says "running", then redraw. Stops as soon as the tab is no longer on screen.
+// before: _coachRunMark of the sidecar when a run was asked for (Coach anyway, Try
+// again), whose response doesn't say "running". Until the poll has seen "running", a
+// sidecar with that same mark is the old outcome, not this run's, so it doesn't end
+// the poll during the first seconds.
 function _coachStartPoll(container, sessionId, before = null) {
   _coachStopPoll();
   const started = Date.now();
+  let seenRunning = false;
   const handle = setInterval(async () => {
     if (!_coachStillShowing(container, sessionId) || Date.now() - started > _COACH_POLL_MAX_MS) {
       if (_coachPollHandle === handle) _coachStopPoll();
@@ -591,8 +599,13 @@ function _coachStartPoll(container, sessionId, before = null) {
       return;
     }
     if (_coachPollHandle !== handle || !_coachStillShowing(container, sessionId)) return;
-    if (!sc || sc.error || sc.status === 'running') return;
-    if (before !== null && Date.now() - started < _COACH_RUN_GRACE_MS && JSON.stringify(sc) === before) return;
+    if (!sc || sc.error) return;
+    if (sc.status === 'running') {
+      seenRunning = true;
+      return;
+    }
+    const waiting = before !== null && !seenRunning && Date.now() - started < _COACH_RUN_GRACE_MS;
+    if (waiting && _coachRunMark(sc) === before) return;
     _coachStopPoll();
     _coachBaseline = null; // a finished run can move "your usual"
     renderCoachingTab(container, sessionId);
@@ -633,7 +646,7 @@ async function _coachRun(container, sessionId, sidecar, btn) {
     return;
   }
   _coachShowRunning(container);
-  _coachStartPoll(container, sessionId, JSON.stringify(sidecar));
+  _coachStartPoll(container, sessionId, _coachRunMark(sidecar));
 }
 
 async function _coachSaveOwner(container, sessionId, sidecar, btn) {
@@ -660,16 +673,24 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
       // A mixed-up recording isn't used to learn your voice
       const res = await window.plaud.coachingSetOwner(sessionId, labels, !mixed);
       if (!res || res.error) throw new Error((res && res.error) || 'no response');
-      if (res.started) {
-        // Coaching runs again in the background: the response is the sidecar as it
-        // was before that run, so wait for it to change, like Coach anyway.
-        const { started: _started, ...snapshot } = res;
+      const { started, ...saved } = res;
+      if (started) {
+        // Coaching runs again in the background. The response is the sidecar already
+        // marked "running": draw it, and _coachDraw polls until the run ends.
         if (!_coachStillShowing(container, sessionId)) return;
-        _coachShowRunning(container);
-        _coachStartPoll(container, sessionId, JSON.stringify(snapshot));
+        _coachSeq++; // drop any render still in flight
+        _coachBaseline = null;
+        if (saved.status === 'running') {
+          _coachDraw(container, sessionId, saved, null);
+        } else {
+          // Not marked "running" (yet, or the run already ended): wait for an outcome
+          // other than the one before the save, like Coach anyway
+          _coachShowRunning(container);
+          _coachStartPoll(container, sessionId, _coachRunMark(latest));
+        }
         return;
       }
-      latest = res;
+      latest = saved;
     }
   } catch (err) {
     toast(`Couldn’t save: ${(err && err.message) || 'no response'}`, 'error');

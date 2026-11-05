@@ -435,7 +435,9 @@ const el = () => ({ classList: { add() {}, remove() {}, toggle() {}, contains() 
   appendChild() {}, style: {}, dataset: {} });
 const timers = new Map(); // fake setInterval: run by tick()
 let nextId = 1;
-const ctx = { console, window: {}, setTimeout, clearTimeout, Date,
+let clock = 1e12; // fake Date.now: tick() moves it on by one poll
+class FakeDate extends Date { static now() { return clock; } }
+const ctx = { console, window: {}, setTimeout, clearTimeout, Date: FakeDate,
   setInterval: (fn) => { timers.set(nextId, fn); return nextId++; }, clearInterval: (id) => timers.delete(id),
   document: { querySelector: () => null, querySelectorAll: () => [], createElement: el, body: el() } };
 vm.createContext(ctx);
@@ -446,12 +448,15 @@ const app = r('app');
 Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'coaching' });
 app.transcripts.s1 = { segments: data.segments };
 const calls = [];
-let serverSidecar = data.before;
+// GET /coaching/<sid> answers from the queue; the last answer repeats
+let gets = [];
+// The route shapes (final-fix-contract.md item 1): every response is the public sidecar plus targets
 ctx.window.plaud = {
-  coaching: async () => { calls.push('get'); return serverSidecar; },
+  coaching: async () => { calls.push('get'); return gets.length > 1 ? gets.shift() : gets[0]; },
   coachingProgress: async () => ({ baseline: null }),
-  coachingSetOwner: async (sid, labels, learn) => { calls.push(['owner', labels, learn]); return { ...data.before, started: true }; },
-  coachingMixedUp: async (sid, flag) => { calls.push(['mixed', flag]); return { ...serverSidecar, mixed_up: flag }; },
+  coachingRun: async () => { calls.push('run'); return { started: true }; },
+  coachingSetOwner: async (sid, labels, learn) => { calls.push(['owner', labels, learn]); return data.ownerResponse; },
+  coachingMixedUp: async (sid, flag) => { calls.push(['mixed', flag]); return { ...data.after, mixed_up: flag }; },
 };
 const container = (checked, mixed) => ({
   innerHTML: '', dataset: {}, isConnected: true, classList: { contains: () => false },
@@ -460,29 +465,67 @@ const container = (checked, mixed) => ({
 });
 const btn = () => ({ classList: { add() {}, remove() {} }, style: {}, disabled: false });
 const settle = () => new Promise((res) => setTimeout(res, 5));
-const tick = async () => { for (const fn of [...timers.values()]) await fn(); await settle(); };
+const tick = async () => { clock += 5000; for (const fn of [...timers.values()]) await fn(); await settle(); };
+const spinning = (c) => c.innerHTML.includes('coach-spinner');
 (async () => {
   const out = {};
-  // 1. A new owner pick: running at once; the poll waits while the sidecar is unchanged,
-  //    then draws the finished report
+  // 1. A new owner pick: the POST response is already "running", so that's drawn at once;
+  //    the poll keeps going while GET says running, then draws the new report
+  gets = [data.ownerRunning, data.after];
   const c1 = container(['Speaker 1'], false);
   await r('_coachSaveOwner')(c1, 's1', data.before, btn());
   out.ownerCalls = calls.splice(0);
-  out.runningAfterSave = c1.innerHTML.includes('coach-spinner');
+  out.runningAfterSave = spinning(c1);
   out.polling = timers.size === 1;
   await tick();
-  out.runningWhileUnchanged = c1.innerHTML.includes('coach-spinner');
-  serverSidecar = data.after;
+  out.runningWhileRunning = spinning(c1);
   await tick();
   out.reportAfterRun = c1.innerHTML.includes('coach-overall') && c1.innerHTML.includes('you chose this');
   out.pollStopped = timers.size === 0;
   calls.splice(0);
-  // 2. Only the mixed-up flag: drawn from the response, no GET and no re-run
+
+  // 2. Only the mixed-up flag: drawn from the response (targets included), no GET and no re-run
   const c2 = container(['Speaker 1'], true);
   await r('_coachSaveOwner')(c2, 's1', data.after, btn());
   out.mixedCalls = calls.splice(0);
   out.mixedNote = c2.innerHTML.includes('Marked as speakers mixed up');
+  out.mixedTargets = c2.innerHTML.includes('110–160 wpm');
   r('_coachStopPoll')();
+
+  // 3. Try again: POST /run only says started. The sidecar on screen was drawn without
+  //    targets, so GET differs from it, but the outcome (status, created_at) is the old
+  //    one: keep waiting. Then running, then a new outcome with the same error: draw it.
+  const c3 = container([], false);
+  gets = [{ ...data.failed, targets: data.targets }, { ...data.failed, status: 'running', status_reason: '' },
+    { ...data.failed, created_at: '2026-11-04T11:00:00+00:00', targets: data.targets }];
+  await r('_coachRun')(c3, 's1', data.failed, btn());
+  out.tryCalls = calls.splice(0);
+  out.tryRunning = spinning(c3);
+  await tick();
+  out.tryWaitsOnOldOutcome = spinning(c3);
+  await tick();
+  out.tryWaitsWhileRunning = spinning(c3);
+  await tick();
+  out.tryDrawsNewOutcome = !spinning(c3) && c3.innerHTML.includes('Try again');
+  out.tryPollStopped = timers.size === 0;
+
+  // 4. Coach anyway whose run finished before the first poll: a new created_at ends it
+  const c4 = container([], false);
+  gets = [data.after];
+  await r('_coachRun')(c4, 's1', data.skipped, btn());
+  await tick();
+  out.quickRunDrawn = c4.innerHTML.includes('coach-overall') && timers.size === 0;
+
+  // 5. A run that never reports (dropped as superseded): after the grace period the
+  //    unchanged outcome is drawn instead of spinning for half an hour
+  const c5 = container([], false);
+  gets = [data.skipped];
+  await r('_coachRun')(c5, 's1', data.skipped, btn());
+  for (let i = 0; i < 3; i++) await tick();
+  out.graceStillWaiting = spinning(c5);
+  for (let i = 0; i < 2; i++) await tick();
+  out.graceDrawn = c5.innerHTML.includes('Coach anyway') && timers.size === 0;
+  calls.splice(0);
   console.log(JSON.stringify(out));
 })();
 """
@@ -493,11 +536,36 @@ def save_out():
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
-    before = {**DONE, "owner": {"labels": ["Speaker 2"], "source": "voice", "confidence": 0.6}}
-    after = {**DONE, "owner": {"labels": ["Speaker 1"], "source": "user", "confidence": 1.0}}
+    before = {
+        **DONE,
+        "owner": {"labels": ["Speaker 2"], "source": "voice", "confidence": 0.6},
+        "created_at": "2026-11-04T10:00:00+00:00",
+    }
+    # POST /owner: the owner and status "running" are saved before the run (contract items 1 and 2)
+    owner = {"labels": ["Speaker 1"], "source": "user", "confidence": 1.0}
+    owner_running = {**before, "owner": owner, "status": "running", "status_reason": ""}
+    after = {**DONE, "owner": owner, "created_at": "2026-11-04T10:05:00+00:00"}
+    failed = {
+        **{k: v for k, v in DONE.items() if k != "targets"},
+        "status": "failed",
+        "review": None,
+        "status_reason": "AI feedback failed: openai: timeout",
+        "created_at": "2026-11-04T10:30:00+00:00",
+    }
+    skipped = {"status": "skipped", "status_reason": "too short", "targets": TARGETS}
+    payload = {
+        "before": before,
+        "ownerResponse": {**owner_running, "started": True},
+        "ownerRunning": owner_running,
+        "after": after,
+        "failed": failed,
+        "skipped": skipped,
+        "targets": TARGETS,
+        "segments": SEGMENTS,
+    }
     res = subprocess.run(
         [node, "-e", _SAVE_JS, str(APP / "ui" / "utils.js"), str(COACH_JS)],
-        input=json.dumps({"before": before, "after": after, "segments": SEGMENTS}),
+        input=json.dumps(payload),
         capture_output=True,
         text=True,
     )
@@ -506,17 +574,36 @@ def save_out():
 
 
 class TestOwnerSave:
-    def test_new_owner_shows_running_and_polls(self, save_out):
+    def test_new_owner_draws_running_from_the_response(self, save_out):
         assert save_out["ownerCalls"] == [["owner", ["Speaker 1"], True]]
         assert save_out["runningAfterSave"]
         assert save_out["polling"]
-        # The background run hasn't changed the sidecar yet: keep waiting, don't redraw the old one
-        assert save_out["runningWhileUnchanged"]
 
-    def test_report_drawn_when_the_run_finishes(self, save_out):
+    def test_polls_while_running_then_draws_the_new_report(self, save_out):
+        assert save_out["runningWhileRunning"]
         assert save_out["reportAfterRun"]
         assert save_out["pollStopped"]
 
     def test_mixed_up_only_draws_from_response(self, save_out):
         assert save_out["mixedCalls"] == [["mixed", True]]
         assert save_out["mixedNote"]
+        assert save_out["mixedTargets"]
+
+
+class TestRunPoll:
+    def test_try_again_waits_for_a_new_outcome(self, save_out):
+        assert save_out["tryCalls"] == ["run"]
+        assert save_out["tryRunning"]
+        # A sidecar that differs only in shape is still the old outcome
+        assert save_out["tryWaitsOnOldOutcome"]
+        assert save_out["tryWaitsWhileRunning"]
+        # Same status and error, new created_at: that's this run's outcome
+        assert save_out["tryDrawsNewOutcome"]
+        assert save_out["tryPollStopped"]
+
+    def test_run_that_ends_before_the_first_poll(self, save_out):
+        assert save_out["quickRunDrawn"]
+
+    def test_grace_period_ends_the_wait(self, save_out):
+        assert save_out["graceStillWaiting"]
+        assert save_out["graceDrawn"]
