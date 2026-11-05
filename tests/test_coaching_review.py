@@ -235,3 +235,67 @@ def test_only_the_owners_interruptions_are_candidates():
     with patch.object(R, "call_llm_json", lambda *a, **k: (confirmed, "x", [])):
         res = R.review_conversation(SEGS, {"Speaker 2"}, metrics, {})
     assert res["review"]["interruptions_confirmed"] == [5.0]
+
+
+# ---------------------------------------------------------------- laughs (engagement)
+
+LAUGHS = [
+    {"t": 12.0, "line_start": 0.0, "line_text": "Hello there."},
+    {"t": 72.0, "line_start": 60.0, "line_text": "I wanted to talk about pricing. " + "x" * 100},
+]
+
+
+def test_laughs_are_lines_in_the_prompt_and_explained_in_the_system_prompt():
+    _res, cap = run({}, laughs=LAUGHS)
+    assert '[00:12] laugh after your line: "Hello there."' in cap["user"]
+    quoted = ("I wanted to talk about pricing. " + "x" * 100)[:80]
+    assert f'[01:12] laugh after your line: "{quoted}"' in cap["user"]
+    assert "x" * 60 not in cap["user"]  # first 80 characters only
+    assert "single" in cap["system"] and "chuckles" in cap["system"] and "charisma" in cap["system"]
+
+
+def test_no_laughs_no_laugh_lines():
+    _res, cap = run({})
+    assert "laugh after your line" not in cap["user"]
+    _res, cap = run({}, laughs=[])
+    assert "laugh after your line" not in cap["user"]
+
+
+def test_ground_accepts_allowed_times_as_evidence_but_not_made_up_ones():
+    """Review focus 4: a laugh time survives grounding; any other invented time is still dropped."""
+    r = review(
+        scores=scores(
+            charisma={"score": 80, "reason": "laughs", "evidence": [33.0]},
+            warmth={"score": 70, "reason": "made up", "evidence": [40.0]},
+        ),
+        moments=[{"t": 33.0, "kind": "landed", "note": "laugh"}, {"t": 40.0, "kind": "invented", "note": "no"}],
+    )
+    out = R.ground(r, SEGS, allowed_times=[33.0])
+    assert out["scores"]["charisma"]["evidence"] == [33.0]
+    assert "warmth" not in out["scores"]
+    assert [m["t"] for m in out["moments"]] == [33.0]
+    # Without the allowed time, 33.0 is invented too.
+    assert "charisma" not in R.ground(r, SEGS)["scores"]
+
+
+def test_review_conversation_grounds_laugh_times_only():
+    cited = review(
+        scores=scores(
+            charisma={"score": 80, "reason": "laughs", "evidence": [12.0]},
+            warmth={"score": 70, "reason": "made up", "evidence": [40.0]},
+        )
+    )
+    with patch.object(R, "call_llm_json", lambda *a, **k: (cited, "x", [])):
+        out = R.review_conversation(SEGS, {"Speaker 1"}, METRICS, {}, laughs=LAUGHS)["review"]
+    assert out["scores"]["charisma"]["evidence"] == [12.0]
+    assert "warmth" not in out["scores"]
+    with patch.object(R, "call_llm_json", lambda *a, **k: (cited, "x", [])):
+        out = R.review_conversation(SEGS, {"Speaker 1"}, METRICS, {})["review"]
+    assert "charisma" not in out["scores"]
+
+
+def test_laugh_times_never_confirm_interruptions():
+    confirmed = review(interruptions_confirmed=[12.0])
+    with patch.object(R, "call_llm_json", lambda *a, **k: (confirmed, "x", [])):
+        out = R.review_conversation(SEGS, {"Speaker 1"}, METRICS, {}, laughs=LAUGHS)["review"]
+    assert out["interruptions_confirmed"] == []

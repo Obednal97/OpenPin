@@ -60,6 +60,8 @@ def env(tmp_path):
         "add_exemplars": MagicMock(return_value=1),
         "review": MagicMock(return_value={"review": REVIEW, "provider": "anthropic", "errors": []}),
         "find_audio": MagicMock(return_value=str(audio)),
+        "detect": MagicMock(return_value={"status": "unavailable", "events": [], "reason": "stubbed"}),
+        "owner_loudness": MagicMock(return_value=-20.0),
     }
     with (
         patch("app.coaching.store.COACHING_DIR", tmp_path / "coaching"),
@@ -71,6 +73,8 @@ def env(tmp_path):
         patch("app.coaching.runner.voice.add_exemplars", stubs["add_exemplars"]),
         patch("app.coaching.runner.review_conversation", stubs["review"]),
         patch("app.coaching.runner._find_audio", stubs["find_audio"]),
+        patch("app.coaching.runner.laughter.detect", stubs["detect"]),
+        patch("app.coaching.runner.engagement.owner_loudness_db", stubs["owner_loudness"]),
         patch("app.coaching.runner.Thread", _SyncThread),
     ):
         yield stubs
@@ -835,3 +839,142 @@ def test_undoing_the_exclusion_lets_a_forced_run_coach_again(env):
 def test_undoing_without_an_exclusion_writes_nothing(env):
     assert runner.set_excluded(SID, False) == {}
     assert not store.coaching_path(SID).exists()
+
+
+# ---------------------------------------------------------------- engagement
+
+# Speaker 1 (you) ends turns at 20.0 and 120.0.
+LAUGH_EVENTS = [
+    {"start": 20.5, "end": 22.0, "score": 0.6, "loudness_db": -40.0},  # someone else laughing
+    {"start": 120.5, "end": 122.0, "score": 0.6, "loudness_db": -18.0},  # you, loudest on your own mic
+]
+
+
+def _laughs(env, events=LAUGH_EVENTS):
+    env["detect"].return_value = {"status": "done", "events": events, "reason": ""}
+
+
+def test_engagement_block_is_stored_and_its_parts_copied_into_the_metrics(env):
+    _write_transcript(env["trn"])
+    _laughs(env)
+    out = runner.run_coaching(SID, env["audio"])
+    eng = out["engagement"]
+    env["detect"].assert_called_once_with(env["audio"])
+    assert eng["laughter_status"] == "done"
+    assert eng["laughs"] == [{"t": 20.5, "line_start": 0.0, "line_text": SEGMENTS[0]["text"]}]
+    assert eng["laughs_count"] == 1
+    assert eng["laughs_per_hour"] == 20.0
+    assert eng["score"] is not None
+    owner = out["metrics"]["owner"]
+    assert owner["laughs_per_hour"] == 20.0
+    assert owner["follow_up_share"] == eng["follow_up_share"]
+    assert owner["built_on_share"] is None  # REVIEW has no reactions
+    # The counted laugh went to the review prompt, before the review ran.
+    assert env["review"].call_args.kwargs["laughs"] == eng["laughs"]
+
+
+def test_built_on_uses_the_review(env):
+    _write_transcript(env["trn"])
+    reacted = {
+        **REVIEW,
+        "reactions": [
+            {"t": 0.0, "owner_point": "p", "response": r, "evidence": "e"} for r in ("engaged", "short", "follow_up")
+        ],
+    }
+    env["review"].return_value = {"review": reacted, "provider": "anthropic", "errors": []}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["engagement"]["built_on"] == {"count": 2, "of": 3}
+    assert out["metrics"]["owner"]["built_on_share"] == round(2 / 3, 4)
+
+
+def test_ai_review_off_still_measures_engagement(env):
+    _write_transcript(env["trn"])
+    _laughs(env)
+    env["config"]["coaching_ai_review"] = False
+    out = runner.run_coaching(SID, env["audio"])
+    env["review"].assert_not_called()
+    assert out["engagement"]["laughs_count"] == 1
+    assert out["engagement"]["built_on"] is None
+    assert out["engagement"]["score"] is not None
+
+
+def test_review_failure_keeps_the_engagement_block(env):
+    _write_transcript(env["trn"])
+    _laughs(env)
+    env["review"].return_value = {"review": None, "provider": "none", "errors": ["Anthropic: 401"]}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "failed"
+    assert out["engagement"]["laughs_count"] == 1
+
+
+def test_laughter_unavailable_keeps_its_reason_and_coaching_carries_on(env):
+    _write_transcript(env["trn"])
+    env["detect"].return_value = {"status": "unavailable", "events": [], "reason": "no model"}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["engagement"]["laughter_status"] == "unavailable"
+    assert out["engagement"]["laughter_reason"] == "no model"
+    assert out["metrics"]["owner"]["laughs_per_hour"] is None
+    env["owner_loudness"].assert_not_called()
+
+
+def test_laughter_raising_never_breaks_coaching(env):
+    _write_transcript(env["trn"])
+    env["detect"].side_effect = RuntimeError("onnx exploded")
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["review"] == REVIEW
+    assert out["engagement"]["laughter_status"] == "unavailable"
+    assert out["engagement"]["laughter_reason"]
+
+
+def test_malformed_detect_result_is_unavailable(env):
+    _write_transcript(env["trn"])
+    env["detect"].return_value = "nonsense"
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "done"
+    assert out["engagement"]["laughter_status"] == "unavailable"
+
+
+def test_no_laughs_found_needs_no_voice_level(env):
+    _write_transcript(env["trn"])
+    _laughs(env, [])
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["engagement"]["laughs_count"] == 0
+    env["owner_loudness"].assert_not_called()
+
+
+def test_over_three_hours_skips_laughter_without_converting(env):
+    long = [*SEGMENTS, {"start": 10800.0, "end": 10802.0, "text": "Bye then.", "speaker": "Speaker 2"}]
+    _write_transcript(env["trn"], long, duration=10801.0)
+    out = runner.run_coaching(SID, env["audio"])
+    env["detect"].assert_not_called()
+    assert out["engagement"]["laughter_status"] == "unavailable"
+    assert out["engagement"]["laughter_reason"] == "Too long to check for laughter"
+
+
+def test_no_audio_on_this_mac_skips_laughter(env):
+    _write_transcript(env["trn"])
+    env["find_audio"].return_value = None
+    out = runner.set_owner(SID, ["Speaker 1"], learn=False)
+    assert out["status"] == "done"
+    env["detect"].assert_not_called()
+    assert out["engagement"]["laughter_status"] == "unavailable"
+    assert out["engagement"]["laughter_reason"]
+
+
+def test_excluding_drops_the_engagement_block(env):
+    _write_transcript(env["trn"])
+    assert "engagement" in runner.run_coaching(SID, env["audio"])
+    assert "engagement" not in runner.set_excluded(SID, True)
+
+
+def test_needs_owner_drops_an_old_engagement_block(env):
+    _write_transcript(env["trn"])
+    assert "engagement" in runner.run_coaching(SID, env["audio"])
+    env["match_owner"].return_value = {"labels": [], "confidence": 0.2, "reason": "no confident match"}
+    relabelled = [{**s, "start": s["start"] + 0.5} for s in SEGMENTS]
+    _write_transcript(env["trn"], relabelled)
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "needs_owner"
+    assert "engagement" not in out
