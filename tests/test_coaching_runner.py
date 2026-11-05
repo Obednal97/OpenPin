@@ -32,6 +32,16 @@ REVIEW = {
 }
 
 
+@pytest.fixture(autouse=True)
+def clean_runner_state():
+    """Runs in progress, queued reruns and run numbers are process-wide: start each test clean."""
+    for state in (runner._running, runner._pending, runner._generation):
+        state.clear()
+    yield
+    for state in (runner._running, runner._pending, runner._generation):
+        state.clear()
+
+
 @pytest.fixture
 def env(tmp_path):
     """Isolated transcripts and coaching dirs, stubbed voice, review, audio lookup and threads."""
@@ -156,7 +166,12 @@ def test_done_writes_metrics_and_review(env):
     out = runner.run_coaching(SID, env["audio"])
     assert out["status"] == "done"
     assert out["review"] == REVIEW
-    assert out["owner"] == {"labels": ["Speaker 1"], "source": "voice", "confidence": 0.8}
+    assert out["owner"] == {
+        "labels": ["Speaker 1"],
+        "source": "voice",
+        "confidence": 0.8,
+        "labelling": runner.labelling_fingerprint(SEGMENTS),
+    }
     assert out["metrics"]["owner"]["talk_share"] is not None
     assert out["mixed_up"] is False
     assert "report_stale" not in out
@@ -259,7 +274,12 @@ def test_user_owner_choice_persists_and_reruns(env):
 
     out = runner.set_owner(SID, ["Speaker 2"])
     assert out["status"] == "done"
-    assert out["owner"] == {"labels": ["Speaker 2"], "source": "user", "confidence": 1.0}
+    assert out["owner"] == {
+        "labels": ["Speaker 2"],
+        "source": "user",
+        "confidence": 1.0,
+        "labelling": runner.labelling_fingerprint(SEGMENTS),
+    }
     assert "candidates" not in out
     env["add_exemplars"].assert_called_once_with(env["audio"], SEGMENTS, ["Speaker 2"])
     assert env["review"].call_args.args[1] == ["Speaker 2"]
@@ -307,17 +327,120 @@ def test_auto_off_does_nothing(env):
     assert store.load(SID)["status"] == "done"
 
 
-def test_async_runs_and_is_a_no_op_while_running(env):
+def test_async_trigger_while_running_is_queued_not_concurrent(env):
     _write_transcript(env["trn"])
     started = []
     with patch("app.coaching.runner.Thread", lambda target, kwargs, daemon: MagicMock(start=lambda: started.append(1))):
         runner.start_coaching_async(SID, env["audio"])
-        runner.start_coaching_async(SID, env["audio"])
-    assert started == [1]
-    runner._running.discard(SID)
+        runner.start_coaching_async(SID, None)
+        runner.start_coaching_async(SID, None, force=True)
+    assert started == [1]  # one thread; the other triggers wait as a single rerun
+    assert runner.is_running(SID)
+    assert runner._pending[SID] == {"audio_path": None, "force": True}
+    runner._running.clear()
+    runner._pending.clear()
     runner.start_coaching_async(SID, env["audio"])  # _SyncThread: runs now
     assert store.load(SID)["status"] == "done"
-    assert SID not in runner._running
+    assert not runner.is_running(SID)
+
+
+def test_status_is_running_during_a_run(env):
+    _write_transcript(env["trn"])
+    seen = []
+
+    def check(*args, **kwargs):
+        seen.append((store.load(SID)["status"], runner.is_running(SID)))
+        return {"review": REVIEW, "provider": "anthropic", "errors": []}
+
+    env["review"].side_effect = check
+    runner.start_coaching_async(SID, env["audio"])
+    runner.run_coaching(SID, env["audio"])
+    assert seen == [("running", True), ("running", True)]
+    assert not runner.is_running(SID)
+
+
+def test_trigger_during_a_run_reruns_on_the_new_transcript(env):
+    """Re-transcribed mid-run: the first result is dropped as stale and the queued rerun coaches the new text."""
+    _write_transcript(env["trn"])
+    new_text = "Re-transcribed while coaching ran."
+
+    def retranscribe_then_review(*args, **kwargs):
+        if env["review"].call_count == 1:
+            path = env["trn"] / f"{SID}.json"
+            data = json.loads(path.read_text())
+            data["text"] = new_text
+            path.write_text(json.dumps(data))
+            runner.start_coaching_async(SID, env["audio"])  # the hook after re-transcription
+        return {"review": REVIEW, "provider": "anthropic", "errors": []}
+
+    env["review"].side_effect = retranscribe_then_review
+    runner.start_coaching_async(SID, env["audio"])
+    assert env["review"].call_count == 2
+    saved = store.load(SID)
+    assert saved["status"] == "done"
+    assert saved["transcript_text_hash"] == store.text_hash(new_text)
+    assert not runner.is_running(SID) and SID not in runner._pending
+
+
+def test_trigger_during_set_owner_waits_then_reruns(env):
+    _write_transcript(env["trn"])
+
+    seen = []
+
+    def hook_fires_meanwhile(*args, **kwargs):
+        runner.start_coaching_async(SID, env["audio"])
+        seen.append((env["review"].call_count, SID in runner._pending))
+        return 1
+
+    env["add_exemplars"].side_effect = hook_fires_meanwhile
+    out = runner.set_owner(SID, ["Speaker 2"])
+    assert seen == [(0, True)]  # queued, no concurrent duplicate run
+    assert out["status"] == "done"
+    assert env["review"].call_count == 2  # set_owner's run, then the queued one
+    assert store.load(SID)["owner"]["source"] == "user"
+    assert not runner.is_running(SID)
+
+
+def test_current_marks_an_orphaned_running_status_failed(env):
+    store.update(SID, lambda d: d.update(status="running", status_reason=""))
+    out = runner.current(SID)
+    assert out["status"] == "failed"
+    assert out["status_reason"] == "Coaching was interrupted. Try again."
+    assert store.load(SID)["status"] == "failed"
+
+
+def test_current_leaves_a_live_run_alone(env):
+    store.update(SID, lambda d: d.update(status="running"))
+    runner._enter(SID)
+    assert runner.current(SID)["status"] == "running"
+    assert runner.current("1715000001") == {}
+    store.update(SID, lambda d: d.update(status="done"))
+    runner._running.clear()
+    assert runner.current(SID)["status"] == "done"
+
+
+def test_relabelled_segments_ignore_the_old_user_pick(env):
+    _write_transcript(env["trn"])
+    assert runner.set_owner(SID, ["Speaker 2"])["status"] == "done"
+
+    # Re-diarized: same text, different labelling ("Speaker 2" is now someone else).
+    swap = {"Speaker 1": "Speaker 2", "Speaker 2": "Speaker 1"}
+    _write_transcript(env["trn"], [{**s, "speaker": swap[s["speaker"]]} for s in SEGMENTS])
+    env["match_owner"].return_value = {"labels": [], "source": "none", "reason": "no confident match"}
+    out = runner.run_coaching(SID, env["audio"])
+    env["match_owner"].assert_called_once()
+    assert out["status"] == "needs_owner"
+    assert "owner" not in out
+
+
+def test_voice_owner_reused_until_relabelled(env):
+    _write_transcript(env["trn"])
+    runner.run_coaching(SID, env["audio"])
+    runner.run_coaching(SID, env["audio"])
+    assert env["match_owner"].call_count == 1
+    _write_transcript(env["trn"], [{**s, "start": s["start"] + 0.5} for s in SEGMENTS])
+    runner.run_coaching(SID, env["audio"])
+    assert env["match_owner"].call_count == 2
 
 
 def test_missing_transcript_writes_nothing(env):

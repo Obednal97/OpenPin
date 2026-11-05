@@ -10,7 +10,8 @@ against a guessed owner. The voice model is only used if already installed; this
 never installs anything.
 
 A result is dropped if the transcript text changed while the run was going, or if a newer
-run for the same recording started meanwhile.
+run for the same recording started meanwhile. A trigger that arrives during a run is queued
+and runs once the current run finishes.
 """
 
 import json
@@ -35,13 +36,15 @@ ONLY_YOU = "only you spoke"
 TOO_SHORT = "too short"
 NO_AUDIO = "no audio file"
 LOCAL_NEEDS_OLLAMA = "AI feedback needs Ollama; showing measured metrics only"
+INTERRUPTED = "Coaching was interrupted. Try again."
 FIRST_LINE_CHARS = 200
 
 # Keys that describe one run's outcome; cleared when a run ends without a report.
 _REPORT_KEYS = ("metrics", "review", "report_stale", "candidates")
 
 _lock = Lock()
-_running: set[str] = set()  # sessions with a background run in this process
+_running: dict[str, int] = {}  # runs in progress per session in this process
+_pending: dict[str, dict] = {}  # one queued rerun per session: {"audio_path", "force"}
 _generation: dict[str, int] = {}  # latest run number per session; older runs drop their result
 
 
@@ -101,17 +104,34 @@ def _duration(transcript: dict, segments: list[dict]) -> float:
 # ---------------------------------------------------------------- analysis
 
 
+def labelling_fingerprint(segments: list[dict]) -> str:
+    """sha1 of the sorted (start rounded to 0.1 s, speaker) pairs: changes when speakers are re-labelled."""
+    pairs = sorted((round(float(s.get("start") or 0), 1), s.get("speaker") or "") for s in segments)
+    return store.text_hash(json.dumps(pairs))
+
+
 def _resolve_owner(sidecar: dict, labels: list[str], audio: str | None, segments: list[dict]):
-    """Return ``(owner, reason)``: owner is None when the user must pick, with reason saying why."""
+    """Return ``(owner, reason)``: owner is None when the user must pick, with reason saying why.
+
+    A saved owner (the user's pick first, then an earlier voice match) is reused only while the
+    speaker labelling it was made for is unchanged; after re-labelling, "Speaker 2" may be
+    someone else, so the voice is matched again.
+    """
     saved = sidecar.get("owner") or {}
     saved_labels = saved.get("labels") or []
-    if saved.get("source") == "user" and saved_labels and set(saved_labels) <= set(labels):
+    if (
+        saved.get("source") in ("user", "voice")
+        and saved_labels
+        and set(saved_labels) <= set(labels)
+        and saved.get("labelling") == labelling_fingerprint(segments)
+    ):
         return saved, ""
     if not audio:
         return None, NO_AUDIO
     match = voice.match_owner(audio, segments)
     if match.get("labels"):
-        return {"labels": list(match["labels"]), "source": "voice", "confidence": float(match["confidence"])}, ""
+        owner = {"labels": list(match["labels"]), "source": "voice", "confidence": float(match["confidence"])}
+        return {**owner, "labelling": labelling_fingerprint(segments)}, ""
     return None, match.get("reason") or "no confident match"
 
 
@@ -169,6 +189,70 @@ def _analyse(sidecar: dict, transcript: dict, audio: str | None, force: bool, co
     return fields, {"report_stale", "candidates"}
 
 
+# ---------------------------------------------------------------- runs in progress
+#
+# ``_running`` counts the runs in progress per session in this process (background and
+# synchronous). A trigger that arrives while one is going is not dropped: it is kept in
+# ``_pending`` and the last run to finish starts it, so a re-transcribed recording is
+# always coached against its newest transcript.
+
+
+def _enter(session_id: str) -> None:
+    with _lock:
+        _running[session_id] = _running.get(session_id, 0) + 1
+
+
+def _leave(session_id: str) -> dict | None:
+    """End one run. Returns a pending rerun to do now (the session stays registered), or None."""
+    with _lock:
+        if _running.get(session_id) == 1 and session_id in _pending:
+            return _pending.pop(session_id)
+        count = _running.get(session_id, 1) - 1
+        if count > 0:
+            _running[session_id] = count
+        else:
+            _running.pop(session_id, None)
+        return None
+
+
+def _spawn(session_id: str, audio_path: str | None, force: bool) -> None:
+    """Start a background run for a session already registered by ``_enter``/``_leave``."""
+    try:
+        Thread(
+            target=_run_in_background,
+            kwargs={"session_id": session_id, "audio_path": audio_path, "force": force},
+            daemon=True,
+        ).start()
+    except BaseException:
+        _leave(session_id)
+        raise
+
+
+def _run_in_background(session_id: str, audio_path: str | None, force: bool) -> None:
+    while True:
+        try:
+            _run_once(session_id, audio_path, force)
+        except Exception as e:
+            log.warning("background coaching for %s failed: %s", session_id, e, exc_info=True)
+        rerun = _leave(session_id)
+        if rerun is None:
+            return
+        audio_path, force = rerun["audio_path"] or audio_path, rerun["force"]
+
+
+def _finish_sync(session_id: str, audio_path: str | None) -> None:
+    """End a synchronous run; a trigger that arrived meanwhile runs in the background."""
+    rerun = _leave(session_id)
+    if rerun is not None:
+        _spawn(session_id, rerun["audio_path"] or audio_path, rerun["force"])
+
+
+def is_running(session_id: str) -> bool:
+    """True while this process is coaching the recording."""
+    with _lock:
+        return session_id in _running
+
+
 # ---------------------------------------------------------------- public API
 
 
@@ -179,6 +263,14 @@ def run_coaching(session_id: str, audio_path: str | None, force: bool = False) -
     the minimum length; it never coaches a recording without speaker labels or where only
     the owner spoke. Without a transcript nothing is written.
     """
+    _enter(session_id)
+    try:
+        return _run_once(session_id, audio_path, force)
+    finally:
+        _finish_sync(session_id, audio_path)
+
+
+def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
     config = load_config()
     if not force and not config.get("coaching_auto", True):
         return store.load(session_id)
@@ -240,38 +332,39 @@ def _commit(session_id, generation, start_hash, before, fields, drop) -> Callabl
     return mutate
 
 
-def _run_in_background(session_id: str, audio_path: str | None, force: bool) -> None:
-    try:
-        run_coaching(session_id, audio_path, force=force)
-    except Exception as e:
-        log.warning("background coaching for %s failed: %s", session_id, e, exc_info=True)
-    finally:
-        with _lock:
-            _running.discard(session_id)
-
-
 def start_coaching_async(session_id: str, audio_path: str | None, force: bool = False) -> None:
     """Coach a recording in a daemon thread.
 
-    Does nothing when automatic coaching is off (unless ``force``) or when this recording
-    is already being coached in this process.
+    Does nothing when automatic coaching is off (unless ``force``). If the recording is
+    already being coached in this process, the request is queued as one rerun (``force``
+    if any queued request asked for it) that starts when the current run finishes.
     """
     if not force and not load_config().get("coaching_auto", True):
         return
     with _lock:
         if session_id in _running:
+            queued = _pending.get(session_id) or {"audio_path": None, "force": False}
+            _pending[session_id] = {"audio_path": audio_path or queued["audio_path"], "force": queued["force"] or force}
             return
-        _running.add(session_id)
-    try:
-        Thread(
-            target=_run_in_background,
-            kwargs={"session_id": session_id, "audio_path": audio_path, "force": force},
-            daemon=True,
-        ).start()
-    except BaseException:
-        with _lock:
-            _running.discard(session_id)
-        raise
+        _running[session_id] = 1
+    _spawn(session_id, audio_path, force)
+
+
+def current(session_id: str) -> dict:
+    """The sidecar as the UI should see it.
+
+    A "running" status with no run in this process means the app quit mid-run: it is
+    rewritten as "failed" so the report doesn't spin forever.
+    """
+    data = store.load(session_id)
+    if data.get("status") != "running" or is_running(session_id):
+        return data
+
+    def _interrupted(d: dict) -> None:
+        if d.get("status") == "running" and not is_running(session_id):
+            d.update(status="failed", status_reason=INTERRUPTED)
+
+    return store.update(session_id, _interrupted)
 
 
 def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
@@ -279,7 +372,8 @@ def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
 
     Raises ValueError for an empty pick or a label not in the transcript. With ``learn``,
     the pick also teaches the voice profile, but only if the voice model is already
-    installed and the recording's audio is on this Mac.
+    installed and the recording's audio is on this Mac. The pick holds only while the
+    speaker labelling stays the same (see ``labelling_fingerprint``).
     """
     transcript = _read_transcript(session_id)
     if transcript is None:
@@ -292,11 +386,17 @@ def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
     if unknown:
         raise ValueError(f"unknown speaker label: {', '.join(unknown)}")
 
-    store.update(session_id, lambda d: d.update(owner={"labels": chosen, "source": "user", "confidence": 1.0}))
-    audio = _resolve_audio(session_id, None)
-    if learn and audio and voice.model_available():
-        try:
-            voice.add_exemplars(audio, segments, chosen)
-        except Exception as e:
-            log.warning("could not add voice exemplars for %s: %s", session_id, e, exc_info=True)
-    return run_coaching(session_id, audio, force=True)
+    owner = {"labels": chosen, "source": "user", "confidence": 1.0, "labelling": labelling_fingerprint(segments)}
+    _enter(session_id)
+    audio = None
+    try:
+        store.update(session_id, lambda d: d.update(owner=owner))
+        audio = _resolve_audio(session_id, None)
+        if learn and audio and voice.model_available():
+            try:
+                voice.add_exemplars(audio, segments, chosen)
+            except Exception as e:
+                log.warning("could not add voice exemplars for %s: %s", session_id, e, exc_info=True)
+        return _run_once(session_id, audio, force=True)
+    finally:
+        _finish_sync(session_id, audio)

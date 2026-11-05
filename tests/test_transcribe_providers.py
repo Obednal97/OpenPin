@@ -154,6 +154,8 @@ def route_env(flask_client, tmp_path):
         patch("app.utils.constants.CLOUD_RECORDINGS_DIR", tmp_path / "cloud"),
         patch("app.routes.transcribe.fire_webhooks"),
         patch("app.coaching.store.COACHING_DIR", tmp_path / "coaching"),
+        # No real coaching runs from route tests (tests/test_coaching_runner.py patches over this).
+        patch("app.coaching.runner.start_coaching_async"),
     ):
         yield flask_client, rec, trn
 
