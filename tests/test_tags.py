@@ -22,10 +22,16 @@ SID = "1715000000"
 def env(flask_client, tmp_path):
     trn = tmp_path / "transcripts"
     trn.mkdir()
+    # The tag routes only change recordings that exist (app/routes/recordings.py recording_exists).
+    rec = tmp_path / "recordings"
+    rec.mkdir()
+    for sid in (SID, "1715000001"):
+        (rec / f"{sid}.ogg").write_bytes(b"\0" * 100)
     with (
         patch("app.utils.tags.TRANSCRIPTS_DIR", trn),
         patch("app.routes.recordings.TRANSCRIPTS_DIR", trn),
         patch("app.routes.notion.TRANSCRIPTS_DIR", trn),
+        patch("app.routes.recordings.get_all_recordings_dirs", return_value=[rec]),
     ):
         yield type("Env", (), {"client": flask_client, "trn": trn})
 

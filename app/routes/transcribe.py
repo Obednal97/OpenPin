@@ -91,29 +91,30 @@ def _extract_spoken_tags(text):
 
 
 def _apply_spoken_tags(session_id, text):
-    """Detect and apply spoken tags from transcript text. Returns list of applied tags."""
-    tags = _extract_spoken_tags(text)
-    if not tags:
+    """Detect spoken tags in the transcript text and add them. Returns the spoken tags
+    the recording now carries, in their saved spelling.
+
+    They go through ``tags.add_tags``, so the same rules apply as for tags added in
+    the app or by AI tools. A tag that breaks a rule (too long, say, or the recording
+    already has 20) is skipped and logged: it never fails the transcription.
+    """
+    spoken = _extract_spoken_tags(text)
+    if not spoken:
         return []
+    from app.utils import tags as tags_store
 
-    def _apply(config):
-        existing = config.get("recording_tags", {}).get(session_id, [])
-        # Merge — don't duplicate (case-insensitive comparison)
-        merged = list(existing)
-        existing_lower = {x.lower() for x in existing}
-        custom_tags = set(config.get("custom_tags", []))
-        for t in tags:
-            if t.lower() not in existing_lower:
-                merged.append(t)
-            # Auto-add to custom tags list if not already there (case-insensitive)
-            if t.lower() not in {x.lower() for x in custom_tags}:
-                custom_tags.add(t)
-        config.setdefault("recording_tags", {})[session_id] = merged
-        config["custom_tags"] = sorted(custom_tags)
-
-    update_config(_apply)
-    logging.info(f"Auto-tagged {session_id} with spoken tags: {tags}")
-    return tags
+    applied = []
+    for tag in spoken:
+        try:
+            now = tags_store.add_tags(session_id, [tag])
+        except ValueError as e:
+            logging.warning(f"Skipped spoken tag {tag!r} for {session_id}: {e}")
+            continue
+        folded = tag.strip().casefold()
+        applied += [t for t in now if t.casefold() == folded and t not in applied]
+    if applied:
+        logging.info(f"Auto-tagged {session_id} with spoken tags: {applied}")
+    return applied
 
 
 # Keys produced by a transcription run. Re-transcribing replaces these and
