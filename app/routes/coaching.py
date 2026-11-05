@@ -241,7 +241,16 @@ def set_mixed_up(sid):
         return jsonify({"error": "mixed_up must be true or false"}), 400
     if not runner.has_transcript(sid):
         return _no_transcript()
-    return _sidecar_response(store.update(sid, lambda d: d.update(mixed_up=flag)))
+    before: dict = {}
+
+    def _mark(d: dict) -> None:
+        before.update(d)
+        d.update(mixed_up=flag)
+
+    saved = store.update(sid, _mark)
+    # Mixed up undoes your pick for naming: your profile name leaves your speaker (and comes back).
+    runner._owner_changed(sid, before, saved)
+    return _sidecar_response(saved)
 
 
 @bp.route("/coaching/<sid>/exclude", methods=["POST"])

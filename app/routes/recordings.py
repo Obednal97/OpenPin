@@ -9,7 +9,9 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
+from app.state import speakers
 from app.utils import redownload_backup
+from app.utils import speaker_names as sn
 from app.utils import tags as tags_store
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
@@ -293,6 +295,13 @@ def list_recordings():
             )
     except Exception:
         pass
+
+    profile = speakers.profile_name() or ""
+    for r in recordings:
+        try:
+            r["participants"] = speakers.participants(r["session_id"], profile) if r.get("has_transcript") else []
+        except Exception:
+            r["participants"] = []
 
     recordings.sort(key=lambda r: r["date"], reverse=True)
     return jsonify(recordings)
@@ -881,6 +890,7 @@ def move_recordings():
 def list_transcripts():
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
     transcripts = []
+    profile = speakers.profile_name() or ""
     for f in sorted(TRANSCRIPTS_DIR.glob("*.json"), reverse=True):
         try:
             # Serialize against concurrent writes from diarization/summarization
@@ -889,7 +899,7 @@ def list_transcripts():
             # (the bare-except below swallows JSONDecodeError).
             with get_transcript_lock(f.stem):
                 data = json.loads(f.read_text())
-            speakers = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
+            labels = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
             transcripts.append(
                 {
                     "session_id": f.stem,
@@ -899,8 +909,14 @@ def list_transcripts():
                     "text": data.get("text", ""),
                     "duration": data.get("duration", 0),
                     "language": data.get("language", ""),
-                    "speakers": speakers,
+                    "speakers": labels,
                     "segments": data.get("segments", []),
+                    # Names over the labels: the effective ones to show (your profile name on
+                    # your speaker once you picked it), the ones typed, and whether a
+                    # re-transcription just cleared them (the UI says so once).
+                    "speaker_names": speakers.names_for(f.stem, data, profile=profile),
+                    "stored_speaker_names": sn.stored_names(data),
+                    "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
                     "summary": data.get("summary", ""),
                     "summary_stale": bool(data.get("summary_stale", False)),
                     "auto_title": data.get("auto_title", ""),
@@ -947,6 +963,16 @@ def _validate_segments(segments):
     return True, ""
 
 
+def _keep_names_for_edited_segments(transcript):
+    """After the user edited segments: keep names only for labels still there, for the new labelling."""
+    if not transcript.get("speaker_names"):
+        return
+    from app.coaching.runner import labelling_fingerprint
+
+    transcript["speaker_names"] = sn.stored_names(transcript)
+    transcript["speaker_names_labelling"] = labelling_fingerprint(transcript.get("segments") or [])
+
+
 @bp.route("/transcripts/update", methods=["POST"])
 def update_transcript():
     """Update transcript segments and/or summary."""
@@ -971,16 +997,21 @@ def update_transcript():
         if not ok:
             return jsonify({"error": err}), 400
 
+    profile = speakers.profile_name() or ""
     with get_transcript_lock(session_id):
         transcript = json.loads(json_path.read_text())
         old_text = transcript.get("text")
+        # The editor shows names; stored summaries stay in label form so renaming keeps working.
+        names = speakers.names_for(session_id, transcript, profile=profile)
 
         if "segments" in data:
             transcript["segments"] = data["segments"]
             transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
+            _keep_names_for_edited_segments(transcript)
 
         if "summary" in data:
-            transcript["summary"] = data["summary"]
+            summary = data["summary"]
+            transcript["summary"] = sn.names_to_labels(summary, names) if isinstance(summary, str) else summary
             # A summary the user saved by hand is current by definition.
             transcript.pop("summary_stale", None)
 
@@ -1025,3 +1056,57 @@ def delete_transcript():
             "errors": errors,
         }
     )
+
+
+# ---------------------------------------------------------------- speaker names
+
+
+@bp.route("/transcripts/speaker-names", methods=["POST"])
+def set_speaker_names():
+    """Name speakers in a recording: ``{session_id, names: {label: name or null}}``.
+
+    Null clears a name. Returns ``{speaker_names}`` (the names as stored). 404 without a
+    transcript, 400 for an unknown label or a bad name.
+    """
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id or not isinstance(session_id, str):
+        return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    names = data.get("names")
+    if not isinstance(names, dict):
+        return jsonify({"error": "names must map speaker labels to names"}), 400
+    try:
+        stored = speakers.set_names(session_id, names)
+    except KeyError:
+        return jsonify({"error": "Transcript not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"speaker_names": stored})
+
+
+@bp.route("/transcripts/speaker-names/ack-cleared", methods=["POST"])
+def ack_speaker_names_cleared():
+    """The UI has told the user that re-transcribing cleared the names: stop flagging it."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id or not isinstance(session_id, str):
+        return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    try:
+        speakers.ack_cleared(session_id)
+    except KeyError:
+        return jsonify({"error": "Transcript not found"}), 404
+    return jsonify({"saved": True})
+
+
+@bp.route("/people")
+def list_people():
+    """Every speaker name used across the library, with counts (name suggestions)."""
+    return jsonify(speakers.list_people())

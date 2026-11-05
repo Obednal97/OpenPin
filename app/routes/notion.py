@@ -13,7 +13,7 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
-from app.utils import notion_legacy
+from app.utils import notion_legacy, speaker_names
 from app.utils.config import load_config, update_config
 from app.utils.constants import DEFAULT_TAGS, TRANSCRIPTS_DIR
 from app.utils.paths import InvalidSessionIdError, validate_session_id
@@ -282,12 +282,17 @@ def set_database():
     return jsonify({"saved": True})
 
 
-def _build_notion_content(t_data):
-    """Build markdown content for a Notion page from transcript data."""
+def _build_notion_content(t_data, names=None):
+    """Build markdown content for a Notion page from transcript data.
+
+    ``names`` (``{label: name}``) are applied to the summary and the speaker of each
+    line; the stored transcript keeps its labels.
+    """
+    names = names or {}
     content_parts = []
     summary = t_data.get("summary", "")
     if summary:
-        content_parts.append(summary)
+        content_parts.append(speaker_names.apply_names(summary, names))
         content_parts.append("\n---\n")
 
     content_parts.append("## Full Transcript\n")
@@ -295,7 +300,7 @@ def _build_notion_content(t_data):
     if segments:
         for seg in segments:
             ts = f"[{int(seg.get('start', 0)) // 60:02d}:{int(seg.get('start', 0)) % 60:02d}]"
-            speaker = f" **{seg['speaker']}**:" if seg.get("speaker") else ""
+            speaker = f" **{names.get(seg['speaker'], seg['speaker'])}**:" if seg.get("speaker") else ""
             content_parts.append(f"{ts}{speaker} {seg.get('text', '').strip()}")
     else:
         content_parts.append(t_data.get("text", ""))
@@ -337,7 +342,17 @@ _sleep = _time.sleep  # patched in tests
 
 
 def _build_app_section(t_data, session_id, stamp=None):
-    """The app-owned block: marked heading, session line, body, end marker."""
+    """The app-owned block: marked heading, session line, body, end marker.
+
+    The body shows the recording's speaker names (no AI call: labels are swapped for names).
+    """
+    try:
+        from app.state import speakers
+
+        names = speakers.names_for(session_id, t_data, profile=speakers.profile_name())
+    except Exception as e:
+        logging.warning(f"Could not read speaker names for {session_id}: {e}")
+        names = {}
     heading = f"## {APP_SECTION_HEADING}" + (f" ({stamp})" if stamp else "")
     return "\n".join(
         [
@@ -345,7 +360,7 @@ def _build_app_section(t_data, session_id, stamp=None):
             f"*Session ID: {session_id} · Written by Open Pin. Updating from the app replaces everything from "
             f"this heading down to the end line below; add your own notes above or below it.*",
             "",
-            _build_notion_content(t_data),
+            _build_notion_content(t_data, names),
             "",
             "---",
             f"*{APP_SECTION_END}*",
