@@ -258,6 +258,17 @@ def add_exemplars(audio_path: str, segments: list[dict], labels: list[str]) -> i
     return len(new)
 
 
+def replace_profile(audio_path: str, segments: list[dict], labels: list[str]) -> int:
+    """Redo voice setup: build exemplars from this recording and swap them in for the old
+    profile, but only if at least one was produced (a failed redo keeps the old voice).
+    Returns how many exemplars the new profile has (0 = nothing changed)."""
+    embeddings = speaker_embeddings(audio_path, segments)
+    new = [embeddings[label] for label in labels if label in embeddings]
+    if new:
+        _save_exemplars(new)
+    return len(new)
+
+
 # ------------------------------------------------------------------ matching
 
 

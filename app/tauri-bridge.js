@@ -408,7 +408,8 @@ window.plaud = {
   coachingProgress: (weeks) => apiCall('GET', `/coaching/progress?weeks=${encodeURIComponent(weeks ?? 12)}`),
   voiceStatus: () => apiCall('GET', '/coaching/voice'),
   voiceInstall: () => apiCall('POST', '/coaching/voice/install'),
-  voiceSetup: (session_id, labels) => apiCall('POST', '/coaching/voice/setup', { session_id, labels }),
+  voiceSetup: (session_id, labels, replace) =>
+    apiCall('POST', '/coaching/voice/setup', { session_id, labels, replace: !!replace }),
   voiceDelete: () => apiCall('DELETE', '/coaching/voice'),
 
   // Settings

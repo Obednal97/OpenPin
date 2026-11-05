@@ -157,6 +157,12 @@ def test_voice_install_runs_once_and_reports_error(env, monkeypatch):
 
     monkeypatch.setattr(voice, "install_model", lambda: (False, "no network"))
     started[0]()
+    assert env.get("/coaching/voice").get_json()["install_error"] == "no network"
+    # A retry clears the stale error before it returns.
+    assert env.post("/coaching/voice/install").get_json() == {"started": True}
+    now = env.get("/coaching/voice").get_json()
+    assert now["installing"] is True and now["install_error"] is None
+    started[-1]()
     status = env.get("/coaching/voice").get_json()
     assert status["installing"] is False
     assert status["install_error"] == "no network"
@@ -181,6 +187,35 @@ def test_voice_setup_adds_exemplars(env, monkeypatch, tmp_path):
     add.assert_called_once_with(str(audio), SEGMENTS, ["Speaker 1"])
     bad = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Nobody"]})
     assert bad.status_code == 400
+
+
+def _fake_embeddings(monkeypatch, result):
+    monkeypatch.setattr(voice, "model_available", lambda: True)
+    monkeypatch.setattr(runner, "_resolve_audio", lambda sid, p: "a.ogg")
+    monkeypatch.setattr(voice, "speaker_embeddings", lambda audio, segs: result)
+
+
+def test_voice_setup_replace_swaps_profile(env, monkeypatch):
+    voice._save_exemplars([[1.0, 0.0], [0.0, 1.0]])
+    _fake_embeddings(monkeypatch, {"Speaker 1": [0.5, 0.5]})
+    r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"], "replace": True})
+    assert r.get_json() == {"exemplars": 1}
+    assert voice._load_exemplars() == [[0.5, 0.5]]
+
+
+def test_voice_setup_replace_failure_keeps_old_voice(env, monkeypatch):
+    voice._save_exemplars([[1.0, 0.0]])
+    _fake_embeddings(monkeypatch, {})
+    r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"], "replace": True})
+    assert r.get_json() == {"exemplars": 0}
+    assert voice._load_exemplars() == [[1.0, 0.0]]
+
+
+def test_voice_setup_without_replace_appends(env, monkeypatch):
+    voice._save_exemplars([[1.0, 0.0]])
+    _fake_embeddings(monkeypatch, {"Speaker 1": [0.5, 0.5]})
+    env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"]})
+    assert len(voice._load_exemplars()) == 2
 
 
 def test_voice_delete(env):

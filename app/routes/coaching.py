@@ -155,7 +155,8 @@ def voice_setup():
     if not audio:
         return jsonify({"error": "no audio file for this recording"}), 404
     try:
-        added = voice.add_exemplars(audio, segments, sorted(set(labels)))
+        add = voice.replace_profile if data.get("replace") is True else voice.add_exemplars
+        added = add(audio, segments, sorted(set(labels)))
     except Exception as e:
         log.warning("voice setup failed for %s: %s", sid, e, exc_info=True)
         return jsonify({"error": "Could not learn your voice from this recording"}), 500
