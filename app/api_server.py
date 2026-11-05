@@ -25,7 +25,9 @@ ensure_installed("requests", required=True)
 
 from flask import Flask, jsonify, request
 
+from app.mcp import access as mcp_access
 from app.routes import cloud, coaching, core, device, diagnostics, gdrive, notion, recordings, settings, transcribe
+from app.utils import changes
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -52,6 +54,17 @@ log.setLevel(logging.WARNING)
 #
 # If PLAUD_API_TOKEN is unset (tests, or running api_server.py by hand) the
 # token check is skipped with a loud warning; CORS and Host checks still apply.
+#
+# /mcp/v1/* (AI tools through the MCP connector, app/mcp/) is a separate world:
+# - It needs the MCP key in X-Open-Pin-MCP-Key and nothing else opens it: not
+#   the app token, not ?token=, and not a missing PLAUD_API_TOKEN.
+# - Anything a browser sends (Origin, or Sec-Fetch-* fetch metadata, which
+#   browsers add even to no-cors GETs) is refused, preflights included, and
+#   gets no CORS headers.
+# - While AI tool access is off there is no key, and it answers 403 with
+#   MCP_OFF_MESSAGE.
+# The MCP key is never looked at on any other path, so it opens nothing else.
+# The Host check above applies to /mcp/v1 as everywhere.
 
 API_TOKEN_HEADER = "X-Plaud-Token"
 # Tauri 2 serves the app from tauri://localhost on macOS/Linux and
@@ -60,6 +73,8 @@ ALLOWED_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "htt
 ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost"})
 # Endpoints reachable without the token (Rust's readiness probe uses /health).
 _TOKEN_EXEMPT_PATHS = frozenset({"/health"})
+MCP_PATH_PREFIX = "/mcp/v1"
+MCP_OFF_MESSAGE = "AI tool access is turned off in Open Pin"
 
 
 def _expected_token() -> str:
@@ -103,10 +118,35 @@ def _host_allowed(host: str) -> bool:
     return hostname.lower() in ALLOWED_HOSTNAMES
 
 
+def _is_mcp_path(path: str) -> bool:
+    return path == MCP_PATH_PREFIX or path.startswith(MCP_PATH_PREFIX + "/")
+
+
+def _from_browser(headers) -> bool:
+    return "Origin" in headers or any(name.lower().startswith("sec-fetch-") for name, _ in headers.items())
+
+
+def _mcp_guard():
+    """Auth for /mcp/v1/*: the MCP key only. Returns an error response or None."""
+    if _from_browser(request.headers):
+        return jsonify({"error": "Forbidden"}), 403
+    key = mcp_access.current_key()
+    if key is None:
+        return jsonify({"error": MCP_OFF_MESSAGE}), 403
+    supplied = request.headers.get(mcp_access.MCP_KEY_HEADER, "")
+    if not hmac.compare_digest(supplied.encode(), key.encode()):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
 @app.before_request
 def _enforce_request_security():
     if not _host_allowed(request.headers.get("Host", "")):
         return jsonify({"error": "Forbidden host"}), 403
+
+    # Before the OPTIONS shortcut and the app-token skip: never falls through.
+    if _is_mcp_path(request.path):
+        return _mcp_guard()
 
     if request.method == "OPTIONS":
         # CORS preflight: answer directly (after_request adds the CORS headers
@@ -128,13 +168,19 @@ def _enforce_request_security():
 @app.after_request
 def add_cors(response):
     origin = request.headers.get("Origin", "")
-    if origin in ALLOWED_ORIGINS:
+    if origin in ALLOWED_ORIGINS and not _is_mcp_path(request.path):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Headers"] = f"Content-Type, Authorization, {API_TOKEN_HEADER}"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         response.headers["Access-Control-Max-Age"] = "600"
     response.vary.add("Origin")
     return response
+
+
+@app.route("/changes", methods=["GET"])
+def get_changes():
+    """The change counter (app/utils/changes.py): the window reloads when it moves."""
+    return jsonify({"counter": changes.current()})
 
 
 # JSON error handlers — prevent Flask returning HTML error pages
@@ -245,6 +291,54 @@ app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
 app.register_blueprint(coaching.bp)
 
+
+def _start_mcp_access(port: int):
+    """Once the port is bound: turn AI tool access on if the setting is on.
+
+    With it off, delete any connection file a crash left behind. Never raises:
+    the backend runs without AI tool access rather than not at all.
+    """
+    try:
+        from app.utils.config import load_config
+
+        mcp_access.set_port(port)
+        if load_config().get("mcp_enabled", False) is True:
+            mcp_access.enable(port)
+            logging.info("[MCP] AI tool access is on")
+        else:
+            mcp_access.remove_connection_file()
+    except Exception as e:
+        logging.error(f"[MCP] Couldn't turn on AI tool access: {e}")
+
+
+def _stop_mcp_access():
+    """On exit: delete the connection file. The setting stays as it is."""
+    try:
+        mcp_access.disable()
+    except Exception as e:
+        logging.warning(f"[MCP] Cleanup failed: {e}")
+
+
+def _install_exit_cleanup():
+    """Run _stop_mcp_access on a normal exit and on SIGTERM.
+
+    The shell stops the backend with SIGTERM, which skips atexit. The handler
+    cleans up, then re-raises SIGTERM with the default action, so the process
+    still ends exactly as it did before.
+    """
+    import atexit
+    import signal
+
+    atexit.register(_stop_mcp_access)
+
+    def _on_sigterm(signum, frame):
+        _stop_mcp_access()
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
 if __name__ == "__main__":
     from werkzeug.serving import make_server
 
@@ -252,7 +346,8 @@ if __name__ == "__main__":
 
     # Exit if the Tauri shell that spawned us dies (SIGTERM/crash/force quit)
     # instead of lingering on the old port with the old token.
-    parent_watch.start()
+    parent_watch.start(on_exit=_stop_mcp_access)
+    _install_exit_cleanup()
 
     _clean_partial_files()
 
@@ -292,6 +387,8 @@ if __name__ == "__main__":
         print(f"PLAUD_PORT_BOUND: {candidate}", flush=True)
         print(f"Open Pin API server starting on http://127.0.0.1:{candidate}", flush=True)
         bound = True
+        # The MCP connection file needs the port actually bound.
+        _start_mcp_access(candidate)
         # Listening now: WiFi recovery from a crashed sync runs in the background.
         _start_wifi_recovery()
         try:

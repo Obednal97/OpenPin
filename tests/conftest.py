@@ -157,3 +157,15 @@ def _no_real_voice_embeddings(monkeypatch):
 
     refuse.real = voice._embed_wav  # for the one test that covers the real wrapper
     monkeypatch.setattr(voice, "_embed_wav", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mcp_launcher(monkeypatch):
+    """AI tool access never writes into the real Application Support, and no
+    test leaves it on for the next (app/mcp/access.py keeps the key module-wide)."""
+    import app.mcp.access as mcp_access
+
+    support = TEST_DATA_DIR / "app-support" / "com.plaud.v2"
+    monkeypatch.setattr(mcp_access, "support_dir", lambda *a, **k: support)
+    yield
+    mcp_access.disable()
