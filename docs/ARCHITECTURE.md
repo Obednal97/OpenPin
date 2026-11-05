@@ -356,6 +356,33 @@ design is in [superpowers/specs/2026-11-04-conversation-coaching-design.md](supe
    "speakers mixed up", and excluded ones, are left out. A report without a review still counts
    for the metrics; it just has no overall score.
 
+### Engagement and laughter (`laughter.py`, `engagement.py`)
+
+A measured Engagement score (0-100), separate from the AI scores, from three parts. The design is
+in [superpowers/specs/2026-11-05-engagement-design.md](superpowers/specs/2026-11-05-engagement-design.md).
+
+- **Laughs after your lines.** `laughter.py` runs the CED-Tiny audio classifier (ONNX, Apache-2.0)
+  on the Mac with onnxruntime and numpy from the `diarize` extra (imported lazily; no new
+  dependency). The model is downloaded on first need from Hugging Face at a pinned revision to
+  `models/ced-tiny.onnx` in the app's support folder, and kept only if its size and SHA-256 match.
+  Audio is read in chunks as 16 kHz mono, scored in 2 s windows every 0.5 s, and merged into
+  laughter events; events over 8 s (TV, a crowd) are dropped. `engagement.py` counts an event that
+  starts within 2 s after one of your turns, or overlaps its last second, unless it is about as
+  loud as your own speech (then it is probably your laugh). At most one per turn.
+- **Follow-up questions to you.** The next speaker's turn straight after yours, with a `?` in its
+  first 30 words. Your turns under three words don't count.
+- **Points others built on.** From the AI review's reactions (engaged or a follow-up), so only
+  with the review on.
+
+Each part maps to 0-100 against its target in `targets.py` (laughs per hour, follow-up share,
+built-on share), and the score is the mean of the parts available. A part that couldn't be
+measured (no audio on the Mac, no model, recordings over 3 hours, too few turns or reactions, the
+review off) is left out, never counted as 0. The runner detects laughter before the review, so the
+review's prompt lists the laughs (and charisma may use them; laugh times are valid evidence for
+`ground`), and computes engagement after it. It stores `sidecar["engagement"]` and copies the three
+parts into `metrics.owner`, so Progress tracks them like the other measures; `engagement_score` is
+one more Progress series, kept out of `overall_score`.
+
 ### Sidecar and status
 
 Each recording has `DATA_DIR/coaching/<session_id>.json` (`store.py`) holding the owner, metrics,
@@ -420,15 +447,22 @@ silently.
 ### Frontend
 
 A Coaching tab in the recording view, a Progress view opened from a header button, and a "Your
-voice & coaching" section in Settings › Transcription & AI. Charts are hand-rolled SVG. Every
+voice & coaching" section in Settings › Transcription & AI. Charts are hand-rolled SVG. The tab's
+Engagement section follows the measures: the score marked "measured", then each part with time
+chips that play from that moment (a laugh's chip starts a few seconds before it, so you hear your
+line too), the reason when laughter couldn't be checked, and one note that quiet chuckles can be
+missed. In Progress the Engagement score sits after the Overall score and its parts after the
+other measures; each row shows only when its series has data. Every
 state of the tab but an excluded one ends with "Don't coach this recording", which asks first
 (`showConfirmDialog`); an excluded recording shows "This recording isn't coached." with "Coach this
 recording".
 
 ### Privacy
 
-Voice embeddings and verbatim words stay in `DATA_DIR` and are never sent anywhere. The only
-network call is the review, which sends transcript text and metrics to the provider the user chose
+Voice embeddings and verbatim words stay in `DATA_DIR` and are never sent anywhere. Laughter is
+detected on the Mac; the only download is the model itself, from Hugging Face, checked by size and
+SHA-256. The only call that sends anything is the review, which sends transcript text and metrics
+(and the times and lines of the laughs) to the provider the user chose
 for summaries (never an Ollama `-cloud` model). With `coaching_ai_review` off it is never made. See [SECURITY.md](../SECURITY.md).
 
 ## MCP server and speaker names (`app/mcp/`, `app/routes/mcp_api.py`, `app/state/speakers.py`)
@@ -494,7 +528,7 @@ hears about the change. The connector speaks MCP's JSON-RPC itself (`initialize`
 | Tool | What it does |
 |---|---|
 | `list_recordings` | Search and list, newest first (`query`, `tag`, `from`, `to`, `limit` up to 100, `cursor`). Matches title, tags, speaker names, transcript and summary, case-insensitively |
-| `get_recording` | One recording: file info (name, format, size, folder shown with `~`, local or Google Drive, whether audio is on the Mac), times, tags, Notion link, speakers, and optionally the transcript, summary and coaching. Never raw audio. Coaching is left out for recordings excluded from it |
+| `get_recording` | One recording: file info (name, format, size, folder shown with `~`, local or Google Drive, whether audio is on the Mac), times, tags, Notion link, speakers, and optionally the transcript, summary and coaching (status, metrics, review and, once measured, engagement). Never raw audio. Coaching is left out for recordings excluded from it |
 | `list_people` | Every speaker name used, with recording counts |
 | `list_tags` | Every tag, with counts |
 | `set_speaker_names` | Set, change or clear (null) names by label |

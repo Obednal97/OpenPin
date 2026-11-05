@@ -146,8 +146,10 @@ TOOLS = [
             "and whether the audio is on this Mac), `speakers` (a {label: name} map) and `you` (the "
             "labels the user has confirmed are them). With `include` (default all three): "
             "`transcript` as segments {start_s, end_s, speaker_label, speaker_name, text}; `summary` "
-            "with speaker names applied; and `coaching` (status, metrics and review, or null when "
-            "there is none or the user excluded the recording from coaching). Long transcripts can "
+            "with speaker names applied; and `coaching` (status, metrics, review and, when measured, "
+            "engagement: laughs after the user's lines, follow-up questions to them and points others "
+            "built on; or null when there is none or the user excluded the recording from coaching). "
+            "Long transcripts can "
             "be large, so leave out what you don't need."
         ),
         "inputSchema": {
