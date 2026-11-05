@@ -32,13 +32,15 @@ stated here:
   WeSpeaker model and stored in `DATA_DIR/coaching/voice_profile.json` (mode `0600`). They are
   never sent anywhere. Removing your voice in Settings deletes the file.
 - **Verbatim words** (the transcript with filler words and per-word timing, kept for coaching
-  only) are stored in `DATA_DIR/coaching/<session_id>.json` and never leave the Mac. The
-  transcript, summary and Notion page stay free of filler words.
+  only) are stored in `DATA_DIR/coaching/<session_id>.words.json` and never leave the Mac or the
+  backend: no route returns them. The transcript, summary and Notion page stay free of filler
+  words. Deleting a recording or its transcript moves its coaching data to the Trash with it.
 - **The coaching AI call** sends the transcript text with timestamps and speaker labels, plus the
   measured metrics, to the same provider you chose for summaries (Anthropic, OpenAI, OpenRouter or
   local Ollama), using the same keys and order. No audio and no voice data is sent. As with
   summaries, Ollama `-cloud` models are never used, because they run on Ollama's servers. With
-  Local as your summary provider, coaching text stays on the Mac.
+  Local as your summary provider, coaching text stays on the Mac: only Ollama is tried, even when
+  a cloud API key is saved, and without Ollama you get the measured metrics only.
 - **Wrong person**: if the app can't tell which speaker is you, it asks and analyses nobody
   until you pick.
 

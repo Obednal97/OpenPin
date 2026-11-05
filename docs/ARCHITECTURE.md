@@ -317,9 +317,10 @@ design is in [superpowers/specs/2026-11-04-conversation-coaching-design.md](supe
 
 1. **Capture.** Deepgram is asked for `filler_words=true` and its per-word timing and speakers are
    kept (`app/providers/transcribe.py`). The clean transcript is built from the same words with
-   filler tokens dropped, so segments, summaries and Notion pages are unchanged. The unfiltered
-   words are returned separately and saved to the sidecar by `_save_coaching_words`
-   (`app/routes/transcribe.py`). Groq, OpenAI and local Whisper have no verbatim words, so they
+   filler tokens ("um", "uh", "er" and their spellings; "hmm", "mm" and "mhm" stay) dropped, and
+   a dropped filler's full stop or question mark handed to the word before it. A recording with
+   no fillers keeps Deepgram's own text exactly. The unfiltered words are returned separately and
+   saved to the recording's words file by `_save_coaching_words` (`app/routes/transcribe.py`). Groq, OpenAI and local Whisper have no verbatim words, so they
    save an empty list and their metrics fall back to segment estimates.
 2. **Hook.** Once transcription and speaker labels are final, `_after_transcript_final` starts
    `start_coaching_async` (`app/coaching/runner.py`) next to each `fire_webhooks("transcribe", ...)`
@@ -328,30 +329,49 @@ design is in [superpowers/specs/2026-11-04-conversation-coaching-design.md](supe
 3. **Owner.** `voice.py` matches each speaker's audio against the owner's voice profile with
    WeSpeaker embeddings. A confident match marks the owner (a set of labels, since a wearable mic
    can split one person into two). Otherwise the status is `needs_owner` and nothing is analysed
-   until the user picks. A pick or correction (`POST /coaching/<id>/owner`) also updates the
-   profile.
+   until the user picks. A pick or correction (`POST /coaching/<id>/owner`) is saved together with
+   status `running` before the response, then the recording is coached again in the background.
+   The pick updates the voice profile only when the WeSpeaker model is already installed (and the
+   audio is on the Mac); otherwise it is used for this recording only.
 4. **Metrics.** `metrics.py` is pure computation over the words or segments: pace, talk share,
    longest monologue, likely interruptions (made and received), patience, questions, filler words
    and interactivity. Each value records whether it is exact, estimated or unavailable.
    `targets.py` holds every target range and tunable number.
 5. **Review.** `review.py` makes one structured-output call through `call_llm_json`
    (`app/providers/llm_json.py`), which uses the summary provider preference and cascade
-   (Anthropic, OpenAI, OpenRouter, Ollama; no DistilBART, which can't follow a schema). It returns
-   scores, a summary, next-time actions, reactions and notable moments. `ground` drops anything
-   that cites a timestamp not in the transcript.
+   (Anthropic, OpenAI, OpenRouter, Ollama; no DistilBART, which can't follow a schema). With Local
+   (or Ollama) as the summary provider only Ollama is tried, never a cloud key; if Ollama isn't
+   running or has no chat model the report shows the measured metrics only, and any other error
+   is a failure. It returns scores (each citing the times it is based on), a summary, next-time
+   actions, reactions and notable moments. `ground` drops anything that cites a timestamp not in
+   the transcript, and any score left without a real time. Only the owner's likely interruptions
+   are put to the model for confirmation.
 6. **Progress.** `progress.py` aggregates finished sidecars into per-week series, a rolling
    baseline, the most improved and most stuck habit, and a weekly focus. Recordings flagged as
    "speakers mixed up" are left out.
 
 ### Sidecar and status
 
-Each recording has `DATA_DIR/coaching/<session_id>.json` (`store.py`) holding the verbatim words,
-owner, metrics, review and `status`: `running`, `done`, `needs_owner`, `skipped` (one speaker, no
-speaker labels, or under two minutes) or `failed`. The transcript JSON is not touched. Writes are
-atomic and serialised under a lock separate from the transcript lock, because `_merge_transcript`
-holds that one and it isn't reentrant. A re-transcribe or re-diarize calls `mark_stale` after
-the transcript lock is released, which sets `report_stale` the way `summary_stale` works. The
-owner's voice profile is `DATA_DIR/coaching/voice_profile.json` (mode `0600`).
+Each recording has `DATA_DIR/coaching/<session_id>.json` (`store.py`) holding the owner, metrics,
+review and `status`: `running`, `done`, `needs_owner`, `skipped` (one speaker, no speaker labels,
+or under two minutes) or `failed`. The verbatim words live next to it in
+`DATA_DIR/coaching/<session_id>.words.json`, so loading a sidecar never carries them and no route
+returns them (an older sidecar that still holds `words` inline is read by the runner and stripped
+by the routes). The transcript JSON is not touched. Writes to both files are atomic and serialised
+under one per-recording lock, separate from the transcript lock, because `_merge_transcript`
+holds that one and it isn't reentrant.
+
+A re-transcribe or transcript edit that changes the text calls `mark_stale` after the transcript
+lock is released, which sets `report_stale` the way `summary_stale` works. New speaker labels from
+background diarization leave the text unchanged, so they don't call `mark_stale`: the coaching
+hook that runs when diarization finishes coaches the recording again (when `coaching_auto` is on),
+and a saved owner is reused only while the speaker labelling it was made for is unchanged.
+
+Deleting a recording (`/recordings/delete`) or its transcript (`/transcripts/delete`) moves its
+sidecar and words file to the Trash with the transcript, and `/coaching/progress` skips any
+sidecar whose transcript is gone. The owner's voice profile is
+`DATA_DIR/coaching/voice_profile.json` (mode `0600`); it and the words files are never treated as
+session ids by the routes.
 
 ### Routes
 
