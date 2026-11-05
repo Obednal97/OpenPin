@@ -9,8 +9,10 @@ pre-rename Worker name; keep it until they have updated. `/v1/latest` is cached 
 its `download_url` must stay on the host the app called.
 
 The repository is **public**, so the Worker needs no GitHub token. An optional read-only
-`GH_TOKEN` (Contents: read) only raises the GitHub API rate limit; without it the Worker uses
-unauthenticated GitHub requests, which the per-host cache keeps well under the limit.
+`GH_TOKEN` (Contents: read) only raises the GitHub API rate limit. Without it the Worker uses
+unauthenticated GitHub requests, which share a 60-an-hour limit with every other Worker on the
+same Cloudflare egress IP, so GitHub sometimes answers `403`. The Worker then serves the last good
+answer (see [Caching](#caching)).
 
 **Test channel:** callers whose IP is in the secret `CANARY_IPS` (comma-separated;
 `npx wrangler secret put CANARY_IPS`) get the newest release including pre-releases
@@ -27,7 +29,7 @@ The repository it reads releases from is `REPO` in `src/index.js`.
 
 | Method + path | What it does |
 |---|---|
-| `GET /v1/latest` | Latest published release (GitHub `releases/latest`, so no drafts or pre-releases; canary callers get the newest including pre-releases): `{version, tag, name, notes, published_at, asset: {name, size, sha256 \| null}, download_url}`. `sha256` comes from a `<dmg name>.sha256` asset (or `SHA256SUMS`) on the release, else `null`. Cached per host 5 min in a per-isolate memory cache, with the Cache API as a best-effort second layer; the `X-Plaud-Cache` header says which (`miss`, `cache`, `memory`), and `X-Open-Pin-Channel` says `stable` or `canary`. |
+| `GET /v1/latest` | Latest published release (GitHub `releases/latest`, so no drafts or pre-releases; canary callers get the newest including pre-releases): `{version, tag, name, notes, published_at, asset: {name, size, sha256 \| null}, download_url}`. `sha256` comes from a `<dmg name>.sha256` asset (or `SHA256SUMS`) on the release, else `null`. Cached per host 5 min in a per-isolate memory cache, with the Cache API as a best-effort second layer; the `X-Plaud-Cache` header says which (`miss`, `cache`, `memory`, or `stale` when GitHub refused and the saved answer was served), and `X-Open-Pin-Channel` says `stable` or `canary`. |
 | `GET /v1/download/<tag>/<asset>` | Answers **302** to the asset's public URL (`https://github.com/<repo>/releases/download/<tag>/<asset>`), which GitHub redirects to a short-lived signed URL, so the DMG never streams through the Worker. No GitHub API call: unauthenticated API calls share a 60/hour limit per Cloudflare egress IP, which failed v2.6.1 downloads with 502. A draft or missing asset 404s at GitHub. Only `.dmg` and `.sha256` assets; anything unknown is 404. |
 | anything else | 404 |
 
@@ -37,6 +39,13 @@ The repository it reads releases from is `REPO` in `src/index.js`.
 keyed by host and channel, and also writes it to the Cache API as a best-effort second layer,
 whose errors are ignored. A full miss costs 1–3 GitHub calls. The response carries
 `Cache-Control: public, max-age=60`.
+
+Each good answer is also saved per channel in the KV namespace bound as `LAST_GOOD`
+(`plaud-v2-updates-last-good`), written only when it changes. When GitHub refuses or fails, the
+Worker serves that saved answer (`X-Plaud-Cache: stale`, held in memory for a minute) instead of
+a `502`, with the download URL rebuilt for the host asked. "No published release" is a real
+answer and is never replaced. KV is global, so a data centre that has never reached GitHub still
+has an answer.
 
 ## Deploy
 
@@ -49,7 +58,7 @@ npx --yes wrangler@4 deploy
 
 ## Optional read-only GitHub token
 
-Only needed if unauthenticated reads ever hit GitHub's rate limit.
+Optional: the saved last good answer covers GitHub's refusals, but a token avoids them, so new releases reach apps without waiting for a GitHub call to succeed.
 
 1. GitHub → Settings → Developer settings → Fine-grained tokens → generate a token for
    the app's repository (`REPO`) only, with **Contents: Read-only** (Metadata: Read-only is added

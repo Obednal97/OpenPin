@@ -205,3 +205,109 @@ test('download redirects to the public URL without calling the GitHub API', asyn
     globalThis.fetch = realFetch;
   }
 });
+
+
+// ---- Last good answer (KV) when GitHub refuses -------------------------------
+
+function fakeKV() {
+  const store = new Map();
+  return {
+    store,
+    puts: 0,
+    async get(k) {
+      return store.has(k) ? store.get(k) : null;
+    },
+    async put(k, v) {
+      this.puts += 1;
+      store.set(k, v);
+    },
+  };
+}
+
+// Runs fn with GitHub answering `mode()` ('ok' | 403 | 'throw' | 404) and a
+// ctx whose waitUntil promises can be awaited.
+async function withGitHub(fn) {
+  const realFetch = globalThis.fetch;
+  const stable = releaseFixture('v2.7.0', false);
+  let mode = 'ok';
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    if (u.pathname === `/repos/${REPO}/releases/latest`) {
+      if (mode === 'throw') throw new Error('network down');
+      if (mode === 403) return Response.json({ message: 'API rate limit exceeded' }, { status: 403 });
+      if (mode === 404) return Response.json({ message: 'Not Found' }, { status: 404 });
+      return Response.json(stable);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  _resetLatestCache();
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(p) };
+  const settle = () => Promise.all(pending.splice(0));
+  try {
+    await fn({ setMode: (m) => (mode = m), ctx, settle });
+  } finally {
+    globalThis.fetch = realFetch;
+    _resetLatestCache();
+  }
+}
+
+test('a GitHub refusal serves the last good answer, with the asking host’s URL', async () => {
+  await withGitHub(async ({ setMode, ctx, settle }) => {
+    const env = { LAST_GOOD: fakeKV() };
+    const ok = await worker.fetch(latestFrom('openpin.example'), env, ctx);
+    assert.equal(ok.status, 200);
+    await settle();
+    assert.equal(env.LAST_GOOD.puts, 1);
+    const saved = JSON.parse(env.LAST_GOOD.store.get('latest|stable'));
+    assert.equal(saved.download_url, undefined); // host-independent
+
+    for (const mode of [403, 'throw']) {
+      _resetLatestCache();
+      setMode(mode);
+      const r = await worker.fetch(latestFrom('old.workers.example'), env, ctx);
+      assert.equal(r.status, 200, `mode ${mode}`);
+      assert.equal(r.headers.get('X-Plaud-Cache'), 'stale');
+      const data = await r.json();
+      assert.equal(data.version, '2.7.0');
+      assert.equal(data.asset.name, 'Open.Pin_2.7.0_aarch64.dmg');
+      assert.equal(data.download_url, 'https://old.workers.example/v1/download/v2.7.0/Open.Pin_2.7.0_aarch64.dmg');
+    }
+  });
+});
+
+test('a refusal with nothing saved, or no binding, is still a 502', async () => {
+  await withGitHub(async ({ setMode, ctx }) => {
+    setMode(403);
+    const empty = await worker.fetch(latestFrom('openpin.example'), { LAST_GOOD: fakeKV() }, ctx);
+    assert.equal(empty.status, 502);
+    assert.equal((await empty.json()).error, 'GitHub returned 403');
+    _resetLatestCache();
+    const unbound = await worker.fetch(latestFrom('openpin.example'), makeEnv(), ctx);
+    assert.equal(unbound.status, 502);
+  });
+});
+
+test('"no published release" is a real answer, not replaced by the saved one', async () => {
+  await withGitHub(async ({ setMode, ctx, settle }) => {
+    const env = { LAST_GOOD: fakeKV() };
+    await worker.fetch(latestFrom('openpin.example'), env, ctx);
+    await settle();
+    _resetLatestCache();
+    setMode(404);
+    const r = await worker.fetch(latestFrom('openpin.example'), env, ctx);
+    assert.equal(r.status, 404);
+  });
+});
+
+test('the saved answer is written only when it changes', async () => {
+  await withGitHub(async ({ ctx, settle }) => {
+    const env = { LAST_GOOD: fakeKV() };
+    for (let i = 0; i < 3; i += 1) {
+      _resetLatestCache();
+      assert.equal((await worker.fetch(latestFrom('openpin.example'), env, ctx)).status, 200);
+      await settle();
+    }
+    assert.equal(env.LAST_GOOD.puts, 1);
+  });
+});

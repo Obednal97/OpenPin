@@ -3,7 +3,8 @@
  * the Open Pin desktop app, so the app never calls GitHub directly.
  * (The Worker keeps its pre-rename name: installed apps call this URL.)
  *
- *   GET  /v1/latest                     latest published release (cached ~5 min)
+ *   GET  /v1/latest                     latest published release (cached ~5 min; when
+ *                                       GitHub refuses, the last good answer from KV)
  *   GET  /v1/download/<tag>/<asset>     302 to GitHub's signed, token-free asset URL
  *
  * The repo is public, so these reads need no token. An optional read-only
@@ -177,6 +178,90 @@ export function _resetLatestCache() {
   memLatest.clear();
 }
 
+// The last good answer per channel, in KV (binding LAST_GOOD, optional), so a
+// GitHub refusal never reaches the app. Unauthenticated API calls share a
+// 60/hour limit per egress IP and Cloudflare's egress IPs are shared, so
+// GitHub intermittently answers 403 (seen 2026-11-05: 2 of 8 checks failed).
+// KV is global, unlike the Cache API, so a data centre that has never reached
+// GitHub still has an answer. Stored without download_url, which is rebuilt
+// for the host asked.
+const LAST_GOOD_KEY = (channel) => `latest|${channel}`;
+const STALE_MEMORY_MS = 60 * 1000;
+
+function withDownloadUrl(data, origin) {
+  return {
+    ...data,
+    download_url: `${origin}/v1/download/${encodeURIComponent(data.tag)}/${encodeURIComponent(data.asset.name)}`,
+  };
+}
+
+async function readLastGood(env, channel) {
+  if (!env || !env.LAST_GOOD) return null;
+  try {
+    const raw = await env.LAST_GOOD.get(LAST_GOOD_KEY(channel));
+    const data = raw ? JSON.parse(raw) : null;
+    return data && data.tag && data.asset && data.asset.name ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveLastGood(env, channel, data) {
+  if (!env || !env.LAST_GOOD) return;
+  try {
+    const value = JSON.stringify(data);
+    // Write only on change: KV writes are limited and this runs on every miss.
+    if ((await env.LAST_GOOD.get(LAST_GOOD_KEY(channel))) === value) return;
+    await env.LAST_GOOD.put(LAST_GOOD_KEY(channel), value);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Ask GitHub for the release a channel should get. Returns { data } (without
+ * download_url), or { status, error, fallback } where fallback says whether
+ * the last good answer may be served instead (GitHub refused or failed),
+ * as opposed to a definite answer such as "no published release".
+ */
+async function fetchLatest(env, channel) {
+  let release;
+  try {
+    if (channel === 'canary') {
+      // Newest first (by creation); the first published one with a DMG,
+      // pre-release or not.
+      const list = await ghJson(env, `/repos/${REPO}/releases?per_page=10`);
+      if (!list.ok || !Array.isArray(list.data)) return { status: 502, error: `GitHub returned ${list.status}`, fallback: true };
+      release = list.data.find((r) => r && !r.draft && pickDmgAsset(r.assets || []));
+      if (!release) return { status: 404, error: 'no published release', fallback: false };
+    } else {
+      const rel = await ghJson(env, `/repos/${REPO}/releases/latest`);
+      if (rel.status === 404) return { status: 404, error: 'no published release', fallback: false };
+      if (!rel.ok || !rel.data) return { status: 502, error: `GitHub returned ${rel.status}`, fallback: true };
+      release = rel.data;
+      // releases/latest already excludes drafts and prereleases; belt and braces.
+      if (release.draft || release.prerelease) return { status: 404, error: 'no published release', fallback: false };
+    }
+  } catch {
+    return { status: 502, error: 'GitHub unreachable', fallback: true };
+  }
+
+  const dmg = pickDmgAsset(release.assets);
+  if (!dmg) return { status: 502, error: 'latest release has no .dmg asset', fallback: true };
+  const sumAsset = pickChecksumAsset(release.assets, dmg.name);
+  const sha256 = sumAsset ? await readChecksum(release.tag_name, sumAsset, dmg.name) : null;
+  return {
+    data: {
+      version: versionFromTag(release.tag_name),
+      tag: release.tag_name,
+      name: release.name || release.tag_name,
+      notes: typeof release.body === 'string' ? release.body.slice(0, 20000) : '',
+      published_at: release.published_at,
+      asset: { name: dmg.name, size: dmg.size, sha256 },
+    },
+  };
+}
+
 async function handleLatest(request, env, ctx) {
   const now = Date.now();
   const origin = new URL(request.url).origin;
@@ -198,39 +283,19 @@ async function handleLatest(request, env, ctx) {
     }
   }
 
-  let release;
-  if (channel === 'canary') {
-    // Newest first (by creation); the first published one with a DMG,
-    // pre-release or not.
-    const list = await ghJson(env, `/repos/${REPO}/releases?per_page=10`);
-    if (!list.ok || !Array.isArray(list.data)) return json({ ok: false, error: `GitHub returned ${list.status}` }, 502);
-    release = list.data.find((r) => r && !r.draft && pickDmgAsset(r.assets || []));
-    if (!release) return json({ ok: false, error: 'no published release' }, 404);
-  } else {
-    const rel = await ghJson(env, `/repos/${REPO}/releases/latest`);
-    if (rel.status === 404) return json({ ok: false, error: 'no published release' }, 404);
-    if (!rel.ok || !rel.data) return json({ ok: false, error: `GitHub returned ${rel.status}` }, 502);
-    release = rel.data;
-    // releases/latest already excludes drafts and prereleases; belt and braces.
-    if (release.draft || release.prerelease) return json({ ok: false, error: 'no published release' }, 404);
+  const result = await fetchLatest(env, channel);
+  if (!result.data) {
+    const stale = result.fallback ? await readLastGood(env, channel) : null;
+    if (!stale) return json({ ok: false, error: result.error }, result.status);
+    // Held briefly in memory so a refusing GitHub isn't asked on every call.
+    const body = JSON.stringify(withDownloadUrl(stale, origin));
+    memLatest.set(memKey, { body, expires: now + STALE_MEMORY_MS });
+    return new Response(body, { headers: latestHeaders('stale', channel) });
   }
 
-  const dmg = pickDmgAsset(release.assets);
-  if (!dmg) return json({ ok: false, error: 'latest release has no .dmg asset' }, 502);
-  const sumAsset = pickChecksumAsset(release.assets, dmg.name);
-  const sha256 = sumAsset ? await readChecksum(release.tag_name, sumAsset, dmg.name) : null;
-
-  const data = {
-    version: versionFromTag(release.tag_name),
-    tag: release.tag_name,
-    name: release.name || release.tag_name,
-    notes: typeof release.body === 'string' ? release.body.slice(0, 20000) : '',
-    published_at: release.published_at,
-    asset: { name: dmg.name, size: dmg.size, sha256 },
-    download_url: `${origin}/v1/download/${encodeURIComponent(release.tag_name)}/${encodeURIComponent(dmg.name)}`,
-  };
-  const body = JSON.stringify(data);
+  const body = JSON.stringify(withDownloadUrl(result.data, origin));
   memLatest.set(memKey, { body, expires: now + LATEST_TTL_SECONDS * 1000 });
+  ctx.waitUntil(saveLastGood(env, channel, result.data));
   if (cache) {
     const toCache = new Response(body, {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': `max-age=${LATEST_TTL_SECONDS}` },
