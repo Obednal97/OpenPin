@@ -345,16 +345,19 @@ design is in [superpowers/specs/2026-11-04-conversation-coaching-design.md](supe
    is a failure. It returns scores (each citing the times it is based on), a summary, next-time
    actions, reactions and notable moments. `ground` drops anything that cites a timestamp not in
    the transcript, and any score left without a real time. Only the owner's likely interruptions
-   are put to the model for confirmation.
+   are put to the model for confirmation. With `coaching_ai_review` off the runner never calls
+   `review_conversation` (no provider is contacted, for automatic and forced runs alike) and the
+   run ends `done` with the metrics, no review and `status_reason` "AI review is off".
 6. **Progress.** `progress.py` aggregates finished sidecars into per-week series, a rolling
    baseline, the most improved and most stuck habit, and a weekly focus. Recordings flagged as
-   "speakers mixed up" are left out.
+   "speakers mixed up", and excluded ones, are left out. A report without a review still counts
+   for the metrics; it just has no overall score.
 
 ### Sidecar and status
 
 Each recording has `DATA_DIR/coaching/<session_id>.json` (`store.py`) holding the owner, metrics,
 review and `status`: `running`, `done`, `needs_owner`, `skipped` (one speaker, no speaker labels,
-or under two minutes) or `failed`. The verbatim words live next to it in
+or under two minutes), `failed` or `excluded`. The verbatim words live next to it in
 `DATA_DIR/coaching/<session_id>.words.json`, so loading a sidecar never carries them and no route
 returns them (an older sidecar that still holds `words` inline is read by the runner and stripped
 by the routes). The transcript JSON is not touched. Writes to both files are atomic and serialised
@@ -366,6 +369,16 @@ lock is released, which sets `report_stale` the way `summary_stale` works. New s
 background diarization leave the text unchanged, so they don't call `mark_stale`: the coaching
 hook that runs when diarization finishes coaches the recording again (when `coaching_auto` is on),
 and a saved owner is reused only while the speaker labelling it was made for is unchanged.
+
+"Don't coach this recording" (`runner.set_excluded`, `POST /coaching/<id>/exclude`) sets
+`excluded: true` and status `excluded` and deletes the report (metrics, review, owner pick,
+candidates, the mixed-up flag); the words file stays, as it belongs to the transcription. It
+also bumps the run number and drops any queued rerun, and a run's commit drops its result if the
+sidecar is excluded by then, so a run in flight can't bring the report back. While excluded no run
+starts (`start_coaching_async` and `_run_once` check, even when forced), owner picks and voice
+setup refuse the recording (409), so the voice profile never learns from it, and progress
+skips it. Re-transcribing keeps it: `mark_stale` and `save_words` leave the flag alone. "Coach this
+recording" clears it (`{"exclude": false}`) and then runs `/run`.
 
 Deleting a recording (`/recordings/delete`) or its transcript (`/transcripts/delete`) moves its
 sidecar and words file to the Trash with the transcript, and `/coaching/progress` skips any
@@ -381,6 +394,7 @@ session ids by the routes.
 | `POST /coaching/<id>/run` | Coach this recording (old or skipped ones) |
 | `POST /coaching/<id>/owner` | Choose or correct which speakers are the owner |
 | `POST /coaching/<id>/mixed-up` | Flag or unflag "speakers mixed up" |
+| `POST /coaching/<id>/exclude` | "Don't coach this recording" (`{"exclude": true}`) or undo it (`false`) |
 | `GET /coaching/progress` | Aggregated progress |
 | `GET`/`DELETE /coaching/voice` | Voice profile status, remove it |
 | `POST /coaching/voice/install` | Install the WeSpeaker model (the `diarize` extra) |
@@ -388,22 +402,30 @@ session ids by the routes.
 
 ### Settings and speaker labels
 
-`coaching_auto` (default on) starts coaching automatically. Coaching needs speaker labels, so a
-one-time migration turns `diarize` on for installs where it is off, and turning `diarize` off turns
-`coaching_auto` off. Deepgram users haven't installed the WeSpeaker model, because Deepgram supplies
+`coaching_auto` (default on) starts coaching automatically. It has two switches showing the same
+value: "Coach my conversations automatically" in Transcription & AI › Your voice & coaching and
+"Coach my conversations" in Automation › New recordings, between transcribe and summarise (dimmed
+with a hint while the steps before it are off). Coaching needs speaker labels, so a one-time
+migration turns `diarize` on for installs where it is off, and turning `diarize` off turns
+`coaching_auto` off; both switches then say "Needs speaker labels". `coaching_ai_review` (default
+on, "Include an AI review") decides whether the review runs at all; it is a privacy choice, so it
+applies to "Coach this recording" too. Deepgram users haven't installed the WeSpeaker model, because Deepgram supplies
 the labels, so it is installed during voice setup, with progress and an error message, never
 silently.
 
 ### Frontend
 
 A Coaching tab in the recording view, a Progress view opened from a header button, and a "Your
-voice & coaching" section in Settings › Transcription & AI. Charts are hand-rolled SVG.
+voice & coaching" section in Settings › Transcription & AI. Charts are hand-rolled SVG. Every
+state of the tab but an excluded one ends with "Don't coach this recording", which asks first
+(`showConfirmDialog`); an excluded recording shows "This recording isn't coached." with "Coach this
+recording".
 
 ### Privacy
 
 Voice embeddings and verbatim words stay in `DATA_DIR` and are never sent anywhere. The only
 network call is the review, which sends transcript text and metrics to the provider the user chose
-for summaries (never an Ollama `-cloud` model). See [SECURITY.md](../SECURITY.md).
+for summaries (never an Ollama `-cloud` model). With `coaching_ai_review` off it is never made. See [SECURITY.md](../SECURITY.md).
 
 ## Notion (`app/state/notion.py`, `app/routes/notion.py`, `app/utils/notion_queue.py`)
 

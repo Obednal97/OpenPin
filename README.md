@@ -41,9 +41,10 @@ aren't supported.
   model as a last resort.
 - **Conversation coaching**: after a recording with at least two speakers, Open Pin measures how you
   came across (pace, talk share, interruptions, patience, questions, filler words) and asks your
-  summary AI for plain-spoken feedback with timestamped moments. A Progress view shows whether you
-  are improving over weeks. You set up your voice once so it knows which speaker is you; voice data
-  and your verbatim words stay on your Mac.
+  summary AI for plain-spoken feedback with timestamped moments. Turn the AI review off to keep
+  coaching to the measured results, with nothing leaving your Mac, and turn coaching off for any
+  one recording. A Progress view shows whether you are improving over weeks. You set up your voice
+  once so it knows which speaker is you; voice data and your verbatim words stay on your Mac.
 - **Editing**: crop audio, fix transcript lines, edit summaries as Markdown, tag, rename and file
   recordings into folders.
 - **Integrations**: Notion (a page per recording, your own notes on the page are kept), Google
