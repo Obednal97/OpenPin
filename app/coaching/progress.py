@@ -26,6 +26,9 @@ DAY_S = 86400.0
 BASELINE_DAYS = 30
 RECENT_DAYS = 28  # "last 4 weeks"; compared with the 28 days before
 FOCUS_DAYS = 14  # "last 2 weeks"
+# Tracked as series but never the focus or "still stuck": the laughter detector undercounts
+# (it misses soft chuckles) and isn't calibrated on real recordings yet.
+NOT_COACHED = frozenset({"laughs_per_hour"})
 
 # How each metric reads in the focus sentence:
 # (multiplier, decimals, opening words, unit after the value, unit after the target band).
@@ -129,6 +132,7 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
       same metric as most_improved.
     - focus: the banded metric furthest outside its band over the last 2 weeks (scaled by band
       size), with a templated sentence.
+    Metrics in NOT_COACHED (laughs per hour) are never most_stuck or focus.
     """
     start = now - weeks * 7 * DAY_S
     rows = [
@@ -169,6 +173,8 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
             gain = _distance(m, before) - _distance(m, last)
             if gain > best_gain:
                 best_gain, improved = gain, {"metric": m, "from": before, "to": last}
+        if m in NOT_COACHED:
+            continue
         if last is not None and _distance(m, last) > 0:
             gain = 0.0 if before is None else _distance(m, before) - _distance(m, last)
             key = (gain, -_distance(m, last))

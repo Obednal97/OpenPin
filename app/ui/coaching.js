@@ -414,7 +414,10 @@ function _coachMeasuresHtml(sidecar, baseline) {
         <td>${_coachIsNum(s.turns) ? s.turns : '—'}</td>
       </tr>`).join('');
 
-  const approx = Object.values(av).some((a) => a === 'estimated' || a === 'unavailable');
+  // Only the measures in this table need word timing; the engagement parts in metrics.availability
+  // (laughs are always estimated) are shown elsewhere and never call for re-transcribing.
+  const approx = _COACH_MEASURES.flatMap((m) => (m.count ? [m.key, m.count] : [m.key]))
+    .some((k) => av[k] === 'estimated' || av[k] === 'unavailable');
   return `
     <section class="coach-card">
       <h3 class="coach-h">Measures</h3>

@@ -365,17 +365,22 @@ in [superpowers/specs/2026-11-05-engagement-design.md](superpowers/specs/2026-11
   on the Mac with onnxruntime and numpy from the `diarize` extra (imported lazily; no new
   dependency). The model is downloaded on first need from Hugging Face at a pinned revision to
   `models/ced-tiny.onnx` in the app's support folder, and kept only if its size and SHA-256 match.
-  Audio is read in chunks as 16 kHz mono, scored in 2 s windows every 0.5 s, and merged into
-  laughter events; events over 8 s (TV, a crowd) are dropped. `engagement.py` counts an event that
-  starts within 2 s after one of your turns, or overlaps its last second, unless it is about as
-  loud as your own speech (then it is probably your laugh). At most one per turn.
+  After a failed download, none is tried again in that process for an hour, so queued runs don't
+  each wait out a stalled download. Inference uses up to 4 threads, which sleep rather than spin
+  between batches. Audio is read in chunks as 16 kHz mono, scored in 2 s windows every 0.5 s, and
+  merged into laughter events; events over 8 s (TV, a crowd) are dropped. `engagement.py` counts
+  an event that starts within 2 s after one of your lines (a transcript segment, not a merged
+  turn, since a laugh between two of your lines has no segment of its own), or overlaps its last
+  second, unless it is about as loud as your own speech (then it is probably your laugh). At most
+  one per line.
   The loudness check doesn't use the detector's own loudness: its 2 s windows reach back into your
   last words, so a laugh straight after you would look as loud as you. Instead `measure_loudness`
   measures each candidate again from the audio, from 0.5 s before the laugh (but never before your
   line ends) to 0.5 s after it, cut at your next line, as the loudest 25 ms frame's RMS. Your level
   is the median of the same measure over your lines. A laugh within 3 dB of your level, or louder,
-  isn't counted, and nor is one with under 0.25 s left to measure. The audio is converted once for
-  all of this, read in chunks, and the temporary WAV deleted.
+  isn't counted, and nor is one with under 0.25 s left to measure. The audio is converted once:
+  the runner calls `laughter.detect(audio, keep_wav=True)`, measures from the detector's 16 kHz
+  WAV, reading in chunks, and then deletes it.
 - **Follow-up questions to you.** The next speaker's turn straight after yours, with a `?` in its
   first 30 words. Your turns under three words don't count.
 - **Points others built on.** From the AI review's reactions (engaged or a follow-up), so only
@@ -383,14 +388,20 @@ in [superpowers/specs/2026-11-05-engagement-design.md](superpowers/specs/2026-11
 
 Each part maps to 0-100 against its target in `targets.py` (laughs per hour, follow-up share,
 built-on share), and the score is the mean of the parts available. A part that couldn't be
-measured (no audio on the Mac, no model, recordings over 3 hours, your voice level couldn't be
-measured so laughs can't be told apart from yours, too few turns or reactions, the review off) is
-left out, never counted as 0. The runner detects laughter before the review, so the
+measured (no model, too few turns or reactions, the review off) is left out, never counted as 0.
+When laughter can't be checked, the block says why: "No audio on this Mac", "Too long to check
+for laughter" (over 3 hours, skipped before any conversion), "Laughter detection didn't run" (it
+failed), "Couldn't download the laughter model", or "Couldn't measure your voice level, so laughs
+can't be told apart from yours" (your voice level couldn't be measured). Engagement never fails a
+run: if any step of it breaks, the runner falls back to laughter "unavailable" with every other
+part still worked out, and the metrics and review are kept whatever happens. The runner detects laughter before the review, so the
 review's prompt lists the laughs (and charisma may use them; laugh times are valid evidence for
 `ground`, within 1 s since the prompt shows them as `[mm:ss]`, while line starts keep 2 s), and
 computes engagement after it. It stores `sidecar["engagement"]` and copies the three
 parts into `metrics.owner`, so Progress tracks them like the other measures; `engagement_score` is
-one more Progress series, kept out of `overall_score`.
+one more Progress series, kept out of `overall_score`. Laughs per hour is a series but never the
+focus or "still stuck", because the detector misses soft chuckles and isn't calibrated on real
+recordings yet.
 
 ### Sidecar and status
 

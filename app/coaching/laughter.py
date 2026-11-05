@@ -32,6 +32,7 @@ MODEL_SHA256 = "3890f227660be71886ff48633d11a731993e0206db8a486781412c28a0873435
 MODEL_SIZE = 6_681_767
 DOWNLOAD_TIMEOUT_S = 60  # per network read
 DOWNLOAD_DEADLINE_S = 600  # whole download, so a trickling server can't hold the lock
+RETRY_AFTER_S = 3600  # after a failed download, don't try again in this process for an hour
 
 THRESHOLD = 0.15
 MAX_EVENT_S = 8.0
@@ -54,6 +55,8 @@ REASON_READ = "Couldn't read the audio"
 REASON_FAILED = "Laughter detection didn't run"
 
 _download_lock = threading.Lock()
+_failed_at: float | None = None  # when the last download failed (``_now``), in this process
+_now = time.monotonic
 
 _WINDOW = int(WINDOW_S * SAMPLE_RATE)
 _STEP = int(STEP_S * SAMPLE_RATE)
@@ -165,16 +168,23 @@ def ensure_model() -> tuple[bool, str]:
     """Make sure the checked model file is present, downloading it if needed.
 
     Returns ``(True, "")`` or ``(False, reason)``. A file that fails its size or
-    SHA-256 check is deleted and fetched again. One download at a time."""
+    SHA-256 check is deleted and fetched again. One download at a time. After a failed
+    download, none is tried again for RETRY_AFTER_S, so queued coaching runs don't each wait
+    out a stalled download."""
+    global _failed_at
     path = model_path()
     with _download_lock:
         _sweep_partials(path.parent)
         if _file_ok(path):
             return True, ""
+        if _failed_at is not None and _now() - _failed_at < RETRY_AFTER_S:
+            return False, REASON_DOWNLOAD
         # A bad or missing file is replaced atomically by the download; it is only
         # removed if it still fails the check afterwards.
         if _download(path) and _file_ok(path):
+            _failed_at = None
             return True, ""
+        _failed_at = _now()
         try:
             path.unlink()
         except OSError:
@@ -187,6 +197,8 @@ def _session():
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
+    # Idle threads sleep instead of spinning, so a coaching run doesn't burn CPU between batches.
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
     return ort.InferenceSession(str(model_path()), opts, providers=["CPUExecutionProvider"])
 
 
@@ -282,12 +294,15 @@ def _unavailable(reason: str) -> dict:
     return {"status": "unavailable", "events": [], "reason": reason}
 
 
-def detect(audio_path: str, max_seconds: float = MAX_SECONDS) -> dict:
+def detect(audio_path: str, max_seconds: float = MAX_SECONDS, keep_wav: bool = False) -> dict:
     """Laughter events in a recording. Never raises.
 
     Downloads the model on first need (only when the runtime is installed).
     Returns ``{"status": "done", "events": [...], "reason": ""}`` or
-    ``{"status": "unavailable", "events": [], "reason": str}``."""
+    ``{"status": "unavailable", "events": [], "reason": str}``.
+
+    With ``keep_wav``, a "done" result also has ``"wav"``: the converted 16 kHz WAV, kept
+    for the caller to reuse and then delete. Any other result never keeps it."""
     try:
         if not runtime_available():
             return _unavailable(REASON_RUNTIME)
@@ -328,12 +343,17 @@ def detect(audio_path: str, max_seconds: float = MAX_SECONDS) -> dict:
             scores.append(laughter_scores(probs))
             loudness.append(raw_db)
             starts.append(batch_starts)
-        if not scores:
-            return {"status": "done", "events": [], "reason": ""}
-        events = events_from_scores(
-            np.concatenate(scores), np.concatenate(loudness), np.concatenate(starts), duration=duration
+        events = (
+            events_from_scores(
+                np.concatenate(scores), np.concatenate(loudness), np.concatenate(starts), duration=duration
+            )
+            if scores
+            else []
         )
-        return {"status": "done", "events": events, "reason": ""}
+        result = {"status": "done", "events": events, "reason": ""}
+        if keep_wav:
+            result["wav"], wav = wav, None  # the caller deletes it now
+        return result
     except Exception as e:
         log.warning("laughter detection failed: %s", e, exc_info=True)
         return _unavailable(REASON_FAILED)

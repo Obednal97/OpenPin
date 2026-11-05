@@ -315,6 +315,23 @@ CASES = {
     },
     # A block saved before follow_up_turns existed: the turn count comes from the share
     "eng_noturns": {"sidecar": {**DONE, "engagement": {k: v for k, v in ENGAGEMENT.items() if k != "follow_up_turns"}}},
+    # Every measure exact (a Deepgram transcript), with engagement parts copied into the metrics:
+    # their "estimated"/"unavailable" must not bring back the re-transcribe footnote
+    "exact_with_engagement": {
+        "sidecar": {
+            **DONE,
+            "metrics": {
+                **METRICS,
+                "owner": {**METRICS["owner"], "fillers": 3, "fillers_per_min": 1.2, "laughs_per_hour": 4.46},
+                "availability": {
+                    **dict.fromkeys(METRICS["availability"], "exact"),
+                    "laughs_per_hour": "estimated",
+                    "follow_up_share": "exact",
+                    "built_on_share": "unavailable",
+                },
+            },
+        }
+    },
     "nobaseline": {"sidecar": DONE},
     "stale": {"sidecar": {**DONE, "report_stale": True}},
     "metricsonly": {"sidecar": {**DONE, "review": None, "status_reason": "measured metrics only (no AI provider)"}},
@@ -1104,3 +1121,15 @@ class TestRealSidecar:
         assert "110–160 wpm" in html
         assert "at most 1 in 10 turns" in html
         assert "Asked a follow-up" in html
+
+
+class TestFootnote:
+    FOOTNOTE = "Re-transcribing with Deepgram measures them exactly."
+
+    def test_shown_when_a_measure_is_estimated(self, out):
+        assert self.FOOTNOTE in out["done"]
+
+    def test_engagement_parts_never_bring_it_back(self, out):
+        html = out["exact_with_engagement"]
+        assert "Measures" in html and "coach-engagement" in html
+        assert self.FOOTNOTE not in html

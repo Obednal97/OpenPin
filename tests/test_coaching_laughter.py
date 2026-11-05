@@ -21,6 +21,7 @@ H = int(laughter.STEP_S * SR)
 @pytest.fixture(autouse=True)
 def _model_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(laughter, "model_path", lambda: tmp_path / "models" / "ced-tiny.onnx")
+    monkeypatch.setattr(laughter, "_failed_at", None)  # no retry pause carried over from another test
 
 
 # ------------------------------------------------------------------ windows
@@ -427,3 +428,72 @@ def test_real_model_noise_gives_no_events(monkeypatch, tmp_path):
     sf.write(wav, noise, SR)
     r = laughter.detect(str(wav))
     assert r == {"status": "done", "events": [], "reason": ""}
+
+
+# --------------------------------------------------------------- final review fixes
+
+
+def test_a_failed_download_is_not_retried_for_an_hour(monkeypatch):
+    """Queued runs don't each wait out a stalled download."""
+    clock = [1000.0]
+    downloads = []
+    monkeypatch.setattr(laughter, "_now", lambda: clock[0])
+    monkeypatch.setattr(laughter, "_download", lambda dest: downloads.append(dest) or False)
+    assert laughter.ensure_model() == (False, "Couldn't download the laughter model")
+    clock[0] += 3599
+    assert laughter.ensure_model() == (False, "Couldn't download the laughter model")
+    assert len(downloads) == 1
+    clock[0] += 2  # an hour and a second after the failure
+    assert laughter.ensure_model()[0] is False
+    assert len(downloads) == 2
+
+
+def test_a_good_file_is_used_even_inside_the_retry_pause(monkeypatch):
+    monkeypatch.setattr(laughter, "_now", lambda: 1000.0)
+    monkeypatch.setattr(laughter, "_failed_at", 999.0)
+    monkeypatch.setattr(laughter, "_file_ok", lambda path: True)
+    assert laughter.ensure_model() == (True, "")
+
+
+def test_detect_can_keep_its_wav_for_the_caller(monkeypatch, tmp_path):
+    a = np.zeros(10 * SR, dtype=np.float32)
+    path = tmp_path / "in.wav"
+    sf.write(path, a, SR)
+    wav = tmp_path / "converted.wav"
+    sf.write(wav, a, SR)
+    monkeypatch.setattr(laughter, "runtime_available", lambda: True)
+    monkeypatch.setattr(laughter, "ensure_model", lambda: (True, ""))
+    monkeypatch.setattr(laughter, "_session", lambda: _StubSession(0, 0))
+    monkeypatch.setattr("src.transcribe._to_wav16k", lambda p: str(wav))
+    r = laughter.detect(str(path), keep_wav=True)
+    assert r["status"] == "done" and r["wav"] == str(wav)
+    assert wav.exists()  # the caller deletes it
+    # Without keep_wav it's deleted and not handed back.
+    r = laughter.detect(str(path))
+    assert "wav" not in r and not wav.exists()
+
+
+def test_detect_keep_wav_still_deletes_it_when_unavailable(monkeypatch, tmp_path):
+    r, wav = _run_detect(monkeypatch, tmp_path, np.zeros(5 * SR, dtype=np.float32), _StubSession(0, 0), seconds=4)
+    assert not wav.exists()
+    sf.write(wav, np.zeros(5 * SR, dtype=np.float32), SR)
+    r = laughter.detect(str(tmp_path / "in.wav"), max_seconds=4, keep_wav=True)
+    assert r["status"] == "unavailable" and "wav" not in r and not wav.exists()
+
+
+def test_session_does_not_spin(monkeypatch, tmp_path):
+    entries = {}
+
+    class Options:
+        intra_op_num_threads = 0
+
+        def add_session_config_entry(self, key, value):
+            entries[key] = value
+
+    fake = types.SimpleNamespace(
+        SessionOptions=Options, InferenceSession=lambda path, opts, providers: ("session", opts, providers)
+    )
+    monkeypatch.setitem(__import__("sys").modules, "onnxruntime", fake)
+    session = laughter._session()
+    assert entries == {"session.intra_op.allow_spinning": "0"}
+    assert session[1].intra_op_num_threads == min(4, os.cpu_count() or 1)

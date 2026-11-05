@@ -51,9 +51,10 @@ LOCAL_NEEDS_OLLAMA = "AI feedback needs Ollama; showing measured metrics only"
 INTERRUPTED = "Coaching was interrupted. Try again."
 REVIEW_OFF = "AI review is off"
 EXCLUDED = "excluded"
-LAUGHTER_NO_AUDIO = "No audio file on this Mac"
-LAUGHTER_TOO_LONG = "Too long to check for laughter"
-LAUGHTER_FAILED = "Laughter detection failed"
+# The detector's own wording, so a reason reads the same wherever it was decided.
+LAUGHTER_NO_AUDIO = laughter.REASON_NO_AUDIO
+LAUGHTER_TOO_LONG = laughter.REASON_TOO_LONG
+LAUGHTER_FAILED = laughter.REASON_FAILED
 FIRST_LINE_CHARS = 200
 
 # Keys that describe one run's outcome; cleared when a run ends without a report.
@@ -174,29 +175,79 @@ def _review(segments, owner_labels, metrics, config, laughs) -> tuple[dict | Non
     return result.get("review"), list(result.get("errors") or [])
 
 
-def _detect_laughter(audio: str | None, duration: float) -> tuple[str, str, list]:
-    """``(status, reason, events)`` from the laughter detector; never raises.
+def _detect_laughter(audio: str | None, duration: float) -> tuple[str, str, list, str | None]:
+    """``(status, reason, events, wav)`` from the laughter detector; never raises.
 
-    Recordings over LAUGHTER_MAX_S are skipped before any audio is converted."""
+    ``wav`` is the detector's converted audio, kept so the loudness check needn't convert
+    again; the caller must delete it (``_remove``). Recordings over LAUGHTER_MAX_S are
+    skipped before any audio is converted."""
     if not audio:
-        return "unavailable", LAUGHTER_NO_AUDIO, []
+        return "unavailable", LAUGHTER_NO_AUDIO, [], None
     if duration > LAUGHTER_MAX_S:
-        return "unavailable", LAUGHTER_TOO_LONG, []
+        return "unavailable", LAUGHTER_TOO_LONG, [], None
     try:
-        result = laughter.detect(audio)
+        result = laughter.detect(audio, keep_wav=True)
     except Exception as e:
         log.warning("laughter detection failed: %s", e, exc_info=True)
-        return "unavailable", LAUGHTER_FAILED, []
+        return "unavailable", LAUGHTER_FAILED, [], None
     if not isinstance(result, dict):
-        return "unavailable", LAUGHTER_FAILED, []
+        return "unavailable", LAUGHTER_FAILED, [], None
+    wav = result.get("wav") if isinstance(result.get("wav"), str) else None
     if result.get("status") != "done":
-        return "unavailable", str(result.get("reason") or LAUGHTER_FAILED), []
+        _remove(wav)
+        return "unavailable", str(result.get("reason") or LAUGHTER_FAILED), [], None
     events = result.get("events")
-    return "done", "", events if isinstance(events, list) else []
+    return "done", "", events if isinstance(events, list) else [], wav
 
 
-def _with_engagement(metrics: dict, block: dict) -> dict:
+def _remove(path: str | None) -> None:
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _laughs_and_loudness(audio, segments, owner_labels, duration) -> tuple[str, str, list, dict | None]:
+    """Laughter events and the loudness to tell them apart from you: ``(status, reason, events,
+    loudness)``. Never raises: if a step fails, laughter is "unavailable"."""
+    status, reason, events, wav = _detect_laughter(audio, duration)
+    try:
+        # One conversion of the audio (the detector's) measures your voice and each candidate.
+        candidates = engagement.laugh_candidates(segments, owner_labels, events) if events else []
+        windows = [c["window"] for c in candidates]
+        loudness = engagement.measure_loudness(audio, segments, owner_labels, windows, wav=wav) if candidates else None
+        return status, reason, events, loudness
+    except Exception as e:
+        log.warning("measuring laughs failed: %s", e, exc_info=True)
+        return "unavailable", LAUGHTER_FAILED, [], None
+    finally:
+        _remove(wav)
+
+
+def _engagement_block(segments, owner_labels, laughs, review, duration) -> dict | None:
+    """The engagement block, never raising: metrics and the review must never be lost to it.
+
+    If computing it fails, it is tried again with laughter "unavailable", then also without
+    the review, so every part that can be worked out still is. None if even that fails."""
+    status, reason, events, loudness = laughs
+    attempts = (
+        (status, reason, events, review, loudness),
+        ("unavailable", LAUGHTER_FAILED, [], review, None),
+        ("unavailable", LAUGHTER_FAILED, [], None, None),
+    )
+    for st, why, evs, rev, loud in attempts:
+        try:
+            return engagement.compute(segments, owner_labels, evs, st, why, rev, duration, loud)
+        except Exception as e:
+            log.warning("engagement failed: %s", e, exc_info=True)
+    return None
+
+
+def _with_engagement(metrics: dict, block: dict | None) -> dict:
     """Copy the engagement parts into the metrics, so Progress series pick them up."""
+    if block is None:
+        return metrics
     owner, availability = metrics.setdefault("owner", {}), metrics.setdefault("availability", {})
     for key, kind in (("laughs_per_hour", "estimated"), ("follow_up_share", "exact"), ("built_on_share", "estimated")):
         owner[key] = block[key]
@@ -247,39 +298,28 @@ def _analyse(
         duration,
         bool(transcript.get("timestamps_estimated")),
     )
-    laugh_status, laugh_reason, events = _detect_laughter(audio, duration)
-    # One conversion of the audio measures your voice and each candidate laugh after your lines.
-    candidates = engagement.laugh_candidates(segments, owner_labels, events) if events else []
-    windows = [c["window"] for c in candidates]
-    loudness = engagement.measure_loudness(audio, segments, owner_labels, windows) if candidates else None
+    laughs = _laughs_and_loudness(audio, segments, owner_labels, duration)
 
-    def _engagement(review: dict | None) -> dict:
-        return engagement.compute(
-            segments, owner_labels, events, laugh_status, laugh_reason, review, duration, loudness
-        )
+    def _engagement(review: dict | None) -> dict | None:
+        return _engagement_block(segments, owner_labels, laughs, review, duration)
 
+    def _fields(review: dict | None, block: dict | None, reason: str) -> dict:
+        fields = {"owner": owner, "metrics": _with_engagement(metrics, block), "review": review}
+        if block is not None:
+            fields["engagement"] = block
+        return {**fields, "status": "done", "status_reason": reason}
+
+    drop = {"report_stale", "candidates"}
     if not ai_review_on(config):
         # The user chose measured results only: the transcript never leaves the Mac.
         block = _engagement(None)
-        fields = {
-            "owner": owner,
-            "metrics": _with_engagement(metrics, block),
-            "review": None,
-            "engagement": block,
-            "status": "done",
-            "status_reason": REVIEW_OFF,
-        }
-        return fields, {"report_stale", "candidates"}
-    review, errors = _review(segments, owner_labels, metrics, config, _engagement(None)["laughs"])
+        return _fields(None, block, REVIEW_OFF), drop | ({"engagement"} if block is None else set())
+    before_review = _engagement(None)
+    review, errors = _review(segments, owner_labels, metrics, config, (before_review or {}).get("laughs") or [])
     block = _engagement(review)
-    fields = {
-        "owner": owner,
-        "metrics": _with_engagement(metrics, block),
-        "review": review,
-        "engagement": block,
-        "status": "done",
-        "status_reason": "",
-    }
+    fields = _fields(review, block, "")
+    if block is None:
+        drop = drop | {"engagement"}
     if review is None:
         # Local users without a usable Ollama still get their measured metrics. Any other
         # error (broken JSON, a timeout) is a real failure, for them too.
@@ -288,7 +328,7 @@ def _analyse(
         else:
             fields["status"] = "failed"
             fields["status_reason"] = "AI feedback failed: " + ("; ".join(errors) or "no AI provider answered")
-    return fields, {"report_stale", "candidates"}
+    return fields, drop
 
 
 # ---------------------------------------------------------------- runs in progress

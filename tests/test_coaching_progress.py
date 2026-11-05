@@ -232,11 +232,6 @@ def test_engagement_score_is_never_the_focus():
     ("metric", "value", "text"),
     [
         (
-            "laughs_per_hour",
-            2.0,
-            "You got 2 laughs an hour after your lines over the last two weeks; aim for at least 6 laughs an hour.",
-        ),
-        (
             "follow_up_share",
             0.1,
             "Follow-up questions came after 10% of your turns over the last two weeks; aim for at least 25%.",
@@ -251,3 +246,21 @@ def test_engagement_score_is_never_the_focus():
 def test_focus_sentence_for_engagement_parts(metric, value, text):
     out = compute_progress([("a", ago(1), sc(**{metric: value}))], NOW)
     assert out["focus"] == {"metric": metric, "text": text}
+
+
+def test_laughs_per_hour_is_a_series_but_never_the_focus_or_still_stuck():
+    """The detector undercounts and isn't calibrated on real audio, so laughs aren't coached on."""
+    data = [
+        ("p1", ago(40), sc(laughs_per_hour=0.0)),
+        ("r1", ago(3), sc(laughs_per_hour=0.0)),
+        ("r2", ago(2), sc(laughs_per_hour=0.5)),
+    ]
+    out = compute_progress(data, NOW)
+    assert [p["value"] for p in out["series"]["laughs_per_hour"]] == [0.0, 0.0, 0.5]
+    assert out["focus"] is None
+    assert out["most_stuck"] is None
+    # Another measure outside its band still gets them.
+    data.append(("r3", ago(1), sc(laughs_per_hour=0.0, talk_share=0.9)))
+    out = compute_progress(data, NOW)
+    assert out["focus"]["metric"] == "talk_share"
+    assert out["most_stuck"]["metric"] == "talk_share"
