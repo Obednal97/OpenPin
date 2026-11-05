@@ -357,7 +357,9 @@ def test_settings_switch_on_and_off(mcp_client, access):
     assert r.status_code == 200
     assert mcp_client.get("/settings").get_json()["mcp_enabled"] is False
     assert access.current_key() is None
-    assert not access.connection_path().exists()
+    # Switched off while running: a keyless marker, so AI tools hear "turned off".
+    info = json.loads(access.connection_path().read_text())
+    assert info == {"port": 5999, "pid": os.getpid(), "enabled": False}
     _no_app_token(mcp_client)
     r = mcp_client.get("/mcp/v1/ping", headers={MCP_HEADER: key})
     assert r.status_code == 403
@@ -383,7 +385,8 @@ def test_settings_switch_failure_leaves_it_off(mcp_client, access, monkeypatch):
     assert "error" in r.get_json()
     assert mcp_client.get("/settings").get_json()["mcp_enabled"] is False
     assert access.current_key() is None
-    assert not access.connection_path().exists()
+    # Left off: only the keyless "turned off" marker, never a key.
+    assert "key" not in json.loads(access.connection_path().read_text())
 
 
 def test_settings_other_fields_dont_touch_mcp(mcp_client, access):
@@ -402,12 +405,17 @@ def test_startup_enables_when_setting_on(access, flask_client):
     assert json.loads(access.connection_path().read_text())["port"] == 6001
 
 
-def test_startup_removes_stale_file_when_off(access, flask_client):
+def test_startup_replaces_stale_file_with_off_marker_when_off(access, flask_client):
     from app import api_server
 
     access.connection_path().write_text(json.dumps({"port": 1, "key": "old", "pid": 999999}))
     api_server._start_mcp_access(6001)
     assert access.current_key() is None
+    info = json.loads(access.connection_path().read_text())
+    assert info == {"port": 6001, "pid": os.getpid(), "enabled": False}
+    assert stat.S_IMODE(access.connection_path().stat().st_mode) == 0o600
+    # Quitting removes the marker: the connector then says the app isn't running.
+    api_server._stop_mcp_access()
     assert not access.connection_path().exists()
 
 

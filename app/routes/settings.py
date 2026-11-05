@@ -246,7 +246,7 @@ def _apply_mcp_enabled(on: bool) -> str | None:
     """
     if not on:
         update_config(lambda c: c.__setitem__("mcp_enabled", False))
-        mcp_access.disable()
+        mcp_access.disable(keep_marker=True)
         return None
     port = mcp_access.bound_port() or _request_port()
     try:
@@ -254,7 +254,7 @@ def _apply_mcp_enabled(on: bool) -> str | None:
             raise OSError("the backend's port isn't known")
         mcp_access.enable(port)
     except OSError as e:
-        mcp_access.disable()
+        mcp_access.disable(keep_marker=True)
         update_config(lambda c: c.__setitem__("mcp_enabled", False))
         return f"Couldn't turn on AI tool access: {e}"
     update_config(lambda c: c.__setitem__("mcp_enabled", True))

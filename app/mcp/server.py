@@ -43,6 +43,7 @@ MAX_RESPONSE_BYTES = 50 * 1024 * 1024
 
 NOT_RUNNING = "Open Pin isn't running. Open it and try again."
 ACCESS_OFF = "AI tool access is turned off in Open Pin"
+ACCESS_OFF_HINT = ACCESS_OFF + ". Turn it on in Open Pin's Settings, under General › AI tools."
 TIMED_OUT = "Open Pin didn't answer in time. Try again."
 TOO_LARGE = "Open Pin's answer was too large to pass on. Ask for less, for example without the transcript."
 
@@ -357,10 +358,13 @@ def read_connection() -> tuple[int, str]:
     port, key = info.get("port"), info.get("key")
     if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
         raise ToolError(NOT_RUNNING)
-    if not isinstance(key, str) or not key:
-        raise ToolError(NOT_RUNNING)
     if _pid_gone(info.get("pid")):
         # A file left behind by a crash: don't hand the key to whatever has the port now.
+        raise ToolError(NOT_RUNNING)
+    if info.get("enabled") is False:
+        # The app is running with AI tool access switched off (a keyless marker).
+        raise ToolError(ACCESS_OFF_HINT)
+    if not isinstance(key, str) or not key:
         raise ToolError(NOT_RUNNING)
     return port, key
 

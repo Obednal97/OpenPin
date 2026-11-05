@@ -191,13 +191,31 @@ def _remove_file(force: bool) -> None:
         logging.warning("[MCP] Couldn't remove %s: %s", path.name, e)
 
 
-def disable(timeout: float | None = None) -> bool:
-    """Turn access off: drop the key and delete this process's connection file.
+def _write_off_marker() -> None:
+    """While the app runs with access off: a connection file with no key.
 
-    ``timeout`` (seconds) bounds the wait for another thread that holds the
-    lock; the signal handler passes one so a quit can't hang. Returns False if
-    it gave up (the file may then stay behind, which is harmless: the
-    connector gets a refused connection).
+    It lets the connector tell "access is turned off" (the app is running) from
+    "Open Pin isn't running" (no file). Best effort; quitting deletes it.
+    """
+    if _port is None:
+        _remove_file(force=False)
+        return
+    try:
+        payload = json.dumps({"port": _port, "pid": os.getpid(), "enabled": False})
+        _atomic_write(connection_path(), payload, 0o600)
+    except OSError as e:
+        logging.warning("[MCP] Couldn't write the access-off marker: %s", e)
+
+
+def disable(timeout: float | None = None, keep_marker: bool = False) -> bool:
+    """Turn access off: drop the key, then delete this process's connection file.
+
+    With ``keep_marker`` (the switch turned off while the app keeps running) the
+    file is replaced by a keyless marker instead, so AI tools are told access is
+    off rather than that the app isn't running. ``timeout`` (seconds) bounds the
+    wait for another thread that holds the lock; the signal handler passes one
+    so a quit can't hang. Returns False if it gave up (the file may then stay
+    behind, which is harmless: the connector gets a refused connection).
     """
     global _key
     if not _lock.acquire(timeout=-1 if timeout is None else timeout):
@@ -205,10 +223,23 @@ def disable(timeout: float | None = None) -> bool:
         return False
     try:
         _key = None
-        _remove_file(force=False)
+        if keep_marker:
+            _write_off_marker()
+        else:
+            _remove_file(force=False)
     finally:
         _lock.release()
     return True
+
+
+def mark_off(port: int) -> None:
+    """At startup with access off: replace any stale file with this run's off marker."""
+    global _key, _port
+    with _lock:
+        _key = None
+        _port = int(port)
+        _remove_file(force=True)
+        _write_off_marker()
 
 
 def remove_connection_file() -> None:

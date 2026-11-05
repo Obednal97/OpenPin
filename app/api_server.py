@@ -320,7 +320,7 @@ def _start_mcp_access(port: int):
             mcp_access.enable(port)
             logging.info("[MCP] AI tool access is on")
         else:
-            mcp_access.remove_connection_file()
+            mcp_access.mark_off(port)
     except Exception as e:
         logging.error(f"[MCP] Couldn't turn on AI tool access: {e}")
 

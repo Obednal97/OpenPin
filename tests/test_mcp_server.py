@@ -107,6 +107,20 @@ def write_connection(data_dir, port, key=KEY, pid=None):
     return path
 
 
+def test_access_off_marker_says_turned_off(data_dir):
+    """The app is running with AI tool access switched off: tell the user how to turn it on."""
+    (data_dir / "mcp-connection.json").write_text(json.dumps({"port": 5123, "pid": os.getpid(), "enabled": False}))
+    result = call_tool(data_dir, "list_tags")
+    assert result["isError"] is True
+    assert text_of(result).startswith("AI tool access is turned off in Open Pin")
+    assert "Settings" in text_of(result)
+
+
+def test_access_off_marker_from_a_dead_process_is_not_running(data_dir):
+    (data_dir / "mcp-connection.json").write_text(json.dumps({"port": 5123, "pid": 999999, "enabled": False}))
+    assert text_of(call_tool(data_dir, "list_tags")) == "Open Pin isn't running. Open it and try again."
+
+
 @pytest.fixture
 def connected(backend, data_dir):
     write_connection(data_dir, backend.port)
