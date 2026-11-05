@@ -45,6 +45,8 @@ aren't supported.
   coaching to the measured results, with nothing leaving your Mac, and turn coaching off for any
   one recording. A Progress view shows whether you are improving over weeks. You set up your voice
   once so it knows which speaker is you; voice data and your verbatim words stay on your Mac.
+- **Speaker names**: click Speaker 2 in a transcript and give it a name. It shows in the transcript,
+  summary, coaching and Notion, and you can clear it any time.
 - **Editing**: crop audio, fix transcript lines, edit summaries as Markdown, tag, rename and file
   recordings into folders.
 - **Integrations**: Notion (a page per recording, your own notes on the page are kept), Google
@@ -53,6 +55,25 @@ aren't supported.
 - **Updates**: checks for new versions and installs them on restart. Every update is checked
   (code signature, team ID, Gatekeeper, checksum) before it replaces the app.
 - **Plaud Cloud sync** (optional): download recordings from, or upload them to, your Plaud account.
+
+## Use with Claude
+
+Claude Desktop and Claude Code can read your recordings through Open Pin, and name speakers and tag
+for you. It is off by default and works only while Open Pin is open.
+
+1. In Open Pin, turn on **Settings › General › AI tools**.
+2. Click **Connect** for Claude Desktop, then quit and reopen it. For Claude Code, tick the setups
+   you use and connect them.
+
+Then ask Claude things like:
+
+- "What did I agree with Sarah in yesterday's meeting?"
+- "Find my recordings about the budget this month and summarise the decisions."
+- "Work out who Speaker 2 is in my last recording and name them."
+- "Tag all my recordings from last week about hiring with `hiring`."
+
+Claude sees details, transcripts, summaries and coaching, never your API keys, voice or audio.
+Open Pin backs up Claude's settings file before changing it. See [SECURITY.md](SECURITY.md).
 
 ## Install
 
