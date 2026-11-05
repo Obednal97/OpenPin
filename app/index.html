@@ -568,6 +568,12 @@
             <span>Coach my conversations automatically</span>
             <span id="coaching-auto-needs" class="voice-needs hidden">Needs speaker labels</span>
           </label>
+          <label class="toggle-label auto-step voice-auto-row" id="coaching-ai-review-row">
+            <input type="checkbox" id="coaching-ai-review-toggle" class="toggle-input" checked>
+            <span class="toggle-switch"></span>
+            <span>Include an AI review</span>
+          </label>
+          <p class="settings-hint">Sends the transcript to your AI provider for scores and tips. Off: only measured results, and nothing from coaching leaves your Mac.</p>
           <div id="voice-status" class="voice-status" aria-live="polite"></div>
           <div id="voice-setup" class="voice-setup hidden"></div>
         </div>
@@ -665,6 +671,14 @@
               <span class="toggle-switch"></span>
               <span>Transcribe them</span>
             </label>
+            <!-- The same coaching_auto setting as #coaching-auto-toggle (Transcription & AI) -->
+            <label class="toggle-label auto-step" id="auto-coach-row">
+              <input type="checkbox" id="auto-coach-toggle" class="toggle-input">
+              <span class="toggle-switch"></span>
+              <span>Coach my conversations</span>
+              <span id="auto-coach-needs" class="voice-needs hidden">Needs speaker labels</span>
+            </label>
+            <p id="automation-coach-hint" class="settings-hint automation-hint hidden">Coaching needs a transcript: turn on the steps above first.</p>
             <label class="toggle-label auto-step" id="auto-summarise-row">
               <input type="checkbox" id="auto-summarise-toggle" class="toggle-input">
               <span class="toggle-switch"></span>

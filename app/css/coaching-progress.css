@@ -113,9 +113,11 @@
 
 /* === MODULE: Settings › Your voice & coaching === */
 .voice-auto-row { margin-top: var(--sp-1); }
-.voice-auto-row.voice-auto-off { cursor: not-allowed; }
-.voice-auto-row.voice-auto-off .toggle-switch,
-.voice-auto-row.voice-auto-off > span:nth-of-type(2) { opacity: 0.45; }
+/* Coaching without speaker labels (here and in Automation): the switch and its label are
+   dimmed, the "Needs speaker labels" note stays readable */
+.voice-auto-off { cursor: not-allowed; }
+.voice-auto-off .toggle-switch,
+.voice-auto-off > span:nth-of-type(2) { opacity: 0.45; }
 .voice-needs {
   margin-left: auto;
   font-size: var(--text-xs);

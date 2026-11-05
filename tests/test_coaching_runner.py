@@ -675,3 +675,163 @@ def test_find_audio_uses_the_recordings_lookup(tmp_path):
     with patch("app.routes.recordings.get_all_recordings_dirs", return_value=[rec]):
         assert runner._find_audio(SID) == str(rec / f"{SID}.ogg")
         assert runner._find_audio("1715000001") is None
+
+
+# ---------------------------------------------------------------- AI review off
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "local"])
+def test_ai_review_off_never_asks_a_provider_and_ends_done(env, provider):
+    _write_transcript(env["trn"])
+    env["config"].update(coaching_ai_review=False, summarization_provider=provider)
+    out = runner.run_coaching(SID, env["audio"])
+    env["review"].assert_not_called()
+    assert out["status"] == "done"
+    assert out["status_reason"] == runner.REVIEW_OFF
+    assert out["review"] is None
+    assert out["metrics"]["owner"]["talk_share"] is not None
+
+
+def test_ai_review_off_applies_to_manual_runs_and_owner_picks(env):
+    _write_transcript(env["trn"])
+    env["config"].update(coaching_ai_review=False, coaching_auto=False)
+    assert runner.run_coaching(SID, env["audio"], force=True)["status"] == "done"
+    out = runner.set_owner(SID, ["Speaker 2"], learn=False)
+    assert out["status"] == "done" and out["review"] is None
+    env["review"].assert_not_called()
+
+
+def test_ai_review_back_on_reviews_again(env):
+    _write_transcript(env["trn"])
+    env["config"]["coaching_ai_review"] = False
+    runner.run_coaching(SID, env["audio"])
+    env["config"]["coaching_ai_review"] = True
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["review"] == REVIEW and out["status_reason"] == ""
+
+
+# ---------------------------------------------------------------- "Don't coach this recording"
+
+
+WORDS = [{"word": "um", "start": 0.0, "end": 0.3, "speaker": "Speaker 1"}]
+
+
+def _done_and_words(env):
+    _write_transcript(env["trn"])
+    runner.run_coaching(SID, env["audio"])
+    store.save_words(SID, WORDS, "h")
+    store.update(SID, lambda d: d.update(mixed_up=True, candidates=[{"label": "Speaker 1"}]))
+
+
+def test_exclude_deletes_the_report_and_keeps_the_words(env):
+    _done_and_words(env)
+    out = runner.set_excluded(SID, True)
+    assert out["excluded"] is True and out["status"] == "excluded"
+    for key in ("metrics", "review", "owner", "candidates", "report_stale", "mixed_up", "created_at"):
+        assert key not in out, key
+    assert store.load(SID) == out
+    assert store.load_words(SID) == WORDS
+
+
+def test_excluded_recording_is_never_coached(env):
+    _done_and_words(env)
+    runner.set_excluded(SID, True)
+    env["review"].reset_mock()
+    env["match_owner"].reset_mock()
+    runner.start_coaching_async(SID, env["audio"])
+    runner.start_coaching_async(SID, env["audio"], force=True)
+    out = runner.run_coaching(SID, env["audio"], force=True)
+    assert out["status"] == "excluded" and "metrics" not in out
+    env["review"].assert_not_called()
+    env["match_owner"].assert_not_called()
+    assert store.load(SID)["status"] == "excluded"
+
+
+def test_retranscribing_keeps_the_exclusion(env):
+    _done_and_words(env)
+    runner.set_excluded(SID, True)
+    env["review"].reset_mock()
+    # What a re-transcribe does: new words, a stale mark, then the coaching hook
+    _write_transcript(env["trn"], [{**s, "text": s["text"] + " Again."} for s in SEGMENTS])
+    store.save_words(SID, [{**WORDS[0], "word": "uh"}], "h2")
+    store.mark_stale(SID)
+    runner.start_coaching_async(SID, env["audio"])
+    saved = store.load(SID)
+    assert saved["excluded"] is True and saved["status"] == "excluded"
+    assert "report_stale" not in saved
+    env["review"].assert_not_called()
+
+
+def test_excluding_mid_run_drops_its_result(env):
+    _write_transcript(env["trn"])
+
+    def exclude_meanwhile(*args, **kwargs):
+        runner.set_excluded(SID, True)
+        return {"review": REVIEW, "provider": "anthropic", "errors": []}
+
+    env["review"].side_effect = exclude_meanwhile
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "excluded"
+    assert "review" not in out and "metrics" not in out and "owner" not in out
+
+
+def test_an_exclusion_saved_mid_run_wins_even_without_a_newer_run_number(env):
+    # The exclusion's run number can land before this run took its own; the saved flag still wins.
+    _write_transcript(env["trn"])
+
+    def flag_meanwhile(*args, **kwargs):
+        store.update(SID, lambda d: d.update(excluded=True, status="excluded", status_reason=""))
+        return {"review": REVIEW, "provider": "anthropic", "errors": []}
+
+    env["review"].side_effect = flag_meanwhile
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "excluded" and "review" not in out
+
+
+def test_excluding_drops_a_queued_rerun(env):
+    _write_transcript(env["trn"])
+    runner._running[SID] = 1
+    runner.start_coaching_async(SID, env["audio"], force=True)
+    assert SID in runner._pending
+    runner.set_excluded(SID, True)
+    assert SID not in runner._pending
+
+
+def test_excluded_recording_never_teaches_the_voice(env):
+    _write_transcript(env["trn"])
+    runner.set_excluded(SID, True)
+    with pytest.raises(ValueError):
+        runner.set_owner(SID, ["Speaker 1"])
+    with pytest.raises(ValueError):
+        runner.start_set_owner(SID, ["Speaker 1"])
+    env["add_exemplars"].assert_not_called()
+    assert "owner" not in store.load(SID)
+    assert not runner.is_running(SID)
+
+
+def test_excluded_after_the_pick_never_teaches_the_voice(env):
+    _write_transcript(env["trn"])
+    resolve = runner._resolve_audio
+
+    def exclude_then_resolve(sid, path):
+        runner.set_excluded(SID, True)
+        return resolve(sid, path)
+
+    with patch("app.coaching.runner._resolve_audio", exclude_then_resolve):
+        out = runner.set_owner(SID, ["Speaker 1"])
+    env["add_exemplars"].assert_not_called()
+    assert out["status"] == "excluded"
+
+
+def test_undoing_the_exclusion_lets_a_forced_run_coach_again(env):
+    _done_and_words(env)
+    runner.set_excluded(SID, True)
+    cleared = runner.set_excluded(SID, False)
+    assert "excluded" not in cleared and "status" not in cleared
+    out = runner.run_coaching(SID, env["audio"], force=True)
+    assert out["status"] == "done" and out["review"] == REVIEW
+
+
+def test_undoing_without_an_exclusion_writes_nothing(env):
+    assert runner.set_excluded(SID, False) == {}
+    assert not store.coaching_path(SID).exists()

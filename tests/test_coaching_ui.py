@@ -84,6 +84,7 @@ class TestScript:
             "window.plaud.coachingSetOwner(",
             "window.plaud.coachingMixedUp(",
             "window.plaud.coachingProgress(",
+            "window.plaud.coachingExclude(",
         ):
             assert call in src
 
@@ -140,6 +141,9 @@ tab.onclick({ target: { closest: (sel) => (sel === '[data-coach-action]' ? actio
 out.voiceSettings = opened;
 out.overallPartial = r('_coachOverall')(data.cases.partial.sidecar.review);
 out.noEvidence = r('_coachEvidenceHtml')(undefined) + r('_coachEvidenceHtml')(['x', -1, null]);
+// "Include an AI review" is off now (the loop above rendered it with the setting on)
+r('app').settings.coaching_ai_review = false;
+out.reviewoffSettingOff = r('_coachReportHtml')(data.cases.reviewoff.sidecar, null, data.segments);
 console.log(JSON.stringify(out));
 """
 
@@ -238,6 +242,8 @@ CASES = {
     "nobaseline": {"sidecar": DONE},
     "stale": {"sidecar": {**DONE, "report_stale": True}},
     "metricsonly": {"sidecar": {**DONE, "review": None, "status_reason": "measured metrics only (no AI provider)"}},
+    "reviewoff": {"sidecar": {**DONE, "review": None, "status_reason": "AI review is off"}},
+    "excluded": {"sidecar": {"status": "excluded", "excluded": True, "status_reason": "", "targets": TARGETS}},
     "running": {"sidecar": {"status": "running", "targets": TARGETS}},
     "needs_owner": {
         "sidecar": {
@@ -493,6 +499,44 @@ class TestReport:
     def test_not_coached_yet(self, out):
         assert 'data-coach-action="run"' in out["empty"]
 
+    def test_review_off_shows_metrics_and_one_plain_line(self, out):
+        html = out["reviewoffSettingOff"]
+        line = "AI review is off. Turn it on in "
+        assert html.count(line) == 1
+        link = html[html.index(line) + len(line) :]
+        assert link.startswith('<button type="button" class="coach-link" data-coach-action="voice-settings">')
+        assert "Settings › Transcription &amp; AI › Your voice &amp; coaching</button>." in link
+        assert "coach-notice coach-notice-info" in html
+        assert "coach-failed" not in html and "didn’t finish" not in html
+        assert "Measures" in html and "Moments" in html
+        assert "Overall" not in html and "How they responded" not in html
+
+    def test_review_off_report_after_turning_it_back_on(self, out):
+        html = out["reviewoff"]
+        assert "AI review is off. Turn it on" not in html
+        assert "made with the AI review off" in html
+        assert "Add an AI review" in html and 'data-coach-action="run"' in html
+        assert "Measures" in html
+
+    def test_review_off_reason_mirrors_the_runner(self):
+        from app.coaching.runner import REVIEW_OFF
+
+        m = re.search(r"^const _COACH_REVIEW_OFF = '([^']+)';", _coach_src(), re.M)
+        assert m and m.group(1) == REVIEW_OFF
+
+    def test_excluded(self, out):
+        html = out["excluded"]
+        assert "This recording isn’t coached." in html
+        assert 'data-coach-action="include"' in html and "Coach this recording" in html
+        assert 'data-coach-action="exclude"' not in html
+        assert "Measures" not in html and "This is you:" not in html
+
+    def test_every_other_state_offers_dont_coach(self, out):
+        for name in ("done", "running", "needs_owner", "skipped", "skipped_only_you", "failed", "empty", "reviewoff"):
+            html = out[name]
+            assert html.count('data-coach-action="exclude"') == 1, name
+            assert "Don’t coach this recording" in html, name
+
 
 _SAVE_JS = r"""
 const fs = require('fs'); const vm = require('vm');
@@ -672,6 +716,108 @@ class TestRunPoll:
     def test_grace_period_ends_the_wait(self, save_out):
         assert save_out["graceStillWaiting"]
         assert save_out["graceDrawn"]
+
+
+# ---------------------------------------------------------------- "Don't coach this recording"
+
+_EXCLUDE_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const el = () => ({ classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, setAttribute() {},
+  appendChild() {}, style: {}, dataset: {} });
+const ctx = { console, window: {}, setTimeout, clearTimeout, setInterval, clearInterval,
+  document: { querySelector: () => null, querySelectorAll: () => [], createElement: el, body: el() } };
+vm.createContext(ctx);
+for (const f of process.argv.slice(1, 3)) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx);
+const r = (code) => vm.runInContext(code, ctx);
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+const app = r('app');
+Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'coaching' });
+app.transcripts.s1 = { segments: [] };
+const calls = [];
+const dialogs = [];
+let answer = 'cancel';
+ctx.showConfirmDialog = async (opts) => { dialogs.push(opts); return answer; };
+ctx.toast = (msg, kind) => calls.push(['toast', kind]);
+ctx.window.plaud = {
+  coaching: async () => ({ status: 'running' }),
+  coachingProgress: async () => ({ baseline: null }),
+  coachingRun: async () => { calls.push('run'); return { started: true }; },
+  coachingExclude: async (sid, flag) => { calls.push(['exclude', sid, flag]); return flag ? data.excluded : data.cleared; },
+};
+const container = () => ({ innerHTML: '', dataset: {}, isConnected: true, classList: { contains: () => false } });
+const btn = () => ({ classList: { add() {}, remove() {} }, style: {}, disabled: false });
+const click = (c, action) => c.onclick({ target: { closest: (sel) => (sel === '[data-coach-action]'
+  ? { dataset: { coachAction: action }, disabled: false, classList: { add() {}, remove() {} }, style: {} } : null) } });
+const settle = () => new Promise((res) => setTimeout(res, 5));
+(async () => {
+  const out = {};
+  const c = container();
+  r('_coachDraw')(c, 's1', data.done, null);
+  out.offered = c.innerHTML.includes('data-coach-action="exclude"');
+  // Cancel: nothing is sent
+  click(c, 'exclude');
+  await settle();
+  out.cancelCalls = calls.splice(0);
+  out.stillReport = c.innerHTML.includes('Measures');
+  // Confirm: excluded, and the response is drawn
+  answer = 'exclude';
+  click(c, 'exclude');
+  await settle();
+  out.excludeCalls = calls.splice(0);
+  out.dialog = dialogs[1];
+  out.excludedShown = c.innerHTML.includes('This recording isn’t coached.') && !c.innerHTML.includes('Measures');
+  // Coach this recording: clear the exclusion, then run (forced on the backend)
+  click(c, 'include');
+  await settle();
+  out.includeCalls = calls.splice(0);
+  out.running = c.innerHTML.includes('coach-spinner');
+  r('_coachStopPoll')();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def exclude_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    payload = {
+        "done": DONE,
+        "excluded": {"status": "excluded", "excluded": True, "status_reason": "", "targets": TARGETS},
+        "cleared": {"targets": TARGETS},
+    }
+    res = subprocess.run(
+        [node, "-e", _EXCLUDE_JS, str(APP / "ui" / "utils.js"), str(COACH_JS)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+class TestExclude:
+    def test_asks_first_and_sends_nothing_on_cancel(self, exclude_out):
+        assert exclude_out["offered"]
+        assert exclude_out["cancelCalls"] == []
+        assert exclude_out["stillReport"]
+
+    def test_confirm_dialog_is_destructive(self, exclude_out):
+        d = exclude_out["dialog"]
+        assert d["title"] == "Don’t coach this recording?"
+        assert d["actions"] == [{"id": "exclude", "label": "Don’t coach it", "destructive": True}]
+        assert d["cancelLabel"] == "Cancel"
+        assert "progress" in d["message"] and "voice" in d["message"]
+        assert "\u2014" not in d["message"]
+
+    def test_confirm_excludes_and_draws_the_response(self, exclude_out):
+        assert exclude_out["excludeCalls"] == [["exclude", "s1", True], ["toast", "success"]]
+        assert exclude_out["excludedShown"]
+
+    def test_coach_this_recording_clears_then_runs(self, exclude_out):
+        assert exclude_out["includeCalls"] == [["exclude", "s1", False], "run"]
+        assert exclude_out["running"]
 
 
 # ---------------------------------------------------------------- real backend JSON

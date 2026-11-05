@@ -229,3 +229,163 @@ class TestBehaviour:
         assert "voiceDelete" not in save
         assert "has been removed" not in save
         assert "Your old voice is kept." in save
+
+
+# ---------------------------------------------------------------- the two "coach automatically" switches
+#
+# settings.js and coaching-progress.js run together in node with fake elements that keep
+# their classes and listeners, so a change event on one switch can be fired and the other
+# one read back.
+
+_SYNC_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const els = {};
+const STARTS_HIDDEN = ['#auto-coach-needs', '#automation-coach-hint', '#coaching-auto-needs'];
+const mk = (id) => {
+  const classes = new Set(STARTS_HIDDEN.includes(id) ? ['hidden'] : []);
+  const listeners = {};
+  const base = {
+    id, innerHTML: '', textContent: '', value: '', dataset: {}, style: {}, disabled: false, checked: false,
+    classList: {
+      add: (...c) => c.forEach((x) => classes.add(x)), remove: (...c) => c.forEach((x) => classes.delete(x)),
+      toggle: (c, on) => {
+        const v = on === undefined ? !classes.has(c) : !!on;
+        if (v) classes.add(c); else classes.delete(c);
+        return v;
+      },
+      contains: (c) => classes.has(c),
+    },
+    addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+    fire: async (type) => { for (const fn of listeners[type] || []) await fn({ target: proxy, currentTarget: proxy }); },
+    classes: () => [...classes].sort(),
+  };
+  // Anything else (closest, querySelector...) is a function returning another fake element
+  const proxy = new Proxy(base, {
+    get: (t, k) => (k in t ? t[k] : typeof k === 'symbol' ? undefined : () => mk(`${id}>${String(k)}`)),
+  });
+  return proxy;
+};
+const el = (sel) => els[sel] || (els[sel] = mk(sel));
+const saved = [];
+const ctx = {
+  console, setTimeout, clearTimeout, Date, Number, String, Math, Promise,
+  document: { addEventListener() {}, querySelector: (s) => el(s), querySelectorAll: () => [], createElement: () => mk('new'),
+    body: mk('body') },
+  $: (sel) => el(sel), $$: () => [],
+  escapeHtml: (t) => String(t ?? ''),
+  app: { settings: {}, recordings: [], transcripts: {} },
+  toast() {}, loadRecordings: async () => {}, initTooltips() {},
+  window: { plaud: new Proxy({ saveSettings: async (d) => { saved.push(d); return {}; } },
+    { get: (t, k) => t[k] || (async () => ({})) }) },
+};
+vm.createContext(ctx);
+for (const f of process.argv.slice(1)) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx);
+const r = (code) => vm.runInContext(code, ctx);
+const S = ctx.app.settings;
+const state = () => ({
+  auto: el('#auto-coach-toggle').checked,
+  voice: el('#coaching-auto-toggle').checked,
+  autoDisabled: el('#auto-coach-toggle').disabled,
+  row: el('#auto-coach-row').classes(),
+  needs: !el('#auto-coach-needs').classList.contains('hidden'),
+  hint: !el('#automation-coach-hint').classList.contains('hidden'),
+});
+const flip = async (sel, on) => { el(sel).checked = on; await el(sel).fire('change'); };
+(async () => {
+  r('initSettingsEvents')();
+  Object.assign(S, { diarize: true, coaching_auto: true, auto_sync: true, auto_transcribe: true });
+  el('#auto-sync-toggle').checked = true;
+  el('#auto-transcribe-toggle').checked = true;
+  r('updateAutoPipelineState')();
+  r('_voiceRenderAutoToggle')();
+  const out = { start: state() };
+  await flip('#coaching-auto-toggle', false);
+  out.voiceOff = { ...state(), setting: S.coaching_auto };
+  await flip('#auto-coach-toggle', true);
+  out.autoOn = { ...state(), setting: S.coaching_auto };
+  el('#auto-transcribe-toggle').checked = false;
+  r('updateAutoPipelineState')();
+  out.noTranscribe = state();
+  el('#auto-transcribe-toggle').checked = true;
+  await flip('#diarize-toggle', false);
+  out.noLabels = state();
+  S.coaching_ai_review = false;
+  r('_voiceRenderAutoToggle')();
+  out.reviewShownOff = el('#coaching-ai-review-toggle').checked === false;
+  await flip('#coaching-ai-review-toggle', true);
+  out.reviewSetting = S.coaching_ai_review;
+  out.saved = saved;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def sync_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "-e", _SYNC_JS, str(APP / "ui" / "settings.js"), str(APP / "ui" / "coaching-progress.js")],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def _automation_pipeline():
+    start = HTML.index('<div class="auto-pipeline" id="automation-pipeline">')
+    return HTML[start : HTML.index("</div>", start)]
+
+
+class TestCoachingSwitches:
+    def test_automation_row_sits_between_transcribe_and_summarise(self):
+        pipeline = _automation_pipeline()
+        order = [pipeline.index(f'id="{i}"') for i in ("auto-transcribe-row", "auto-coach-row", "auto-summarise-row")]
+        assert order == sorted(order)
+        row = pipeline[pipeline.index('id="auto-coach-row"') :]
+        row = row[: row.index("</label>")]
+        assert "<span>Coach my conversations</span>" in row
+        assert 'id="auto-coach-needs" class="voice-needs hidden">Needs speaker labels<' in row
+        assert 'id="automation-coach-hint"' in pipeline
+
+    def test_ai_review_switch_in_voice_section(self):
+        tab = _ai_tab()
+        section = tab[tab.index('id="voice-coaching-section"') :]
+        assert section.index('id="coaching-auto-toggle"') < section.index('id="coaching-ai-review-toggle"')
+        assert "<span>Include an AI review</span>" in section
+        assert "Sends the transcript to your AI provider for scores and tips." in section
+        assert "nothing from coaching leaves your Mac" in section
+        assert "\u2014" not in section  # no em dashes in user-facing copy
+
+    def test_both_switches_start_from_the_setting(self, sync_out):
+        assert sync_out["start"] == {
+            "auto": True,
+            "voice": True,
+            "autoDisabled": False,
+            "row": [],
+            "needs": False,
+            "hint": False,
+        }
+
+    def test_changing_either_switch_updates_the_other(self, sync_out):
+        assert sync_out["voiceOff"]["auto"] is False and sync_out["voiceOff"]["setting"] is False
+        assert sync_out["autoOn"]["voice"] is True and sync_out["autoOn"]["setting"] is True
+        assert {"coaching_auto": False} in sync_out["saved"]
+        assert {"coaching_auto": True} in sync_out["saved"]
+
+    def test_disabled_with_a_hint_without_transcription(self, sync_out):
+        s = sync_out["noTranscribe"]
+        assert s["row"] == ["disabled"] and s["autoDisabled"] and s["hint"]
+        assert s["needs"] is False
+
+    def test_needs_speaker_labels(self, sync_out):
+        s = sync_out["noLabels"]
+        assert s["auto"] is False and s["voice"] is False and s["autoDisabled"]
+        assert s["row"] == ["voice-auto-off"] and s["needs"] and not s["hint"]
+
+    def test_ai_review_switch_saves_its_own_key(self, sync_out):
+        assert sync_out["reviewShownOff"]
+        assert sync_out["reviewSetting"] is True
+        assert {"coaching_ai_review": True} in sync_out["saved"]

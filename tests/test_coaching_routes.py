@@ -344,6 +344,83 @@ def test_diarize_off_turns_coaching_off(env):
     assert body["diarize"] is False and body["coaching_auto"] is False
 
 
+def test_settings_coaching_ai_review_default_and_whitelist(env):
+    assert env.get("/settings").get_json()["coaching_ai_review"] is True
+    env.post("/settings", json={"coaching_ai_review": False})
+    assert env.get("/settings").get_json()["coaching_ai_review"] is False
+    assert load_config()["coaching_ai_review"] is False
+    env.post("/settings", json={"coaching_ai_review": True})
+    assert load_config()["coaching_ai_review"] is True
+
+
+# ---------------------------------------------------------------- "Don't coach this recording"
+
+
+def test_exclude_route_deletes_the_report(env):
+    store.update(SID, lambda d: d.update(status="done", metrics={"owner": {}}, review={"summary": "x"}, mixed_up=False))
+    store.save_words(SID, [{"w": "verbatim"}], "h")
+    r = env.post(f"/coaching/{SID}/exclude", json={"exclude": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["excluded"] is True and body["status"] == "excluded"
+    assert "metrics" not in body and "review" not in body
+    assert "pace_wpm" in body["targets"]  # the same shape as every sidecar response
+    assert "verbatim" not in r.get_data(as_text=True)
+    assert store.load_words(SID) == [{"w": "verbatim"}]
+
+    r = env.post(f"/coaching/{SID}/exclude", json={"exclude": False})
+    assert r.status_code == 200
+    assert "excluded" not in r.get_json() and "excluded" not in store.load(SID)
+
+
+def test_exclude_route_validates(env, monkeypatch):
+    for bad in ({}, {"exclude": "yes"}, {"exclude": 1}):
+        assert env.post(f"/coaching/{SID}/exclude", json=bad).status_code == 400
+    assert env.post("/coaching/999/exclude", json={"exclude": True}).status_code == 404
+    assert not store.coaching_path("999").exists()
+    store.save_words(SID, [{"w": "x"}], "h")
+    voice._save_exemplars([[0.1, 0.2]])
+    for sid in ("voice_profile", f"{SID}.words", ".hidden"):
+        assert env.post(f"/coaching/{sid}/exclude", json={"exclude": True}).status_code == 404
+    assert voice._load_exemplars() == [[0.1, 0.2]]
+    assert json.loads(store.words_path(SID).read_text())["words"] == [{"w": "x"}]
+
+
+def test_excluded_recording_refuses_runs_owner_picks_and_voice_setup(env, monkeypatch, tmp_path):
+    env.post(f"/coaching/{SID}/exclude", json={"exclude": True})
+    start, pick, add = MagicMock(), MagicMock(), MagicMock(return_value=1)
+    monkeypatch.setattr(runner, "start_coaching_async", start)
+    monkeypatch.setattr(runner, "start_set_owner", pick)
+    monkeypatch.setattr(voice, "add_exemplars", add)
+    monkeypatch.setattr(voice, "replace_profile", add)
+    monkeypatch.setattr(voice, "model_available", lambda: True)
+    audio = tmp_path / "a.ogg"
+    audio.write_bytes(b"x")
+    monkeypatch.setattr(runner, "_resolve_audio", lambda sid, p: str(audio))
+    assert env.post(f"/coaching/{SID}/run").status_code == 409
+    assert env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"]}).status_code == 409
+    for replace in (False, True):
+        r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"], "replace": replace})
+        assert r.status_code == 409
+    start.assert_not_called()
+    pick.assert_not_called()
+    add.assert_not_called()
+    # Undoing the exclusion lets "Coach this recording" run again
+    env.post(f"/coaching/{SID}/exclude", json={"exclude": False})
+    assert env.post(f"/coaching/{SID}/run").get_json() == {"started": True}
+    start.assert_called_once_with(SID, None, force=True)
+
+
+def test_progress_route_ignores_excluded_recordings(env):
+    now = time.time()
+    sid = str(int(now) - 3600)
+    (runner.TRANSCRIPTS_DIR / f"{sid}.json").write_text(json.dumps({"text": "x", "segments": SEGMENTS}))
+    store.update(sid, lambda d: d.update(status="done", mixed_up=False, metrics={"owner": {"pace_wpm": 130.0}}))
+    assert env.get("/coaching/progress").get_json()["count"] == 1
+    env.post(f"/coaching/{sid}/exclude", json={"exclude": True})
+    assert env.get("/coaching/progress").get_json()["count"] == 0
+
+
 class _SyncThread:
     def __init__(self, target, args=(), kwargs=None, daemon=None):
         self._t, self._a, self._k = target, args, kwargs or {}

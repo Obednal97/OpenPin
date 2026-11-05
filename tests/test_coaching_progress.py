@@ -180,3 +180,26 @@ def test_overall_score_averages_only_the_scores_present():
     assert out["series"]["overall_score"][0]["value"] == 70
     out = compute_progress([("a", ago(1), sc(review={"scores": {}}))], NOW)
     assert out["series"]["overall_score"] == []
+
+
+def test_excluded_recordings_are_ignored():
+    excluded = {**sc(talk_share=0.9), "excluded": True}
+    out = compute_progress([("a", ago(1), sc(talk_share=0.5)), ("b", ago(2), excluded)], NOW)
+    assert out["count"] == 1
+    assert [p["session_id"] for p in out["series"]["talk_share"]] == ["a"]
+
+
+def test_reports_without_an_ai_review_still_count():
+    # "Include an AI review" off: metrics only, so no overall score for those recordings
+    reviewed = {"scores": {"clarity": {"score": 80}}}
+    data = [
+        ("a", ago(1), sc(talk_share=0.5, pace_wpm=130)),
+        ("b", ago(2), sc(talk_share=0.7, pace_wpm=170, review=reviewed)),
+        ("c", ago(3), sc(talk_share=0.6)),
+    ]
+    out = compute_progress(data, NOW)
+    assert out["count"] == 3
+    assert [p["session_id"] for p in out["series"]["talk_share"]] == ["c", "b", "a"]
+    assert [p["session_id"] for p in out["series"]["overall_score"]] == ["b"]
+    assert out["baseline"]["overall_score"] == 80
+    assert out["baseline"]["talk_share"] == 0.6

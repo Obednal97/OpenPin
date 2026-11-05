@@ -48,6 +48,10 @@ def _no_transcript():
     return jsonify({"error": "no transcript for this recording"}), 404
 
 
+def _excluded():
+    return jsonify({"error": "this recording isn't coached"}), 409
+
+
 def _sidecar_response(sidecar: dict, **extra):
     """Every sidecar response: the sidecar without the verbatim words, plus the targets."""
     out = {k: v for k, v in (sidecar or {}).items() if k != "words"}
@@ -160,6 +164,8 @@ def voice_setup():
     segments = transcript.get("segments") or []
     if not set(labels) <= set(runner._speaker_labels(segments)):
         return jsonify({"error": "unknown speaker label"}), 400
+    if runner.is_excluded(sid):  # an excluded recording never teaches the voice profile
+        return _excluded()
     audio = runner._resolve_audio(sid, None)
     if not audio:
         return jsonify({"error": "no audio file for this recording"}), 404
@@ -194,6 +200,8 @@ def run_coaching(sid):
         return _bad_id()
     if not runner.has_transcript(sid):
         return _no_transcript()
+    if runner.is_excluded(sid):  # "Coach this recording" clears the exclusion first
+        return _excluded()
     runner.start_coaching_async(sid, None, force=True)
     return jsonify({"started": True})
 
@@ -209,6 +217,8 @@ def set_owner(sid):
     transcript = runner._read_transcript(sid)
     if transcript is None:
         return _no_transcript()
+    if runner.is_excluded(sid):
+        return _excluded()
     known = set(runner._speaker_labels(transcript.get("segments") or []))
     unknown = sorted(set(labels) - known)
     if unknown:
@@ -232,6 +242,24 @@ def set_mixed_up(sid):
     if not runner.has_transcript(sid):
         return _no_transcript()
     return _sidecar_response(store.update(sid, lambda d: d.update(mixed_up=flag)))
+
+
+@bp.route("/coaching/<sid>/exclude", methods=["POST"])
+def set_excluded(sid):
+    """Exclude a recording from coaching (``{"exclude": true}``) or undo it (``false``).
+
+    Excluding deletes the report and stops any run from saving one; undoing it leaves the
+    recording not coached yet (the UI then asks for a run with ``/run``).
+    """
+    if not _valid(sid):
+        return _bad_id()
+    data = request.get_json(silent=True) or {}
+    flag = data.get("exclude")
+    if not isinstance(flag, bool):
+        return jsonify({"error": "exclude must be true or false"}), 400
+    if not runner.has_transcript(sid):
+        return _no_transcript()
+    return _sidecar_response(runner.set_excluded(sid, flag))
 
 
 # ---------------------------------------------------------------- startup

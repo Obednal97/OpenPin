@@ -61,6 +61,9 @@ const _COACH_NEEDS_OWNER = {
   'no audio file': ['There’s no audio for this recording, so there’s nothing to match your voice against.', ''],
 };
 
+// Mirrors REVIEW_OFF in app/coaching/runner.py: the run skipped the AI review by choice
+const _COACH_REVIEW_OFF = 'AI review is off';
+
 // Mirrors MIN_COACHING_SECONDS in app/coaching/targets.py (shorter recordings are skipped)
 const _COACH_MIN_COACHING_SECONDS = 120;
 // AI moment kinds that describe an interruption ("talked over", "cut in"...)
@@ -513,9 +516,41 @@ function _coachSkippedHtml(sc, segments) {
     </div>`;
 }
 
-/** The whole tab for one sidecar. segments are the transcript's, for the speaker picker. */
+/** "Include an AI review" (Settings › Your voice & coaching) as it is now. */
+function _coachReviewSettingOn() {
+  return !(typeof app !== 'undefined' && app.settings && app.settings.coaching_ai_review === false);
+}
+
+// A report made with "Include an AI review" off: say why there are no scores, and how to
+// get them, without error styling.
+function _coachReviewOffHtml() {
+  if (!_coachReviewSettingOn()) {
+    return _coachNotice(`AI review is off. Turn it on in ${_COACH_VOICE_SETTINGS_LINK}.`, '', '', 'info');
+  }
+  return _coachNotice('This report was made with the AI review off.', 'Add an AI review', 'run', 'info');
+}
+
+function _coachExcludedHtml() {
+  return `
+    <div class="coach-state">
+      <p>This recording isn’t coached.</p>
+      <button type="button" class="action-btn subtle" data-coach-action="include">Coach this recording</button>
+    </div>`;
+}
+
+/** The whole tab for one sidecar. segments are the transcript's, for the speaker picker.
+    Every state but an excluded one (or an error) ends with "Don't coach this recording". */
 function _coachReportHtml(sidecar, baseline, segments) {
   const sc = sidecar || {};
+  if (sc.error) return _coachReportBodyHtml(sc, baseline, segments);
+  if (sc.excluded || sc.status === 'excluded') return _coachExcludedHtml();
+  return `${_coachReportBodyHtml(sc, baseline, segments)}
+    <div class="coach-exclude-row">
+      <button type="button" class="coach-link coach-exclude" data-coach-action="exclude">Don’t coach this recording</button>
+    </div>`;
+}
+
+function _coachReportBodyHtml(sc, baseline, segments) {
   if (sc.error) {
     return `
       <div class="coach-state">
@@ -570,6 +605,8 @@ function _coachReportHtml(sidecar, baseline, segments) {
         ${previous ? '<p class="coach-muted">The previous report is hidden, as it may no longer match.</p>' : ''}
         <button type="button" class="action-btn subtle" data-coach-action="run">Try again</button>
       </section>`);
+  } else if (!review && sc.status_reason === _COACH_REVIEW_OFF) {
+    parts.push(_coachReviewOffHtml());
   } else if (!review) {
     parts.push(_coachNotice(escapeHtml(sc.status_reason || 'This report has measured metrics only.'), '', '', 'info'));
   }
@@ -727,6 +764,55 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
   if (seq === _coachSeq && _coachStillShowing(container, sessionId)) _coachDraw(container, sessionId, latest, baseline);
 }
 
+// "Don't coach this recording": confirm, then the backend deletes the report and keeps
+// any run from saving one. The response is the excluded sidecar, drawn as it is.
+async function _coachExclude(container, sessionId, btn) {
+  const choice = await showConfirmDialog({
+    title: 'Don’t coach this recording?',
+    message:
+      'Open Pin deletes this recording’s coaching report and leaves it out of your progress. It won’t be coached again, '
+      + 'and won’t be used to learn your voice, unless you choose Coach this recording.',
+    actions: [{ id: 'exclude', label: 'Don’t coach it', destructive: true }],
+    cancelLabel: 'Cancel',
+  });
+  if (choice !== 'exclude') return;
+  setLoading(btn, true);
+  let res;
+  try {
+    res = await window.plaud.coachingExclude(sessionId, true);
+  } catch (err) {
+    res = { error: (err && err.message) || 'no response' };
+  }
+  if (!res || res.error) {
+    setLoading(btn, false);
+    toast(`Couldn’t turn coaching off for this recording: ${(res && res.error) || 'no response'}`, 'error');
+    return;
+  }
+  _coachBaseline = null; // the report no longer counts towards "your usual"
+  toast('This recording won’t be coached', 'success');
+  if (!_coachStillShowing(container, sessionId)) return;
+  _coachSeq++; // drop any render still in flight
+  _coachDraw(container, sessionId, res, null);
+}
+
+// "Coach this recording" on an excluded recording: clear the exclusion, then run (force)
+async function _coachInclude(container, sessionId, btn) {
+  setLoading(btn, true);
+  let res;
+  try {
+    res = await window.plaud.coachingExclude(sessionId, false);
+  } catch (err) {
+    res = { error: (err && err.message) || 'no response' };
+  }
+  if (!_coachStillShowing(container, sessionId)) return;
+  if (!res || res.error) {
+    setLoading(btn, false);
+    toast(`Couldn’t start coaching: ${(res && res.error) || 'no response'}`, 'error');
+    return;
+  }
+  await _coachRun(container, sessionId, res, btn);
+}
+
 // The same place the Progress view's "set up your voice" link opens
 function _coachOpenVoiceSettings() {
   openSettings();
@@ -783,6 +869,8 @@ function _coachDraw(container, sessionId, sidecar, baseline) {
     else if (action === 'save-owner') _coachSaveOwner(container, sessionId, sidecar, btn);
     else if (action === 'reload') renderCoachingTab(container, sessionId);
     else if (action === 'voice-settings') _coachOpenVoiceSettings();
+    else if (action === 'exclude') _coachExclude(container, sessionId, btn);
+    else if (action === 'include') _coachInclude(container, sessionId, btn);
   };
   container.onchange = () => {
     const save = container.querySelector('[data-coach-action="save-owner"]');
