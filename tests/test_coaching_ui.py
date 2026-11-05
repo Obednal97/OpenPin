@@ -125,6 +125,19 @@ out.overall = r('_coachOverall')(data.cases.done.sidecar.review);
 const aiKinds = ['interrupted_them', 'talked over', 'Cut in', 'cuts off', 'speaking over them', 'strong question'];
 out.aiKinds = aiKinds.map((kind) => r('_coachMoments')({ review: { moments: [{ t: 5, kind, note: 'x' }] } })[0].label);
 out.overallNone = r('_coachOverall')(null);
+// "Set up your voice" opens Settings on the AI tab at the voice section, from a click in the tab
+const opened = [];
+Object.assign(ctx, {
+  openSettings: () => opened.push('open'), loadSettings: () => opened.push('load'),
+  showSettingsTab: (t) => opened.push(`tab:${t}`),
+});
+ctx.document.querySelector = (sel) => (sel === '#voice-coaching-section' ? { scrollIntoView: () => opened.push('scroll') } : null);
+r('app').transcripts.s1 = { segments: data.segments };
+const tab = { innerHTML: '', dataset: {} };
+r('_coachDraw')(tab, 's1', data.cases.needs_owner_no_profile.sidecar, null);
+const action = { dataset: { coachAction: 'voice-settings' }, disabled: false };
+tab.onclick({ target: { closest: (sel) => (sel === '[data-coach-action]' ? action : null) } });
+out.voiceSettings = opened;
 out.overallPartial = r('_coachOverall')(data.cases.partial.sidecar.review);
 out.noEvidence = r('_coachEvidenceHtml')(undefined) + r('_coachEvidenceHtml')(['x', -1, null]);
 console.log(JSON.stringify(out));
@@ -235,6 +248,17 @@ CASES = {
             ],
             "targets": TARGETS,
         }
+    },
+    **{
+        f"needs_owner_{key}": {
+            "sidecar": {"status": "needs_owner", "status_reason": reason, "candidates": [], "targets": TARGETS}
+        }
+        for key, reason in (
+            ("no_profile", "no voice profile"),
+            ("no_model", "voice model not installed"),
+            ("no_match", "no confident match"),
+            ("no_audio", "no audio file"),
+        )
     },
     "skipped": {"sidecar": {"status": "skipped", "status_reason": "too short", "targets": TARGETS}},
     "skipped_no_labels": {"sidecar": {"status": "skipped", "status_reason": "no speaker labels", "targets": TARGETS}},
@@ -385,6 +409,30 @@ class TestReport:
         assert "Speakers mixed up" in html
         assert "Morning, &lt;img src=x&gt;" in html
         assert "Measures" not in html
+
+    def test_needs_owner_says_why(self, out):
+        settings_link = 'data-coach-action="voice-settings"'
+        no_profile = out["needs_owner_no_profile"]
+        assert "You haven’t set up your voice yet" in no_profile
+        assert settings_link in no_profile
+        assert "Settings › Transcription &amp; AI › Your voice &amp; coaching" in no_profile
+        no_model = out["needs_owner_no_model"]
+        assert "The voice model isn’t installed" in no_model
+        assert settings_link in no_model
+        assert "couldn’t tell from your voice" in out["needs_owner_no_match"]
+        assert "no audio for this recording" in out["needs_owner_no_audio"]
+        for name in ("needs_owner_no_match", "needs_owner_no_audio"):
+            assert settings_link not in out[name]
+            assert "set up your voice" not in out[name]
+        for name in ("needs_owner_no_profile", "needs_owner_no_model", "needs_owner_no_match", "needs_owner_no_audio"):
+            # The picker is always there, whatever the reason
+            assert 'data-coach-action="save-owner"' in out[name]
+
+    def test_voice_settings_link_opens_the_voice_section(self, out):
+        assert out["voiceSettings"] == ["open", "load", "tab:ai", "scroll"]
+        ai_tab = HTML[HTML.index('<div class="settings-tab-content" data-tab="ai"') :]
+        ai_tab = ai_tab[: ai_tab.index('<div class="settings-tab-content"', 1)]
+        assert 'id="voice-coaching-section"' in ai_tab
 
     def test_skipped(self, out):
         assert "Coach anyway" in out["skipped"]

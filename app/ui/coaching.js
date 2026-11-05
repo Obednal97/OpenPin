@@ -44,6 +44,23 @@ const _COACH_MOMENT_KINDS = {
   filler_burst: 'Run of filler words',
 };
 
+// Why the runner couldn't pick you (needs_owner status_reason, app/coaching/runner.py
+// and voice.py): what happened, then how to fix it for next time (already escaped).
+const _COACH_VOICE_SETTINGS_LINK =
+  '<button type="button" class="coach-link" data-coach-action="voice-settings">Settings › Transcription &amp; AI › Your voice &amp; coaching</button>';
+const _COACH_NEEDS_OWNER = {
+  'no voice profile': [
+    'You haven’t set up your voice yet, so the app can’t tell which speaker is you.',
+    `Set it up in ${_COACH_VOICE_SETTINGS_LINK} so the app recognises you in later recordings.`,
+  ],
+  'voice model not installed': [
+    'The voice model isn’t installed, so the app can’t tell which speaker is you.',
+    `Install it in ${_COACH_VOICE_SETTINGS_LINK} so the app can learn your voice.`,
+  ],
+  'no confident match': ['The app couldn’t tell from your voice which speaker is you.', ''],
+  'no audio file': ['There’s no audio for this recording, so there’s nothing to match your voice against.', ''],
+};
+
 // Mirrors MIN_COACHING_SECONDS in app/coaching/targets.py (shorter recordings are skipped)
 const _COACH_MIN_COACHING_SECONDS = 120;
 // AI moment kinds that describe an interruption ("talked over", "cut in"...)
@@ -509,10 +526,12 @@ function _coachReportHtml(sidecar, baseline, segments) {
   const status = sc.status;
   if (status === 'running') return _coachSpinnerHtml('Coaching this conversation…');
   if (status === 'needs_owner') {
+    const [why, fix] = _COACH_NEEDS_OWNER[sc.status_reason] || ['The app couldn’t tell which speaker is you.', ''];
     return `
       <section class="coach-card">
         <h3 class="coach-h">Which one is you?</h3>
-        <p class="coach-muted">The app couldn’t tell from your voice. Nothing is coached until you choose.</p>
+        <p class="coach-muted">${why} Nothing is coached until you choose.</p>
+        ${fix ? `<p class="coach-muted coach-needs-fix">${fix}</p>` : ''}
         ${_coachPickerHtml(sc, segments, true)}
       </section>`;
   }
@@ -702,6 +721,15 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
   if (seq === _coachSeq && _coachStillShowing(container, sessionId)) _coachDraw(container, sessionId, latest, baseline);
 }
 
+// The same place the Progress view's "set up your voice" link opens
+function _coachOpenVoiceSettings() {
+  openSettings();
+  loadSettings();
+  showSettingsTab('ai');
+  const section = document.querySelector('#voice-coaching-section');
+  if (section) section.scrollIntoView({ block: 'start' });
+}
+
 function _coachTogglePicker(container, open) {
   const picker = container.querySelector('[data-coach-picker]');
   if (picker) picker.classList.toggle('hidden', !open);
@@ -748,6 +776,7 @@ function _coachDraw(container, sessionId, sidecar, baseline) {
     else if (action === 'run') _coachRun(container, sessionId, sidecar, btn);
     else if (action === 'save-owner') _coachSaveOwner(container, sessionId, sidecar, btn);
     else if (action === 'reload') renderCoachingTab(container, sessionId);
+    else if (action === 'voice-settings') _coachOpenVoiceSettings();
   };
   container.onchange = () => {
     const save = container.querySelector('[data-coach-action="save-owner"]');
