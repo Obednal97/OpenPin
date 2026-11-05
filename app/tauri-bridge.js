@@ -94,6 +94,7 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/cloud/sync',
   '/gdrive/sync', '/gdrive/upload',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
+  '/coaching/voice/install', // downloads and installs the speaker model
 ]);
 const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -396,6 +397,20 @@ window.plaud = {
   updateTranscript: (session_id, updates) =>
     apiCall('POST', '/transcripts/update', { session_id, ...updates }),
   summarize: (session_id) => apiCall('POST', '/summarize', { session_id }),
+
+  // Conversation coaching
+  coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),
+  coachingRun: (session_id) => apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/run`),
+  coachingSetOwner: (session_id, labels, learn) =>
+    apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/owner`, { labels, learn }),
+  coachingMixedUp: (session_id, mixed_up) =>
+    apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/mixed-up`, { mixed_up }),
+  coachingProgress: (weeks) => apiCall('GET', `/coaching/progress?weeks=${encodeURIComponent(weeks ?? 12)}`),
+  voiceStatus: () => apiCall('GET', '/coaching/voice'),
+  voiceInstall: () => apiCall('POST', '/coaching/voice/install'),
+  voiceSetup: (session_id, labels, replace) =>
+    apiCall('POST', '/coaching/voice/setup', { session_id, labels, replace: !!replace }),
+  voiceDelete: () => apiCall('DELETE', '/coaching/voice'),
 
   // Settings
   getSettings: () => apiCall('GET', '/settings'),
