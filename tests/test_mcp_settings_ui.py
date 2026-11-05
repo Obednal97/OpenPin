@@ -84,6 +84,15 @@ class TestMarkup:
         assert "css/mcp-settings.css" in imports
         assert (APP / "css" / "mcp-settings.css").exists()
 
+    def test_tick_rows_are_big_click_targets(self):
+        """The label (tick box plus file name) stretches across the row up to its badge
+        and is at least 32px tall, so a click anywhere on the row ticks it."""
+        css = (APP / "css" / "mcp-settings.css").read_text()
+        rule = re.search(r"\.mcp-client-row\.mcp-tickable \.mcp-code-label \{([^}]*)\}", css)
+        assert rule, "tickable rows must stretch their label"
+        assert "flex: 1" in rule.group(1) and "min-height: 32px" in rule.group(1)
+        assert re.search(r"\.mcp-code-label input \{[^}]*width: 16px", css)
+
 
 class TestWiring:
     SRC = JS.read_text()
@@ -315,6 +324,8 @@ class TestRender:
         # Unreadable file: its message, no tick box
         assert "isn&#39;t valid JSON" in html or "isn't valid JSON" in html
         assert html.count('type="checkbox"') == 1
+        # Only the row with a tick box is a whole-row click target
+        assert html.count("mcp-client-row mcp-tickable") == 1
         # Desktop already connected: Disconnect offered, Connect not needed
         assert "Connected" in s["desktopHtml"]
         assert 'data-mcp-disconnect="desktop"' in s["desktopHtml"]
