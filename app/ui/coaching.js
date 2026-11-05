@@ -544,17 +544,22 @@ function _coachReportHtml(sidecar, baseline, segments) {
       </div>`;
   }
 
-  const review = sc.review && typeof sc.review === 'object' ? sc.review : null;
+  // A failed run that still holds a review never got as far as replacing the last report
+  // (it crashed, or the app quit mid-run): that review, and the metrics with it, are the
+  // previous run's, maybe for another owner. Only a run's own results are shown.
+  const previous = status === 'failed' && !!(sc.review && typeof sc.review === 'object');
+  const review = !previous && sc.review && typeof sc.review === 'object' ? sc.review : null;
   const parts = [];
-  if (sc.report_stale) parts.push(_coachNotice('Transcript changed:', 'Update coaching'));
+  if (sc.report_stale && !previous) parts.push(_coachNotice('Transcript changed:', 'Update coaching'));
   if ((sc.owner && (sc.owner.labels || []).length) || status === 'done') {
     parts.push(_coachOwnerLine(sc), _coachPickerHtml(sc, segments, false));
   }
   if (sc.mixed_up) {
     parts.push(_coachNotice('Marked as speakers mixed up, so this report is left out of your progress.', '', '', 'info'));
   }
-  // A run that failed or was interrupted before measuring anything has no metrics
-  const hasMetrics = !!(sc.metrics && sc.metrics.owner);
+  // A run whose AI review failed still measured the metrics; one that failed or was
+  // interrupted before measuring anything has none of its own
+  const hasMetrics = !previous && !!(sc.metrics && sc.metrics.owner);
   if (status === 'failed') {
     const errors = _coachErrors(sc.status_reason);
     parts.push(`
@@ -562,6 +567,7 @@ function _coachReportHtml(sidecar, baseline, segments) {
         <h3 class="coach-h">${hasMetrics ? 'The AI review didn’t finish' : 'Coaching didn’t finish'}</h3>
         ${errors.length ? `<ul class="coach-errors">${errors.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>` : ''}
         ${hasMetrics ? '<p class="coach-muted">The measured metrics below are still right.</p>' : ''}
+        ${previous ? '<p class="coach-muted">The previous report is hidden, as it may no longer match.</p>' : ''}
         <button type="button" class="action-btn subtle" data-coach-action="run">Try again</button>
       </section>`);
   } else if (!review) {

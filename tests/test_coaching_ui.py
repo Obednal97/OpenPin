@@ -282,6 +282,8 @@ CASES = {
         }
     },
     "empty": {"sidecar": {"targets": TARGETS}},
+    # A rerun that was interrupted: the review and metrics on file are the previous run's
+    "failed_previous": {"sidecar": {**DONE, "status": "failed", "status_reason": "Coaching was interrupted. Try again."}},
     # The review dropped listening and charisma: none of their evidence matched the transcript
     "partial": {
         "sidecar": {
@@ -472,6 +474,17 @@ class TestReport:
         assert "openai: timeout" in html
         assert "Measures" in html
         assert "Try again" in html
+
+    def test_failed_rerun_hides_the_previous_report(self, out):
+        html = out["failed_previous"]
+        assert "Coaching didn’t finish" in html
+        assert "Coaching was interrupted. Try again." in html
+        assert "previous report is hidden" in html
+        assert 'data-coach-action="run"' in html
+        # Neither the old review nor the metrics measured with it pass as this run's
+        for old in ("The AI review didn’t finish", "still right", "Overall", "Measures", "How they responded"):
+            assert old not in html
+        assert "This is you:" in html
 
     def test_not_coached_yet(self, out):
         assert 'data-coach-action="run"' in out["empty"]
