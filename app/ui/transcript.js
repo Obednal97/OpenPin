@@ -77,6 +77,36 @@ function openTranscript(sessionId, autoPlay = false) {
   // new-tag box and "Done".
   let tagPickerOpen = false;
 
+  // Tags change one at a time on the server, never by saving the whole list,
+  // so this window can't wipe a tag an AI tool added since it opened. The
+  // server's reply is the recording's real tags (and new tags join the picker
+  // there). On failure the click is undone and the reason shown.
+  async function saveTagChange(tag, adding) {
+    let res;
+    try {
+      res = adding
+        ? await window.plaud.addTags([sessionId], [tag])
+        : await window.plaud.removeTags([sessionId], [tag]);
+    } catch (err) {
+      res = { error: (err && err.message) || 'Could not save the tag' };
+    }
+    const saved = res && res.tags && res.tags[sessionId];
+    if (saved) {
+      currentTags.splice(0, currentTags.length, ...saved);
+      saved.forEach((t) => {
+        if (!availableTags.some((a) => a.toLowerCase() === t.toLowerCase())) availableTags.push(t);
+      });
+      app.settings.available_tags = availableTags;
+    } else {
+      const at = currentTags.findIndex((t) => t.toLowerCase() === tag.toLowerCase());
+      if (adding && at >= 0) currentTags.splice(at, 1);
+      if (!adding && at < 0) currentTags.push(tag);
+      toast(((res && (res.errors && res.errors[sessionId])) || (res && res.error)) || 'Could not save the tag', 'error');
+    }
+    rec.tags = currentTags;
+    if (app.currentView === 'transcript' && app.currentSessionId === sessionId) renderTagPicker();
+  }
+
   function renderTagPicker() {
     const shown = availableTags.filter((tag) => tagPickerOpen || currentTags.includes(tag));
     // Tags set elsewhere (e.g. spoken) that aren't in the list yet
@@ -111,16 +141,17 @@ function openTranscript(sessionId, autoPlay = false) {
       btn.addEventListener('click', () => {
         const tag = btn.dataset.tag;
         const idx = currentTags.indexOf(tag);
-        if (idx >= 0) {
-          currentTags.splice(idx, 1);
-        } else {
+        const adding = idx < 0;
+        if (adding) {
           currentTags.push(tag);
+        } else {
+          currentTags.splice(idx, 1);
         }
         rec.tags = currentTags;
-        // Render immediately — the server-side tag endpoint just saves locally
-        // and enqueues the Notion sync, so the UI doesn't need to wait.
+        // Render immediately: the server just saves locally and queues the
+        // Notion sync, so the UI doesn't need to wait.
         renderTagPicker();
-        window.plaud.tagRecording(sessionId, currentTags).catch(() => {});
+        saveTagChange(tag, adding);
       });
     });
 
@@ -133,22 +164,16 @@ function openTranscript(sessionId, autoPlay = false) {
         return;
       }
       if (e.key !== 'Enter') return;
-      const newTag = addInput.value.trim();
-      if (!newTag) return;
+      const typed = addInput.value.trim();
+      if (!typed) return;
       e.preventDefault();
-      const addedToAvailable = !availableTags.includes(newTag);
-      if (addedToAvailable) {
-        availableTags.push(newTag);
-        const customTags = availableTags.filter(
-          (t) => !['Group Meeting', '1:1', 'Memo', 'Journal', 'Interview', 'Lecture'].includes(t),
-        );
-        app.settings.available_tags = availableTags;
-        window.plaud.saveSettings({ custom_tags: customTags }).catch(() => {});
-      }
-      if (!currentTags.includes(newTag)) {
+      // An existing tag's spelling wins (the server applies the same rule and
+      // adds a new tag to the picker list itself).
+      const newTag = availableTags.concat(currentTags).find((t) => t.toLowerCase() === typed.toLowerCase()) || typed;
+      if (!currentTags.some((t) => t.toLowerCase() === newTag.toLowerCase())) {
         currentTags.push(newTag);
         rec.tags = currentTags;
-        window.plaud.tagRecording(sessionId, currentTags).catch(() => {});
+        saveTagChange(newTag, true);
       }
       renderTagPicker();
     });
