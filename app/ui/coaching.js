@@ -660,15 +660,20 @@ function _coachExcludedHtml() {
 
 /** The whole tab for one sidecar. segments are the transcript's, for the speaker picker;
     names its speaker names ({label: name}), shown wherever a speaker is.
-    Every state but an excluded one (or an error) ends with "Don't coach this recording". */
+    Every state but an excluded one (or an error) ends with "Don't coach this recording";
+    a finished report also offers "Coach again" there (a forced run that keeps who's you
+    and never learns the voice), so a report made before a new section can gain it. */
 function _coachReportHtml(sidecar, baseline, segments, names = {}) {
   _coachNames = names && typeof names === 'object' ? names : {};
   const sc = sidecar || {};
   if (sc.error) return _coachReportBodyHtml(sc, baseline, segments);
   if (sc.excluded || sc.status === 'excluded') return _coachExcludedHtml();
+  const again = sc.status === 'done'
+    ? '<button type="button" class="coach-link coach-again" data-coach-action="coach-again">Coach again</button><span class="coach-sep" aria-hidden="true">·</span>'
+    : '';
   return `${_coachReportBodyHtml(sc, baseline, segments)}
     <div class="coach-exclude-row">
-      <button type="button" class="coach-link coach-exclude" data-coach-action="exclude">Don’t coach this recording</button>
+      ${again}<button type="button" class="coach-link coach-exclude" data-coach-action="exclude">Don’t coach this recording</button>
     </div>`;
 }
 
@@ -1007,7 +1012,7 @@ function _coachDraw(container, sessionId, sidecar, baseline) {
     const action = btn.dataset.coachAction;
     if (action === 'change-owner') _coachTogglePicker(container, btn.getAttribute('aria-expanded') !== 'true');
     else if (action === 'cancel-owner') _coachTogglePicker(container, false);
-    else if (action === 'run') _coachRun(container, sessionId, sidecar, btn);
+    else if (action === 'run' || action === 'coach-again') _coachRun(container, sessionId, sidecar, btn);
     else if (action === 'save-owner') _coachSaveOwner(container, sessionId, sidecar, btn);
     else if (action === 'reload') renderCoachingTab(container, sessionId);
     else if (action === 'voice-settings') _coachOpenVoiceSettings();

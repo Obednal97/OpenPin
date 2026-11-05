@@ -631,6 +631,111 @@ class TestReport:
             assert "Don’t coach this recording" in html, name
 
 
+class TestCoachAgain:
+    """Every finished report can be coached again (an older one gains Engagement that way)."""
+
+    def test_on_every_finished_report_only(self, out):
+        for name in ("done", "noengagement", "stale", "metricsonly", "reviewoff"):
+            html = out[name]
+            assert html.count('data-coach-action="coach-again"') == 1, name
+            assert ">Coach again</button>" in html, name
+        for name in ("running", "needs_owner", "skipped", "skipped_only_you", "failed", "failed_previous", "empty"):
+            assert "coach-again" not in out[name], name
+        assert "coach-again" not in out["excluded"]
+
+    def test_beside_dont_coach_and_in_its_style(self, out):
+        html = out["noengagement"]
+        row = html[html.index('<div class="coach-exclude-row">') :]
+        row = row[: row.index("</div>")]
+        assert row.index('data-coach-action="coach-again"') < row.index('data-coach-action="exclude"')
+        assert '<button type="button" class="coach-link coach-again" data-coach-action="coach-again">' in row
+
+
+_AGAIN_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const el = () => ({ classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, setAttribute() {},
+  appendChild() {}, style: {}, dataset: {} });
+const timers = new Map();
+let nextId = 1;
+let clock = 1e12;
+class FakeDate extends Date { static now() { return clock; } }
+const ctx = { console, window: {}, setTimeout, clearTimeout, Date: FakeDate,
+  setInterval: (fn) => { timers.set(nextId, fn); return nextId++; }, clearInterval: (id) => timers.delete(id),
+  document: { querySelector: () => null, querySelectorAll: () => [], createElement: el, body: el() } };
+vm.createContext(ctx);
+for (const f of process.argv.slice(1, 3)) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx);
+const r = (code) => vm.runInContext(code, ctx);
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+const app = r('app');
+Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'coaching' });
+app.transcripts.s1 = { segments: [] };
+const calls = [];
+let gets = [];
+ctx.window.plaud = {
+  coaching: async () => { calls.push('get'); return gets.length > 1 ? gets.shift() : gets[0]; },
+  coachingProgress: async () => ({ baseline: null }),
+  coachingRun: async (sid) => { calls.push(['run', sid]); return { started: true }; },
+  coachingSetOwner: async () => { calls.push('owner'); return {}; },
+  voiceSetup: async () => { calls.push('voice'); return {}; },
+};
+const c = { innerHTML: '', dataset: {}, isConnected: true, classList: { contains: () => false } };
+const btn = { dataset: { coachAction: 'coach-again' }, disabled: false, classList: { add() {}, remove() {} }, style: {} };
+const settle = () => new Promise((res) => setTimeout(res, 5));
+const tick = async () => { clock += 5000; for (const fn of [...timers.values()]) await fn(); await settle(); };
+(async () => {
+  const out = {};
+  r('_coachDraw')(c, 's1', data.old, null);
+  c.onclick({ target: { closest: (sel) => (sel === '[data-coach-action]' ? btn : null) } });
+  await settle();
+  out.calls = calls.splice(0);
+  out.running = c.innerHTML.includes('coach-spinner');
+  out.polling = timers.size === 1;
+  // The old outcome first (the run hasn't marked itself running yet), then running, then the new report
+  gets = [data.old, { ...data.old, status: 'running' }, data.fresh];
+  await tick();
+  out.waitsOnOld = c.innerHTML.includes('coach-spinner');
+  await tick();
+  await tick();
+  out.newReport = c.innerHTML.includes('coach-engagement') && timers.size === 0;
+  out.later = calls.filter((x) => x !== 'get');
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def again_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    old = {k: v for k, v in DONE.items() if k != "engagement"}
+    payload = {
+        "old": {**old, "created_at": "2026-11-01T10:00:00+00:00"},
+        "fresh": {**DONE, "created_at": "2026-11-05T10:00:00+00:00"},
+    }
+    res = subprocess.run(
+        [node, "-e", _AGAIN_JS, str(APP / "ui" / "utils.js"), str(COACH_JS)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+class TestCoachAgainRun:
+    def test_runs_the_recording_again_and_shows_running(self, again_out):
+        # POST /coaching/<sid>/run only: no owner pick, so nothing teaches the voice
+        assert again_out["calls"] == [["run", "s1"]]
+        assert again_out["running"]
+        assert again_out["polling"]
+
+    def test_polls_until_the_new_report_lands(self, again_out):
+        assert again_out["waitsOnOld"]
+        assert again_out["newReport"]
+        assert again_out["later"] == []
+
+
 def _engagement(html):
     start = html.index('<section class="coach-card coach-engagement">')
     return html[start : html.index("</section>", start)]

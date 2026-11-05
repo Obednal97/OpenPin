@@ -23,6 +23,11 @@ never stops a run: if it can't run, that part is "unavailable" with a reason.
 A result is dropped if the transcript text changed while the run was going, if a newer
 run for the same recording started meanwhile, or if the recording was excluded meanwhile.
 A trigger that arrives during a run is queued and runs once the current run finishes.
+
+"Coach them again" (Progress) re-runs every finished report saved before Engagement existed
+(``start_rerun_all``): one recording at a time on one daemon thread, each through
+``run_coaching(sid, None, force=True)``, so the rules above apply to each. One bulk run at a
+time; cancelling stops it after the recording in progress.
 """
 
 import json
@@ -39,6 +44,7 @@ from app.coaching.targets import LAUGHTER_MAX_S, MIN_COACHING_SECONDS
 from app.providers.llm_json import ollama_unavailable
 from app.utils.config import load_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.paths import InvalidSessionIdError, validate_session_id
 from app.utils.transcript_locks import get_transcript_lock
 
 log = logging.getLogger(__name__)
@@ -66,6 +72,10 @@ _lock = Lock()
 _running: dict[str, int] = {}  # runs in progress per session in this process
 _pending: dict[str, dict] = {}  # one queued rerun per session: {"audio_path", "force"}
 _generation: dict[str, int] = {}  # latest run number per session; older runs drop their result
+
+# The one bulk re-run ("Coach them again"): progress, the recording in progress, and a stop request
+_bulk_lock = Lock()
+_bulk: dict = {"running": False, "done": 0, "total": 0, "current": None, "cancel": False}
 
 
 # ---------------------------------------------------------------- inputs
@@ -669,3 +679,90 @@ def set_excluded(session_id: str, excluded: bool) -> dict:
     saved = store.update(session_id, mutate)
     _owner_changed(session_id, before, saved)
     return saved
+
+
+# ---------------------------------------------------------------- coach older reports again
+
+
+def _needs_rerun(session_id: str, sidecar: dict) -> bool:
+    """A finished report saved before Engagement existed, for a recording that can still be coached."""
+    return (
+        sidecar.get("status") == "done"
+        and "engagement" not in sidecar
+        and not sidecar.get("excluded")
+        and has_transcript(session_id)
+    )
+
+
+def rerun_candidates() -> list[str]:
+    """Every recording "Coach them again" would coach now, in session id order."""
+    directory = store.COACHING_DIR
+    out = []
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+        sid = path.stem
+        if not store.is_sidecar_stem(sid):  # the words files and the voice profile
+            continue
+        try:
+            validate_session_id(sid)
+        except InvalidSessionIdError:
+            continue
+        if _needs_rerun(sid, store.load(sid)):
+            out.append(sid)
+    return out
+
+
+def rerun_all_status() -> dict:
+    """``{"running", "done", "total", "current"}`` for the bulk re-run (the last one's, once it ends)."""
+    with _bulk_lock:
+        return {key: _bulk[key] for key in ("running", "done", "total", "current")}
+
+
+def start_rerun_all() -> bool:
+    """Coach every ``rerun_candidates`` recording again, one at a time, in a daemon thread.
+
+    Returns False, starting nothing, if a bulk re-run is already going.
+    """
+    with _bulk_lock:
+        if _bulk["running"]:
+            return False
+        _bulk.update(running=True, done=0, total=0, current=None, cancel=False)
+    try:
+        session_ids = rerun_candidates()
+        with _bulk_lock:
+            _bulk["total"] = len(session_ids)
+        Thread(target=_rerun_all, kwargs={"session_ids": session_ids}, daemon=True).start()
+    except BaseException:
+        with _bulk_lock:
+            _bulk.update(running=False, current=None)
+        raise
+    return True
+
+
+def cancel_rerun_all() -> bool:
+    """Stop the bulk re-run after the recording in progress. False if none is going."""
+    with _bulk_lock:
+        if not _bulk["running"]:
+            return False
+        _bulk["cancel"] = True
+        return True
+
+
+def _rerun_all(session_ids: list[str]) -> None:
+    try:
+        for sid in session_ids:
+            with _bulk_lock:
+                if _bulk["cancel"]:
+                    return
+                _bulk["current"] = sid
+            try:
+                # Checked again: since the list was made, it may have been excluded or coached again.
+                # Never learns the voice (only an owner pick does) and keeps the saved owner.
+                if _needs_rerun(sid, store.load(sid)):
+                    run_coaching(sid, None, force=True)
+            except Exception as e:
+                log.warning("coaching %s again failed: %s", sid, e, exc_info=True)
+            with _bulk_lock:
+                _bulk["done"] += 1
+    finally:
+        with _bulk_lock:
+            _bulk.update(running=False, current=None, cancel=False)
