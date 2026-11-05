@@ -316,9 +316,12 @@ def test_enable_writes_launcher(access):
     [
         ("/Users/x/Library/Application Support/com.plaud.v2/venv/bin/python3", "com.plaud.v2"),
         ("/Users/x/Library/Application Support/com.plaud.v2.dev/venv/bin/python3", "com.plaud.v2.dev"),
-        ("/Users/x/.venvs/plaud-v2/bin/python", "com.plaud.v2"),
-        ("/opt/homebrew/bin/python3", "com.plaud.v2"),
-        ("/Users/x/Library/Application Support/other/venv/bin/python3", "com.plaud.v2"),
+        # Anything else is a backend run from a checkout (or tests): the dev folder, so it
+        # never rewrites the installed app's launcher with paths into the checkout.
+        ("/Users/x/.venvs/plaud-v2/bin/python", "com.plaud.v2.dev"),
+        ("/opt/homebrew/bin/python3", "com.plaud.v2.dev"),
+        ("/Users/x/Library/Application Support/other/venv/bin/python3", "com.plaud.v2.dev"),
+        ("/Users/x/projects/plaud-v2/venv/bin/python3", "com.plaud.v2.dev"),
     ],
 )
 def test_support_dir_follows_the_build(executable, folder):

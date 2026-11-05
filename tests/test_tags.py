@@ -292,3 +292,93 @@ def test_ui_uses_add_remove_not_whole_list():
     assert re.search(r"\.removeTags\(", ui["transcript.js"])
     assert re.search(r"\.addTags\(", ui["recordings.js"])
     assert re.search(r"\.removeTags\(", ui["recordings.js"])
+
+
+# ---------------------------------------------------------------------------
+# The transcript's tag picker works from the recording's tags at click time
+# ---------------------------------------------------------------------------
+
+_PICKER_JS = r"""
+const app = r('app');
+app.settings = { available_tags: ['Work', 'Home', 'Ideas'] };
+Object.assign(app, { currentView: 'transcript', currentSessionId: 's1' });
+let tagsNow = ['Work'];  // the server's tags
+ctx.window.plaud = {
+  addTags: async (ids, tags) => { calls.push(['add', tags]); tagsNow = [...new Set([...tagsNow, ...tags])]; return { tags: { s1: tagsNow } }; },
+  removeTags: async (ids, tags) => { calls.push(['remove', tags]); tagsNow = tagsNow.filter((t) => !tags.includes(t)); return { tags: { s1: tagsNow } }; },
+};
+const picker = r("$('#transcript-tags')");
+// The elements the markup holds, as the browser would build them
+const byId = {};
+document.getElementById = (id) => (picker.innerHTML.includes(`id="${id}"`) ? (byId[id] = new El()) : null);
+// (the same elements until the markup is set again, so their click handlers stay on them)
+let built = null;
+Object.defineProperty(picker, 'innerHTML', {
+  get() { return this._html; },
+  set(v) { this._html = String(v); built = null; },
+});
+picker.querySelectorAll = () => {
+  if (!built) {
+    built = [...picker.innerHTML.matchAll(/<button class="tag-option ([^"]*)" data-tag="([^"]*)"/g)].map((m) => {
+      const b = new El('button');
+      b.dataset.tag = m[2];
+      m[1].split(/\s+/).filter(Boolean).forEach((c) => b.classList.add(c));
+      return b;
+    });
+  }
+  return built;
+};
+const click = (tag) => fire(picker.querySelectorAll().find((b) => b.dataset.tag === tag), 'click');
+const shown = () => picker.querySelectorAll().map((b) => [b.dataset.tag, b.classList.contains('active')]);
+const reload = (tags) => { app.recordings = [{ session_id: 's1', title: 'Chat', tags: [...tags] }]; };
+const out = {};
+
+(async () => {
+  reload(['Work']);
+  r('_txMountTagPicker')('s1', app.recordings[0]);
+  out.collapsed = shown();
+  await fire(byId['tag-picker-open'], 'click');
+  out.open = shown();
+
+  // A click adds, and the server's reply lands on the recording in app.recordings
+  await click('Home');
+  out.addCalls = calls.splice(0);
+  out.afterAdd = shown();
+  out.liveAfterAdd = [...app.recordings[0].tags];
+
+  // An AI tool removes Work and Home and adds Ideas; the list reloads (new objects)
+  // while the picker is open, so it isn't drawn again
+  tagsNow = ['Ideas'];
+  reload(tagsNow);
+  // The user clicks Work, still shown as on, to remove it: the AI tool already did,
+  // so nothing is sent (never an add) and the picker shows the recording's real tags
+  await click('Work');
+  out.staleRemoveCalls = calls.splice(0);
+  out.afterStaleRemove = shown();
+  // Likewise a click on an off tag the AI tool already added
+  tagsNow = ['Ideas', 'Home'];
+  reload(tagsNow);
+  await click('Ideas');  // shown on: removes it (the server has it too)
+  out.removeCalls = calls.splice(0);
+  out.liveAfterRemove = [...app.recordings[0].tags];
+  out.afterRemove = shown();
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_tag_picker_decides_from_the_recordings_current_tags():
+    from tests.test_speaker_names_ui import _run
+
+    out = _run(_PICKER_JS, ["utils.js", "recordings.js", "transcript.js"], {})
+    assert out["collapsed"] == [["Work", True]]
+    assert out["open"] == [["Work", True], ["Home", False], ["Ideas", False]]
+    assert out["addCalls"] == [["add", ["Home"]]]
+    assert out["afterAdd"] == [["Work", True], ["Home", True], ["Ideas", False]]
+    assert out["liveAfterAdd"] == ["Work", "Home"]
+    # Work was already gone: no request, least of all an add
+    assert out["staleRemoveCalls"] == []
+    assert out["afterStaleRemove"] == [["Work", False], ["Home", False], ["Ideas", True]]
+    assert out["removeCalls"] == [["remove", ["Ideas"]]]
+    assert out["liveAfterRemove"] == ["Home"]
+    assert out["afterRemove"] == [["Work", False], ["Home", True], ["Ideas", False]]

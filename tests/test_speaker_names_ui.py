@@ -705,8 +705,10 @@ class TestSummary:
 
     def test_save_sends_names_and_keeps_labels_locally(self, tx):
         sent = "## Notes\n- Ollie asked Sarah <Jones> about pricing.\n- Speaker 10 agreed with Sarah <Jones>."
-        assert tx["savedSummaryCalls"] == [["update", "s1", {"summary": sent}]]
         names = TRANSCRIPT["speaker_names"]
+        # With the exact names the editor showed, so the backend reverses with those
+        # even if an AI tool changed the names while the editor was open
+        assert tx["savedSummaryCalls"] == [["update", "s1", {"summary": sent, "summary_names": names}]]
         assert tx["localSummary"] == sn.names_to_labels(sent, names)
         assert tx["localSummary"] == (
             "## Notes\n- Speaker 1 asked Speaker 2 about pricing.\n- Speaker 10 agreed with Speaker 2."
@@ -778,12 +780,14 @@ def test_shared_name_keeps_labels_in_summary_editor(tx):
     # Edited with the labels kept, so the save can't lose them
     assert tx["sharedEditorText"] == "Speaker 1 asked Speaker 2; Tom agreed."
     sent = "Speaker 1 asked Speaker 2; Tom agreed. Done."
-    assert tx["sharedSaveCalls"] == [["update", "s1", {"summary": sent}]]
+    # Only the names the editor showed go with it
+    assert tx["sharedSaveCalls"] == [["update", "s1", {"summary": sent, "summary_names": {"Speaker 10": "Tom"}}]]
     names = {"Speaker 1": "Sarah", "Speaker 2": "Sarah", "Speaker 10": "Tom"}
     stored = "Speaker 1 asked Speaker 2; Speaker 10 agreed. Done."
     assert tx["sharedLocalSummary"] == stored
     # The backend stores the same
     assert sn.names_to_labels(sent, names) == stored
+    assert sn.names_to_labels(sent, {"Speaker 10": "Tom"}) == stored
 
 
 def test_background_redraw_waits_for_the_name_editor(tx):

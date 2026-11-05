@@ -1,7 +1,7 @@
 """Speaker names: the {label: name} layer on a transcript, its routes, summaries and Notion."""
 
 import json
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -66,6 +66,16 @@ def _user_owner(labels, segments=SEGMENTS, **extra):
 
 def _set_profile(name):
     update_config(lambda c: c.setdefault("profile", {}).__setitem__("name", name))
+
+
+@contextmanager
+def _notion_linked(connected=True):
+    """The recording has a Notion page, and Notion is connected (or not)."""
+    with (
+        patch("app.routes.notion._get_notion_page_url", return_value="https://www.notion.so/p-abc"),
+        patch("app.state.notion.is_connected", return_value=connected),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------- pure functions
@@ -317,6 +327,52 @@ def test_summary_saved_with_names_is_stored_as_labels(env):
     assert _read(env["trn"])["summary"] == "Speaker 1 agreed with Speaker 10; Speaker 2 and Sarahs did not."
 
 
+@pytest.mark.parametrize(
+    "now",
+    [
+        {"Speaker 1": "Sarah Jones"},  # renamed while the editor was open
+        {"Speaker 1": None},  # cleared
+        {"Speaker 2": "Sarah"},  # now shared with Speaker 2
+    ],
+)
+def test_summary_save_uses_the_names_the_editor_showed(env, now):
+    """An AI tool changes the names while the summary editor is open: the save still
+    turns the names the editor showed back into their labels."""
+    from app.state import speakers
+
+    _write(env["trn"], summary="Speaker 1 met Speaker 2.")
+    speakers.set_names(SID, {"Speaker 1": "Sarah"})
+    shown = speakers.get_names(SID)  # what the editor was built from
+    speakers.set_names(SID, now)
+    r = env["client"].post(
+        "/transcripts/update",
+        json={"session_id": SID, "summary": "Sarah met Speaker 2. Sarah agreed.", "summary_names": shown},
+    )
+    assert r.status_code == 200
+    assert _read(env["trn"])["summary"] == "Speaker 1 met Speaker 2. Speaker 1 agreed."
+
+
+@pytest.mark.parametrize(
+    "summary_names",
+    [
+        ["Speaker 1"],
+        "Sarah",
+        {"Speaker 9": "Sarah"},  # not a speaker in this transcript
+        {"Speaker 1": 5},
+        {"Speaker 1": None},
+        {"Speaker 1": ["Sarah"]},
+    ],
+)
+def test_summary_names_must_be_this_transcripts_labels(env, summary_names):
+    _write(env["trn"], summary="Speaker 1 met Speaker 2.")
+    r = env["client"].post(
+        "/transcripts/update",
+        json={"session_id": SID, "summary": "Sarah met Speaker 2.", "summary_names": summary_names},
+    )
+    assert r.status_code == 400
+    assert _read(env["trn"])["summary"] == "Speaker 1 met Speaker 2."
+
+
 def test_notion_content_uses_names(env):
     from app.routes import notion as rn
     from app.state import speakers
@@ -342,12 +398,21 @@ def test_set_names_enqueues_full_notion_update_when_linked(env):
     speakers.set_names(SID, {"Speaker 1": "Sarah"})
     env["enqueue"].assert_not_called()
 
-    with patch("app.routes.notion._get_notion_page_url", return_value="https://www.notion.so/p-abc"):
+    with _notion_linked():
         speakers.set_names(SID, {"Speaker 2": "Bob"})
         env["enqueue"].assert_called_once_with(SID, notion_queue.KIND_FULL)
         env["enqueue"].reset_mock()
         speakers.set_names(SID, {"Speaker 2": "Bob"})  # no change: nothing to send
         env["enqueue"].assert_not_called()
+
+
+def test_names_changed_queues_nothing_while_notion_is_disconnected(env):
+    from app.state import speakers
+
+    _write(env["trn"])
+    with _notion_linked(connected=False):
+        speakers.set_names(SID, {"Speaker 1": "Sarah"})
+    env["enqueue"].assert_not_called()
 
 
 def test_user_owner_pick_enqueues_notion_update(env, monkeypatch):
@@ -356,7 +421,7 @@ def test_user_owner_pick_enqueues_notion_update(env, monkeypatch):
     _set_profile("Ollie")
     _write(env["trn"])
     monkeypatch.setattr(runner, "_learn_and_run", lambda sid, *a, **k: (None, store.load(sid)))
-    with patch("app.routes.notion._get_notion_page_url", return_value="https://www.notion.so/p-abc"):
+    with _notion_linked():
         runner.set_owner(SID, ["Speaker 1"], learn=False)
         env["enqueue"].assert_called_once_with(SID, notion_queue.KIND_FULL)
 
@@ -380,7 +445,7 @@ def test_user_owner_pick_enqueues_notion_update(env, monkeypatch):
 def test_owner_pick_without_profile_name_queues_nothing(env, monkeypatch):
     _write(env["trn"])
     monkeypatch.setattr(runner, "_learn_and_run", lambda sid, *a, **k: (None, store.load(sid)))
-    with patch("app.routes.notion._get_notion_page_url", return_value="https://www.notion.so/p-abc"):
+    with _notion_linked():
         runner.set_owner(SID, ["Speaker 1"], learn=False)
     env["enqueue"].assert_not_called()
 
