@@ -464,9 +464,12 @@ hears about the change. The connector speaks MCP's JSON-RPC itself (`initialize`
   tools). Turning it on calls `access.enable(port)`: a random MCP key kept in memory only,
   `mcp-connection.json` (`{port, key, pid}`, mode `0600`, in the data folder) and the launcher.
   Launch does the same while the setting is on.
-- The file is deleted when the switch goes off and on a clean quit (including SIGTERM). A file left
-  by a crash is harmless: the connector gets a refused connection or a rejected key and says Open
-  Pin isn't running. A restarted backend never deletes a file another process owns.
+- While the app runs with the switch off (turned off, or launched with it off), the file is a
+  keyless marker, `{port, pid, enabled: false}`, so the connector tells AI tools that access is
+  turned off and where to turn it on, not that the app isn't running. A clean quit (including
+  SIGTERM) deletes the file. A file left by a crash is harmless: its pid is gone, so the connector
+  says Open Pin isn't running and never sends the key. A restarted backend never deletes a file
+  another process owns.
 - The launcher is a small shell script at a fixed path in Application Support, never inside the
   bundle, which can move on update. It is rewritten at each launch while access is on, sets
   `PLAUD_DATA_DIR`, and fails with a plain stderr message if the app has been deleted. Turning the
