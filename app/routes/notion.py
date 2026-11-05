@@ -349,7 +349,7 @@ def _build_app_section(t_data, session_id, stamp=None):
     try:
         from app.state import speakers
 
-        names = speakers.names_for(session_id, t_data)
+        names = speakers.names_for(session_id, t_data, profile=speakers.profile_name())
     except Exception as e:
         logging.warning(f"Could not read speaker names for {session_id}: {e}")
         names = {}

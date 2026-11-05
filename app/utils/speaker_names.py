@@ -15,6 +15,9 @@ import re
 
 MAX_NAME_CHARS = 80
 _FORBIDDEN = (":", "*")  # break the "Speaker: text" lines and Markdown bold
+# A name that looks like a label ("Speaker 2") would be read back as that label when a
+# summary is saved, so it would silently point at another speaker.
+_LABEL_LIKE = re.compile(r"speaker\s*\d+", re.IGNORECASE)
 
 
 def validate_name(name) -> str:
@@ -30,6 +33,8 @@ def validate_name(name) -> str:
         raise ValueError("A speaker name can't contain control characters")
     if any(ch in name for ch in _FORBIDDEN):
         raise ValueError("A speaker name can't contain : or *")
+    if _LABEL_LIKE.fullmatch(name):
+        raise ValueError("A speaker name can't look like a speaker label, such as Speaker 2")
     return name
 
 
@@ -129,16 +134,20 @@ def drop_if_relabelled(data: dict, old_segments) -> bool:
     """After a transcript's segments were replaced: drop the names if the speakers were detected again.
 
     ``data`` is the transcript dict with its new segments; ``old_segments`` the segments before.
-    Names are kept when the labelling (``labelling_fingerprint``) is unchanged. When they are
-    dropped, ``speaker_names_cleared`` is set so the UI can say so once. Returns True if dropped.
+    Names are kept when the labelling (``labelling_fingerprint``) matches the one they were
+    given for. Segments without any labels drop them too: callers whose labels are still
+    coming (background diarisation pending) must not call this until they arrive. When names
+    are dropped, ``speaker_names_cleared`` is set so the UI can say so once. Returns True if
+    dropped.
     """
     from app.coaching.runner import labelling_fingerprint
 
     if not data.get("speaker_names"):
         return False
-    new = labelling_fingerprint(data.get("segments") or [])
+    segments = data.get("segments") or []
+    new = labelling_fingerprint(segments)
     reference = data.get("speaker_names_labelling") or labelling_fingerprint(old_segments or [])
-    if new == reference:
+    if speaker_labels(segments) and new == reference:
         data["speaker_names_labelling"] = new
         return False
     data["speaker_names"] = {}

@@ -52,21 +52,23 @@ def profile_name() -> str | None:
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
-def names_for(session_id: str, transcript: dict, profile: str | None = None) -> dict[str, str]:
+def names_for(session_id: str, transcript: dict, *, profile: str | None) -> dict[str, str]:
     """The effective names for an already-read transcript (stored names plus your own).
 
-    Reads the coaching sidecar (no lock: it is written atomically), so it is safe to call
-    while holding the transcript lock.
+    ``profile`` is your name (``profile_name()``, read by the caller beforehand; None for
+    none). It is a required keyword so this never reads the config itself: it only reads
+    the coaching sidecar, which takes no lock (it is written atomically), so it is safe to
+    call while holding the transcript lock.
     """
-    if profile is None:
-        profile = profile_name()
     return sn.effective_names(transcript, coaching_store.load(session_id), profile)
 
 
 def get_names(session_id: str) -> dict[str, str]:
     """The effective names for a recording, or {} without a transcript."""
     transcript = _read(session_id)
-    return names_for(session_id, transcript) if transcript is not None else {}
+    if transcript is None:
+        return {}
+    return names_for(session_id, transcript, profile=profile_name())
 
 
 def _notion_linked(session_id: str) -> bool:
@@ -198,7 +200,7 @@ def participants(session_id: str, profile: str | None = None) -> list[str]:
         result: list[str] = []
     else:
         transcript = _read(session_id)
-        names = names_for(session_id, transcript, profile) if transcript else {}
+        names = names_for(session_id, transcript, profile=profile) if transcript else {}
         result = list(dict.fromkeys(names.values()))
     with _cache_lock:
         _participants_cache[session_id] = (key, result)

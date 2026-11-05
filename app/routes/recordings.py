@@ -869,7 +869,7 @@ def list_transcripts():
                     # Names over the labels: the effective ones to show (your profile name on
                     # your speaker once you picked it), the ones typed, and whether a
                     # re-transcription just cleared them (the UI says so once).
-                    "speaker_names": speakers.names_for(f.stem, data, profile),
+                    "speaker_names": speakers.names_for(f.stem, data, profile=profile),
                     "stored_speaker_names": sn.stored_names(data),
                     "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
                     "summary": data.get("summary", ""),
@@ -957,7 +957,7 @@ def update_transcript():
         transcript = json.loads(json_path.read_text())
         old_text = transcript.get("text")
         # The editor shows names; stored summaries stay in label form so renaming keeps working.
-        names = speakers.names_for(session_id, transcript, profile)
+        names = speakers.names_for(session_id, transcript, profile=profile)
 
         if "segments" in data:
             transcript["segments"] = data["segments"]

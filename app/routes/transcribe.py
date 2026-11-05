@@ -24,7 +24,7 @@ from app.utils.paths import (
     resolve_inside,
     validate_session_id,
 )
-from app.utils.speaker_names import drop_if_relabelled
+from app.utils.speaker_names import drop_if_relabelled, speaker_labels
 from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
 
@@ -147,7 +147,10 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
     ``summary_stale: true`` if a summary exists and the text changed. Speaker
     names are dropped (``speaker_names_cleared``) when the speakers were
     detected again with a different labelling, so a name never lands on the
-    wrong person. Returns the merged dict.
+    wrong person. Unlabelled segments with diarisation still to run
+    (``diarization_status`` "running") leave the names alone:
+    ``_background_diarize`` decides once the labels are known. Returns the
+    merged dict.
     """
     transcript_path = Path(transcript_path)
     with get_transcript_lock(session_id):
@@ -163,7 +166,11 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
         merged.update(new_fields)
         if existing.get("summary") and existing.get("text") != new_fields.get("text"):
             merged["summary_stale"] = True
-        drop_if_relabelled(merged, existing.get("segments"))
+        labels_pending = new_fields.get("diarization_status") == "running" and not speaker_labels(
+            new_fields.get("segments")
+        )
+        if not labels_pending:
+            drop_if_relabelled(merged, existing.get("segments"))
         _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
         if txt_text is not None:
             _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
@@ -246,8 +253,10 @@ def _background_diarize(
                 return
             old_segments = td.get("segments")
             td.update(fields)
-            if "segments" in fields:
-                drop_if_relabelled(td, old_segments)
+            # Names were kept while labels were pending (``_merge_transcript``): keep them for
+            # the same labelling, drop them for a different one, or when no labels came back
+            # (failed, or "none"), since then they can't return.
+            drop_if_relabelled(td, old_segments)
             _write_text_atomic(tp, json.dumps(td, indent=2, ensure_ascii=False))
             if write_txt and t_obj is not None:
                 _write_text_atomic(tp.with_suffix(".txt"), t_obj.formatted)

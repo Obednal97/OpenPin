@@ -165,27 +165,41 @@ def test_relabel_drops_names(env):
     assert "speaker_names_cleared" not in _read(env["trn"])
 
 
-def test_background_diarize_relabel_drops_names(env):
-    """Speaker labels added later by local diarization count as relabelling too."""
+PLAIN = [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in SEGMENTS]
+SWAPPED = {"Speaker 1": "Speaker 2", "Speaker 2": "Speaker 1", "Speaker 10": "Speaker 10"}
+
+
+def _diarize(env, outcome):
+    """Re-transcribe without labels (diarisation pending), then run background diarisation.
+
+    ``outcome``: "same" or "swapped" labelling, "none" (one speaker), or "crash".
+    """
     from app.routes import transcribe
 
-    text = "Hello there. Hi, how are you? Fine."
-    plain = [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in SEGMENTS]
-    _write(env["trn"], segments=plain, speaker_names={"Speaker 1": "Sarah"})
+    text = " ".join(s["text"] for s in SEGMENTS)
+    path = env["trn"] / f"{SID}.json"
+    transcribe._merge_transcript(
+        SID, path, {"text": text, "segments": PLAIN, "diarization_status": "running", "provider": "whisper"}
+    )
+    pending = _read(env["trn"])
+    # Labels are coming back: nothing is dropped or flagged yet.
+    assert pending["speaker_names"] == {"Speaker 1": "Sarah", "Speaker 2": "Bob"}
+    assert not pending.get("speaker_names_cleared")
 
     class Result:
-        status = "done"
-        message = ""
+        status = "none" if outcome == "none" else "done"
+        message = "" if outcome != "none" else "Only one speaker"
         engine = "diarize"
         segments = []
 
     def fake_merge(t_obj, _segments):
-        for seg, src in zip(t_obj.segments, SEGMENTS[::-1], strict=False):
-            seg.speaker = src["speaker"]
+        for seg, src in zip(t_obj.segments, SEGMENTS, strict=True):
+            seg.speaker = SWAPPED[src["speaker"]] if outcome == "swapped" else src["speaker"]
         return t_obj
 
+    run = {"side_effect": RuntimeError("boom")} if outcome == "crash" else {"return_value": Result()}
     with (
-        patch("src.transcribe.run_diarization", return_value=Result()),
+        patch("src.transcribe.run_diarization", **run),
         patch("src.transcribe.merge_transcript_with_diarization", side_effect=fake_merge),
         patch.object(transcribe, "fire_webhooks"),
         patch.object(transcribe, "_after_transcript_final"),
@@ -193,16 +207,68 @@ def test_background_diarize_relabel_drops_names(env):
         transcribe._background_diarize(
             audio_path="x.ogg",
             session_id=SID,
-            transcript_path=env["trn"] / f"{SID}.json",
-            segments=plain,
+            transcript_path=path,
+            segments=PLAIN,
             text=text,
             language="en",
             duration=70,
             provider="whisper",
         )
+    return _read(env["trn"])
+
+
+@pytest.mark.parametrize("outcome", ["same", "swapped", "none", "crash"])
+def test_retranscribe_then_diarize(env, outcome):
+    """Providers without labels save unlabelled segments first; diarisation then decides."""
+    from app.state import speakers
+
+    _write(env["trn"])
+    speakers.set_names(SID, {"Speaker 1": "Sarah", "Speaker 2": "Bob"})
+    saved = _diarize(env, outcome)
+    if outcome == "same":
+        assert saved["speaker_names"] == {"Speaker 1": "Sarah", "Speaker 2": "Bob"}
+        assert not saved.get("speaker_names_cleared")
+        assert speakers.get_names(SID) == {"Speaker 1": "Sarah", "Speaker 2": "Bob"}
+    else:
+        assert saved.get("speaker_names", {}) == {}
+        assert saved["speaker_names_cleared"] is True
+        assert speakers.get_names(SID) == {}
+
+
+def test_unlabelled_transcript_without_pending_diarization_drops_names(env):
+    from app.routes.transcribe import _merge_transcript
+    from app.state import speakers
+
+    _write(env["trn"])
+    speakers.set_names(SID, {"Speaker 1": "Sarah"})
+    _merge_transcript(SID, env["trn"] / f"{SID}.json", {"text": "x", "segments": PLAIN, "diarization_status": "none"})
     saved = _read(env["trn"])
     assert saved.get("speaker_names", {}) == {}
     assert saved["speaker_names_cleared"] is True
+
+
+def test_label_like_names_rejected(env):
+    from app.state import speakers
+
+    _write(env["trn"], summary="Speaker 1 met Speaker 2.")
+    for bad in ["Speaker 2", "speaker 12", "SPEAKER 1", " Speaker  3 ", "Speaker3"]:
+        with pytest.raises(ValueError, match="label"):
+            speakers.set_names(SID, {"Speaker 1": bad})
+    r = env["client"].post("/transcripts/speaker-names", json={"session_id": SID, "names": {"Speaker 1": "Speaker 2"}})
+    assert r.status_code == 400
+    assert speakers.set_names(SID, {"Speaker 1": "Speaker Jones"}) == {"Speaker 1": "Speaker Jones"}
+
+
+def test_names_for_never_reads_config(env):
+    """names_for runs under the transcript lock: the profile must be passed, never looked up."""
+    from app.state import speakers
+
+    t = _write(env["trn"])
+    with pytest.raises(TypeError):
+        speakers.names_for(SID, t)  # profile is a required keyword
+    with patch("app.state.speakers.load_config", side_effect=AssertionError("config read")):
+        assert speakers.names_for(SID, t, profile=None) == {}
+        assert speakers.names_for(SID, t, profile="Ollie") == {}
 
 
 def test_owner_default_only_after_user_pick(env):
