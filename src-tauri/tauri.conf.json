@@ -1,6 +1,6 @@
 {
   "productName": "Open Pin",
-  "version": "2.9.1",
+  "version": "2.9.2",
   "identifier": "com.plaud.v2",
   "build": {
     "beforeBuildCommand": { "script": "bash scripts/prepare-frontend.sh", "cwd": ".." },
