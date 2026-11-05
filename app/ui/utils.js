@@ -626,3 +626,73 @@ function closeSettings() {
     dom.settingsPanel.removeEventListener('transitionend', handler);
   });
 }
+
+/* ---------- Speaker names ----------
+   A recording's speakers can be named ({label: name}). Stored text keeps the labels
+   ("Speaker 2"); names are swapped in for display with exactly the rule in
+   app/utils/speaker_names.py: whole words only, longest first, in one pass, so
+   "Speaker 1" never touches "Speaker 10". A word character is what Python's \w
+   matches in a str pattern: a Unicode letter or digit, or "_". No regex lookbehind:
+   WebKit on macOS 12 doesn't have it, so the character before a match is checked here. */
+const _SPEAKER_WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+function _speakerNamesEscape(s) {
+  return s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+}
+
+// Replace each key of `map` (a Map of non-empty strings) found as a whole word with its value.
+function _speakerNamesReplace(text, map) {
+  if (!map.size) return text;
+  const keys = [...map.keys()].sort((a, b) => [...b].length - [...a].length);
+  const re = new RegExp(`(?:${keys.map(_speakerNamesEscape).join('|')})(?![\\p{L}\\p{N}_])`, 'gu');
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const i = m.index;
+    if (i > 0) {
+      // The whole character before the match (a surrogate pair counts as one)
+      const lo = text.charCodeAt(i - 1);
+      const pairStart = i > 1 && lo >= 0xdc00 && lo <= 0xdfff && text.charCodeAt(i - 2) >= 0xd800 && text.charCodeAt(i - 2) <= 0xdbff;
+      const before = String.fromCodePoint(text.codePointAt(pairStart ? i - 2 : i - 1));
+      if (_SPEAKER_WORD_CHAR.test(before)) {
+        // Inside a longer word: try again from the next character, as Python's lookbehind does
+        re.lastIndex = i + (text.codePointAt(i) > 0xffff ? 2 : 1);
+        continue;
+      }
+    }
+    out += text.slice(last, i) + map.get(m[0]);
+    last = i + m[0].length;
+  }
+  return out + text.slice(last);
+}
+
+function _speakerNamesMap(names) {
+  return new Map(
+    Object.entries(names || {})
+      .filter(([label, name]) => label && name && typeof name === 'string')
+  );
+}
+
+/** Text with each named speaker label replaced by its name (whole words only). */
+function applySpeakerNames(text, names) {
+  if (!text || typeof text !== 'string') return text;
+  return _speakerNamesReplace(text, _speakerNamesMap(names));
+}
+
+/** The reverse: each name back to its label. A name two speakers share stays as typed. */
+function speakerNamesToLabels(text, names) {
+  if (!text || typeof text !== 'string') return text;
+  const byName = new Map();
+  for (const [label, name] of _speakerNamesMap(names)) {
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(label);
+  }
+  const reverse = new Map([...byName].filter(([, labels]) => labels.length === 1).map(([name, labels]) => [name, labels[0]]));
+  return _speakerNamesReplace(text, reverse);
+}
+
+/** A speaker's name, or the label when it has none. */
+function speakerName(label, names) {
+  return (names && typeof names[label] === 'string' && names[label]) || label;
+}

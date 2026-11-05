@@ -17,6 +17,8 @@
 .coach-muted { color: var(--text-tertiary); font-size: var(--text-sm); }
 .coach-footnote { margin-top: var(--sp-3); font-size: var(--text-xs); line-height: 1.5; }
 .coach-sep { color: var(--text-tertiary); }
+/* A speaker's label next to their name ("Sarah  Speaker 2") */
+.coach-label { color: var(--text-tertiary); font-weight: var(--weight-normal); font-size: var(--text-xs); }
 
 /* Text-style button (Change, Update coaching) */
 .coach-link {
@@ -96,7 +98,8 @@
 .coach-picker-list { display: flex; flex-direction: column; gap: var(--sp-1); }
 .coach-picker-row {
   display: grid;
-  grid-template-columns: auto 96px minmax(0, 1fr) auto;
+  /* The speaker column fits a name and its label (cut short past 180px; full text in its title) */
+  grid-template-columns: auto minmax(96px, max-content) minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2);
@@ -106,6 +109,7 @@
 .coach-picker-row:hover { background: var(--bg-hover); }
 .coach-picker input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
 .coach-picker-label {
+  max-width: 180px;
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   color: var(--accent);

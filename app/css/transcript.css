@@ -525,6 +525,54 @@
   text-overflow: ellipsis;
   flex-shrink: 0;
 }
+/* The speaker is a button: click to name them (ui/transcript.js _txOpenSpeakerEditor) */
+button.segment-speaker {
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 2px 0 0;
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+button.segment-speaker:hover { text-decoration: underline; }
+button.segment-speaker:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+/* Inline speaker name editor, under the line whose speaker was clicked */
+.speaker-name-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+.speaker-name-label { font-size: var(--text-sm); color: var(--text-secondary); white-space: nowrap; }
+.speaker-name-label strong { color: var(--text); font-weight: var(--weight-semibold); }
+.speaker-name-input {
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-family: var(--font);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  outline: none;
+}
+.speaker-name-input:focus { border-color: var(--accent); }
+.speaker-name-input::placeholder { color: var(--text-tertiary); }
+.speaker-name-actions { display: flex; gap: var(--sp-1); margin-left: auto; }
+.speaker-name-hint,
+.speaker-name-error { flex-basis: 100%; margin: 0; font-size: var(--text-xs); line-height: 1.4; }
+.speaker-name-hint { color: var(--text-tertiary); }
+.speaker-name-error { color: var(--destructive); }
+.speaker-name-error[hidden] { display: none; }
+
 .segment-text {
   font-size: var(--text-base);
   line-height: 1.6;
@@ -590,6 +638,7 @@
   transition: border-color var(--duration) var(--ease);
 }
 .summary-editor:focus { border-color: var(--accent); }
+.summary-editor-hint { margin: var(--sp-2) 0 0; font-size: var(--text-xs); color: var(--text-tertiary); }
 .summary-editor-actions {
   display: flex;
   gap: var(--sp-2);

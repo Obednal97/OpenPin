@@ -12,6 +12,12 @@ let _notionPollTimeoutHandleTx = null;
 // transcript view, so we track the handles and cancel on close + on re-entry.
 let _diarPollHandleTx = null;
 let _diarPollTimeoutHandleTx = null;
+// The speaker name editor open in the transcript (one at a time), and the
+// transcript object the open view renders from (refreshSpeakerNames updates it).
+let _txSpeakerEditorEl = null;
+let _txShownT = null;
+// A background redraw of this recording that waits for the name editor to close
+let _txPendingRedrawSid = null;
 
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
@@ -21,6 +27,10 @@ function openTranscript(sessionId, autoPlay = false) {
   app.currentSessionId = sessionId;
   const t = app.transcripts[sessionId];
   app.currentView = 'transcript';
+  _txShownT = t || null;
+  _txPendingRedrawSid = null; // this is the redraw
+  _txRemoveSpeakerEditor();
+  if (t && t.speaker_names_cleared) _txNoticeNamesCleared(sessionId, t);
 
   $('#main-content').scrollTop = 0;
 
@@ -351,20 +361,7 @@ function openTranscript(sessionId, autoPlay = false) {
   const copyBtn = $('#copy-transcript-btn');
   if (copyBtn && t) {
     copyBtn.addEventListener('click', () => {
-      let text = '';
-      if (app.activeTab === 'summary' && t.summary) {
-        text = t.summary;
-      } else if (t.segments && t.segments.length > 0) {
-        text = t.segments
-          .map((seg) => {
-            const time = formatTime(seg.start);
-            const speaker = seg.speaker ? `[${seg.speaker}] ` : '';
-            return `[${time}] ${speaker}${seg.text}`;
-          })
-          .join('\n');
-      } else {
-        text = t.text || '';
-      }
+      const text = _txCopyText(t, !!(app.activeTab === 'summary' && t.summary));
       const label = app.activeTab === 'summary' ? 'Summary' : 'Transcript';
       navigator.clipboard
         .writeText(text)
@@ -405,57 +402,12 @@ function openTranscript(sessionId, autoPlay = false) {
         const customName = app.settings.recording_names?.[sessionId] || t.auto_title || sessionId;
         const safeName = customName.replace(/[/\\:*?"<>|]/g, '-').slice(0, 80);
 
-        // Build content based on format
-        let content, filename, mimeType;
+        // Build content based on format (speaker names in place of labels)
+        const built = _txExportContent(format, t, customName, safeName, isSum);
+        const { content, filename, mimeType } = built;
 
-        if (format === 'json') {
-          content = JSON.stringify(isSum ? { title: t.auto_title, summary: t.summary, segments: t.segments } : { text: t.text, segments: t.segments, duration: t.duration, language: t.language, speakers: t.speakers }, null, 2);
-          filename = `${safeName}.json`;
-          mimeType = 'application/json';
-        } else if (format === 'md') {
-          if (isSum) {
-            content = `# ${t.auto_title || customName}\n\n${t.summary}`;
-          } else if (t.segments && t.segments.length > 0) {
-            const lines = t.segments.map(s => {
-              const time = formatTime(s.start);
-              const speaker = s.speaker ? `**${s.speaker}**: ` : '';
-              return `[${time}] ${speaker}${s.text}`;
-            });
-            content = `# ${customName}\n\n${lines.join('\n\n')}`;
-          } else {
-            content = `# ${customName}\n\n${t.text || ''}`;
-          }
-          filename = `${safeName}.md`;
-          mimeType = 'text/markdown';
-        } else if (format === 'txt') {
-          if (isSum) {
-            content = `${t.auto_title || customName}\n${'='.repeat(40)}\n\n${t.summary}`;
-          } else if (t.segments && t.segments.length > 0) {
-            content = t.segments.map(s => {
-              const time = formatTime(s.start);
-              const speaker = s.speaker ? `[${s.speaker}] ` : '';
-              return `[${time}] ${speaker}${s.text}`;
-            }).join('\n');
-          } else {
-            content = t.text || '';
-          }
-          filename = `${safeName}.txt`;
-          mimeType = 'text/plain';
-        } else if (format === 'pdf') {
-          // Generate PDF via a simple HTML→print approach
-          let html;
-          if (isSum) {
-            html = `<h1>${escapeHtml(t.auto_title || customName)}</h1>${renderMarkdown(t.summary)}`;
-          } else if (t.segments && t.segments.length > 0) {
-            html = `<h1>${escapeHtml(customName)}</h1>` + t.segments.map(s => {
-              const time = formatTime(s.start);
-              const speaker = s.speaker ? `<strong>${escapeHtml(s.speaker)}:</strong> ` : '';
-              return `<p><small>[${time}]</small> ${speaker}${escapeHtml(s.text)}</p>`;
-            }).join('');
-          } else {
-            html = `<h1>${escapeHtml(customName)}</h1><p>${escapeHtml(t.text || '')}</p>`;
-          }
-
+        if (format === 'pdf') {
+          const { html } = built;
           const printWin = window.open('', '_blank', 'width=800,height=600');
           if (printWin) {
             printWin.document.write(`<!DOCTYPE html><html><head><title>${escapeHtml(safeName)}</title>
@@ -838,12 +790,13 @@ function renderTranscriptSegments(container, t, sessionId) {
     // Recordings over an hour show every time as H:MM:SS, so the column lines up
     const lastStart = t.segments[t.segments.length - 1].start || 0;
     const withHours = (t.duration || 0) >= 3600 || lastStart >= 3600;
+    const names = _txNames(t);
     container.innerHTML = t.segments
       .map(
         (seg, i) => `
       <div class="segment" data-index="${i}" data-start="${escapeHtml(seg.start)}">
         <span class="segment-time">${formatTime(seg.start, withHours)}</span>
-        ${seg.speaker ? `<span class="segment-speaker" title="${escapeHtml(seg.speaker)}">${escapeHtml(seg.speaker)}</span>` : ''}
+        ${seg.speaker ? _txSpeakerButtonHtml(seg.speaker, names) : ''}
         <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
         <button class="segment-delete" data-index="${i}" title="Remove segment">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -852,6 +805,14 @@ function renderTranscriptSegments(container, t, sessionId) {
     `,
       )
       .join('');
+
+    // Click a speaker to name them (one handler for the list, replaced on each render)
+    container.onclick = (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('.segment-speaker') : null;
+      if (!btn) return;
+      e.stopPropagation();
+      _txOpenSpeakerEditor(container, sessionId, t, btn.dataset.label, btn.closest('.segment'));
+    };
 
     // Click timestamp to seek audio
     container.querySelectorAll('.segment-time').forEach((el) => {
@@ -947,10 +908,345 @@ async function saveSegments(sessionId, t) {
   }
 }
 
+/* ---------- Speaker names ----------
+   A transcript carries speaker_names (the names to show: the ones typed, plus your
+   profile name on your own speaker once you picked it in Coaching) and
+   stored_speaker_names (only the typed ones). Segments and summaries keep their
+   labels; names are applied when shown, copied or exported (applySpeakerNames). */
+
+function _txNames(t) {
+  return (t && t.speaker_names && typeof t.speaker_names === 'object') ? t.speaker_names : {};
+}
+
+function _txStoredNames(t) {
+  return (t && t.stored_speaker_names && typeof t.stored_speaker_names === 'object') ? t.stored_speaker_names : {};
+}
+
+// The names held by exactly one speaker
+function _txUniqueNames(names) {
+  const count = new Map();
+  for (const n of Object.values(names)) count.set(n, (count.get(n) || 0) + 1);
+  return Object.fromEntries(Object.entries(names).filter(([, n]) => count.get(n) === 1));
+}
+
+// Speaker labels in order of first appearance
+function _txSpeakerLabels(t) {
+  const seen = new Set();
+  for (const s of (t && t.segments) || []) if (s && s.speaker) seen.add(s.speaker);
+  return [...seen];
+}
+
+function _txSpeakerButtonHtml(label, names) {
+  const name = names[label];
+  const title = name ? `${name} (${label}). Click to rename` : `${label}. Click to name this speaker`;
+  return `<button type="button" class="segment-speaker${name ? ' named' : ''}" data-label="${escapeHtml(label)}" title="${escapeHtml(title)}">${escapeHtml(name || label)}</button>`;
+}
+
+// One transcript line for Copy and the text exports: "[00:04] [Sarah] Hello"
+function _txSegmentLines(t, speakerFmt) {
+  const names = _txNames(t);
+  return (t.segments || []).map((s) => {
+    const speaker = s.speaker ? speakerFmt(speakerName(s.speaker, names)) : '';
+    return `[${formatTime(s.start)}] ${speaker}${s.text}`;
+  });
+}
+
+/** What Copy puts on the clipboard: the summary, or the transcript, with names. */
+function _txCopyText(t, summary) {
+  if (summary) return applySpeakerNames(t.summary || '', _txNames(t));
+  if (t.segments && t.segments.length > 0) return _txSegmentLines(t, (n) => `[${n}] `).join('\n');
+  return t.text || '';
+}
+
+/**
+ * An export's content with names in place of labels: { content, filename, mimeType },
+ * or { html } for PDF (printed from a window). JSON keeps each segment's label and
+ * adds speaker_name, plus the speaker_names map, so the file stays machine-readable.
+ */
+function _txExportContent(format, t, customName, safeName, isSum) {
+  const names = _txNames(t);
+  const summary = applySpeakerNames(t.summary || '', names);
+  const hasSegments = !!(t.segments && t.segments.length > 0);
+  if (format === 'json') {
+    const segments = (t.segments || []).map((s) => (s && s.speaker && names[s.speaker] ? { ...s, speaker_name: names[s.speaker] } : s));
+    const body = isSum
+      ? { title: t.auto_title, summary, segments, speaker_names: names }
+      : { text: t.text, segments, duration: t.duration, language: t.language, speakers: t.speakers, speaker_names: names };
+    return { content: JSON.stringify(body, null, 2), filename: `${safeName}.json`, mimeType: 'application/json' };
+  }
+  if (format === 'md') {
+    let content;
+    if (isSum) content = `# ${t.auto_title || customName}\n\n${summary}`;
+    else if (hasSegments) content = `# ${customName}\n\n${_txSegmentLines(t, (n) => `**${n}**: `).join('\n\n')}`;
+    else content = `# ${customName}\n\n${t.text || ''}`;
+    return { content, filename: `${safeName}.md`, mimeType: 'text/markdown' };
+  }
+  if (format === 'txt') {
+    let content;
+    if (isSum) content = `${t.auto_title || customName}\n${'='.repeat(40)}\n\n${summary}`;
+    else if (hasSegments) content = _txSegmentLines(t, (n) => `[${n}] `).join('\n');
+    else content = t.text || '';
+    return { content, filename: `${safeName}.txt`, mimeType: 'text/plain' };
+  }
+  // PDF: HTML for the print window
+  let html;
+  if (isSum) {
+    html = `<h1>${escapeHtml(t.auto_title || customName)}</h1>${renderMarkdown(summary)}`;
+  } else if (hasSegments) {
+    html = `<h1>${escapeHtml(customName)}</h1>` + t.segments.map((s) => {
+      const speaker = s.speaker ? `<strong>${escapeHtml(speakerName(s.speaker, names))}:</strong> ` : '';
+      return `<p><small>[${formatTime(s.start)}]</small> ${speaker}${escapeHtml(s.text)}</p>`;
+    }).join('');
+  } else {
+    html = `<h1>${escapeHtml(customName)}</h1><p>${escapeHtml(t.text || '')}</p>`;
+  }
+  return { html };
+}
+
+// Re-transcribing found the speakers again, so the backend dropped the names: say so once.
+function _txNoticeNamesCleared(sessionId, t) {
+  if (!t || !t.speaker_names_cleared) return;
+  t.speaker_names_cleared = false;
+  if (app.transcripts[sessionId]) app.transcripts[sessionId].speaker_names_cleared = false;
+  toast('Speaker names were cleared because the speakers were detected again', 'info');
+  Promise.resolve()
+    .then(() => window.plaud.ackSpeakerNamesCleared(sessionId))
+    .catch(() => {});
+}
+
+// Put new names on every cached copy of a recording's transcript, and its list row.
+function _txSetNames(sessionId, effective, stored, extra) {
+  const targets = new Set([app.transcripts[sessionId], extra, _txShownT && _txShownT.session_id === sessionId ? _txShownT : null]);
+  for (const obj of targets) {
+    if (!obj) continue;
+    obj.speaker_names = { ...effective };
+    obj.stored_speaker_names = { ...stored };
+  }
+  const rec = app.recordings.find((r) => r.session_id === sessionId);
+  if (rec) rec.participants = [...new Set(Object.values(effective))];
+}
+
+/**
+ * Re-read a recording's speaker names from the backend into the cached transcript
+ * (in place, so the open view sees them). Used when only the backend knows the
+ * result: your own name after a pick in Coaching, or under a name just cleared.
+ * Resolves true if the names were updated.
+ */
+async function refreshSpeakerNames(sessionId, t) {
+  let list;
+  try {
+    list = await window.plaud.transcripts();
+  } catch {
+    return false;
+  }
+  const fresh = (list || []).find((x) => x && x.session_id === sessionId);
+  if (!fresh) return false;
+  _txSetNames(sessionId, fresh.speaker_names || {}, fresh.stored_speaker_names || {}, t);
+  return true;
+}
+
+/** True while the speaker name editor is open (a background reload shouldn't redraw then). */
+function speakerNameEditorOpen() {
+  return !!(_txSpeakerEditorEl && _txSpeakerEditorEl.isConnected);
+}
+
+// Take the editor off the page, keeping any held redraw (switching to another speaker)
+function _txRemoveSpeakerEditor() {
+  if (_txSpeakerEditorEl) _txSpeakerEditorEl.remove();
+  _txSpeakerEditorEl = null;
+}
+
+// The editor is done with (Save, Clear, Cancel, Esc): remove it and run any held redraw
+function _txCloseSpeakerEditor() {
+  _txRemoveSpeakerEditor();
+  const pending = _txPendingRedrawSid;
+  _txPendingRedrawSid = null;
+  if (pending) redrawOpenTranscript(pending);
+}
+
+/**
+ * Redraw the recording on screen after something changed it in the background
+ * (a re-download, a restore, auto-processing, speaker detection). While the
+ * speaker name editor is open the redraw waits, and runs once it closes, so it
+ * never throws away a name being typed.
+ */
+function redrawOpenTranscript(sessionId) {
+  if (app.currentView !== 'transcript' || app.currentSessionId !== sessionId) return;
+  if (speakerNameEditorOpen()) {
+    _txPendingRedrawSid = sessionId;
+    return;
+  }
+  openTranscript(sessionId);
+}
+
+// Why your own name is on a speaker, and how to change it
+const _TX_DEFAULT_NAME_HELP =
+  'This is your name because you picked this speaker as you in Coaching. To change that, use Which one is you '
+  + '(Change, in the Coaching tab), or type another name here.';
+
+function _txSpeakerEditorHtml(label, current, isDefault, hasStored) {
+  const hint = isDefault ? _TX_DEFAULT_NAME_HELP : 'Names you’ve used before are suggested as you type.';
+  const clearTitle = hasStored ? 'Remove this name' : 'Only a name you typed can be cleared';
+  return `
+    <label class="speaker-name-label" for="speaker-name-input">Name for <strong>${escapeHtml(label)}</strong></label>
+    <input type="text" id="speaker-name-input" class="speaker-name-input" list="speaker-name-suggestions" maxlength="80"
+      autocomplete="off" spellcheck="false" placeholder="Name, such as Sarah Jones" value="${escapeHtml(current)}">
+    <datalist id="speaker-name-suggestions"></datalist>
+    <div class="speaker-name-actions">
+      <button type="button" class="action-btn subtle" data-speaker-action="cancel">Cancel</button>
+      <button type="button" class="action-btn subtle" data-speaker-action="clear" title="${clearTitle}"${hasStored ? '' : ' disabled'}>Clear</button>
+      <button type="button" class="action-btn accent" data-speaker-action="save">Save</button>
+    </div>
+    <p class="speaker-name-hint">${escapeHtml(hint)}</p>
+    <p class="speaker-name-error" role="alert" hidden></p>`;
+}
+
+/**
+ * The change to send for `typed` on `label`: { label: name }, { label: null } to clear
+ * a typed name, or null when there's nothing to save (unchanged, your default name
+ * kept as it is, or empty with no typed name).
+ */
+function _txSpeakerNameChange(t, label, typed) {
+  const name = String(typed || '').trim();
+  const stored = _txStoredNames(t)[label];
+  if (!name) return stored ? { [label]: null } : null;
+  if (name === stored) return null;
+  if (!stored && name === _txNames(t)[label]) return null;
+  return { [label]: name };
+}
+
+function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
+  // Not _txCloseSpeakerEditor: a held redraw would re-render the rows and detach `row`
+  _txRemoveSpeakerEditor();
+  if (!t || !label || !row) {
+    _txCloseSpeakerEditor(); // no new editor after all: let a held redraw run
+    return;
+  }
+  const current = _txNames(t)[label] || '';
+  const hasStored = !!_txStoredNames(t)[label];
+  const editor = document.createElement('div');
+  editor.className = 'speaker-name-editor';
+  editor.setAttribute('role', 'group');
+  editor.setAttribute('aria-label', `Name ${label}`);
+  editor.innerHTML = _txSpeakerEditorHtml(label, current, !!current && !hasStored, hasStored);
+  row.insertAdjacentElement('afterend', editor);
+  _txSpeakerEditorEl = editor;
+
+  const input = editor.querySelector('.speaker-name-input');
+  input.value = current;
+  input.focus();
+  input.select();
+
+  // Suggestions: names typed for speakers anywhere in the library
+  Promise.resolve()
+    .then(() => window.plaud.people())
+    .then((people) => {
+      const list = editor.querySelector('#speaker-name-suggestions');
+      if (!list || !Array.isArray(people)) return;
+      list.innerHTML = people
+        .filter((p) => p && typeof p.name === 'string')
+        .slice(0, 200)
+        .map((p) => `<option value="${escapeHtml(p.name)}"></option>`)
+        .join('');
+    })
+    .catch(() => {});
+
+  let busy = false;
+  const act = async (action) => {
+    if (busy) return;
+    if (action === 'cancel') {
+      _txCloseSpeakerEditor();
+      return;
+    }
+    let change;
+    if (action === 'clear') change = _txStoredNames(t)[label] ? { [label]: null } : null;
+    else change = _txSpeakerNameChange(t, label, input.value);
+    if (!change && action === 'save' && !String(input.value || '').trim() && _txNames(t)[label] && !_txStoredNames(t)[label]) {
+      // Emptied your own name: it can't be cleared here, so say how to change it
+      const errorEl = editor.querySelector('.speaker-name-error');
+      if (errorEl) {
+        errorEl.textContent = _TX_DEFAULT_NAME_HELP;
+        errorEl.hidden = false;
+      }
+      input.focus();
+      return;
+    }
+    if (!change) {
+      _txCloseSpeakerEditor();
+      return;
+    }
+    busy = true;
+    const errorEl = editor.querySelector('.speaker-name-error');
+    editor.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    await _txSaveSpeakerName(container, sessionId, t, change, (message) => {
+      busy = false;
+      if (errorEl) {
+        errorEl.textContent = message;
+        errorEl.hidden = false;
+      }
+      editor.querySelectorAll('button[data-speaker-action]').forEach((b) => {
+        b.disabled = b.dataset.speakerAction === 'clear' && !_txStoredNames(t)[label];
+      });
+      input.focus();
+    });
+  };
+
+  editor.addEventListener('click', (e) => {
+    e.stopPropagation(); // not a click on the transcript behind it
+    const btn = e.target && e.target.closest ? e.target.closest('[data-speaker-action]') : null;
+    if (btn && !btn.disabled) act(btn.dataset.speakerAction);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      act('save');
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      act('cancel');
+    }
+  });
+}
+
+// Send a name change; on success update every copy of the names and redraw the
+// transcript, otherwise hand the message to onError (the editor stays open).
+async function _txSaveSpeakerName(container, sessionId, t, change, onError) {
+  let res;
+  try {
+    res = await window.plaud.setSpeakerNames(sessionId, change);
+  } catch (err) {
+    res = { error: `Couldn’t save the name: ${(err && err.message) || 'no response'}` };
+  }
+  if (!res || res.error || !res.speaker_names || typeof res.speaker_names !== 'object') {
+    onError((res && res.error) || 'Couldn’t save the name');
+    return;
+  }
+  // The names shown: the stored ones, else your own name where it was shown by default
+  const stored = res.speaker_names;
+  const before = _txNames(t);
+  const beforeStored = _txStoredNames(t);
+  const effective = {};
+  for (const label of _txSpeakerLabels(t)) {
+    if (stored[label]) effective[label] = stored[label];
+    else if (before[label] && !beforeStored[label]) effective[label] = before[label];
+  }
+  _txSetNames(sessionId, effective, stored, t);
+  _txCloseSpeakerEditor();
+  const redraw = () => {
+    if (app.currentView === 'transcript' && app.currentSessionId === sessionId && app.activeTab === 'transcript' && !speakerNameEditorOpen()) {
+      renderTranscriptSegments(container, t, sessionId);
+    }
+  };
+  redraw();
+  // A cleared name may have hidden your own name, which only the backend can tell
+  if (Object.values(change).includes(null) && (await refreshSpeakerNames(sessionId, t))) redraw();
+}
+
 function renderEditableSummary(container, t, sessionId, rec) {
   let editing = false;
+  // Stored in label form; shown, and edited, with the speakers' names
   const render = () => {
-    container.innerHTML = renderMarkdown(t.summary);
+    container.innerHTML = renderMarkdown(applySpeakerNames(t.summary, _txNames(t)));
     // Add edit hint
     const editHint = document.createElement('button');
     editHint.className = 'summary-edit-btn';
@@ -978,10 +1274,20 @@ function renderEditableSummary(container, t, sessionId, rec) {
 
   const startEditing = () => {
     editing = true;
+    // Only names one speaker holds: a name two speakers share (one voice split in two)
+    // can't be turned back into a label on save, so those speakers stay as labels here.
+    const names = _txUniqueNames(_txNames(t));
+    const shown = applySpeakerNames(t.summary, names);
     const textarea = document.createElement('textarea');
     textarea.className = 'summary-editor';
-    textarea.value = t.summary;
-    textarea.rows = Math.max(10, t.summary.split('\n').length + 2);
+    textarea.value = shown;
+    textarea.rows = Math.max(10, shown.split('\n').length + 2);
+    let hint = null;
+    if (Object.keys(names).length) {
+      hint = document.createElement('p');
+      hint.className = 'summary-editor-hint';
+      hint.textContent = 'Speaker names are saved as their speaker labels, so renaming a speaker later updates this summary too.';
+    }
 
     const actions = document.createElement('div');
     actions.className = 'summary-editor-actions';
@@ -994,14 +1300,16 @@ function renderEditableSummary(container, t, sessionId, rec) {
 
     actions.append(cancelBtn, saveBtn);
     container.innerHTML = '';
-    container.append(textarea, actions);
+    container.append(...[textarea, hint, actions].filter(Boolean));
     textarea.focus();
 
     saveBtn.addEventListener('click', async () => {
       const newSummary = textarea.value.trim();
-      if (newSummary !== t.summary) {
+      if (newSummary !== shown) {
+        // The backend turns the names back into labels when it saves; do the same here
+        const stored = speakerNamesToLabels(newSummary, names);
         if (newSummary) {
-          t.summary = newSummary;
+          t.summary = stored;
         } else {
           delete t.summary;
           if (app.transcripts[sessionId]) {
@@ -1011,7 +1319,7 @@ function renderEditableSummary(container, t, sessionId, rec) {
         try {
           await window.plaud.updateTranscript(sessionId, { summary: newSummary || null });
           if (newSummary && app.transcripts[sessionId]) {
-            app.transcripts[sessionId].summary = newSummary;
+            app.transcripts[sessionId].summary = stored;
           }
         } catch (err) {
           if (err.name !== 'AbortError') console.warn('[transcript] save summary failed:', err);
@@ -1132,9 +1440,7 @@ async function transcribeRecording(oggPath, sessionId) {
             app.transcripts[sessionId] = t;
             if (t.speakers && t.speakers.length > 0) {
               toast(`Speaker detection complete: ${t.speakers.length} speaker(s) found`, 'success');
-              if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
-                openTranscript(sessionId);
-              }
+              redrawOpenTranscript(sessionId);
             } else {
               toast(t.diarization_message || 'No speakers detected', 'info');
             }
