@@ -72,8 +72,9 @@ def support_dir(executable: str | None = None, home: Path | None = None) -> Path
 
     The Rust shell doesn't tell Python which build it is, but it always runs
     the backend with the managed venv at ``Application Support/<folder>/venv``,
-    so the folder comes from ``sys.executable``. Anything else (a checkout's
-    own venv, tests) gets the release folder.
+    so the folder comes from ``sys.executable``. Anything else (a backend run
+    from a checkout, tests) gets the dev folder: only the installed app's own
+    venv may rewrite the installed app's launcher.
     """
     base = (home if home is not None else Path.home()) / "Library" / "Application Support"
     exe = Path(executable if executable is not None else sys.executable)
@@ -86,7 +87,7 @@ def support_dir(executable: str | None = None, home: Path | None = None) -> Path
             and folder.parent.name == "Application Support"
         ):
             return base / folder.name
-    return base / RELEASE_SUPPORT_DIR
+    return base / DEV_SUPPORT_DIR
 
 
 def launcher_path() -> Path:

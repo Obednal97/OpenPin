@@ -443,7 +443,7 @@ because of this.
 Claude Desktop / Claude Code
   | starts (stdio)
   v
-launcher   ~/Library/Application Support/com.plaud.v2/mcp/open-pin-mcp   (com.plaud.v2.dev for debug builds)
+launcher   ~/Library/Application Support/com.plaud.v2/mcp/open-pin-mcp   (com.plaud.v2.dev for debug builds and a backend run from a checkout)
   | runs the managed venv's Python on the connector in the current app bundle
   v
 connector  app/mcp/server.py   (MCP over stdio, standard library only, no state)
@@ -471,7 +471,10 @@ hears about the change. The connector speaks MCP's JSON-RPC itself (`initialize`
   says Open Pin isn't running and never sends the key. A restarted backend never deletes a file
   another process owns.
 - The launcher is a small shell script at a fixed path in Application Support, never inside the
-  bundle, which can move on update. It is rewritten at each launch while access is on, sets
+  bundle, which can move on update. The folder comes from the backend's interpreter: only the
+  installed app's managed venv (`com.plaud.v2/venv`) writes to `com.plaud.v2`; any other Python, such
+  as a backend run from a checkout, writes to `com.plaud.v2.dev`, so it never points the installed
+  app's launcher into the checkout. It is rewritten at each launch while access is on, sets
   `PLAUD_DATA_DIR`, and fails with a plain stderr message if the app has been deleted. Turning the
   switch off leaves it and Claude's settings alone; the connector then says access is off.
 
@@ -538,10 +541,15 @@ safe the app's own tag saving adds and removes single tags (`/recordings/tags/ad
   so renaming is always reversible.
 - New summaries are made from the transcript with labels, not names, for the same reason. Don't
   change this without thought.
-- Editing a summary shows names. On save, current names are turned back into labels
-  (`names_to_labels`; a name shared by two speakers is left as typed).
-- When names change on a recording with a Notion page, a full update is queued on the existing
-  Notion queue (`notion_queue.KIND_FULL`) and the page body is rebuilt with names. No AI call. The
+- Editing a summary shows names. On save, the window sends the `{label: name}` map the editor
+  showed (`summary_names` on `/transcripts/update`), and those names are turned back into labels
+  (`names_to_labels`; a name shared by two speakers is left as typed). Using that map, not the
+  current names, keeps a label from becoming fixed text when an AI tool renames, clears or shares a
+  name while the editor is open. Keys must be speaker labels in the transcript and values strings
+  (400 otherwise); without the map, the current names are used.
+- When names change on a recording with a Notion page and Notion is connected, a full update is
+  queued on the existing Notion queue (`notion_queue.KIND_FULL`) and the page body is rebuilt with
+  names. No AI call. The
   page title isn't changed, and unpushed recordings stay unpushed.
 
 ### Tags

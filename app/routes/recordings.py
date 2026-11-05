@@ -1064,12 +1064,28 @@ def update_transcript():
         if not ok:
             return jsonify({"error": err}), 400
 
+    # The {label: name} map the summary editor showed. The names can change while the
+    # editor is open (an AI tool renames, clears or shares one), so reverse with these.
+    summary_names = data.get("summary_names")
+    if summary_names is not None and (
+        not isinstance(summary_names, dict) or not all(isinstance(v, str) for v in summary_names.values())
+    ):
+        return jsonify({"error": "summary_names must map speaker labels to names"}), 400
+
     profile = speakers.profile_name() or ""
     with get_transcript_lock(session_id):
         transcript = json.loads(json_path.read_text())
         old_text = transcript.get("text")
         # The editor shows names; stored summaries stay in label form so renaming keeps working.
-        names = speakers.names_for(session_id, transcript, profile=profile)
+        if summary_names is None:
+            # Older callers: the recording's current names.
+            names = speakers.names_for(session_id, transcript, profile=profile)
+        else:
+            labels = set(sn.speaker_labels(transcript.get("segments")))
+            unknown = [label for label in summary_names if label not in labels]
+            if unknown:
+                return jsonify({"error": f"No speaker called {unknown[0]} in this recording"}), 400
+            names = summary_names
 
         if "segments" in data:
             transcript["segments"] = data["segments"]

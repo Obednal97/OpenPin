@@ -154,7 +154,7 @@ Every write is applied by the same backend function the app's own UI uses, then 
   - The upside: one rule for every summary.
   - The builder must not change this without asking.
 - A summary can contain the user's own edits. The swap only touches exact label matches.
-- **Editing a summary in the app** (my call): the editor shows the names. On save, whole-word occurrences of the recording's current names are turned back into their labels, so stored summaries stay in label form and renaming keeps working. A name the user types that matches a current name is stored as that label, which displays the same.
+- **Editing a summary in the app** (my call): the editor shows the names. On save, whole-word occurrences of the names the editor showed (sent with the summary as `summary_names`) are turned back into their labels, so stored summaries stay in label form and renaming keeps working. A name the user types that matches a current name is stored as that label, which displays the same.
 
 ### Notion
 

@@ -72,10 +72,12 @@ def get_names(session_id: str) -> dict[str, str]:
 
 
 def _notion_linked(session_id: str) -> bool:
+    """Notion is connected and the recording has a page there (as tags.enqueue_notion_sync)."""
     try:
         from app.routes.notion import _get_notion_page_url
+        from app.state import notion
 
-        return bool(_get_notion_page_url(session_id))
+        return notion.is_connected() and bool(_get_notion_page_url(session_id))
     except Exception as e:
         log.warning("Could not check the Notion page for %s: %s", session_id, e)
         return False
