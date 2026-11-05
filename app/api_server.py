@@ -311,10 +311,14 @@ def _start_mcp_access(port: int):
         logging.error(f"[MCP] Couldn't turn on AI tool access: {e}")
 
 
-def _stop_mcp_access():
+# How long the SIGTERM handler waits for another thread inside app/mcp/access.py.
+SIGNAL_CLEANUP_TIMEOUT = 0.5
+
+
+def _stop_mcp_access(timeout: float | None = None):
     """On exit: delete the connection file. The setting stays as it is."""
     try:
-        mcp_access.disable()
+        mcp_access.disable(timeout=timeout)
     except Exception as e:
         logging.warning(f"[MCP] Cleanup failed: {e}")
 
@@ -332,7 +336,9 @@ def _install_exit_cleanup():
     atexit.register(_stop_mcp_access)
 
     def _on_sigterm(signum, frame):
-        _stop_mcp_access()
+        # Bounded: the lock is re-entrant (this thread may be inside enable()),
+        # and another thread holding it mustn't stall the quit.
+        _stop_mcp_access(timeout=SIGNAL_CLEANUP_TIMEOUT)
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         os.kill(os.getpid(), signal.SIGTERM)
 

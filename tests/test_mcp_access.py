@@ -451,3 +451,85 @@ def test_change_counter_needs_app_token(flask_client):
 def test_bundle_ships_mcp_folder():
     conf = json.loads((Path(__file__).parent.parent / "src-tauri" / "tauri.conf.json").read_text())
     assert conf["bundle"]["resources"].get("../app/mcp/*") == "app/mcp/"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: signal-safe cleanup, real state in settings, no leaked port
+# ---------------------------------------------------------------------------
+
+
+def test_signal_cleanup_while_same_thread_holds_lock(access, flask_client):
+    """A SIGTERM during enable() runs the cleanup on the thread holding the lock."""
+    import threading
+
+    from app import api_server
+
+    access.enable(5123)
+    done = threading.Event()
+
+    def run():
+        with access._lock:  # as if enable() were mid-way on this thread
+            api_server._stop_mcp_access(timeout=api_server.SIGNAL_CLEANUP_TIMEOUT)
+        done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert done.wait(5), "cleanup deadlocked on its own thread's lock"
+    assert access.current_key() is None
+    assert not access.connection_path().exists()
+
+
+def test_signal_cleanup_gives_up_when_another_thread_holds_lock(access, flask_client):
+    import threading
+    import time
+
+    from app import api_server
+
+    access.enable(5123)
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with access._lock:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert held.wait(5)
+    try:
+        start = time.monotonic()
+        api_server._stop_mcp_access(timeout=0.2)
+        assert time.monotonic() - start < 2
+    finally:
+        release.set()
+        t.join(5)
+    assert access.disable(timeout=0.2) is True
+
+
+def test_sigterm_handler_uses_a_timeout():
+    src = (Path(__file__).parent.parent / "app" / "api_server.py").read_text()
+    handler = src.split("def _on_sigterm", 1)[1].split("signal.signal(signal.SIGTERM, _on_sigterm)", 1)[0]
+    assert "_stop_mcp_access(timeout=SIGNAL_CLEANUP_TIMEOUT)" in handler
+
+
+def test_settings_reports_active_separately(mcp_client, access, flask_client):
+    from app.utils.config import update_config
+
+    update_config(lambda c: c.__setitem__("mcp_enabled", True))
+    s = mcp_client.get("/settings").get_json()
+    assert s["mcp_enabled"] is True
+    assert s["mcp_active"] is False  # e.g. enable() failed at startup
+    access.enable(5123)
+    assert mcp_client.get("/settings").get_json()["mcp_active"] is True
+    access.disable()
+    assert mcp_client.get("/settings").get_json()["mcp_active"] is False
+
+
+def test_port_set_by_a_test(access):
+    access.set_port(4321)
+    assert access.bound_port() == 4321
+
+
+def test_port_does_not_leak_between_tests(access):
+    # Runs after test_port_set_by_a_test: the conftest fixture resets it.
+    assert access.bound_port() is None

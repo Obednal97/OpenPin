@@ -36,6 +36,15 @@ def validate_hf_token(token):
 
 @bp.route("/settings", methods=["GET"])
 def get_settings():
+    """The settings the window shows.
+
+    AI tool access has two fields:
+    - ``mcp_enabled``: the saved switch ("Let AI tools on this Mac use Open Pin").
+    - ``mcp_active``: whether access is actually on now (an MCP key exists).
+      It can be False while ``mcp_enabled`` is True if turning it on failed at
+      startup (the connection file or launcher couldn't be written); the
+      window shows an error when they differ.
+    """
     config = load_config()
     total_gb, used_gb = get_ram_info()
     headroom_gb = total_gb * 0.85 - used_gb
@@ -88,6 +97,7 @@ def get_settings():
             "historical_directories": config.get("historical_directories", []),
             # "Let AI tools on this Mac use Open Pin" (app/mcp/access.py). Off by default.
             "mcp_enabled": config.get("mcp_enabled", False) is True,
+            "mcp_active": mcp_access.current_key() is not None,
         }
     )
 

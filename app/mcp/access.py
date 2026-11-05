@@ -37,7 +37,9 @@ LAUNCHER_NAME = "open-pin-mcp"
 RELEASE_SUPPORT_DIR = "com.plaud.v2"
 DEV_SUPPORT_DIR = "com.plaud.v2.dev"
 
-_lock = threading.Lock()
+# Re-entrant: a SIGTERM can run disable() on the main thread while that thread
+# is inside enable() (startup), and must not deadlock on its own lock.
+_lock = threading.RLock()
 _key: str | None = None
 _port: int | None = None
 
@@ -189,12 +191,24 @@ def _remove_file(force: bool) -> None:
         logging.warning("[MCP] Couldn't remove %s: %s", path.name, e)
 
 
-def disable() -> None:
-    """Turn access off: drop the key and delete this process's connection file."""
+def disable(timeout: float | None = None) -> bool:
+    """Turn access off: drop the key and delete this process's connection file.
+
+    ``timeout`` (seconds) bounds the wait for another thread that holds the
+    lock; the signal handler passes one so a quit can't hang. Returns False if
+    it gave up (the file may then stay behind, which is harmless: the
+    connector gets a refused connection).
+    """
     global _key
-    with _lock:
+    if not _lock.acquire(timeout=-1 if timeout is None else timeout):
+        logging.warning("[MCP] Skipped cleanup: access is busy")
+        return False
+    try:
         _key = None
         _remove_file(force=False)
+    finally:
+        _lock.release()
+    return True
 
 
 def remove_connection_file() -> None:
