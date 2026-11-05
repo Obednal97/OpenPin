@@ -9,7 +9,10 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
+from app.state import speakers
 from app.utils import redownload_backup
+from app.utils import speaker_names as sn
+from app.utils import tags as tags_store
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
 from app.utils.paths import (
@@ -26,6 +29,8 @@ from app.utils.transcript_locks import get_transcript_lock
 from app.utils.trash import APP_TRASH_DIR, move_to_trash
 
 bp = Blueprint("recordings", __name__)
+
+NO_SUCH_RECORDING = "No recording with that id"
 
 
 def _invalid(e):
@@ -142,8 +147,51 @@ def init_recordings():
     recover_metadata_from_transcripts()
 
 
+def recording_exists(session_id) -> bool:
+    """True when ``session_id`` is a recording the app lists (see ``collect_recordings``).
+
+    That is: an audio file in a recordings folder, an interrupted download, a copy set
+    aside for re-download, or a recording only in Google Drive. False for an invalid id
+    (checked before any path is built), a crop backup, or a transcript with no recording.
+    Shared by the app's tag routes and the AI tool routes (/mcp/v1), so neither writes
+    tags or names for a recording that doesn't exist.
+    """
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError:
+        return False
+    if is_auxiliary_stem(session_id):
+        return False
+    if _find_recording(session_id) is not None:
+        return True
+    for rec_dir in get_all_recordings_dirs():
+        if any((rec_dir / f"{session_id}{suffix}").exists() for suffix in _PARTIAL_SUFFIXES):
+            return True
+    try:
+        deleted = set(load_config().get("deleted_ids", []))
+        if session_id not in deleted and redownload_backup.backup_ogg_path(session_id) is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        from app.state.gdrive import get_cloud_only_recordings
+
+        return any(cr.get("session_id") == session_id for cr in get_cloud_only_recordings())
+    except Exception:
+        return False
+
+
 @bp.route("/recordings")
 def list_recordings():
+    return jsonify(collect_recordings())
+
+
+def collect_recordings() -> list[dict]:
+    """Every recording the app lists, newest first: what ``GET /recordings`` returns.
+
+    The AI tool routes (app/mcp/library.py) build on this, so the window and AI tools
+    see the same recordings.
+    """
     config = load_config()
     custom_names = config.get("recording_names", {})
     rec_tags = config.get("recording_tags", {})
@@ -293,13 +341,82 @@ def list_recordings():
     except Exception:
         pass
 
+    profile = speakers.profile_name() or ""
+    for r in recordings:
+        try:
+            r["participants"] = speakers.participants(r["session_id"], profile) if r.get("has_transcript") else []
+        except Exception:
+            r["participants"] = []
+
     recordings.sort(key=lambda r: r["date"], reverse=True)
-    return jsonify(recordings)
+    return recordings
+
+
+def _change_tags(op):
+    """Shared body of /recordings/tags/add and /recordings/tags/remove.
+
+    ``{session_ids: [...], tags: [...]}`` -> ``{tags: {sid: [...]}}``, plus
+    ``errors: {sid: message}`` for recordings that couldn't take the change
+    (say, already at 20 tags, or no such recording). 400 if the input is bad or
+    nothing could change; 404 if none of the recordings exists.
+    """
+    data = request.get_json(silent=True) or {}
+    session_ids = data.get("session_ids")
+    tags = data.get("tags")
+    try:
+        validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    if not session_ids:
+        return jsonify({"error": "No session_ids"}), 400
+    if not isinstance(tags, list) or not tags:
+        return jsonify({"error": "tags must be a non-empty list"}), 400
+
+    result, errors, missing = {}, {}, set()
+    for sid in dict.fromkeys(session_ids):
+        if not recording_exists(sid):
+            errors[sid] = NO_SUCH_RECORDING
+            missing.add(sid)
+            continue
+        try:
+            result[sid] = op(sid, tags)
+        except ValueError as e:
+            errors[sid] = str(e)
+    if not result:
+        status = 404 if missing == set(errors) else 400
+        return jsonify({"error": next(iter(errors.values())), "errors": errors}), status
+    body = {"tags": result}
+    if errors:
+        body["errors"] = errors
+    return jsonify(body)
+
+
+@bp.route("/recordings/tags/add", methods=["POST"])
+def add_recording_tags():
+    """Add tags to one or more recordings (new tags join the picker)."""
+    return _change_tags(tags_store.add_tags)
+
+
+@bp.route("/recordings/tags/remove", methods=["POST"])
+def remove_recording_tags():
+    """Remove tags from one or more recordings."""
+    return _change_tags(tags_store.remove_tags)
+
+
+@bp.route("/tags", methods=["GET"])
+def list_tags():
+    """Every tag with how many recordings carry it."""
+    return jsonify({"tags": tags_store.all_tags()})
 
 
 @bp.route("/recordings/tag", methods=["POST"])
 def tag_recording():
-    """Set tags for a recording."""
+    """Set a recording's whole tag list.
+
+    Kept for compatibility only: the app adds and removes single tags through
+    /recordings/tags/add and /recordings/tags/remove, so a stale window can't
+    wipe a tag something else added.
+    """
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id", "")
     tags = data.get("tags", [])
@@ -327,22 +444,10 @@ def tag_recording():
         except Exception:
             pass
 
-    # Enqueue a Notion tag sync — the background worker owns the actual call
-    # so this endpoint returns immediately and the UI stays responsive. If
-    # Notion is offline or the token expired, the queue retries with backoff.
-    notion_queued = False
-    try:
-        from app.routes.notion import _get_notion_page_url
-        from app.state import notion as _notion
-        from app.utils import notion_queue
+    from app.utils import changes
 
-        if _notion.is_connected() and _get_notion_page_url(session_id):
-            notion_queue.enqueue(session_id)
-            notion_queued = True
-    except Exception as e:
-        import logging as _logging
-
-        _logging.warning(f"Notion tag enqueue failed: {e}")
+    changes.bump()
+    notion_queued = tags_store.enqueue_notion_sync(session_id)
 
     return jsonify({"saved": True, "notion_queued": notion_queued})
 
@@ -832,39 +937,62 @@ def move_recordings():
     return jsonify({"moved": moved, "errors": errors, "count": len(moved)})
 
 
+def load_transcript(session_id) -> dict | None:
+    """A recording's transcript JSON, or None when it has none (or it can't be read).
+
+    Read under the transcript lock: without it, json.loads can catch a partial write
+    from a diarization or summarization background task. The caller validates the id.
+    """
+    path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    try:
+        with get_transcript_lock(session_id):
+            data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def transcript_item(session_id, data: dict, profile: str) -> dict:
+    """One ``GET /transcripts`` item. ``profile`` is ``speakers.profile_name() or ""``."""
+    labels = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
+    path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    return {
+        "session_id": session_id,
+        "text_preview": (data.get("text", "")[:150] + "...")
+        if len(data.get("text", "")) > 150
+        else data.get("text", ""),
+        "text": data.get("text", ""),
+        "duration": data.get("duration", 0),
+        "language": data.get("language", ""),
+        "speakers": labels,
+        "segments": data.get("segments", []),
+        # Names over the labels: the effective ones to show (your profile name on
+        # your speaker once you picked it), the ones typed, and whether a
+        # re-transcription just cleared them (the UI says so once).
+        "speaker_names": speakers.names_for(session_id, data, profile=profile),
+        "stored_speaker_names": sn.stored_names(data),
+        "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
+        "summary": data.get("summary", ""),
+        "summary_stale": bool(data.get("summary_stale", False)),
+        "auto_title": data.get("auto_title", ""),
+        # Speaker labels: "running" | "done" | "none" | "failed" (with a message)
+        "diarization_status": data.get("diarization_status", ""),
+        "diarization_message": data.get("diarization_message", ""),
+        "path": str(path),
+    }
+
+
 @bp.route("/transcripts")
 def list_transcripts():
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
     transcripts = []
+    profile = speakers.profile_name() or ""
     for f in sorted(TRANSCRIPTS_DIR.glob("*.json"), reverse=True):
+        data = load_transcript(f.stem)
+        if data is None:
+            continue
         try:
-            # Serialize against concurrent writes from diarization/summarization
-            # background tasks. Without this, json.loads can catch a partial
-            # write and the transcript silently disappears from the listing
-            # (the bare-except below swallows JSONDecodeError).
-            with get_transcript_lock(f.stem):
-                data = json.loads(f.read_text())
-            speakers = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
-            transcripts.append(
-                {
-                    "session_id": f.stem,
-                    "text_preview": (data.get("text", "")[:150] + "...")
-                    if len(data.get("text", "")) > 150
-                    else data.get("text", ""),
-                    "text": data.get("text", ""),
-                    "duration": data.get("duration", 0),
-                    "language": data.get("language", ""),
-                    "speakers": speakers,
-                    "segments": data.get("segments", []),
-                    "summary": data.get("summary", ""),
-                    "summary_stale": bool(data.get("summary_stale", False)),
-                    "auto_title": data.get("auto_title", ""),
-                    # Speaker labels: "running" | "done" | "none" | "failed" (with a message)
-                    "diarization_status": data.get("diarization_status", ""),
-                    "diarization_message": data.get("diarization_message", ""),
-                    "path": str(f),
-                }
-            )
+            transcripts.append(transcript_item(f.stem, data, profile))
         except Exception:
             continue
     return jsonify(transcripts)
@@ -902,6 +1030,16 @@ def _validate_segments(segments):
     return True, ""
 
 
+def _keep_names_for_edited_segments(transcript):
+    """After the user edited segments: keep names only for labels still there, for the new labelling."""
+    if not transcript.get("speaker_names"):
+        return
+    from app.coaching.runner import labelling_fingerprint
+
+    transcript["speaker_names"] = sn.stored_names(transcript)
+    transcript["speaker_names_labelling"] = labelling_fingerprint(transcript.get("segments") or [])
+
+
 @bp.route("/transcripts/update", methods=["POST"])
 def update_transcript():
     """Update transcript segments and/or summary."""
@@ -926,16 +1064,37 @@ def update_transcript():
         if not ok:
             return jsonify({"error": err}), 400
 
+    # The {label: name} map the summary editor showed. The names can change while the
+    # editor is open (an AI tool renames, clears or shares one), so reverse with these.
+    summary_names = data.get("summary_names")
+    if summary_names is not None and (
+        not isinstance(summary_names, dict) or not all(isinstance(v, str) for v in summary_names.values())
+    ):
+        return jsonify({"error": "summary_names must map speaker labels to names"}), 400
+
+    profile = speakers.profile_name() or ""
     with get_transcript_lock(session_id):
         transcript = json.loads(json_path.read_text())
         old_text = transcript.get("text")
+        # The editor shows names; stored summaries stay in label form so renaming keeps working.
+        if summary_names is None:
+            # Older callers: the recording's current names.
+            names = speakers.names_for(session_id, transcript, profile=profile)
+        else:
+            labels = set(sn.speaker_labels(transcript.get("segments")))
+            unknown = [label for label in summary_names if label not in labels]
+            if unknown:
+                return jsonify({"error": f"No speaker called {unknown[0]} in this recording"}), 400
+            names = summary_names
 
         if "segments" in data:
             transcript["segments"] = data["segments"]
             transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
+            _keep_names_for_edited_segments(transcript)
 
         if "summary" in data:
-            transcript["summary"] = data["summary"]
+            summary = data["summary"]
+            transcript["summary"] = sn.names_to_labels(summary, names) if isinstance(summary, str) else summary
             # A summary the user saved by hand is current by definition.
             transcript.pop("summary_stale", None)
 
@@ -980,3 +1139,57 @@ def delete_transcript():
             "errors": errors,
         }
     )
+
+
+# ---------------------------------------------------------------- speaker names
+
+
+@bp.route("/transcripts/speaker-names", methods=["POST"])
+def set_speaker_names():
+    """Name speakers in a recording: ``{session_id, names: {label: name or null}}``.
+
+    Null clears a name. Returns ``{speaker_names}`` (the names as stored). 404 without a
+    transcript, 400 for an unknown label or a bad name.
+    """
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id or not isinstance(session_id, str):
+        return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    names = data.get("names")
+    if not isinstance(names, dict):
+        return jsonify({"error": "names must map speaker labels to names"}), 400
+    try:
+        stored = speakers.set_names(session_id, names)
+    except KeyError:
+        return jsonify({"error": "Transcript not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"speaker_names": stored})
+
+
+@bp.route("/transcripts/speaker-names/ack-cleared", methods=["POST"])
+def ack_speaker_names_cleared():
+    """The UI has told the user that re-transcribing cleared the names: stop flagging it."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    if not session_id or not isinstance(session_id, str):
+        return jsonify({"error": "No session_id"}), 400
+    try:
+        validate_session_id(session_id)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    try:
+        speakers.ack_cleared(session_id)
+    except KeyError:
+        return jsonify({"error": "Transcript not found"}), 404
+    return jsonify({"saved": True})
+
+
+@bp.route("/people")
+def list_people():
+    """Every speaker name used across the library, with counts (name suggestions)."""
+    return jsonify(speakers.list_people())

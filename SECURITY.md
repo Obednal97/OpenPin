@@ -21,6 +21,7 @@ Mac, other machines on the network, and a tampered update.
 | Path tricks in requests (`../`, absolute paths) | Session IDs are validated and paths must stay inside the recordings folders (`app/utils/paths.py`) |
 | Losing recordings to a bug or a bad request | Deletes go to the macOS Trash; re-downloads back up the old files first; incomplete downloads are never saved as recordings |
 | Other users on the Mac | Config files are written with mode `0600` |
+| An AI tool or web page reaching more than the library data it was offered | `/mcp/v1` takes only the separate MCP key (off by default, revoked when switched off or on quit), refuses anything from a browser, and serves a fixed set of reads plus speaker-name and tag edits. See below |
 | Credentials in the process list | The WiFi-sync worker gets its credentials on stdin, not in `argv` |
 | A tampered or broken update | Downloaded through the Worker; size and SHA-256 checked; the install script refuses any bundle that isn't `com.plaud.v2` at the expected version, signed by the expected Apple team (the official releases' team unless the build set `APPLE_TEAM_ID`), and accepted by Gatekeeper |
 | Personal data in bug reports | The app sends no crash or bug reports. **Export bug report** saves a zip to `~/Downloads` that the user reviews and attaches to an issue themselves. Every file in it is scrubbed first (home folder, user names, serials, BLE IDs, keys, tokens, e-mail addresses, Notion and Drive links); `GET /diagnostics` returns only booleans, counts, the API host and the last four characters of serials. Recordings, transcripts and summaries are never included |
@@ -45,6 +46,35 @@ stated here:
   made, for automatic and manual coaching alike, and nothing from coaching leaves the Mac.
 - **Wrong person**: if the app can't tell which speaker is you, it asks and analyses nobody
   until you pick.
+
+AI tools (Claude Desktop and Claude Code) can use your library through Open Pin's MCP connector.
+It is off by default, and the boundaries are:
+
+- **Off until you turn it on** (Settings › General › AI tools), and it works only while Open Pin is
+  open. With the app closed, or the switch off, the connector just says so.
+- **A separate key.** While the switch is on, Open Pin makes a random MCP key and writes it, with
+  the port, to `mcp-connection.json` in the data folder (mode `0600`). The key opens `/mcp/v1`
+  only: it opens nothing else, and the app's own token doesn't open `/mcp/v1`. Turning the switch
+  off, or quitting, revokes the key and deletes the file at once.
+- **Browsers are refused.** Any request carrying an `Origin` or `Sec-Fetch-*` header gets 403 with
+  no CORS headers, so a web page can't use it even if it guessed the port. Nothing listens beyond
+  `127.0.0.1`, and the Host check still applies.
+- **What AI tools can see:** recording details (title, times, length, file name, format, size,
+  folder, tags, Notion link), transcripts, summaries, speaker names and coaching results (not for
+  recordings you excluded from coaching). Anything an AI tool reads is then handled under that
+  tool's own privacy terms, so only turn it on if you're happy with that.
+- **What they can't see:** API keys and tokens, your voice profile, verbatim words, pairing data,
+  settings and the audio itself.
+- **What they can change:** speaker names and tags, nothing else. They can't delete, move, crop,
+  transcribe or summarise, change settings, or control the device.
+- **Claude's settings files.** The one-click setup adds an `open-pin` entry to Claude's own
+  settings files (`claude_desktop_config.json`, `~/.claude.json` and similar). It copies the file
+  to a timestamped `.open-pin-backup-` file first (the last three are kept), keeps every other
+  entry, writes atomically, never overwrites a file that isn't valid JSON, and never runs the
+  `claude` command. Disconnect removes only the `open-pin` entry.
+- **Same Mac, same user.** A process running as you could already read the data folder directly.
+  The key means that reaching the backend's port isn't enough, and that switching it off really
+  stops access.
 
 Not in scope: malware running as the same user. It can read the config (API keys and device
 tokens are stored as plain JSON, not in the Keychain) and the backend's environment, which holds

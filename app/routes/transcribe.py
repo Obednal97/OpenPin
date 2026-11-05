@@ -24,6 +24,7 @@ from app.utils.paths import (
     resolve_inside,
     validate_session_id,
 )
+from app.utils.speaker_names import drop_if_relabelled, speaker_labels
 from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
 
@@ -90,29 +91,30 @@ def _extract_spoken_tags(text):
 
 
 def _apply_spoken_tags(session_id, text):
-    """Detect and apply spoken tags from transcript text. Returns list of applied tags."""
-    tags = _extract_spoken_tags(text)
-    if not tags:
+    """Detect spoken tags in the transcript text and add them. Returns the spoken tags
+    the recording now carries, in their saved spelling.
+
+    They go through ``tags.add_tags``, so the same rules apply as for tags added in
+    the app or by AI tools. A tag that breaks a rule (too long, say, or the recording
+    already has 20) is skipped and logged: it never fails the transcription.
+    """
+    spoken = _extract_spoken_tags(text)
+    if not spoken:
         return []
+    from app.utils import tags as tags_store
 
-    def _apply(config):
-        existing = config.get("recording_tags", {}).get(session_id, [])
-        # Merge — don't duplicate (case-insensitive comparison)
-        merged = list(existing)
-        existing_lower = {x.lower() for x in existing}
-        custom_tags = set(config.get("custom_tags", []))
-        for t in tags:
-            if t.lower() not in existing_lower:
-                merged.append(t)
-            # Auto-add to custom tags list if not already there (case-insensitive)
-            if t.lower() not in {x.lower() for x in custom_tags}:
-                custom_tags.add(t)
-        config.setdefault("recording_tags", {})[session_id] = merged
-        config["custom_tags"] = sorted(custom_tags)
-
-    update_config(_apply)
-    logging.info(f"Auto-tagged {session_id} with spoken tags: {tags}")
-    return tags
+    applied = []
+    for tag in spoken:
+        try:
+            now = tags_store.add_tags(session_id, [tag])
+        except ValueError as e:
+            logging.warning(f"Skipped spoken tag {tag!r} for {session_id}: {e}")
+            continue
+        folded = tag.strip().casefold()
+        applied += [t for t in now if t.casefold() == folded and t not in applied]
+    if applied:
+        logging.info(f"Auto-tagged {session_id} with spoken tags: {applied}")
+    return applied
 
 
 # Keys produced by a transcription run. Re-transcribing replaces these and
@@ -143,8 +145,13 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
 
     Must be called WITHOUT holding the session's transcript lock (it takes
     it). Replaces the transcription keys, preserves every other key, and sets
-    ``summary_stale: true`` if a summary exists and the text changed.
-    Returns the merged dict.
+    ``summary_stale: true`` if a summary exists and the text changed. Speaker
+    names are dropped (``speaker_names_cleared``) when the speakers were
+    detected again with a different labelling, so a name never lands on the
+    wrong person. Unlabelled segments with diarisation still to run
+    (``diarization_status`` "running") leave the names alone:
+    ``_background_diarize`` decides once the labels are known. Returns the
+    merged dict.
     """
     transcript_path = Path(transcript_path)
     with get_transcript_lock(session_id):
@@ -160,6 +167,11 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
         merged.update(new_fields)
         if existing.get("summary") and existing.get("text") != new_fields.get("text"):
             merged["summary_stale"] = True
+        labels_pending = new_fields.get("diarization_status") == "running" and not speaker_labels(
+            new_fields.get("segments")
+        )
+        if not labels_pending:
+            drop_if_relabelled(merged, existing.get("segments"))
         _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
         if txt_text is not None:
             _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
@@ -240,7 +252,12 @@ def _background_diarize(
                 # Re-transcribed (or edited) while this ran: don't clobber it.
                 print(f"  [bg-diarize] {session_id} changed meanwhile, result dropped")
                 return
+            old_segments = td.get("segments")
             td.update(fields)
+            # Names were kept while labels were pending (``_merge_transcript``): keep them for
+            # the same labelling, drop them for a different one, or when no labels came back
+            # (failed, or "none"), since then they can't return.
+            drop_if_relabelled(td, old_segments)
             _write_text_atomic(tp, json.dumps(td, indent=2, ensure_ascii=False))
             if write_txt and t_obj is not None:
                 _write_text_atomic(tp.with_suffix(".txt"), t_obj.formatted)

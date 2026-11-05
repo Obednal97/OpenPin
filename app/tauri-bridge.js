@@ -391,6 +391,10 @@ window.plaud = {
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
   deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
   tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),
+  // Add or remove single tags: { tags: { sid: [...] }, errors?: { sid: msg } }.
+  addTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/add', { session_ids, tags }),
+  removeTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/remove', { session_ids, tags }),
+  listTags: () => apiCall('GET', '/tags'),
   renameRecording: (session_id, title) => apiCall('POST', '/recordings/rename', { session_id, title }),
   exportRecording: (session_id) => apiCall('POST', '/recordings/export', { session_id }),
   cropRecording: (session_id, start, end, mode) =>
@@ -398,6 +402,14 @@ window.plaud = {
   updateTranscript: (session_id, updates) =>
     apiCall('POST', '/transcripts/update', { session_id, ...updates }),
   summarize: (session_id) => apiCall('POST', '/summarize', { session_id }),
+  // Speaker names. names maps labels to a name, or null to clear it. Returns
+  // { speaker_names } (the names as stored) or { error } with a message to show.
+  setSpeakerNames: (session_id, names) =>
+    apiCall('POST', '/transcripts/speaker-names', { session_id, names }),
+  ackSpeakerNamesCleared: (session_id) =>
+    apiCall('POST', '/transcripts/speaker-names/ack-cleared', { session_id }),
+  // Every name typed for a speaker, [{ name, recordings }], most used first
+  people: () => apiCall('GET', '/people'),
 
   // Conversation coaching
   coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),
@@ -419,6 +431,13 @@ window.plaud = {
   getSettings: () => apiCall('GET', '/settings'),
   saveSettings: (settings) => apiCall('POST', '/settings', settings),
   validateKey: (provider, key) => apiCall('POST', '/validate-key', { provider, key }),
+
+  // AI tools (MCP): the library change counter, and one-click setup for
+  // Claude Desktop / Claude Code (path: one that mcpSetupStatus listed).
+  libraryChanges: () => apiCall('GET', '/changes'),
+  mcpSetupStatus: () => apiCall('GET', '/mcp/setup/status'),
+  mcpConnect: (kind, path) => apiCall('POST', '/mcp/setup/connect', { kind, path }),
+  mcpDisconnect: (kind, path) => apiCall('POST', '/mcp/setup/disconnect', { kind, path }),
 
   // Cloud account
   cloudStatus: () => apiCall('GET', '/cloud/status'),

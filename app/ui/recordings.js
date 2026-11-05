@@ -33,7 +33,9 @@ function getFilteredRecordings() {
       const title = (rec.title || '').toLowerCase();
       const date = formatDate(rec.date).toLowerCase();
       const text = t ? (t.text || '').toLowerCase() : '';
-      return title.includes(q) || date.includes(q) || text.includes(q) || rec.session_id.toLowerCase().includes(q);
+      // Speaker names: the recording's participants, and the names on its transcript
+      const people = (rec.participants || []).concat(Object.values((t && t.speaker_names) || {})).join('\n').toLowerCase();
+      return title.includes(q) || date.includes(q) || text.includes(q) || people.includes(q) || rec.session_id.toLowerCase().includes(q);
     });
   }
 
@@ -111,6 +113,11 @@ function renderRecordingsList() {
         hasTranscript && t.speakers && t.speakers.length > 0
           ? `${t.speakers.length} speaker${t.speakers.length > 1 ? 's' : ''}`
           : '';
+      // Named speakers (you too, once you picked yourself in Coaching)
+      const participants = (rec.participants || []).filter((p) => typeof p === 'string' && p);
+      const people = participants.length
+        ? `<span class="recording-participants" title="${escapeHtml(`With ${participants.join(', ')}`)}">${escapeHtml(participants.join(', '))}</span>`
+        : '';
 
       let badgeClass = 'badge-new';
       let badgeText = 'New';
@@ -163,7 +170,7 @@ function renderRecordingsList() {
         <div class="recording-info">
           ${rec.title ? `<div class="recording-title">${rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(rec.title)}</div>` : ''}
           <div class="recording-date">${!rec.title && rec.cloud_synced ? '<svg class="cloud-icon" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4.5 13h7a3.5 3.5 0 00.5-6.97A5 5 0 002.1 8.26 3 3 0 004.5 13z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg> ' : ''}${escapeHtml(date)}</div>
-          <div class="recording-duration">${rec.partial ? (rec.redownload_pending ? 'Sync again to finish, or right-click to restore the previous copy' : 'Sync again to complete transfer') : [dur, speakerCount].filter(Boolean).join(' \u00B7 ')}</div>
+          <div class="recording-duration">${rec.partial ? (rec.redownload_pending ? 'Sync again to finish, or right-click to restore the previous copy' : 'Sync again to complete transfer') : [dur, speakerCount, people].filter(Boolean).join(' \u00B7 ')}</div>
           ${preview ? `<div class="recording-preview">${escapeHtml(preview)}</div>` : ''}
         </div>
         <div class="recording-right">
@@ -330,23 +337,26 @@ function updateSelectBar() {
             return rec && (rec.tags || []).includes(tag);
           });
 
+          // Add or remove just this tag (never the whole list, so a tag an AI
+          // tool added meanwhile survives). The reply holds each recording's
+          // real tags, and why any recording couldn't take the change.
+          let res;
+          try {
+            res = allHaveTag
+              ? await window.plaud.removeTags(ids, [tag])
+              : await window.plaud.addTags(ids, [tag]);
+          } catch (err) {
+            res = { error: (err && err.message) || 'unknown' };
+          }
+          const saved = (res && res.tags) || {};
           const failures = [];
           for (const sid of ids) {
             const rec = app.recordings.find((r) => r.session_id === sid);
-            if (!rec) continue;
-            const tags = rec.tags || [];
-            if (allHaveTag) {
-              rec.tags = tags.filter((t) => t !== tag);
+            if (saved[sid]) {
+              if (rec) rec.tags = saved[sid];
             } else {
-              if (!tags.includes(tag)) {
-                tags.push(tag);
-                rec.tags = tags;
-              }
-            }
-            try {
-              await window.plaud.tagRecording(sid, rec.tags);
-            } catch (err) {
-              failures.push({ sid, err });
+              const message = (res && res.errors && res.errors[sid]) || (res && res.error) || 'unknown';
+              failures.push({ sid, err: { message } });
             }
           }
           if (failures.length === 0) {
@@ -560,8 +570,9 @@ async function restoreRedownload(sessionId) {
   }
 }
 
+// Waits while the speaker name editor is open (redrawOpenTranscript, transcript.js)
 function _refreshOpenTranscript(sessionId) {
-  if (app.currentView === 'transcript' && app.currentSessionId === sessionId) openTranscript(sessionId);
+  redrawOpenTranscript(sessionId);
 }
 
 
@@ -717,8 +728,9 @@ function _showContextMenu(x, y, sessionId) {
 
   if (hasTranscript) {
     items.push({ label: 'Copy transcript', icon: 'copy', action: () => {
+      const names = t.speaker_names || {};
       const text = (t.segments || []).map(s => {
-        const speaker = s.speaker ? `[${s.speaker}] ` : '';
+        const speaker = s.speaker ? `[${speakerName(s.speaker, names)}] ` : '';
         return `${speaker}${s.text}`;
       }).join('\n') || t.text;
       navigator.clipboard.writeText(text).then(() => toast('Transcript copied', 'success')).catch(() => toast('Copy failed', 'error'));
@@ -727,7 +739,7 @@ function _showContextMenu(x, y, sessionId) {
 
   if (hasSummary) {
     items.push({ label: 'Copy summary', icon: 'copy', action: () => {
-      navigator.clipboard.writeText(t.summary).then(() => toast('Summary copied', 'success')).catch(() => toast('Copy failed', 'error'));
+      navigator.clipboard.writeText(applySpeakerNames(t.summary, t.speaker_names)).then(() => toast('Summary copied', 'success')).catch(() => toast('Copy failed', 'error'));
     }});
   }
 
@@ -887,7 +899,7 @@ async function _runAutoProcessQueue() {
         _autoProcessQueue.shift();
       }
       await loadRecordings();
-      if (app.currentView === 'transcript' && app.currentSessionId === item.sid) openTranscript(item.sid);
+      redrawOpenTranscript(item.sid);
     }
   } finally {
     _autoProcessRunning = false;

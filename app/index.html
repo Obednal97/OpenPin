@@ -976,6 +976,38 @@
             <button class="storage-mode-btn" data-theme-pref="dark" role="radio" aria-checked="false">Dark</button>
           </div>
         </div>
+        <!-- AI tools (ui/mcp-settings.js): the switch, then one-click setup for Claude -->
+        <div class="settings-section" id="mcp-section">
+          <h3>AI tools (MCP)</h3>
+          <label class="toggle-label auto-step">
+            <input type="checkbox" id="mcp-enabled-toggle" class="toggle-input">
+            <span class="toggle-switch"></span>
+            <span>Let AI tools on this Mac use Open Pin</span>
+          </label>
+          <p class="settings-hint mt-2">
+            Claude and other AI tools on this Mac can read your recordings' details, transcripts, summaries and coaching,
+            and can name speakers and change tags. Only while Open Pin is open. Your API keys, voice and audio files are
+            never shared.
+          </p>
+          <p class="ai-key-status error hidden" id="mcp-error" role="alert">AI tool access couldn't start. Check the log, or turn it off and on again.</p>
+          <div class="settings-subsection mcp-client">
+            <h4>Claude Desktop</h4>
+            <div id="mcp-desktop-status"></div>
+            <div class="dm-actions">
+              <button id="mcp-desktop-connect-btn" class="action-btn subtle" disabled>Connect to Claude Desktop</button>
+            </div>
+            <p class="settings-hint hidden" id="mcp-desktop-hint">Quit and reopen Claude Desktop to start using Open Pin.</p>
+          </div>
+          <div class="settings-subsection mcp-client">
+            <h4>Claude Code</h4>
+            <p class="settings-desc">Tick the settings files to connect. Open Pin backs each one up first.</p>
+            <div id="mcp-code-list"></div>
+            <div class="dm-actions">
+              <button id="mcp-code-connect-btn" class="action-btn subtle" disabled>Connect to Claude Code</button>
+            </div>
+            <p class="settings-hint hidden" id="mcp-code-hint">Start a new Claude Code session to start using Open Pin.</p>
+          </div>
+        </div>
         <div class="settings-section">
           <h3>About</h3>
           <p class="settings-desc">
@@ -1046,6 +1078,7 @@
   <script src="ui/transcript.js"></script>
   <script src="ui/coaching.js"></script>
   <script src="ui/settings.js"></script>
+  <script src="ui/mcp-settings.js"></script>
   <script src="ui/setup.js"></script>
   <script src="ui/coaching-progress.js"></script>
   <script src="renderer.js"></script>
