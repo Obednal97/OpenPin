@@ -203,3 +203,64 @@ def test_reports_without_an_ai_review_still_count():
     assert [p["session_id"] for p in out["series"]["overall_score"]] == ["b"]
     assert out["baseline"]["overall_score"] == 80
     assert out["baseline"]["talk_share"] == 0.6
+
+
+# ---------------------------------------------------------------- engagement
+
+
+def test_engagement_score_is_its_own_series_and_overall_stays_ai_only():
+    review = {"scores": {"clarity": {"score": 80}, "warmth": {"score": 60}}}
+    a = {**sc(review=review, laughs_per_hour=3.0, follow_up_share=0.3, built_on_share=0.5), "engagement": {"score": 40}}
+    b = {**sc(laughs_per_hour=None, follow_up_share=0.2), "engagement": {"score": None}}
+    c = sc(talk_share=0.5)  # older report, no engagement block
+    out = compute_progress([("a", ago(1), a), ("b", ago(2), b), ("c", ago(3), c)], NOW)
+    assert [p["value"] for p in out["series"]["engagement_score"]] == [40.0]
+    assert [p["value"] for p in out["series"]["overall_score"]] == [70.0]
+    assert out["baseline"]["engagement_score"] == 40.0
+    assert out["weekly"][-1]["engagement_score"] == 40.0
+    assert [p["value"] for p in out["series"]["laughs_per_hour"]] == [3.0]
+    assert [p["value"] for p in out["series"]["follow_up_share"]] == [0.2, 0.3]
+    assert [p["value"] for p in out["series"]["built_on_share"]] == [0.5]
+
+
+def test_engagement_score_is_never_the_focus():
+    out = compute_progress([("a", ago(1), {**sc(talk_share=0.5), "engagement": {"score": 0}})], NOW)
+    assert out["focus"] is None
+
+
+@pytest.mark.parametrize(
+    ("metric", "value", "text"),
+    [
+        (
+            "follow_up_share",
+            0.1,
+            "Follow-up questions came after 10% of your turns over the last two weeks; aim for at least 25%.",
+        ),
+        (
+            "built_on_share",
+            0.3,
+            "Others built on 30% of your points over the last two weeks; aim for at least 50%.",
+        ),
+    ],
+)
+def test_focus_sentence_for_engagement_parts(metric, value, text):
+    out = compute_progress([("a", ago(1), sc(**{metric: value}))], NOW)
+    assert out["focus"] == {"metric": metric, "text": text}
+
+
+def test_laughs_per_hour_is_a_series_but_never_the_focus_or_still_stuck():
+    """The detector undercounts and isn't calibrated on real audio, so laughs aren't coached on."""
+    data = [
+        ("p1", ago(40), sc(laughs_per_hour=0.0)),
+        ("r1", ago(3), sc(laughs_per_hour=0.0)),
+        ("r2", ago(2), sc(laughs_per_hour=0.5)),
+    ]
+    out = compute_progress(data, NOW)
+    assert [p["value"] for p in out["series"]["laughs_per_hour"]] == [0.0, 0.0, 0.5]
+    assert out["focus"] is None
+    assert out["most_stuck"] is None
+    # Another measure outside its band still gets them.
+    data.append(("r3", ago(1), sc(laughs_per_hour=0.0, talk_share=0.9)))
+    out = compute_progress(data, NOW)
+    assert out["focus"]["metric"] == "talk_share"
+    assert out["most_stuck"]["metric"] == "talk_share"

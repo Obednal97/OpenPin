@@ -119,7 +119,7 @@ const data = JSON.parse(fs.readFileSync(0, 'utf8'));
 const r = (code) => vm.runInContext(code, ctx);
 const out = {};
 for (const [name, c] of Object.entries(data.cases)) {
-  out[name] = r('_coachReportHtml')(c.sidecar, c.baseline || null, data.segments);
+  out[name] = r('_coachReportHtml')(c.sidecar, c.baseline || null, data.segments, c.names || {});
 }
 out.moments = r('_coachMoments')(data.cases.done.sidecar);
 out.overall = r('_coachOverall')(data.cases.done.sidecar.review);
@@ -227,6 +227,24 @@ REVIEW = {
     "interruptions_confirmed": [70.1],
 }
 
+# sidecar["engagement"] (spec 2026-11-05-engagement-design.md): Speaker 2 is you
+ENGAGEMENT = {
+    "score": 64,
+    "laughs": [
+        {"t": 9.4, "line_start": 4.5, "line_text": "No problem <b>at all</b>, Speaker 1."},
+        {"t": 2.0, "line_start": 0.5, "line_text": "Early <img src=x>"},
+    ],
+    "laughs_count": 2,
+    "laughs_per_hour": 4.46,
+    "follow_ups": [{"t": 61.7, "text": "So the price is <script>x</script>?"}],
+    "follow_up_share": 0.25,
+    "follow_up_turns": 4,
+    "built_on": {"count": 2, "of": 3},
+    "built_on_share": 0.667,
+    "laughter_status": "done",
+    "laughter_reason": "",
+}
+
 DONE = {
     "status": "done",
     "owner": {"labels": ["Speaker 2"], "source": "voice", "confidence": 0.81},
@@ -235,10 +253,85 @@ DONE = {
     "report_stale": False,
     "mixed_up": False,
     "targets": TARGETS,
+    "engagement": ENGAGEMENT,
 }
 
 CASES = {
-    "done": {"sidecar": DONE, "baseline": {"pace_wpm": 140.0, "overall_score": 64.0, "talk_share": None}},
+    "done": {
+        "sidecar": DONE,
+        "baseline": {"pace_wpm": 140.0, "overall_score": 64.0, "talk_share": None, "engagement_score": 57.4},
+    },
+    "named": {"sidecar": DONE, "names": {"Speaker 1": "Sarah <Jones>", "Speaker 2": "Ollie"}},
+    "noengagement": {"sidecar": {k: v for k, v in DONE.items() if k != "engagement"}},
+    # The review is off: laughs and follow-ups still count, built-on doesn't exist
+    "eng_reviewoff": {
+        "sidecar": {
+            **DONE,
+            "review": None,
+            "status_reason": "AI review is off",
+            "engagement": {**ENGAGEMENT, "built_on": None, "built_on_share": None},
+        }
+    },
+    # No audio on this Mac: laughter is out and says why; too few turns for follow-ups
+    "eng_unavailable": {
+        "sidecar": {
+            **DONE,
+            "engagement": {
+                **ENGAGEMENT,
+                "score": None,
+                "laughs": [],
+                "laughs_count": 0,
+                "laughs_per_hour": None,
+                "follow_ups": [],
+                "follow_up_share": None,
+                "built_on": None,
+                "built_on_share": None,
+                "laughter_status": "unavailable",
+                "laughter_reason": "No audio on <this> Mac",
+            },
+        }
+    },
+    # Laughter ran and found nothing; none of your turns drew a follow-up
+    "eng_none": {
+        "sidecar": {
+            **DONE,
+            "engagement": {
+                **ENGAGEMENT,
+                "score": 0,
+                "laughs": [],
+                "laughs_count": 0,
+                "laughs_per_hour": 0.0,
+                "follow_ups": [],
+                "follow_up_share": 0.0,
+                "follow_up_turns": 5,
+                "built_on": {"count": 0, "of": 4},
+                "built_on_share": 0.0,
+            },
+        }
+    },
+    # Many turns: the 4-decimal share can't give back the turn count (1 / 0.0033 is 303)
+    "eng_manyturns": {
+        "sidecar": {**DONE, "engagement": {**ENGAGEMENT, "follow_up_share": 0.0033, "follow_up_turns": 300}}
+    },
+    # A block saved before follow_up_turns existed: the turn count comes from the share
+    "eng_noturns": {"sidecar": {**DONE, "engagement": {k: v for k, v in ENGAGEMENT.items() if k != "follow_up_turns"}}},
+    # Every measure exact (a Deepgram transcript), with engagement parts copied into the metrics:
+    # their "estimated"/"unavailable" must not bring back the re-transcribe footnote
+    "exact_with_engagement": {
+        "sidecar": {
+            **DONE,
+            "metrics": {
+                **METRICS,
+                "owner": {**METRICS["owner"], "fillers": 3, "fillers_per_min": 1.2, "laughs_per_hour": 4.46},
+                "availability": {
+                    **dict.fromkeys(METRICS["availability"], "exact"),
+                    "laughs_per_hour": "estimated",
+                    "follow_up_share": "exact",
+                    "built_on_share": "unavailable",
+                },
+            },
+        }
+    },
     "nobaseline": {"sidecar": DONE},
     "stale": {"sidecar": {**DONE, "report_stale": True}},
     "metricsonly": {"sidecar": {**DONE, "review": None, "status_reason": "measured metrics only (no AI provider)"}},
@@ -536,6 +629,111 @@ class TestReport:
             html = out[name]
             assert html.count('data-coach-action="exclude"') == 1, name
             assert "Don’t coach this recording" in html, name
+
+
+def _engagement(html):
+    start = html.index('<section class="coach-card coach-engagement">')
+    return html[start : html.index("</section>", start)]
+
+
+def _eng_row(html, name):
+    eng = _engagement(html)
+    start = eng.index(f'<span class="coach-eng-name">{name}</span>')
+    end = eng.find('<div class="coach-eng-row">', start)
+    return eng[start : end if end > 0 else len(eng)]
+
+
+class TestEngagement:
+    def test_after_the_measures(self, out):
+        html = out["done"]
+        marks = ["Overall", "Measures", "Engagement", "Moments", "How they responded"]
+        positions = [html.index(m) for m in marks]
+        assert positions == sorted(positions)
+
+    def test_score_marked_measured_with_your_usual(self, out):
+        eng = _engagement(out["done"])
+        assert '<span class="coach-overall-score">64</span>' in eng
+        assert "coach-badge-measured" in eng and ">measured<" in eng
+        assert "Your usual 57" in eng
+
+    def test_three_rows(self, out):
+        html = out["done"]
+        assert "2 (4.5 per hour)" in _eng_row(html, "Laughs after your lines")
+        # 1 follow-up, 4 of your turns
+        assert "1 of 4 of your turns" in _eng_row(html, "Follow-up questions to you")
+        assert "2 of 3" in _eng_row(html, "Your points others built on")
+
+    def test_follow_up_turns_from_the_block(self, out):
+        assert "1 of 300 of your turns" in _eng_row(out["eng_manyturns"], "Follow-up questions to you")
+        # Without the field, worked out from the share (1 at 0.25: 4 turns)
+        assert "1 of 4 of your turns" in _eng_row(out["eng_noturns"], "Follow-up questions to you")
+
+    def test_chips_seek(self, out):
+        laughs = _eng_row(out["done"], "Laughs after your lines")
+        chips = re.findall(
+            r'<button type="button" class="coach-chip" data-coach-seek="([\d.]+)"[^>]*>([^<]+)</button>', laughs
+        )
+        # Sorted by time, labelled with the laugh's time, playing from just before it (never before your line)
+        assert chips == [("0.5", "00:02"), ("5.4", "00:09")]
+        follow = _eng_row(out["done"], "Follow-up questions to you")
+        assert re.findall(r'class="coach-chip" data-coach-seek="([\d.]+)"', follow) == ["61.7"]
+
+    def test_quoted_lines_and_escaping(self, out):
+        eng = _engagement(out["done"])
+        assert "No problem &lt;b&gt;at all&lt;/b&gt;, Speaker 1." in eng
+        assert "So the price is &lt;script&gt;x&lt;/script&gt;?" in eng
+        for raw in ("<b>", "<img", "<script>"):
+            assert raw not in eng
+        assert "No audio on &lt;this&gt; Mac" in _engagement(out["eng_unavailable"])
+
+    def test_names_applied_to_quoted_lines(self, out):
+        eng = _engagement(out["named"])
+        assert "No problem &lt;b&gt;at all&lt;/b&gt;, Sarah &lt;Jones&gt;." in eng
+        assert "Speaker 1" not in eng
+
+    def test_chuckle_caveat_once(self, out):
+        caveat = "Laughter detection can miss quiet chuckles."
+        assert out["done"].count(caveat) == 1
+        assert out["eng_none"].count(caveat) == 1
+        # Nothing ran, so there's nothing to caveat: the row says why instead
+        assert caveat not in out["eng_unavailable"]
+
+    def test_built_on_hidden_with_review_off(self, out):
+        html = out["eng_reviewoff"]
+        eng = _engagement(html)
+        assert "built on" not in eng
+        assert "Laughs after your lines" in eng and "Follow-up questions to you" in eng
+        assert '<span class="coach-overall-score">64</span>' in eng
+
+    def test_unavailable_laughter_says_why(self, out):
+        html = out["eng_unavailable"]
+        laughs = _eng_row(html, "Laughs after your lines")
+        assert "Not available" in laughs and "No audio on &lt;this&gt; Mac" in laughs
+        assert "coach-chip" not in laughs
+        assert "Not enough of your turns to tell" in _eng_row(html, "Follow-up questions to you")
+        # No score rather than a low one
+        eng = _engagement(html)
+        assert "coach-overall-score" not in eng
+        assert "Not enough to score" in eng
+
+    def test_zero_counts(self, out):
+        html = out["eng_none"]
+        assert '<span class="coach-overall-score">0</span>' in _engagement(html)
+        assert "None" in _eng_row(html, "Laughs after your lines")
+        assert "None of 5 of your turns" in _eng_row(html, "Follow-up questions to you")
+        assert "0 of 4" in _eng_row(html, "Your points others built on")
+
+    def test_absent_or_previous_run_shows_nothing(self, out):
+        assert "coach-engagement" not in out["noengagement"]
+        assert "Measures" in out["noengagement"]
+        # A failed rerun's engagement is the previous run's, like its metrics
+        assert "coach-engagement" not in out["failed_previous"]
+
+    def test_no_em_dashes(self):
+        src = _coach_src()
+        body = src[src.index("function _coachEngagementHtml(") :]
+        body = body[: body.index("\n}\n")]
+        assert "\u2014" not in body
 
 
 _SAVE_JS = r"""
@@ -923,3 +1121,15 @@ class TestRealSidecar:
         assert "110–160 wpm" in html
         assert "at most 1 in 10 turns" in html
         assert "Asked a follow-up" in html
+
+
+class TestFootnote:
+    FOOTNOTE = "Re-transcribing with Deepgram measures them exactly."
+
+    def test_shown_when_a_measure_is_estimated(self, out):
+        assert self.FOOTNOTE in out["done"]
+
+    def test_engagement_parts_never_bring_it_back(self, out):
+        html = out["exact_with_engagement"]
+        assert "Measures" in html and "coach-engagement" in html
+        assert self.FOOTNOTE not in html

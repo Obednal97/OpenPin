@@ -41,7 +41,9 @@ aren't supported.
   model as a last resort.
 - **Conversation coaching**: after a recording with at least two speakers, Open Pin measures how you
   came across (pace, talk share, interruptions, patience, questions, filler words) and asks your
-  summary AI for plain-spoken feedback with timestamped moments. Turn the AI review off to keep
+  summary AI for plain-spoken feedback with timestamped moments. A measured Engagement score
+  counts laughs after your lines (detected on your Mac), follow-up questions to you and points
+  others built on, each with moments you can click to hear. Turn the AI review off to keep
   coaching to the measured results, with nothing leaving your Mac, and turn coaching off for any
   one recording. A Progress view shows whether you are improving over weeks. You set up your voice
   once so it knows which speaker is you; voice data and your verbatim words stay on your Mac.
@@ -137,7 +139,8 @@ kept in your login Keychain, so the pairing survives a cleaner deleting the fold
   your IP address and app version.
 - First-launch and on-demand downloads come from GitHub (Python), PyPI (packages), evermeet.cx
   (FFmpeg) and Hugging Face / OpenAI (models). The first time local speaker labelling runs, the
-  `diarize` library downloads its voice model from WeSpeaker's own server. No audio is sent.
+  `diarize` library downloads its voice model from WeSpeaker's own server. The first time coaching
+  checks for laughter, it downloads the laughter model from Hugging Face. No audio is sent.
 
 Open Pin has no analytics and sends no crash reports.
 
@@ -188,3 +191,8 @@ reverse-engineering notes).
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+### Third-party
+
+- [CED-Tiny](https://huggingface.co/mispeech/ced-tiny) by mispeech (Apache-2.0), the audio
+  classifier coaching uses to detect laughter. It is downloaded on first use, not bundled.

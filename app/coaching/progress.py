@@ -6,7 +6,9 @@ report made with the AI review off has metrics but no review: its overall score 
 read from sidecar["metrics"]["owner"] (the units there already match the target
 bands, e.g. talk_share is a 0-1 fraction). One extra series, "overall_score", is the
 mean of the review scores present (ungrounded ones are dropped); it has no band and is left out of most_improved,
-most_stuck and focus. None values are skipped, never counted as zero.
+most_stuck and focus. Another, "engagement_score", is read from sidecar["engagement"]["score"] (the measured
+Engagement score, kept apart from the AI scores) and is left out the same way. The engagement parts are
+ordinary TARGETS series: the runner copies them into metrics.owner. None values are skipped, never counted as zero.
 
 Weeks are ISO weeks starting Monday, in UTC.
 """
@@ -18,11 +20,15 @@ from datetime import UTC, datetime, timedelta
 from app.coaching import targets as T
 
 OVERALL = "overall_score"
+ENGAGEMENT = "engagement_score"
 REVIEW_KEYS = ("clarity", "warmth", "charisma", "listening", "reception")
 DAY_S = 86400.0
 BASELINE_DAYS = 30
 RECENT_DAYS = 28  # "last 4 weeks"; compared with the 28 days before
 FOCUS_DAYS = 14  # "last 2 weeks"
+# Tracked as series but never the focus or "still stuck": the laughter detector undercounts
+# (it misses soft chuckles) and isn't calibrated on real recordings yet.
+NOT_COACHED = frozenset({"laughs_per_hour"})
 
 # How each metric reads in the focus sentence:
 # (multiplier, decimals, opening words, unit after the value, unit after the target band).
@@ -36,6 +42,9 @@ _FOCUS = {
     "questions_per_hour": (1, 0, "You asked", " question{s} an hour", " questions an hour"),
     "fillers_per_min": (1, 1, "You used", " filler word{s} a speaking minute", " a speaking minute"),
     "interactivity": (1, 1, "Speakers switched", " time{s} every 5 minutes", " switches every 5 minutes"),
+    "laughs_per_hour": (1, 1, "You got", " laugh{s} an hour after your lines", " laughs an hour"),
+    "follow_up_share": (100, 0, "Follow-up questions came after", "% of your turns", "%"),
+    "built_on_share": (100, 0, "Others built on", "% of your points", "%"),
 }
 
 
@@ -56,6 +65,8 @@ def _values(sidecar: dict) -> dict[str, float | None]:
     owner = (sidecar.get("metrics") or {}).get("owner") or {}
     out = {m: _num(owner.get(m)) for m in T.TARGETS}
     out[OVERALL] = _overall(sidecar.get("review"))
+    engagement = sidecar.get("engagement")
+    out[ENGAGEMENT] = _num(engagement.get("score")) if isinstance(engagement, dict) else None
     return out
 
 
@@ -121,6 +132,7 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
       same metric as most_improved.
     - focus: the banded metric furthest outside its band over the last 2 weeks (scaled by band
       size), with a templated sentence.
+    Metrics in NOT_COACHED (laughs per hour) are never most_stuck or focus.
     """
     start = now - weeks * 7 * DAY_S
     rows = [
@@ -129,7 +141,7 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
         if sc.get("status") == "done" and sc.get("mixed_up") is False and not sc.get("excluded") and start <= t <= now
     ]
     rows.sort(key=lambda r: r["t"])
-    metrics = [*T.TARGETS, OVERALL]
+    metrics = [*T.TARGETS, OVERALL, ENGAGEMENT]
     end = now + 1  # make `now` itself inclusive in the half-open windows
 
     series = {
@@ -161,6 +173,8 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
             gain = _distance(m, before) - _distance(m, last)
             if gain > best_gain:
                 best_gain, improved = gain, {"metric": m, "from": before, "to": last}
+        if m in NOT_COACHED:
+            continue
         if last is not None and _distance(m, last) > 0:
             gain = 0.0 if before is None else _distance(m, before) - _distance(m, last)
             key = (gain, -_distance(m, last))

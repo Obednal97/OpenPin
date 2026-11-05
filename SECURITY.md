@@ -44,6 +44,8 @@ stated here:
   a cloud API key is saved, and without Ollama you get the measured metrics only. With "Include
   an AI review" off (Settings › Transcription & AI › Your voice & coaching) this call is never
   made, for automatic and manual coaching alike, and nothing from coaching leaves the Mac.
+- **Laughter detection** runs on the Mac with a small model (CED-Tiny), downloaded once from
+  Hugging Face at a pinned revision and kept only if its SHA-256 matches. No audio is sent.
 - **Wrong person**: if the app can't tell which speaker is you, it asks and analyses nobody
   until you pick.
 

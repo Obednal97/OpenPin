@@ -9,9 +9,12 @@
 // talk_share is a 0-1 fraction); tests/test_coaching_progress_ui.py keeps them in
 // step. scale/dec/unit only shape how a number is written; targetDec, when set,
 // writes the target band with other decimals ("at most 1 in 10 turns"). overall_score is the
-// mean of the five AI scores and has no target.
+// mean of the five AI scores and has no target; engagement_score is measured (laughs,
+// follow-ups, points built on) and has none either. Rows show in this order, each only when
+// the backend sends its series: the scores first, then the measures, then engagement's parts.
 const _coachProgMetrics = {
   overall_score: { label: 'Overall score', low: null, high: null, scale: 1, dec: 0, unit: ' / 100', hint: 'Average of the five AI scores' },
+  engagement_score: { label: 'Engagement score', low: null, high: null, scale: 1, dec: 0, unit: ' / 100', hint: 'Measured from laughs, follow-up questions and points built on' },
   pace_wpm: { label: 'Pace', low: 110, high: 160, scale: 1, dec: 0, unit: ' wpm', hint: 'Words per minute while you speak' },
   talk_share: { label: 'Talk share', low: 0.4, high: 0.6, scale: 100, dec: 0, unit: '%', hint: 'Your share of the talking' },
   longest_monologue_s: { label: 'Longest monologue', low: null, high: 150, scale: 1, dec: 0, unit: '', hint: 'Your longest turn without a break' },
@@ -20,6 +23,9 @@ const _coachProgMetrics = {
   questions_per_hour: { label: 'Questions', low: 10, high: 18, scale: 1, dec: 0, unit: ' an hour', hint: 'Questions you ask' },
   fillers_per_min: { label: 'Filler words', low: 0.6, high: 3, scale: 1, dec: 1, unit: ' a minute', hint: 'Um, uh, like, you know' },
   interactivity: { label: 'Interactivity', low: 5, high: null, scale: 1, dec: 1, unit: ' per 5 min', hint: 'How often the speaker changes' },
+  laughs_per_hour: { label: 'Laughs after your lines', low: 6, high: null, scale: 1, dec: 1, targetDec: 0, unit: ' an hour', hint: 'Laughter straight after you speak' },
+  follow_up_share: { label: 'Follow-up questions to you', low: 0.25, high: null, scale: 100, dec: 0, unit: '% of your turns', hint: 'Questions straight after your turns' },
+  built_on_share: { label: 'Your points others built on', low: 0.5, high: null, scale: 100, dec: 0, unit: '%', hint: 'From the AI review' },
 };
 const COACH_PROG_WEEKS = 12;
 const COACH_PROG_MIN = 3; // fewer coached conversations than this shows the empty state

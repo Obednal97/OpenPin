@@ -14,6 +14,12 @@ never installs anything.
 With ``coaching_ai_review`` off, the AI review is never asked for: the run ends ``done``
 with the measured metrics only.
 
+Every run with a report also stores ``engagement`` (app/coaching/engagement.py): laughter is
+detected before the review (so the review is told about the laughs), and the block is
+computed after it (so "built on" can use the review's reactions). Its three parts are copied
+into ``metrics.owner`` so Progress tracks them like any other measure. Laughter detection
+never stops a run: if it can't run, that part is "unavailable" with a reason.
+
 A result is dropped if the transcript text changed while the run was going, if a newer
 run for the same recording started meanwhile, or if the recording was excluded meanwhile.
 A trigger that arrives during a run is queued and runs once the current run finishes.
@@ -26,10 +32,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from threading import Lock, Thread
 
-from app.coaching import store, voice
+from app.coaching import engagement, laughter, store, voice
 from app.coaching.metrics import compute_metrics
 from app.coaching.review import review_conversation
-from app.coaching.targets import MIN_COACHING_SECONDS
+from app.coaching.targets import LAUGHTER_MAX_S, MIN_COACHING_SECONDS
 from app.providers.llm_json import ollama_unavailable
 from app.utils.config import load_config
 from app.utils.constants import TRANSCRIPTS_DIR
@@ -45,12 +51,16 @@ LOCAL_NEEDS_OLLAMA = "AI feedback needs Ollama; showing measured metrics only"
 INTERRUPTED = "Coaching was interrupted. Try again."
 REVIEW_OFF = "AI review is off"
 EXCLUDED = "excluded"
+# The detector's own wording, so a reason reads the same wherever it was decided.
+LAUGHTER_NO_AUDIO = laughter.REASON_NO_AUDIO
+LAUGHTER_TOO_LONG = laughter.REASON_TOO_LONG
+LAUGHTER_FAILED = laughter.REASON_FAILED
 FIRST_LINE_CHARS = 200
 
 # Keys that describe one run's outcome; cleared when a run ends without a report.
-_REPORT_KEYS = ("metrics", "review", "report_stale", "candidates")
+_REPORT_KEYS = ("metrics", "review", "engagement", "report_stale", "candidates")
 # Removed when the user excludes a recording: everything a run or an owner pick wrote.
-_EXCLUDE_DROPS = ("metrics", "review", "owner", "candidates", "report_stale", "mixed_up", "created_at")
+_EXCLUDE_DROPS = ("metrics", "review", "engagement", "owner", "candidates", "report_stale", "mixed_up", "created_at")
 
 _lock = Lock()
 _running: dict[str, int] = {}  # runs in progress per session in this process
@@ -156,13 +166,93 @@ def _candidates(labels: list[str], segments: list[dict], audio: str | None) -> l
     return [{"label": label, "first_line": lines.get(label, ""), "loud": label == loud} for label in labels]
 
 
-def _review(segments, owner_labels, metrics, config) -> tuple[dict | None, list[str]]:
+def _review(segments, owner_labels, metrics, config, laughs) -> tuple[dict | None, list[str]]:
     try:
-        result = review_conversation(segments, owner_labels, metrics, config)
+        result = review_conversation(segments, owner_labels, metrics, config, laughs=laughs)
     except Exception as e:
         log.warning("coaching review failed: %s", e, exc_info=True)
         return None, [str(e)]
     return result.get("review"), list(result.get("errors") or [])
+
+
+def _detect_laughter(audio: str | None, duration: float) -> tuple[str, str, list, str | None]:
+    """``(status, reason, events, wav)`` from the laughter detector; never raises.
+
+    ``wav`` is the detector's converted audio, kept so the loudness check needn't convert
+    again; the caller must delete it (``_remove``). Recordings over LAUGHTER_MAX_S are
+    skipped before any audio is converted."""
+    if not audio:
+        return "unavailable", LAUGHTER_NO_AUDIO, [], None
+    if duration > LAUGHTER_MAX_S:
+        return "unavailable", LAUGHTER_TOO_LONG, [], None
+    try:
+        result = laughter.detect(audio, keep_wav=True)
+    except Exception as e:
+        log.warning("laughter detection failed: %s", e, exc_info=True)
+        return "unavailable", LAUGHTER_FAILED, [], None
+    if not isinstance(result, dict):
+        return "unavailable", LAUGHTER_FAILED, [], None
+    wav = result.get("wav") if isinstance(result.get("wav"), str) else None
+    if result.get("status") != "done":
+        _remove(wav)
+        return "unavailable", str(result.get("reason") or LAUGHTER_FAILED), [], None
+    events = result.get("events")
+    return "done", "", events if isinstance(events, list) else [], wav
+
+
+def _remove(path: str | None) -> None:
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _laughs_and_loudness(audio, segments, owner_labels, duration) -> tuple[str, str, list, dict | None]:
+    """Laughter events and the loudness to tell them apart from you: ``(status, reason, events,
+    loudness)``. Never raises: if a step fails, laughter is "unavailable"."""
+    status, reason, events, wav = _detect_laughter(audio, duration)
+    try:
+        # One conversion of the audio (the detector's) measures your voice and each candidate.
+        candidates = engagement.laugh_candidates(segments, owner_labels, events) if events else []
+        windows = [c["window"] for c in candidates]
+        loudness = engagement.measure_loudness(audio, segments, owner_labels, windows, wav=wav) if candidates else None
+        return status, reason, events, loudness
+    except Exception as e:
+        log.warning("measuring laughs failed: %s", e, exc_info=True)
+        return "unavailable", LAUGHTER_FAILED, [], None
+    finally:
+        _remove(wav)
+
+
+def _engagement_block(segments, owner_labels, laughs, review, duration) -> dict | None:
+    """The engagement block, never raising: metrics and the review must never be lost to it.
+
+    If computing it fails, it is tried again with laughter "unavailable", then also without
+    the review, so every part that can be worked out still is. None if even that fails."""
+    status, reason, events, loudness = laughs
+    attempts = (
+        (status, reason, events, review, loudness),
+        ("unavailable", LAUGHTER_FAILED, [], review, None),
+        ("unavailable", LAUGHTER_FAILED, [], None, None),
+    )
+    for st, why, evs, rev, loud in attempts:
+        try:
+            return engagement.compute(segments, owner_labels, evs, st, why, rev, duration, loud)
+        except Exception as e:
+            log.warning("engagement failed: %s", e, exc_info=True)
+    return None
+
+
+def _with_engagement(metrics: dict, block: dict | None) -> dict:
+    """Copy the engagement parts into the metrics, so Progress series pick them up."""
+    if block is None:
+        return metrics
+    owner, availability = metrics.setdefault("owner", {}), metrics.setdefault("availability", {})
+    for key, kind in (("laughs_per_hour", "estimated"), ("follow_up_share", "exact"), ("built_on_share", "estimated")):
+        owner[key] = block[key]
+        availability[key] = kind if block[key] is not None else "unavailable"
+    return metrics
 
 
 def _local_only(config: dict) -> bool:
@@ -196,7 +286,7 @@ def _analyse(
     owner, reason = _resolve_owner(sidecar, labels, audio, segments)
     if owner is None:
         fields = {"status": "needs_owner", "status_reason": reason, "candidates": _candidates(labels, segments, audio)}
-        return fields, {"owner", "metrics", "review", "report_stale"}
+        return fields, {"owner", "metrics", "review", "engagement", "report_stale"}
     owner_labels = sorted(owner["labels"])
     if set(owner_labels) >= set(labels):
         return {"status": "skipped", "status_reason": ONLY_YOU, "owner": owner}, set(_REPORT_KEYS)
@@ -208,12 +298,28 @@ def _analyse(
         duration,
         bool(transcript.get("timestamps_estimated")),
     )
+    laughs = _laughs_and_loudness(audio, segments, owner_labels, duration)
+
+    def _engagement(review: dict | None) -> dict | None:
+        return _engagement_block(segments, owner_labels, laughs, review, duration)
+
+    def _fields(review: dict | None, block: dict | None, reason: str) -> dict:
+        fields = {"owner": owner, "metrics": _with_engagement(metrics, block), "review": review}
+        if block is not None:
+            fields["engagement"] = block
+        return {**fields, "status": "done", "status_reason": reason}
+
+    drop = {"report_stale", "candidates"}
     if not ai_review_on(config):
         # The user chose measured results only: the transcript never leaves the Mac.
-        fields = {"owner": owner, "metrics": metrics, "review": None, "status": "done", "status_reason": REVIEW_OFF}
-        return fields, {"report_stale", "candidates"}
-    review, errors = _review(segments, owner_labels, metrics, config)
-    fields = {"owner": owner, "metrics": metrics, "review": review, "status": "done", "status_reason": ""}
+        block = _engagement(None)
+        return _fields(None, block, REVIEW_OFF), drop | ({"engagement"} if block is None else set())
+    before_review = _engagement(None)
+    review, errors = _review(segments, owner_labels, metrics, config, (before_review or {}).get("laughs") or [])
+    block = _engagement(review)
+    fields = _fields(review, block, "")
+    if block is None:
+        drop = drop | {"engagement"}
     if review is None:
         # Local users without a usable Ollama still get their measured metrics. Any other
         # error (broken JSON, a timeout) is a real failure, for them too.
@@ -222,7 +328,7 @@ def _analyse(
         else:
             fields["status"] = "failed"
             fields["status_reason"] = "AI feedback failed: " + ("; ".join(errors) or "no AI provider answered")
-    return fields, {"report_stale", "candidates"}
+    return fields, drop
 
 
 # ---------------------------------------------------------------- runs in progress

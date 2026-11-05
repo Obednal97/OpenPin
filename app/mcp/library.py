@@ -192,11 +192,15 @@ class _Row:
         side = self.sidecar
         if side.get("excluded") or not side.get("status"):
             return None
-        return {
+        out = {
             "status": side.get("status"),
             "metrics": side.get("metrics"),
             "review": _named(side.get("review"), self.names),
         }
+        # Laughs after your lines, follow-up questions to you, points built on: quoted lines get names too
+        if isinstance(side.get("engagement"), dict):
+            out["engagement"] = _named(side["engagement"], self.names)
+        return out
 
     def detail(self, include) -> dict:
         out = self.list_item()
