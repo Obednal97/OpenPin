@@ -171,6 +171,23 @@ def test_progress_route(env):
     assert env.get("/coaching/progress?weeks=abc").status_code == 200
 
 
+def test_progress_route_has_the_engagement_score(env):
+    """The Progress tab shows the engagement score's baseline as "Your usual"."""
+    recent = str(int(time.time()) - 3600)
+    done = {
+        "status": "done",
+        "mixed_up": False,
+        "metrics": {"owner": {"laughs_per_hour": 3.0}},
+        "engagement": {"score": 55},
+    }
+    (runner.TRANSCRIPTS_DIR / f"{recent}.json").write_text(json.dumps({"text": "x", "segments": SEGMENTS}))
+    store.update(recent, lambda d: d.update(done))
+    body = env.get("/coaching/progress").get_json()
+    assert body["baseline"]["engagement_score"] == 55.0
+    assert [p["value"] for p in body["series"]["engagement_score"]] == [55.0]
+    assert body["baseline"]["laughs_per_hour"] == 3.0
+
+
 def test_progress_lists_only_sidecars(env, monkeypatch):
     seen = {}
     monkeypatch.setattr(routes, "compute_progress", lambda sc, now, weeks: seen.update(sids=[s[0] for s in sc]) or {})
