@@ -17,6 +17,7 @@ function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
   if (!rec) return;
 
+  const reopening = app.currentView === 'transcript' && app.currentSessionId === sessionId;
   app.currentSessionId = sessionId;
   const t = app.transcripts[sessionId];
   app.currentView = 'transcript';
@@ -757,45 +758,52 @@ function openTranscript(sessionId, autoPlay = false) {
     });
   }
 
-  // Tabs
+  // Tabs: shown whenever there's a transcript (Coaching needs one).
+  // Re-opening the recording that's already on screen (a background refresh)
+  // keeps the Coaching tab.
   const tabsEl = $('#transcript-tabs');
-  if (t && t.summary) {
-    tabsEl.classList.remove('hidden');
+  tabsEl.classList.toggle('hidden', !hasTranscriptText);
+  if (reopening && app.activeTab === 'coaching' && hasTranscriptText) {
+    showTranscriptTab('coaching', sessionId, rec, t);
+  } else if (hasSummary) {
     showTranscriptTab('summary', sessionId, rec, t);
-  } else if (t && t.text) {
-    tabsEl.classList.add('hidden');
-    showTranscriptTab('transcript', sessionId, rec, t);
   } else {
-    tabsEl.classList.add('hidden');
     showTranscriptTab('transcript', sessionId, rec, t);
   }
 
   tabsEl.querySelectorAll('.transcript-tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      showTranscriptTab(tab.dataset.tab, sessionId, rec, t);
-    });
+    tab.onclick = () => showTranscriptTab(tab.dataset.tab, sessionId, rec, t);
   });
 }
 
 function showTranscriptTab(tabName, sessionId, rec, t) {
   const segContainer = $('#transcript-segments');
   const sumContainer = $('#transcript-summary');
+  const coachContainer = $('#transcript-coaching');
   const tabsEl = $('#transcript-tabs');
+  const hasText = !!(t && (t.text || (t.segments && t.segments.length > 0)));
 
-  app.activeTab = tabName;
+  // A tab with nothing to show falls back to the transcript
+  let shown = 'transcript';
+  if (tabName === 'summary' && t && t.summary) shown = 'summary';
+  else if (tabName === 'coaching' && hasText) shown = 'coaching';
+  app.activeTab = shown;
 
   tabsEl.querySelectorAll('.transcript-tab').forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.tab === tabName);
+    tab.classList.toggle('active', tab.dataset.tab === shown);
+    // The Summary tab only when there's a summary
+    if (tab.dataset.tab === 'summary') tab.classList.toggle('hidden', !(t && t.summary));
   });
 
-  if (tabName === 'summary' && t && t.summary) {
-    segContainer.classList.add('hidden');
-    sumContainer.classList.remove('hidden');
+  segContainer.classList.toggle('hidden', shown !== 'transcript');
+  sumContainer.classList.toggle('hidden', shown !== 'summary');
+  coachContainer.classList.toggle('hidden', shown !== 'coaching');
+  if (shown === 'summary') {
     renderEditableSummary(sumContainer, t, sessionId, rec);
     tabsEl.classList.remove('hidden');
+  } else if (shown === 'coaching') {
+    renderCoachingTab(coachContainer, sessionId);
   } else {
-    sumContainer.classList.add('hidden');
-    segContainer.classList.remove('hidden');
     renderTranscriptSegments(segContainer, t, sessionId);
   }
 }
