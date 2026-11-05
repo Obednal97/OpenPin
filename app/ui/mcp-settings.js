@@ -79,7 +79,7 @@ function _mcpSetCodeHtml(files, enabled) {
           ? `<p class="settings-hint">${_MCP_SET_STALE_HINT}</p>`
           : '';
       return (
-        `<div class="mcp-client-row"><label class="mcp-code-label">${tick}` +
+        `<div class="mcp-client-row${tick ? ' mcp-tickable' : ''}"><label class="mcp-code-label">${tick}` +
         `<span class="mcp-client-path" title="${path}">${path}</span></label>${state}</div>${note}`
       );
     })
