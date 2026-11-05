@@ -26,7 +26,19 @@ ensure_installed("requests", required=True)
 from flask import Flask, jsonify, request
 
 from app.mcp import access as mcp_access
-from app.routes import cloud, coaching, core, device, diagnostics, gdrive, notion, recordings, settings, transcribe
+from app.routes import (
+    cloud,
+    coaching,
+    core,
+    device,
+    diagnostics,
+    gdrive,
+    mcp_api,
+    notion,
+    recordings,
+    settings,
+    transcribe,
+)
 from app.utils import changes
 
 app = Flask(__name__)
@@ -290,6 +302,8 @@ app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
 app.register_blueprint(coaching.bp)
+# AI tools (MCP): the guard above opens it with the MCP key only.
+app.register_blueprint(mcp_api.bp)
 
 
 def _start_mcp_access(port: int):

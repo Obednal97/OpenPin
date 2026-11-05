@@ -105,6 +105,11 @@ def _owner_default_labels(transcript: dict, sidecar: dict | None) -> list[str]:
     return [label for label in speaker_labels(segments) if label in picked]
 
 
+def confirmed_owner_labels(transcript: dict, sidecar: dict | None) -> list[str]:
+    """The labels you picked as yourself, while that pick still counts (never a voice match alone)."""
+    return _owner_default_labels(transcript, sidecar)
+
+
 def effective_names(transcript: dict, sidecar: dict | None, profile_name: str | None) -> dict[str, str]:
     """The names to show: the stored ones, plus your profile name on your own speaker.
 
