@@ -379,6 +379,17 @@ const actionClick = (editor, action) =>
   calls.length = 0;
   await actionClick(ed, 'clear');
   out.defaultClearCalls = calls.filter((x) => x[0] === 'set');
+  // Emptying the box on your default name says how to change it, rather than doing nothing
+  await clickSpeaker(c, 'Speaker 1');
+  ed = editorOf();
+  ed.querySelector('.speaker-name-input').value = '  ';
+  calls.length = 0;
+  await actionClick(ed, 'save');
+  out.defaultEmptyCalls = calls.filter((x) => x[0] === 'set');
+  out.defaultEmptyMessage = ed.querySelector('.speaker-name-error').textContent;
+  out.defaultEmptyShown = ed.querySelector('.speaker-name-error').hidden === false;
+  out.defaultEmptyOpen = ed.isConnected && r('speakerNameEditorOpen')();
+  await actionClick(ed, 'cancel');
   // Typing another name wins
   setReply = (names) => ({ speaker_names: { 'Speaker 1': names['Speaker 1'], 'Speaker 2': 'Priya' } });
   await clickSpeaker(c, 'Speaker 1');
@@ -506,6 +517,46 @@ const actionClick = (editor, action) =>
   out.ownerPickNames = app.transcripts.s1.speaker_names;
   out.ownerPickSame = app.transcripts.s1 === t;
   out.ownerPickDrawn = cc.innerHTML;
+
+  // 16. Two speakers sharing a name (one voice split in two): the summary editor keeps
+  // their labels, since a shared name can't be turned back into a label on save
+  app.activeTab = 'summary';
+  t = { ...T(), speaker_names: { 'Speaker 1': 'Sarah', 'Speaker 2': 'Sarah', 'Speaker 10': 'Tom' },
+    stored_speaker_names: { 'Speaker 1': 'Sarah', 'Speaker 2': 'Sarah', 'Speaker 10': 'Tom' },
+    summary: 'Speaker 1 asked Speaker 2; Speaker 10 agreed.' };
+  app.transcripts.s1 = t;
+  const sh = new El();
+  r('renderEditableSummary')(sh, t, 's1', rec);
+  out.sharedView = sh.innerHTML;
+  await fire(sh.children.find((x) => x.className === 'summary-edit-btn'), 'click');
+  const ta3 = sh.children.find((x) => x.tagName === 'TEXTAREA');
+  out.sharedEditorText = ta3.value;
+  ta3.value += ' Done.';
+  calls.length = 0;
+  await fire(sh.children.find((x) => x.className === 'summary-editor-actions').children.find((x) => x.textContent === 'Save'), 'click');
+  out.sharedSaveCalls = calls.slice();
+  out.sharedLocalSummary = t.summary;
+
+  // 17. Background redraws (re-download, restore, auto-processing, speaker detection)
+  // wait while the name editor is open, then run once when it closes
+  const opened = [];
+  ctx.__opened = opened;
+  r('openTranscript = (sid) => globalThis.__opened.push(sid)');
+  Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'transcript' });
+  t = T();
+  app.transcripts.s1 = t;
+  const c2 = new El();
+  r('renderTranscriptSegments')(c2, t, 's1');
+  await clickSpeaker(c2, 'Speaker 2');
+  r('_refreshOpenTranscript')('s1');
+  r('redrawOpenTranscript')('s1');
+  out.redrawWhileEditing = opened.slice();
+  out.editorSurvived = r('speakerNameEditorOpen')();
+  await actionClick(editorOf(), 'cancel');
+  out.redrawAfterClose = opened.slice();
+  r('_refreshOpenTranscript')('s1');
+  r('redrawOpenTranscript')('s2');
+  out.redrawNoEditor = opened.slice();
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -586,6 +637,16 @@ class TestNameEditor:
         assert "disabled" in clear
         assert tx["defaultUnchangedCalls"] == []
         assert tx["defaultClearCalls"] == []
+        # The hint says how to change it: in Coaching, or by typing another name
+        hint = re.search(r'<p class="speaker-name-hint">(.*?)</p>', html, re.S).group(1)
+        assert "Which one is you" in hint and "Coaching" in hint and "type another name" in hint.lower()
+
+    def test_emptying_your_default_name_explains_instead_of_doing_nothing(self, tx):
+        assert tx["defaultEmptyCalls"] == []
+        assert tx["defaultEmptyOpen"]
+        assert tx["defaultEmptyShown"]
+        msg = tx["defaultEmptyMessage"]
+        assert "Coaching" in msg and "type another name" in msg.lower()
 
     def test_typed_name_wins_over_default(self, tx):
         assert tx["overrideCalls"] == [["set", "s1", {"Speaker 1": "Oliver"}]]
@@ -691,6 +752,43 @@ def test_refresh_updates_cached_transcript_in_place(tx):
     assert tx["refreshedSame"]
     assert tx["refreshedNames"] == {"Speaker 2": "Bo"}
     assert tx["refreshedParticipants"] == ["Bo"]
+
+
+def test_shared_name_keeps_labels_in_summary_editor(tx):
+    # Shown with the shared name, which only reads oddly
+    assert "Sarah asked Sarah; Tom agreed." in tx["sharedView"]
+    # Edited with the labels kept, so the save can't lose them
+    assert tx["sharedEditorText"] == "Speaker 1 asked Speaker 2; Tom agreed."
+    sent = "Speaker 1 asked Speaker 2; Tom agreed. Done."
+    assert tx["sharedSaveCalls"] == [["update", "s1", {"summary": sent}]]
+    names = {"Speaker 1": "Sarah", "Speaker 2": "Sarah", "Speaker 10": "Tom"}
+    stored = "Speaker 1 asked Speaker 2; Speaker 10 agreed. Done."
+    assert tx["sharedLocalSummary"] == stored
+    # The backend stores the same
+    assert sn.names_to_labels(sent, names) == stored
+
+
+def test_background_redraw_waits_for_the_name_editor(tx):
+    assert tx["redrawWhileEditing"] == []
+    assert tx["editorSurvived"] is True
+    assert tx["redrawAfterClose"] == ["s1"]
+    # With no editor open it redraws at once, and only the recording on screen
+    assert tx["redrawNoEditor"] == ["s1", "s1"]
+
+
+def test_background_redraws_go_through_redraw_open_transcript():
+    rec_js = (UI / "recordings.js").read_text()
+    auto = rec_js[rec_js.index("while (_autoProcessQueue.length > 0)") :]
+    auto = auto[: auto.index("\n}\n")]
+    assert "redrawOpenTranscript(item.sid)" in auto and "openTranscript(item.sid)" not in auto.replace(
+        "redrawOpenTranscript(item.sid)", ""
+    )
+    refresh = rec_js[rec_js.index("function _refreshOpenTranscript(") :]
+    refresh = refresh[: refresh.index("\n}\n")]
+    assert "redrawOpenTranscript(sessionId)" in refresh
+    diar = TRANSCRIPT_JS[TRANSCRIPT_JS.index("_diarPollHandleTx = setInterval(") :]
+    diar = diar[: diar.index("}, 5000);")]
+    assert "redrawOpenTranscript(sessionId)" in diar and "  openTranscript(" not in diar
 
 
 def test_owner_pick_in_coaching_rereads_names(tx):

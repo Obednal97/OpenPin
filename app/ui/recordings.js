@@ -570,8 +570,9 @@ async function restoreRedownload(sessionId) {
   }
 }
 
+// Waits while the speaker name editor is open (redrawOpenTranscript, transcript.js)
 function _refreshOpenTranscript(sessionId) {
-  if (app.currentView === 'transcript' && app.currentSessionId === sessionId) openTranscript(sessionId);
+  redrawOpenTranscript(sessionId);
 }
 
 
@@ -898,7 +899,7 @@ async function _runAutoProcessQueue() {
         _autoProcessQueue.shift();
       }
       await loadRecordings();
-      if (app.currentView === 'transcript' && app.currentSessionId === item.sid) openTranscript(item.sid);
+      redrawOpenTranscript(item.sid);
     }
   } finally {
     _autoProcessRunning = false;

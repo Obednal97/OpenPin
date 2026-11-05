@@ -16,6 +16,8 @@ let _diarPollTimeoutHandleTx = null;
 // transcript object the open view renders from (refreshSpeakerNames updates it).
 let _txSpeakerEditorEl = null;
 let _txShownT = null;
+// A background redraw of this recording that waits for the name editor to close
+let _txPendingRedrawSid = null;
 
 function openTranscript(sessionId, autoPlay = false) {
   const rec = app.recordings.find((r) => r.session_id === sessionId);
@@ -26,6 +28,7 @@ function openTranscript(sessionId, autoPlay = false) {
   const t = app.transcripts[sessionId];
   app.currentView = 'transcript';
   _txShownT = t || null;
+  _txPendingRedrawSid = null; // this is the redraw
   _txCloseSpeakerEditor();
   if (t && t.speaker_names_cleared) _txNoticeNamesCleared(sessionId, t);
 
@@ -919,6 +922,13 @@ function _txStoredNames(t) {
   return (t && t.stored_speaker_names && typeof t.stored_speaker_names === 'object') ? t.stored_speaker_names : {};
 }
 
+// The names held by exactly one speaker
+function _txUniqueNames(names) {
+  const count = new Map();
+  for (const n of Object.values(names)) count.set(n, (count.get(n) || 0) + 1);
+  return Object.fromEntries(Object.entries(names).filter(([, n]) => count.get(n) === 1));
+}
+
 // Speaker labels in order of first appearance
 function _txSpeakerLabels(t) {
   const seen = new Set();
@@ -1043,12 +1053,33 @@ function speakerNameEditorOpen() {
 function _txCloseSpeakerEditor() {
   if (_txSpeakerEditorEl) _txSpeakerEditorEl.remove();
   _txSpeakerEditorEl = null;
+  const pending = _txPendingRedrawSid;
+  _txPendingRedrawSid = null;
+  if (pending) redrawOpenTranscript(pending);
 }
 
+/**
+ * Redraw the recording on screen after something changed it in the background
+ * (a re-download, a restore, auto-processing, speaker detection). While the
+ * speaker name editor is open the redraw waits, and runs once it closes, so it
+ * never throws away a name being typed.
+ */
+function redrawOpenTranscript(sessionId) {
+  if (app.currentView !== 'transcript' || app.currentSessionId !== sessionId) return;
+  if (speakerNameEditorOpen()) {
+    _txPendingRedrawSid = sessionId;
+    return;
+  }
+  openTranscript(sessionId);
+}
+
+// Why your own name is on a speaker, and how to change it
+const _TX_DEFAULT_NAME_HELP =
+  'This is your name because you picked this speaker as you in Coaching. To change that, use Which one is you '
+  + '(Change, in the Coaching tab), or type another name here.';
+
 function _txSpeakerEditorHtml(label, current, isDefault, hasStored) {
-  const hint = isDefault
-    ? 'This is your name, shown because you picked this speaker as you in Coaching. Type another name to use that instead.'
-    : 'Names you’ve used before are suggested as you type.';
+  const hint = isDefault ? _TX_DEFAULT_NAME_HELP : 'Names you’ve used before are suggested as you type.';
   const clearTitle = hasStored ? 'Remove this name' : 'Only a name you typed can be cleared';
   return `
     <label class="speaker-name-label" for="speaker-name-input">Name for <strong>${escapeHtml(label)}</strong></label>
@@ -1120,6 +1151,16 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
     let change;
     if (action === 'clear') change = _txStoredNames(t)[label] ? { [label]: null } : null;
     else change = _txSpeakerNameChange(t, label, input.value);
+    if (!change && action === 'save' && !String(input.value || '').trim() && _txNames(t)[label] && !_txStoredNames(t)[label]) {
+      // Emptied your own name: it can't be cleared here, so say how to change it
+      const errorEl = editor.querySelector('.speaker-name-error');
+      if (errorEl) {
+        errorEl.textContent = _TX_DEFAULT_NAME_HELP;
+        errorEl.hidden = false;
+      }
+      input.focus();
+      return;
+    }
     if (!change) {
       _txCloseSpeakerEditor();
       return;
@@ -1223,7 +1264,9 @@ function renderEditableSummary(container, t, sessionId, rec) {
 
   const startEditing = () => {
     editing = true;
-    const names = _txNames(t);
+    // Only names one speaker holds: a name two speakers share (one voice split in two)
+    // can't be turned back into a label on save, so those speakers stay as labels here.
+    const names = _txUniqueNames(_txNames(t));
     const shown = applySpeakerNames(t.summary, names);
     const textarea = document.createElement('textarea');
     textarea.className = 'summary-editor';
@@ -1387,9 +1430,7 @@ async function transcribeRecording(oggPath, sessionId) {
             app.transcripts[sessionId] = t;
             if (t.speakers && t.speakers.length > 0) {
               toast(`Speaker detection complete: ${t.speakers.length} speaker(s) found`, 'success');
-              if (app.currentView === 'transcript' && app.currentSessionId === sessionId) {
-                openTranscript(sessionId);
-              }
+              redrawOpenTranscript(sessionId);
             } else {
               toast(t.diarization_message || 'No speakers detected', 'info');
             }
