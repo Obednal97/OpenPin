@@ -28,6 +28,7 @@ let _coachProgSeq = 0;
 
 function _coachProgNum(metric, v) {
   const m = _coachProgMetrics[metric];
+  if (!m) return String(Math.round(v * 100) / 100); // a metric the backend added later
   if (metric === 'longest_monologue_s') {
     const total = Math.round(v);
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
@@ -38,11 +39,13 @@ function _coachProgNum(metric, v) {
 
 function _coachProgValue(metric, v) {
   if (v === null || v === undefined || Number.isNaN(v)) return '–';
-  return `${_coachProgNum(metric, v)}${_coachProgMetrics[metric].unit}`;
+  const m = _coachProgMetrics[metric];
+  return `${_coachProgNum(metric, v)}${m ? m.unit : ''}`;
 }
 
 function _coachProgTarget(metric) {
   const m = _coachProgMetrics[metric];
+  if (!m) return '';
   if (m.low !== null && m.high !== null) return `${_coachProgNum(metric, m.low)}–${_coachProgNum(metric, m.high)}${m.unit}`;
   if (m.low !== null) return `at least ${_coachProgNum(metric, m.low)}${m.unit}`;
   if (m.high !== null) return `at most ${_coachProgNum(metric, m.high)}${m.unit}`;
@@ -134,7 +137,7 @@ function _coachProgCards(data) {
     : 'Nothing yet. This compares the last four weeks with the four before.';
   const st = data.most_stuck;
   const stuck = st
-    ? `<strong>${name(st.metric)}</strong>: ${escapeHtml(_coachProgValue(st.metric, st.value))}, target ${escapeHtml(_coachProgTarget(st.metric))}`
+    ? `<strong>${name(st.metric)}</strong>: ${escapeHtml(_coachProgValue(st.metric, st.value))}${_coachProgTarget(st.metric) ? `, target ${escapeHtml(_coachProgTarget(st.metric))}` : ''}`
     : 'Nothing. Everything was on target over the last four weeks.';
   return `
     ${_coachProgCard('Focus this week', focus, 'focus')}
@@ -214,16 +217,21 @@ async function openProgressView() {
     data = { error: (err && err.message) || String(err) };
   }
   if (seq !== _coachProgSeq) return;
-  if (!data || data.error) {
-    body.innerHTML = `
-      <div class="coach-prog-empty">
-        <p>Couldn’t load your progress: ${escapeHtml((data && data.error) || 'no reply')}</p>
-        <button class="action-btn subtle" id="coach-prog-retry">Try again</button>
-      </div>`;
-    $('#coach-prog-retry').addEventListener('click', openProgressView);
-    return;
+  if (data && !data.error) {
+    try {
+      _coachProgRender(data);
+      return;
+    } catch (err) {
+      console.error('[coaching] progress render failed:', err);
+      data = { error: 'something in the reply couldn’t be shown' };
+    }
   }
-  _coachProgRender(data);
+  body.innerHTML = `
+    <div class="coach-prog-empty">
+      <p>Couldn’t load your progress: ${escapeHtml((data && data.error) || 'no reply')}</p>
+      <button class="action-btn subtle" id="coach-prog-retry">Try again</button>
+    </div>`;
+  $('#coach-prog-retry').addEventListener('click', openProgressView);
 }
 
 function _coachProgClose() {
@@ -289,7 +297,7 @@ function _voiceRenderStatus(status) {
   const el = $('#voice-status');
   let html;
   if (status.profile) {
-    const n = status.exemplars || 0;
+    const n = Number(status.exemplars) || 0;
     html = `<p class="voice-status-line"><span class="ai-key-badge connected">Set up</span>Open Pin knows your voice from ${n} sample${n === 1 ? '' : 's'}. It learns more each time you say which speaker is you.</p>`;
   } else {
     html = '<p class="voice-status-line"><span class="ai-key-badge none">Not set up</span>Until it is, each coached conversation asks which speaker is you.</p>';
@@ -472,15 +480,11 @@ async function _voiceSave(e) {
   if (!_voiceSetupSid || labels.length === 0) return;
   setLoading(btn, true);
   $('#voice-setup-error').classList.add('hidden');
-  let removedOld = false;
+  // Redo replaces the profile in one step on the backend: if it fails, the old voice stays.
+  const replace = _voiceSetupMode === 'redo';
+  const kept = replace ? ' Your old voice is kept.' : '';
   try {
-    if (_voiceSetupMode === 'redo') {
-      const del = await window.plaud.voiceDelete();
-      if (del && del.error) throw new Error(del.error);
-      removedOld = true;
-      _voiceSetupMode = 'setup'; // the old voice is gone: a retry just sets up
-    }
-    const res = await window.plaud.voiceSetup(_voiceSetupSid, labels);
+    const res = await window.plaud.voiceSetup(_voiceSetupSid, labels, replace);
     if (res && res.error) {
       if (/not installed/i.test(res.error)) {
         toast('The voice model isn’t installed yet. Install it first.', 'error');
@@ -491,17 +495,16 @@ async function _voiceSave(e) {
     }
     if (!res || !res.exemplars) {
       _voiceShowError(
-        'Couldn’t hear enough clear speech from those speakers. Pick a recording where you talk for longer.'
-          + (removedOld ? ' Your old voice has been removed.' : ''),
+        `Couldn’t hear enough clear speech from those speakers. Pick a recording where you talk for longer.${kept}`,
       );
       renderVoiceSettings();
       return;
     }
     _voiceSetupMode = null;
-    toast('Your voice is set up', 'success');
+    toast(replace ? 'Your voice has been replaced' : 'Your voice is set up', 'success');
     renderVoiceSettings();
   } catch (err) {
-    _voiceShowError(`Couldn’t set up your voice: ${(err && err.message) || err}${removedOld ? ' Your old voice has been removed.' : ''}`);
+    _voiceShowError(`Couldn’t set up your voice: ${(err && err.message) || err}${kept}`);
     renderVoiceSettings();
   } finally {
     setLoading(btn, false);
@@ -540,7 +543,30 @@ function _voiceSchedulePoll() {
   }, VOICE_POLL_MS);
 }
 
+// One render at a time: a call that arrives mid-render (a poll and a click together)
+// runs once more after the current render instead of in parallel with it.
+let _voiceRendering = null;
+let _voiceRenderAgain = false;
+
 async function renderVoiceSettings() {
+  if (_voiceRendering) {
+    _voiceRenderAgain = true;
+    return _voiceRendering;
+  }
+  _voiceRendering = (async () => {
+    try {
+      do {
+        _voiceRenderAgain = false;
+        await _voiceRenderOnce();
+      } while (_voiceRenderAgain);
+    } finally {
+      _voiceRendering = null;
+    }
+  })();
+  return _voiceRendering;
+}
+
+async function _voiceRenderOnce() {
   _voiceRenderAutoToggle();
   const statusEl = $('#voice-status');
   const setupEl = $('#voice-setup');
