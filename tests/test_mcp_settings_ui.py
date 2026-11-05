@@ -190,40 +190,78 @@ function snap() {
 
   // --- Change poll ---
   let counter = 4;
-  let calls = { changes: 0, load: 0, open: [] };
+  let calls = { changes: 0, load: 0, open: [], redraw: [] };
+  // The library on the backend; loadRecordings() copies it into app, as the real one does.
+  const lib = { tags: ['work'], names: {}, summary: 'Speaker 1 spoke.' };
+  const app = r('app');
+  const reload = () => {
+    app.recordings = [{ session_id: 'S1', tags: [...lib.tags] }];
+    app.transcripts = { S1: { session_id: 'S1', segments: [{ speaker: 'Speaker 1', text: 'Hi' }], text: 'Hi',
+      summary: lib.summary, speaker_names: { ...lib.names } } };
+  };
+  reload();
   ctx.window.plaud.libraryChanges = async () => { calls.changes++; return { counter }; };
-  r('globalThis').loadRecordings = async () => { calls.load++; };
-  r('globalThis').openTranscript = (sid) => { calls.open.push(sid); };
-  r('app').currentView = 'transcript';
-  r('app').currentSessionId = 'S1';
+  r('globalThis').loadRecordings = async () => { calls.load++; reload(); };
+  // The audio player: openTranscript() reloads it, which rewinds and pauses it.
+  const audio = { currentTime: 0, paused: true, readyState: 4, played: 0, listeners: {},
+    getAttribute: (a) => (a === 'src' ? 'http://x/S1.ogg' : null),
+    play() { this.paused = false; this.played++; return Promise.resolve(); },
+    addEventListener(ev, fn) { this.listeners[ev] = fn; } };
+  r('dom').audioEl = audio;
+  r('globalThis').openTranscript = (sid) => {
+    calls.open.push(sid);
+    audio.currentTime = 0; audio.paused = true; audio.readyState = 0;
+  };
+  app.currentView = 'transcript';
+  app.currentSessionId = 'S1';
   const tick = r('_mcpChangesTick');
   const step = async () => { await tick(); return JSON.parse(JSON.stringify(calls)); };
   out.poll = [];
-  out.poll.push(await step());          // first read: baseline only
-  out.poll.push(await step());          // no change
+  out.poll.push(await step());          // 0: first read: baseline only
+  out.poll.push(await step());          // 1: no change
   counter = 5;
-  out.poll.push(await step());          // change: reload + re-render
-  focused = false; counter = 6;
-  out.poll.push(await step());          // window not focused: no request
+  out.poll.push(await step());          // 2: counter moved but this recording didn't change (the window's own edit)
+  counter = 6; lib.tags.push('ai-tag');
+  out.poll.push(await step());          // 3: a tag changed: reload + redraw
+  focused = false; counter = 7;
+  out.poll.push(await step());          // 4: window not focused: no request
   focused = true;
-  // An editor is open in the transcript view: reload, but don't re-render
+  // An editor is open in the transcript view: reload, but don't redraw
   const view = byId('transcript-view');
   view.querySelector = (sel) => (sel.includes('.summary-editor') ? {} : null);
-  out.poll.push(await step());
-  out.poll.push(await step());          // still editing: still waiting
+  lib.names = { 'Speaker 1': 'Sarah' };
+  out.poll.push(await step());          // 5
+  out.poll.push(await step());          // 6: still editing: still waiting
   view.querySelector = () => null;
-  out.poll.push(await step());          // editor closed: the pending re-render happens
-  counter = 7;
-  r('app').currentView = 'recordings';
-  out.poll.push(await step());          // list view: reload only
+  out.poll.push(await step());          // 7: editor closed: the pending redraw happens
+  counter = 8; lib.summary = 'Speaker 1 spoke at length.';
+  app.currentView = 'recordings';
+  out.poll.push(await step());          // 8: list view: reload only
   // Task 7's speaker-name editor (ui/transcript.js) is open: wait for it too
-  r('app').currentView = 'transcript';
+  app.currentView = 'transcript';
   let naming = true;
   r('globalThis').speakerNameEditorOpen = () => naming;
-  counter = 8;
-  out.poll.push(await step());
+  counter = 9; lib.names = {};
+  out.poll.push(await step());          // 9
   naming = false;
-  out.poll.push(await step());
+  out.poll.push(await step());          // 10
+  // The player keeps its place: paused at 42 s stays paused at 42 s
+  audio.currentTime = 42; audio.paused = true; audio.readyState = 4; audio.played = 0;
+  counter = 10; lib.tags = ['other'];
+  await step();
+  out.audioPaused = { before: [audio.currentTime, audio.paused, audio.played] };
+  audio.listeners.loadedmetadata && audio.listeners.loadedmetadata();
+  out.audioPaused.after = [audio.currentTime, audio.paused, audio.played];
+  // Playing at 90 s: seeks back and plays again once the new source has loaded
+  audio.currentTime = 90; audio.paused = false; audio.readyState = 4; audio.played = 0; audio.listeners = {};
+  counter = 11; lib.tags = ['third'];
+  await step();
+  audio.listeners.loadedmetadata && audio.listeners.loadedmetadata();
+  out.audioPlaying = [audio.currentTime, audio.paused, audio.played];
+  // Task 7's redrawOpenTranscript() draws it when it exists
+  r('globalThis').redrawOpenTranscript = (sid) => { calls.redraw.push(sid); };
+  counter = 12; lib.tags = ['fourth'];
+  out.poll.push(await step());          // 11
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -284,24 +322,43 @@ class TestRender:
 
 
 class TestChangePoll:
-    def test_first_read_is_a_baseline(self, ui):
-        assert ui["poll"][0] == {"changes": 1, "load": 0, "open": []}
-        assert ui["poll"][1] == {"changes": 2, "load": 0, "open": []}
+    @staticmethod
+    def _c(changes, load, open_, redraw=()):
+        return {"changes": changes, "load": load, "open": list(open_), "redraw": list(redraw)}
 
-    def test_change_reloads_and_rerenders(self, ui):
-        assert ui["poll"][2] == {"changes": 3, "load": 1, "open": ["S1"]}
+    def test_first_read_is_a_baseline(self, ui):
+        assert ui["poll"][0] == self._c(1, 0, [])
+        assert ui["poll"][1] == self._c(2, 0, [])
+
+    def test_own_edit_reloads_without_redrawing(self, ui):
+        # The window's own tag save moves the counter too: same data, no redraw
+        assert ui["poll"][2] == self._c(3, 1, [])
+
+    def test_change_reloads_and_redraws(self, ui):
+        assert ui["poll"][3] == self._c(4, 2, ["S1"])
 
     def test_unfocused_window_does_not_poll(self, ui):
-        assert ui["poll"][3]["changes"] == 3
+        assert ui["poll"][4]["changes"] == 4
 
-    def test_open_editor_defers_the_rerender(self, ui):
-        assert ui["poll"][4] == {"changes": 4, "load": 2, "open": ["S1"]}
-        assert ui["poll"][5] == {"changes": 5, "load": 2, "open": ["S1"]}
-        assert ui["poll"][6] == {"changes": 6, "load": 2, "open": ["S1", "S1"]}
+    def test_open_editor_defers_the_redraw(self, ui):
+        assert ui["poll"][5] == self._c(5, 3, ["S1"])
+        assert ui["poll"][6] == self._c(6, 3, ["S1"])
+        assert ui["poll"][7] == self._c(7, 3, ["S1", "S1"])
 
     def test_list_view_only_reloads(self, ui):
-        assert ui["poll"][7] == {"changes": 7, "load": 3, "open": ["S1", "S1"]}
+        assert ui["poll"][8] == self._c(8, 4, ["S1", "S1"])
 
-    def test_speaker_name_editor_defers_the_rerender(self, ui):
-        assert ui["poll"][8] == {"changes": 8, "load": 4, "open": ["S1", "S1"]}
-        assert ui["poll"][9] == {"changes": 9, "load": 4, "open": ["S1", "S1", "S1"]}
+    def test_speaker_name_editor_defers_the_redraw(self, ui):
+        assert ui["poll"][9] == self._c(9, 5, ["S1", "S1"])
+        assert ui["poll"][10] == self._c(10, 5, ["S1", "S1", "S1"])
+
+    def test_paused_player_keeps_its_place(self, ui):
+        assert ui["audioPaused"]["after"] == [42, True, 0]
+
+    def test_playing_player_seeks_back_and_plays_on(self, ui):
+        assert ui["audioPlaying"] == [90, False, 1]
+
+    def test_uses_redraw_open_transcript_when_there(self, ui):
+        last = ui["poll"][11]
+        assert last["redraw"] == ["S1"]
+        assert last["open"] == ui["poll"][10]["open"] + ["S1", "S1"]  # the two audio redraws, not this one

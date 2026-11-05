@@ -256,8 +256,10 @@ initMcpSettingsEvents();
 // AI tools can name speakers and change tags while the window is open. The
 // backend counts those changes (GET /changes); while the window is focused we
 // read it every 5 s, and when it moves, reload the recordings and transcripts.
-// The open recording is drawn again only when nothing in it is being edited
-// (or played); otherwise that waits for a later tick.
+// The counter also moves for the window's own edits, so the open recording is
+// drawn again only when its own data changed in the reload, and never while
+// something in it is being edited (that waits for a later tick). Drawing it
+// again reloads the audio, so the player's place and play state are put back.
 
 const _MCP_CHANGES_POLL_MS = 5000;
 let _mcpChangesTimer = null;
@@ -270,12 +272,21 @@ function startMcpChangePoll() {
   _mcpChangesTimer = setInterval(_mcpChangesTick, _MCP_CHANGES_POLL_MS);
 }
 
+/** What the open recording shows that an AI tool can change: transcript, summary, names and tags. */
+function _mcpChangesSnapshot(sid) {
+  const t = (app.transcripts && app.transcripts[sid]) || {};
+  const rec = (app.recordings || []).find((r) => r.session_id === sid) || {};
+  return JSON.stringify([t.segments || null, t.text || '', t.summary || '', t.speaker_names || null, rec.tags || []]);
+}
+
 /** Something in the open recording is being edited, so drawing it again would lose work. */
 function _mcpChangesEditing() {
+  // The speaker-name editor (ui/transcript.js)
+  if (typeof speakerNameEditorOpen === 'function' && speakerNameEditorOpen()) return true;
   const view = document.getElementById('transcript-view');
   if (!view) return false;
   // Summary editor, the tag picker's new-tag field, or any text field in the
-  // transcript panel (the speaker-name editor among them).
+  // transcript panel.
   const field = '#transcript-content input:not([type="checkbox"]):not([type="radio"]), #transcript-content textarea';
   if (view.querySelector(`.summary-editor, #tag-add-input, ${field}`)) return true;
   // Tick boxes (coaching's "Which one is you?") only while changed and not yet saved.
@@ -285,31 +296,49 @@ function _mcpChangesEditing() {
   if (active && view.contains(active) && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName || ''))) {
     return true;
   }
-  // The speaker-name editor and the crop editor (ui/transcript.js)
-  if (typeof speakerNameEditorOpen === 'function' && speakerNameEditorOpen()) return true;
+  // The crop editor (ui/transcript.js)
   if (typeof cropState !== 'undefined' && cropState) return true;
   return false;
 }
 
-function _mcpChangesRerender() {
+/** Put the player back where it was after the redraw reloaded its source. */
+function _mcpChangesRestoreAudio(audio, time, wasPlaying) {
+  if (!audio || !audio.getAttribute || !audio.getAttribute('src')) return; // no audio to put back
+  const restore = () => {
+    try {
+      if (time > 0) audio.currentTime = time;
+    } catch {}
+    if (wasPlaying) audio.play().catch(() => {});
+  };
+  // Seeking needs the new source's metadata.
+  if (audio.readyState >= 1) restore();
+  else audio.addEventListener('loadedmetadata', restore, { once: true });
+}
+
+function _mcpChangesRedraw() {
   if (app.currentView !== 'transcript' || !app.currentSessionId) {
     _mcpChangesPending = false;
     return;
   }
-  const audio = dom && dom.audioEl;
-  if (_mcpChangesEditing() || (audio && !audio.paused)) return; // try again next tick
+  if (_mcpChangesEditing()) return; // try again next tick
   _mcpChangesPending = false;
   const sid = app.currentSessionId;
   const tab = app.activeTab;
   const main = document.getElementById('main-content');
   const scroll = main ? main.scrollTop : 0;
-  openTranscript(sid);
+  const audio = typeof dom !== 'undefined' && dom ? dom.audioEl : null;
+  const time = audio ? audio.currentTime || 0 : 0;
+  const wasPlaying = !!(audio && !audio.paused);
+  if (typeof redrawOpenTranscript === 'function') redrawOpenTranscript(sid);
+  else openTranscript(sid);
+  if (app.currentSessionId !== sid) return;
   // openTranscript() picks the Summary tab; stay where the user was.
-  if (tab && tab !== app.activeTab && app.currentSessionId === sid && typeof showTranscriptTab === 'function') {
+  if (tab && tab !== app.activeTab && typeof showTranscriptTab === 'function') {
     const rec = app.recordings.find((r) => r.session_id === sid);
     if (rec) showTranscriptTab(tab, sid, rec, app.transcripts[sid]);
   }
   if (main) main.scrollTop = scroll;
+  _mcpChangesRestoreAudio(audio, time, wasPlaying);
 }
 
 async function _mcpChangesTick() {
@@ -324,10 +353,12 @@ async function _mcpChangesTick() {
     } else if (counter !== _mcpChangesLast) {
       // Any difference, including a restarted backend counting from 0 again.
       _mcpChangesLast = counter;
+      const sid = app.currentView === 'transcript' ? app.currentSessionId : null;
+      const before = sid ? _mcpChangesSnapshot(sid) : null;
       await loadRecordings();
-      _mcpChangesPending = true;
+      if (sid && app.currentSessionId === sid && _mcpChangesSnapshot(sid) !== before) _mcpChangesPending = true;
     }
-    if (_mcpChangesPending) _mcpChangesRerender();
+    if (_mcpChangesPending) _mcpChangesRedraw();
   } catch (err) {
     console.warn('[changes] poll failed:', err);
   } finally {

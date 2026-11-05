@@ -6,6 +6,7 @@ here can read or write the real ~/Library or ~/.claude* files.
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import pytest
 
 from app.mcp import access, clients
 
+BACKUP_MARK = ".open-pin-backup-"
 LAUNCHER = "/fake/Application Support/com.plaud.v2/mcp/open-pin-mcp"
 
 
@@ -436,3 +438,95 @@ def test_turning_access_off_leaves_claude_files_alone(flask_client, home):
     res = flask_client.post("/settings", json={"mcp_enabled": False})
     assert res.status_code == 200
     assert path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Review fixes
+# ---------------------------------------------------------------------------
+
+
+def test_pruning_keeps_newest_with_same_second_suffixes(home, monkeypatch):
+    """-2, -10 suffixes sort by number, not by name, so the newest survive."""
+    path = _write_json(home / ".claude.json", {"n": 0})
+    monkeypatch.setattr(clients, "_timestamp", lambda: "20261105-100000")
+    for _ in range(11):  # makes the plain stamp, then -2 ... -11
+        clients._backup(path)
+    assert _backups(path) == sorted(
+        [
+            ".claude.json.open-pin-backup-20261105-100000-9",
+            ".claude.json.open-pin-backup-20261105-100000-10",
+            ".claude.json.open-pin-backup-20261105-100000-11",
+        ]
+    )
+
+
+def test_pruning_ignores_files_that_are_not_ours(home, monkeypatch):
+    path = _write_json(home / ".claude.json", {"n": 0})
+    stray = home / ".claude.json.open-pin-backup-notes.txt"
+    stray.write_text("mine")
+    old = home / ".claude.json.open-pin-backup-20200101-000000.bak"
+    old.write_text("also mine")
+    stamps = iter([f"20261105-10000{i}" for i in range(5)])
+    monkeypatch.setattr(clients, "_timestamp", lambda: next(stamps))
+    for _ in range(5):
+        clients._backup(path)
+    assert stray.exists() and old.exists()
+    ours = [n for n in _backups(path) if re.fullmatch(r".*-backup-\d{8}-\d{6}(-\d+)?", n)]
+    assert ours == [f".claude.json.open-pin-backup-20261105-10000{i}" for i in (2, 3, 4)]
+
+
+def test_retry_backs_up_only_once(home, monkeypatch):
+    path = _write_json(home / ".claude.json", {"n": 0})
+    real_stat = Path.stat
+    done = {"raced": False}
+
+    def flaky_stat(self, *a, **k):
+        # Our temp file is written and we're about to rename: someone else writes first, once
+        if self == path and not done["raced"] and any(home.glob("*.open-pin.tmp")):
+            done["raced"] = True
+            path.write_text(json.dumps({"n": 1, "theirs": "a longer value"}, indent=2))
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    clients.connect(path, "code")
+    assert done["raced"]
+    assert len(_backups(path)) == 1
+    assert json.loads(path.read_text())["theirs"] == "a longer value"
+
+
+def test_backup_never_world_readable(home, monkeypatch):
+    path = _write_json(home / ".claude.json", {"secret": 1}, mode=0o600)
+    seen = []
+    real_open = os.open
+
+    def spy_open(p, flags, mode=0o777, *a, **k):
+        fd = real_open(p, flags, mode, *a, **k)
+        if BACKUP_MARK in str(p):
+            seen.append((flags, stat.S_IMODE(os.fstat(fd).st_mode)))
+        return fd
+
+    monkeypatch.setattr(clients.os, "open", spy_open)
+    clients._backup(path)
+    [(flags, mode)] = seen
+    assert flags & os.O_EXCL and flags & os.O_CREAT
+    assert mode & 0o077 == 0  # never readable by others while being written
+    [backup] = _backups(path)
+    assert stat.S_IMODE((home / backup).stat().st_mode) == 0o600
+    assert json.loads((home / backup).read_text()) == {"secret": 1}
+
+
+def test_backup_takes_the_original_mode(home):
+    path = _write_json(home / ".claude.json", {}, mode=0o644)
+    clients._backup(path)
+    [backup] = _backups(path)
+    assert stat.S_IMODE((home / backup).stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", '"text"', "3", "null"])
+def test_non_object_body_is_400(flask_client, body):
+    for route in ("/mcp/setup/connect", "/mcp/setup/disconnect"):
+        res = flask_client.post(route, data=body, content_type="application/json")
+        assert res.status_code in (400, 409), (route, body, res.status_code)
+    _set_enabled(True)
+    res = flask_client.post("/mcp/setup/connect", data=body, content_type="application/json")
+    assert res.status_code == 400

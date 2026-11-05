@@ -275,7 +275,9 @@ def mcp_setup_status():
 
 def _mcp_setup_target():
     """(kind, path) from the request body, or an error response."""
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}  # a list, string or number: no kind or path, so a 400 below
     kind = data.get("kind")
     path = mcp_clients.resolve(kind, data.get("path"))
     if path is None:

@@ -25,6 +25,7 @@ This never runs the ``claude`` CLI.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -172,21 +173,64 @@ def _timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
-def _backup(path: Path) -> Path:
-    """Copy ``path`` (mode and times kept) beside itself; keep the newest three."""
-    stem = f"{path.name}{BACKUP_MARKER}{_timestamp()}"
-    target = path.with_name(stem)
-    n = 2
-    while target.exists():
-        target = path.with_name(f"{stem}-{n}")
-        n += 1
-    shutil.copy2(path, target)
-    backups = sorted(path.parent.glob(f"{path.name}{BACKUP_MARKER}*"), key=lambda p: p.name)
-    for old in backups[:-KEEP_BACKUPS]:
+def _backup_pattern(path: Path) -> re.Pattern:
+    """Open Pin's own backups of ``path``: ``<name>.open-pin-backup-YYYYMMDD-HHMMSS[-N]``."""
+    return re.compile(rf"^{re.escape(path.name)}{re.escape(BACKUP_MARKER)}(\d{{8}}-\d{{6}})(?:-(\d+))?$")
+
+
+def _prune_backups(path: Path) -> None:
+    """Keep the newest three of Open Pin's backups, newest by (timestamp, N)."""
+    pattern = _backup_pattern(path)
+    ours = []
+    for candidate in path.parent.iterdir():
+        m = pattern.match(candidate.name)
+        if m:
+            ours.append(((m.group(1), int(m.group(2) or 1)), candidate))
+    ours.sort(key=lambda item: item[0])
+    for _key, old in ours[:-KEEP_BACKUPS]:
         try:
             old.unlink()
         except OSError:
             pass
+
+
+def _backup(path: Path) -> Path:
+    """Copy ``path`` beside itself (its mode and times kept); keep the newest three.
+
+    The copy is created 0600 and only gets the original's mode once it's
+    written, so a private settings file is never readable by others meanwhile.
+    """
+    stamp = _timestamp()
+    stem = f"{path.name}{BACKUP_MARKER}{stamp}"
+    # Number after the newest backup of this second, so the order stays true
+    # after pruning frees lower numbers.
+    pattern = _backup_pattern(path)
+    taken = [
+        int(m.group(2) or 1)
+        for m in (pattern.match(c.name) for c in path.parent.iterdir())
+        if m and m.group(1) == stamp
+    ]
+    n = max(taken) + 1 if taken else 1
+    while True:
+        target = path.with_name(stem if n == 1 else f"{stem}-{n}")
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            break
+        except FileExistsError:
+            n += 1
+    try:
+        with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        shutil.copystat(path, target)
+    except BaseException:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+    _prune_backups(path)
     return target
 
 
@@ -202,6 +246,7 @@ def _edit(path: Path, change, create: bool) -> None:
     """
     # Edit the real file, so a symlinked settings file stays a symlink.
     target = path.resolve() if path.is_symlink() else path
+    backed_up = False  # once per call, however many times a change by someone else makes us retry
     for _attempt in range(_WRITE_ATTEMPTS):
         try:
             before = target.stat()
@@ -222,8 +267,9 @@ def _edit(path: Path, change, create: bool) -> None:
             out += "\n"
         mode = stat.S_IMODE(before.st_mode) if before is not None else DESKTOP_NEW_FILE_MODE
 
-        if before is not None:
+        if before is not None and not backed_up:
             _backup(target)
+            backed_up = True
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".open-pin.tmp")
         try:
