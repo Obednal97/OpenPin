@@ -29,7 +29,7 @@ function openTranscript(sessionId, autoPlay = false) {
   app.currentView = 'transcript';
   _txShownT = t || null;
   _txPendingRedrawSid = null; // this is the redraw
-  _txCloseSpeakerEditor();
+  _txRemoveSpeakerEditor();
   if (t && t.speaker_names_cleared) _txNoticeNamesCleared(sessionId, t);
 
   $('#main-content').scrollTop = 0;
@@ -1050,9 +1050,15 @@ function speakerNameEditorOpen() {
   return !!(_txSpeakerEditorEl && _txSpeakerEditorEl.isConnected);
 }
 
-function _txCloseSpeakerEditor() {
+// Take the editor off the page, keeping any held redraw (switching to another speaker)
+function _txRemoveSpeakerEditor() {
   if (_txSpeakerEditorEl) _txSpeakerEditorEl.remove();
   _txSpeakerEditorEl = null;
+}
+
+// The editor is done with (Save, Clear, Cancel, Esc): remove it and run any held redraw
+function _txCloseSpeakerEditor() {
+  _txRemoveSpeakerEditor();
   const pending = _txPendingRedrawSid;
   _txPendingRedrawSid = null;
   if (pending) redrawOpenTranscript(pending);
@@ -1110,8 +1116,12 @@ function _txSpeakerNameChange(t, label, typed) {
 }
 
 function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
-  _txCloseSpeakerEditor();
-  if (!t || !label || !row) return;
+  // Not _txCloseSpeakerEditor: a held redraw would re-render the rows and detach `row`
+  _txRemoveSpeakerEditor();
+  if (!t || !label || !row) {
+    _txCloseSpeakerEditor(); // no new editor after all: let a held redraw run
+    return;
+  }
   const current = _txNames(t)[label] || '';
   const hasStored = !!_txStoredNames(t)[label];
   const editor = document.createElement('div');

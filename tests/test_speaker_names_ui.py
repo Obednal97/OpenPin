@@ -78,7 +78,8 @@ class El {
   append(...els) { this.children.push(...els); }
   prepend(...els) { this.children.unshift(...els); }
   appendChild(el) { this.children.push(el); return el; }
-  insertAdjacentElement(pos, el) { this.inserted.push([pos, el]); el.isConnected = true; return el; }
+  // An element put next to a detached one isn't in the document either
+  insertAdjacentElement(pos, el) { this.inserted.push([pos, el]); el.isConnected = this.isConnected; return el; }
   remove() { this.isConnected = false; }
   focus() { this.focused = true; } select() {} blur() {} scrollIntoView() {}
   closest() { return null; }
@@ -557,6 +558,23 @@ const actionClick = (editor, action) =>
   r('_refreshOpenTranscript')('s1');
   r('redrawOpenTranscript')('s2');
   out.redrawNoEditor = opened.slice();
+
+  // 18. Switching the editor from one speaker to another while a redraw is held: the
+  // redraw (which re-renders the rows) waits for the last editor to close, so the new
+  // editor goes in next to a row that's still in the document
+  opened.length = 0;
+  r('openTranscript = (sid) => { globalThis.__opened.push(sid); globalThis.__row.isConnected = false; }');
+  ctx.__row = row;
+  await clickSpeaker(c2, 'Speaker 1');
+  r('redrawOpenTranscript')('s1');
+  await clickSpeaker(c2, 'Speaker 2');
+  const edB = editorOf();
+  out.switchRedraws = opened.slice();
+  out.switchEditorAttached = edB.isConnected && r('speakerNameEditorOpen')();
+  out.switchLabel = edB.innerHTML.includes('<strong>Speaker 2</strong>');
+  await fire(edB.querySelector('.speaker-name-input'), 'keydown', { key: 'Escape' });
+  out.switchRedrawAfterClose = opened.slice();
+  row.isConnected = true;
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 """
@@ -774,6 +792,14 @@ def test_background_redraw_waits_for_the_name_editor(tx):
     assert tx["redrawAfterClose"] == ["s1"]
     # With no editor open it redraws at once, and only the recording on screen
     assert tx["redrawNoEditor"] == ["s1", "s1"]
+
+
+def test_switching_speakers_keeps_the_redraw_held(tx):
+    assert tx["switchRedraws"] == []
+    assert tx["switchEditorAttached"] is True
+    assert tx["switchLabel"]
+    # Runs once, when the last editor closes
+    assert tx["switchRedrawAfterClose"] == ["s1"]
 
 
 def test_background_redraws_go_through_redraw_open_transcript():
