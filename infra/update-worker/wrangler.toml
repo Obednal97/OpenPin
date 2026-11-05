@@ -15,6 +15,12 @@ routes = [
 [observability]
 enabled = true
 
+# The last good /v1/latest answer per channel, served when GitHub refuses
+# (unauthenticated API calls from Cloudflare hit GitHub's shared rate limit).
+[[kv_namespaces]]
+binding = "LAST_GOOD"
+id = "cbab13b4c00247f3b30c72c956f55acb"
+
 # Migration history. v1 created the ReportLimiter Durable Object for the old
 # bug-report endpoint; v2 deletes it now that the endpoint is retired.
 [[migrations]]

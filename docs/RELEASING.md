@@ -231,8 +231,10 @@ Check an older install updates and that `update.log` ends cleanly.
 ## The Worker's GitHub token (optional)
 
 The repository is public, so the update Worker reads releases **without a token**. A read-only
-`GH_TOKEN` is optional and only raises GitHub's API rate limit; add it if unauthenticated reads
-ever start returning `403` rate-limit errors.
+`GH_TOKEN` is optional and only raises GitHub's API rate limit. Unauthenticated reads do get
+`403` rate-limit errors now and then (Cloudflare's egress IPs are shared); the Worker then serves
+the last good answer from KV, so apps see no error, but a new release only reaches them once a
+GitHub call succeeds. A token removes that delay.
 
 1. GitHub › Settings › Developer settings › Fine-grained tokens › **Generate new token**, for
    repository **Obednal97/OpenPin** only, with **Contents: Read-only** (Metadata: Read-only is
