@@ -307,6 +307,13 @@ class TestTauriBridgeAPISurface:
         for ep in critical:
             assert ep in self.bridge_src
 
+    def test_long_coaching_calls_never_time_out(self):
+        """Installing the speaker model and a first voice setup can both run for minutes."""
+        block = self.bridge_src[self.bridge_src.index("const NO_TIMEOUT_ENDPOINTS") :]
+        block = block[: block.index("]);")]
+        for ep in ("'/coaching/voice/install'", "'/coaching/voice/setup'"):
+            assert ep in block
+
 
 # ---------------------------------------------------------------------------
 # Flask endpoint JSON shapes
@@ -989,6 +996,19 @@ class TestSidecarManagement:
         dev = re.search(r'const DEV_DATA_DIR: &str = "([^"]+)";', paths_rs)
         assert release and dev and release.group(1) != dev.group(1)
         assert f'Path("~/Library/Application Support/{release.group(1)}")' in constants
+
+    def test_bundle_ships_every_app_package(self):
+        """tauri.conf.json lists app/ packages folder by folder; a Python
+        package missing from it makes the installed backend fail to import."""
+        conf = json.loads((PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text())
+        bundled = set(conf["bundle"]["resources"].values())
+        packages = {
+            d.name for d in (PROJECT_ROOT / "app").iterdir()
+            if d.is_dir() and any(d.glob("*.py"))
+        }
+        assert packages, "no app packages found"
+        missing = sorted(p for p in packages if f"app/{p}/" not in bundled)
+        assert not missing, f"not bundled: {missing}"
 
     def test_bundle_ships_every_src_module_the_app_imports(self):
         """tauri.conf.json lists src/ modules one by one; every module the

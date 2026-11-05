@@ -57,6 +57,9 @@ def env(flask_client, tmp_path):
         patch("app.utils.trash.APP_TRASH_DIR", app_trash),
         patch("app.utils.trash._system_trash", side_effect=fake_system_trash),
         patch("app.state.gdrive.get_cloud_only_recordings", return_value=[]),
+        # No real coaching runs from route tests (tests/test_coaching_runner.py patches over this).
+        patch("app.coaching.runner.start_coaching_async"),
+        patch("app.coaching.store.COACHING_DIR", tmp_path / "coaching"),
     ):
         ns = types.SimpleNamespace(
             client=flask_client,
@@ -521,6 +524,36 @@ def test_delete_transcript_moves_to_trash(env):
     assert [p.name for p in env.system_trash] == [f"{sid}.json"]
 
 
+def _coaching_files(sid):
+    from app.coaching import store
+
+    store.update(sid, lambda d: d.update(status="done", review={"summary": "x"}))
+    store.save_words(sid, [{"word": "um", "start": 0.0, "end": 0.2}], "h")
+    return store.session_files(sid)
+
+
+def test_delete_recordings_trashes_coaching_data(env):
+    sid = "1715000000"
+    (env.rec / f"{sid}.ogg").write_bytes(b"audio")
+    (env.trn / f"{sid}.json").write_text("{}")
+    sidecar, words = _coaching_files(sid)
+    body = _post(env.client, "/recordings/delete", {"session_ids": [sid]}).get_json()
+    assert body["trashed"] is True and body["count"] == 1
+    assert not sidecar.exists() and not words.exists()
+    assert str(sidecar) in body["deleted"] and str(words) in body["deleted"]
+    assert f"{sid}.words.json" in {p.name for p in env.system_trash}
+
+
+def test_delete_transcript_trashes_coaching_data(env):
+    sid = "1715000000"
+    (env.trn / f"{sid}.json").write_text("{}")
+    sidecar, words = _coaching_files(sid)
+    body = _post(env.client, "/transcripts/delete", {"session_id": sid}).get_json()
+    assert body["trashed"] is True
+    assert not sidecar.exists() and not words.exists()
+    assert sorted(p.name for p in env.system_trash) == sorted([f"{sid}.json", f"{sid}.json", f"{sid}.words.json"])
+
+
 def test_delete_nothing_found_shape(env):
     r = _post(env.client, "/recordings/delete", {"session_ids": ["fake_id_999"]})
     body = r.get_json()
@@ -948,3 +981,23 @@ def test_summary_title_replaces_a_transcript_title_but_not_a_rename(env):
     assert names[other] == "My own name"
     t = json.loads((env.trn / f"{sid}.json").read_text())
     assert t["auto_title"] == "Q2 launch moved to May" and "auto_title_source" not in t
+
+
+def test_coaching_trash_failure_is_reported_but_recording_still_deleted(env):
+    from app.routes import recordings
+
+    sid = "1715000000"
+    (env.rec / f"{sid}.ogg").write_bytes(b"audio")
+    _coaching_files(sid)
+    real = recordings._trash_files
+
+    def failing_for_coaching(paths):
+        if any(p.parent.name == "coaching" for p in paths):
+            return [], set(), [{"path": str(paths[0]), "error": "denied"}]
+        return real(paths)
+
+    with patch("app.routes.recordings._trash_files", side_effect=failing_for_coaching):
+        body = _post(env.client, "/recordings/delete", {"session_ids": [sid]}).get_json()
+    assert body["count"] == 1 and body["trashed"] is False
+    assert body["errors"] == [{"session_id": sid, "path": body["errors"][0]["path"], "error": "denied"}]
+    assert sid in _cfg()["deleted_ids"]

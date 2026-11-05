@@ -153,6 +153,9 @@ def route_env(flask_client, tmp_path):
         patch("app.utils.constants.get_all_recordings_dirs", return_value=[rec]),
         patch("app.utils.constants.CLOUD_RECORDINGS_DIR", tmp_path / "cloud"),
         patch("app.routes.transcribe.fire_webhooks"),
+        patch("app.coaching.store.COACHING_DIR", tmp_path / "coaching"),
+        # No real coaching runs from route tests (tests/test_coaching_runner.py patches over this).
+        patch("app.coaching.runner.start_coaching_async"),
     ):
         yield flask_client, rec, trn
 
@@ -290,3 +293,193 @@ def test_deepgram_keyterms_are_capped_and_deduped(mock_post, ogg):
     terms = [p.split("=", 1)[1] for p in url.split("?", 1)[1].split("&") if p.startswith("keyterm=")]
     assert terms[:2] == ["Acme", "Plaud%20V2"]
     assert len(terms) == T.DEEPGRAM_MAX_KEYTERMS
+
+
+# ---------------------------------------------------------------------------
+# Deepgram verbatim words (coaching) vs. clean transcript
+# ---------------------------------------------------------------------------
+
+
+def _dg_word(word, start, speaker=0):
+    return {
+        "word": word.lower().strip(".,"),
+        "punctuated_word": word,
+        "start": start,
+        "end": start + 0.3,
+        "confidence": 0.9,
+        "speaker": speaker,
+    }
+
+
+DG_VERBATIM_WORDS = [_dg_word(w, i * 0.4) for i, w in enumerate(["So", "um", "pricing", "uh", "works."])]
+DG_VERBATIM_BODY = {
+    "metadata": {"duration": 2.0},
+    "results": {
+        "channels": [
+            {
+                "alternatives": [{"transcript": "So um pricing uh works.", "words": DG_VERBATIM_WORDS}],
+                "detected_language": "en",
+            }
+        ],
+        "utterances": [
+            {
+                "start": 0,
+                "end": 2,
+                "transcript": "So um pricing uh works.",
+                "speaker": 0,
+                "words": DG_VERBATIM_WORDS,
+            }
+        ],
+    },
+}
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_requests_filler_words(mock_post, ogg):
+    mock_post.return_value = _resp(DG_VERBATIM_BODY)
+    T.transcribe_deepgram(str(ogg), "dg", "en")
+    assert "filler_words=true" in mock_post.call_args.args[0]
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_clean_text_has_no_fillers(mock_post, ogg):
+    mock_post.return_value = _resp(DG_VERBATIM_BODY)
+    out = T.transcribe_deepgram(str(ogg), "dg", "en", diarize=True)
+    assert out["segments"][0]["text"] == "So pricing works."
+    assert out["text"] == "So pricing works."
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_returns_verbatim_words(mock_post, ogg):
+    mock_post.return_value = _resp(DG_VERBATIM_BODY)
+    out = T.transcribe_deepgram(str(ogg), "dg", "en", diarize=True)
+    assert [w["word"] for w in out["words"]] == ["So", "um", "pricing", "uh", "works."]
+    assert {w["speaker"] for w in out["words"]} == {"Speaker 1"}
+    assert out["words"][1].keys() == {"word", "start", "end", "speaker", "confidence"}
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_words_have_no_speaker_without_diarize(mock_post, ogg):
+    mock_post.return_value = _resp(DG_VERBATIM_BODY)
+    out = T.transcribe_deepgram(str(ogg), "dg", "en")
+    assert all(w["speaker"] is None for w in out["words"])
+
+
+def test_cloud_route_saves_words_to_coaching_sidecar_not_transcript(route_env):
+    import hashlib
+
+    from app.coaching import store
+    from app.utils.config import save_config
+
+    client, rec, trn = route_env
+    (rec / "1715000000.ogg").write_bytes(b"OggS" + bytes(100))
+    save_config({"deepgram_api_key": "k", "transcription_provider": "deepgram"})
+    words = [{"word": "um", "start": 0, "end": 0.2, "speaker": None, "confidence": 0.9}]
+    result = {**RESULT, "words": words}
+    with patch("app.routes.transcribe.transcribe_deepgram", return_value=result):
+        r = _transcribe(client, rec / "1715000000.ogg")
+    assert r.status_code == 200, r.get_json()
+    assert "words" not in r.get_json()
+    side = store.load("1715000000")
+    assert "words" not in side  # the words live in their own file
+    assert store.load_words("1715000000") == words
+    assert store.words_path("1715000000").exists()
+    assert side["transcript_text_hash"] == hashlib.sha1(RESULT["text"].encode()).hexdigest()
+    assert "words" not in json.loads((trn / "1715000000.json").read_text())
+    assert "um" not in json.loads((trn / "1715000000.json").read_text())["text"].split()
+
+
+def test_retranscribe_with_non_deepgram_provider_clears_words(route_env):
+    from app.coaching import store
+    from app.utils.config import save_config
+
+    client, rec, _ = route_env
+    (rec / "1715000000.ogg").write_bytes(b"OggS" + bytes(100))
+    words = [{"word": "um", "start": 0, "end": 0.2, "speaker": None, "confidence": 0.9}]
+    save_config({"deepgram_api_key": "k", "transcription_provider": "deepgram"})
+    with patch("app.routes.transcribe.transcribe_deepgram", return_value={**RESULT, "words": words}):
+        _transcribe(client, rec / "1715000000.ogg")
+    assert store.load_words("1715000000") == words
+
+    save_config({"groq_api_key": "k", "transcription_provider": "groq"})
+    with patch("app.routes.transcribe.transcribe_groq", return_value=dict(RESULT)):
+        _transcribe(client, rec / "1715000000.ogg")
+    assert store.load_words("1715000000") == []
+
+
+def _dg_body(words, transcript):
+    return {
+        "metadata": {"duration": 4.0},
+        "results": {
+            "channels": [{"alternatives": [{"transcript": transcript, "words": words}], "detected_language": "en"}],
+            "utterances": [
+                {"start": 0, "end": 4, "transcript": transcript, "speaker": 0, "words": words},
+            ],
+        },
+    }
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_without_fillers_keeps_deepgram_text_exactly(mock_post, ogg):
+    # smart_format text that the per-word tokens would not rebuild exactly.
+    transcript = "It costs $5,000 on 3/4."
+    words = [_dg_word(w, i * 0.4) for i, w in enumerate(["It", "costs", "$5000", "on", "3/4."])]
+    body = _dg_body(words, transcript)
+    mock_post.return_value = _resp(body)
+    out = T.transcribe_deepgram(str(ogg), "dg", "en", diarize=True)
+    assert out["text"] == transcript
+    assert out["segments"] == [{"start": 0, "end": 4, "text": transcript, "speaker": "Speaker 1"}]
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_filler_only_utterance_gives_no_segment(mock_post, ogg):
+    body = _dg_body([_dg_word("Um.", 0.0)], "Um.")
+    mock_post.return_value = _resp(body)
+    out = T.transcribe_deepgram(str(ogg), "dg", "en", diarize=True)
+    assert out["segments"] == []
+    assert out["text"] == ""
+    assert [w["word"] for w in out["words"]] == ["Um."]  # the verbatim words keep it
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        (["we", "went", "there,", "um."], "we went there."),
+        (["Did", "you", "go", "uh?"], "Did you go?"),
+        (["Done.", "Um."], "Done."),
+        (["So", "um,", "pricing", "works."], "So pricing works."),
+        (["Wait", "erm!", "Really?"], "Wait! Really?"),
+    ],
+)
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_dropped_filler_hands_on_its_full_stop(mock_post, ogg, tokens, expected):
+    words = [_dg_word(w, i * 0.4) for i, w in enumerate(tokens)]
+    mock_post.return_value = _resp(_dg_body(words, " ".join(tokens)))
+    out = T.transcribe_deepgram(str(ogg), "dg", "en", diarize=True)
+    assert out["text"] == expected
+    assert out["segments"][0]["text"] == expected
+    assert [w["word"] for w in out["words"]] == tokens  # verbatim words untouched
+
+
+@patch("app.providers.transcribe.http_requests.post")
+def test_deepgram_keeps_hmm_mm_and_mhm(mock_post, ogg):
+    tokens = ["Hmm.", "Mm,", "mhm,", "um,", "okay."]
+    words = [_dg_word(w, i * 0.4) for i, w in enumerate(tokens)]
+    mock_post.return_value = _resp(_dg_body(words, " ".join(tokens)))
+    out = T.transcribe_deepgram(str(ogg), "dg", "en")
+    assert out["text"] == "Hmm. Mm, mhm, okay."
+    assert {"um", "uh", "uhm", "umm", "er", "erm"} == set(T.FILLER_TOKENS)
+
+
+def test_filler_counting_still_follows_filler_phrases():
+    from app.coaching import metrics, targets
+
+    assert not hasattr(metrics, "FILLER_TOKENS")
+    words = [
+        {"word": w, "start": float(i), "end": i + 0.3, "speaker": "Speaker 1"}
+        for i, w in enumerate(["Um,", "so", "hmm.", "basically", "er", "you", "know"])
+    ]
+    times = metrics._filler_hits(words)
+    # um, basically, er, "you know": every one is in FILLER_PHRASES; "hmm" isn't.
+    assert times == [0.0, 3.0, 4.0, 5.0]
+    assert {"um", "er", "basically", "you know"} <= set(targets.FILLER_PHRASES)

@@ -49,6 +49,7 @@ def get_settings():
         {
             "model": config.get("whisper_model", "small"),
             "diarize": config.get("diarize", False),
+            "coaching_auto": config.get("coaching_auto", True),
             "language": config.get("language", "auto"),
             "english_variant": config.get("english_variant", "us"),
             "models": models,
@@ -120,8 +121,14 @@ def save_settings():
     def _apply(config):
         if "model" in data:
             config["whisper_model"] = data["model"]
+        # coaching_auto first, diarize last: coaching needs speaker labels, so turning
+        # diarize off wins even when the same request asks for coaching_auto on.
+        if "coaching_auto" in data:
+            config["coaching_auto"] = data["coaching_auto"]
         if "diarize" in data:
             config["diarize"] = data["diarize"]
+            if not data["diarize"]:
+                config["coaching_auto"] = False
         if "language" in data:
             config["language"] = data["language"]
         if "english_variant" in data:

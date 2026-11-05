@@ -63,6 +63,7 @@ function renderSettings() {
   renderCloudAccount();
   renderStorageSettings();
   renderAutomationState();
+  renderVoiceSettings();
 }
 
 // ---- Settings tabs ----
@@ -1565,6 +1566,9 @@ function initSettingsEvents() {
     await window.plaud.saveSettings({ diarize: e.target.checked });
     toast(e.target.checked ? 'Speaker identification on' : 'Speaker identification off', 'success');
     renderProcessingSections();
+    // The backend turns automatic coaching off with speaker labels (it needs them)
+    if (!e.target.checked) app.settings.coaching_auto = false;
+    renderVoiceSettings();
   });
 
   // Automation pipeline toggles with cascade disable

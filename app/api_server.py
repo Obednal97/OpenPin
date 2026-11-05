@@ -25,7 +25,7 @@ ensure_installed("requests", required=True)
 
 from flask import Flask, jsonify, request
 
-from app.routes import cloud, core, device, diagnostics, gdrive, notion, recordings, settings, transcribe
+from app.routes import cloud, coaching, core, device, diagnostics, gdrive, notion, recordings, settings, transcribe
 
 app = Flask(__name__)
 log = logging.getLogger("werkzeug")
@@ -131,7 +131,7 @@ def add_cors(response):
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Headers"] = f"Content-Type, Authorization, {API_TOKEN_HEADER}"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         response.headers["Access-Control-Max-Age"] = "600"
     response.vary.add("Origin")
     return response
@@ -243,6 +243,7 @@ app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
+app.register_blueprint(coaching.bp)
 
 if __name__ == "__main__":
     from werkzeug.serving import make_server
@@ -260,6 +261,7 @@ if __name__ == "__main__":
     # serve_forever opens the listening socket, and skips re-running these
     # side effects if api_server.py is ever imported from a test/REPL.
     recordings.init_recordings()
+    coaching.migrate_speaker_labels()
     # Saved Plaud cloud token (+ background validation). Not done at import so
     # tests and tooling that import the app make no network calls.
     from app.state import cloud as _cloud_state

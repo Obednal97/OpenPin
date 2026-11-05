@@ -10,6 +10,8 @@ from pathlib import Path
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
+from app.coaching import runner as coaching_runner
+from app.coaching import store as coaching_store
 from app.providers.summarize import generate_title, summarize
 from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
 from app.providers.validate import validate_key as do_validate_key
@@ -24,6 +26,28 @@ from app.utils.paths import (
 )
 from app.utils.transcript_locks import get_transcript_lock
 from app.utils.webhooks import fire_webhooks
+
+
+def _save_coaching_words(session_id, words, text):
+    """Replace the recording's verbatim words (the coaching words file) after a transcription.
+
+    Providers without verbatim words (Groq, OpenAI, local Whisper) pass []
+    so fillers from an earlier Deepgram run are never reused. The words stay
+    out of the transcript JSON, the .txt, the summary input and webhooks.
+    """
+    coaching_store.save_words(session_id, words or [], coaching_store.text_hash(text))
+
+
+def _after_transcript_final(session_id, audio_path):
+    """Start coaching once the transcript and its speaker labels are final.
+
+    Called next to each ``transcribe`` webhook. Never raises: a coaching
+    problem must not break transcription.
+    """
+    try:
+        coaching_runner.start_coaching_async(session_id, audio_path)
+    except Exception as e:
+        logging.warning("Could not start coaching for %s: %s", session_id, e)
 
 
 def _extract_spoken_tags(text):
@@ -139,6 +163,9 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
         _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
         if txt_text is not None:
             _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
+    # After releasing the transcript lock: the coaching store has its own lock.
+    if existing.get("text") != new_fields.get("text"):
+        coaching_store.mark_stale(session_id)
     return merged
 
 
@@ -232,6 +259,7 @@ def _background_diarize(
     if speakers:
         payload["speakers"] = speakers
     fire_webhooks("transcribe", payload)
+    _after_transcript_final(session_id, audio_path)
 
 
 def _plan_local_diarization(t_data):
@@ -425,6 +453,7 @@ def transcribe_file():
                     break
 
         if _used_cloud:
+            verbatim_words = result.pop("words", None) or []
             text = result.get("text", "")
             segments = []
             for seg in result.get("segments", []):
@@ -478,6 +507,7 @@ def transcribe_file():
                 else:
                     run_local_diarization, diarization_message = _plan_local_diarization(t_data)
             _merge_transcript(session_id, transcript_path, t_data, txt_text=text)
+            _save_coaching_words(session_id, verbatim_words, text)
 
             # Auto-detect spoken tags from the beginning of the transcript
             spoken_tags = _apply_spoken_tags(session_id, text)
@@ -506,6 +536,7 @@ def transcribe_file():
                         "segments": segments,
                     },
                 )
+                _after_transcript_final(session_id, str(path))
 
             resp = {
                 "session_id": session_id,
@@ -573,6 +604,7 @@ def transcribe_file():
             if diarize:
                 run_local_diarization, diarization_message = _plan_local_diarization(local_fields)
             _merge_transcript(session_id, transcript_path, local_fields, txt_text=t.formatted)
+            _save_coaching_words(session_id, [], t.text)
 
             # Auto-detect spoken tags
             local_spoken_tags = _apply_spoken_tags(session_id, t.text)
@@ -602,6 +634,7 @@ def transcribe_file():
                         "segments": local_segments,
                     },
                 )
+                _after_transcript_final(session_id, str(path))
 
             resp = {
                 "session_id": session_id,

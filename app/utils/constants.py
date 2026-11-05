@@ -105,6 +105,7 @@ def get_all_recordings_dirs():
 
 
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+COACHING_DIR = DATA_DIR / "coaching"
 SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
 CONFIG_PATH = DATA_DIR / ".plaud_v2_config.json"

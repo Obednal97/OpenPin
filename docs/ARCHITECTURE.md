@@ -196,7 +196,7 @@ Other rules:
 
 | Path | Contents |
 |---|---|
-| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.notion_legacy_cache.json`, `.gdrive_config.json`, `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
+| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.notion_legacy_cache.json`, `.gdrive_config.json`, `coaching/` (see below), `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/` |
 | `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log` |
 | `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
 | `... Plaud V2 (Dev)/`, `com.plaud.v2.dev/`, `Logs/Plaud V2 (Dev)/` | The same, for debug builds (`tauri dev`). They share only `com.plaud.v2/python/` and `bin/` with the installed app |
@@ -307,6 +307,103 @@ auto-summarise is off and the recording has no name yet, a short title-only call
 `claude-haiku-5-5`, else OpenAI or OpenRouter, else Ollama; nothing leaves the Mac when the summary
 provider is Local). It's stored as `auto_title` with `auto_title_source: "transcript"`, so a later
 summary's title replaces it, unless the user renamed the recording in between.
+
+## Conversation coaching (`app/coaching/`, `app/routes/coaching.py`)
+
+Coaching tells the owner how they came across in a conversation and tracks it over weeks. The
+design is in [superpowers/specs/2026-11-04-conversation-coaching-design.md](superpowers/specs/2026-11-04-conversation-coaching-design.md).
+
+### Data flow
+
+1. **Capture.** Deepgram is asked for `filler_words=true` and its per-word timing and speakers are
+   kept (`app/providers/transcribe.py`). The clean transcript is built from the same words with
+   filler tokens ("um", "uh", "er" and their spellings; "hmm", "mm" and "mhm" stay) dropped, and
+   a dropped filler's full stop or question mark handed to the word before it. A recording with
+   no fillers keeps Deepgram's own text exactly. The unfiltered words are returned separately and
+   saved to the recording's words file by `_save_coaching_words` (`app/routes/transcribe.py`). Groq, OpenAI and local Whisper have no verbatim words, so they
+   save an empty list and their metrics fall back to segment estimates.
+2. **Hook.** Once transcription and speaker labels are final, `_after_transcript_final` starts
+   `start_coaching_async` (`app/coaching/runner.py`) next to each `fire_webhooks("transcribe", ...)`
+   call: the end of `_background_diarize` and the branches that skip it. It runs on a daemon
+   thread, like diarization.
+3. **Owner.** `voice.py` matches each speaker's audio against the owner's voice profile with
+   WeSpeaker embeddings. A confident match marks the owner (a set of labels, since a wearable mic
+   can split one person into two). Otherwise the status is `needs_owner` and nothing is analysed
+   until the user picks. A pick or correction (`POST /coaching/<id>/owner`) is saved together with
+   status `running` before the response, then the recording is coached again in the background.
+   The pick updates the voice profile only when the WeSpeaker model is already installed (and the
+   audio is on the Mac); otherwise it is used for this recording only.
+4. **Metrics.** `metrics.py` is pure computation over the words or segments: pace, talk share,
+   longest monologue, likely interruptions (made and received), patience, questions, filler words
+   and interactivity. Each value records whether it is exact, estimated or unavailable.
+   `targets.py` holds every target range and tunable number.
+5. **Review.** `review.py` makes one structured-output call through `call_llm_json`
+   (`app/providers/llm_json.py`), which uses the summary provider preference and cascade
+   (Anthropic, OpenAI, OpenRouter, Ollama; no DistilBART, which can't follow a schema). With Local
+   (or Ollama) as the summary provider only Ollama is tried, never a cloud key; if Ollama isn't
+   running or has no chat model the report shows the measured metrics only, and any other error
+   is a failure. It returns scores (each citing the times it is based on), a summary, next-time
+   actions, reactions and notable moments. `ground` drops anything that cites a timestamp not in
+   the transcript, and any score left without a real time. Only the owner's likely interruptions
+   are put to the model for confirmation.
+6. **Progress.** `progress.py` aggregates finished sidecars into per-week series, a rolling
+   baseline, the most improved and most stuck habit, and a weekly focus. Recordings flagged as
+   "speakers mixed up" are left out.
+
+### Sidecar and status
+
+Each recording has `DATA_DIR/coaching/<session_id>.json` (`store.py`) holding the owner, metrics,
+review and `status`: `running`, `done`, `needs_owner`, `skipped` (one speaker, no speaker labels,
+or under two minutes) or `failed`. The verbatim words live next to it in
+`DATA_DIR/coaching/<session_id>.words.json`, so loading a sidecar never carries them and no route
+returns them (an older sidecar that still holds `words` inline is read by the runner and stripped
+by the routes). The transcript JSON is not touched. Writes to both files are atomic and serialised
+under one per-recording lock, separate from the transcript lock, because `_merge_transcript`
+holds that one and it isn't reentrant.
+
+A re-transcribe or transcript edit that changes the text calls `mark_stale` after the transcript
+lock is released, which sets `report_stale` the way `summary_stale` works. New speaker labels from
+background diarization leave the text unchanged, so they don't call `mark_stale`: the coaching
+hook that runs when diarization finishes coaches the recording again (when `coaching_auto` is on),
+and a saved owner is reused only while the speaker labelling it was made for is unchanged.
+
+Deleting a recording (`/recordings/delete`) or its transcript (`/transcripts/delete`) moves its
+sidecar and words file to the Trash with the transcript, and `/coaching/progress` skips any
+sidecar whose transcript is gone. The owner's voice profile is
+`DATA_DIR/coaching/voice_profile.json` (mode `0600`); it and the words files are never treated as
+session ids by the routes.
+
+### Routes
+
+| Route | Purpose |
+|---|---|
+| `GET /coaching/<id>` | Sidecar status and report |
+| `POST /coaching/<id>/run` | Coach this recording (old or skipped ones) |
+| `POST /coaching/<id>/owner` | Choose or correct which speakers are the owner |
+| `POST /coaching/<id>/mixed-up` | Flag or unflag "speakers mixed up" |
+| `GET /coaching/progress` | Aggregated progress |
+| `GET`/`DELETE /coaching/voice` | Voice profile status, remove it |
+| `POST /coaching/voice/install` | Install the WeSpeaker model (the `diarize` extra) |
+| `POST /coaching/voice/setup` | Build the profile from a speaker in a past recording |
+
+### Settings and speaker labels
+
+`coaching_auto` (default on) starts coaching automatically. Coaching needs speaker labels, so a
+one-time migration turns `diarize` on for installs where it is off, and turning `diarize` off turns
+`coaching_auto` off. Deepgram users haven't installed the WeSpeaker model, because Deepgram supplies
+the labels, so it is installed during voice setup, with progress and an error message, never
+silently.
+
+### Frontend
+
+A Coaching tab in the recording view, a Progress view opened from a header button, and a "Your
+voice & coaching" section in Settings › Transcription & AI. Charts are hand-rolled SVG.
+
+### Privacy
+
+Voice embeddings and verbatim words stay in `DATA_DIR` and are never sent anywhere. The only
+network call is the review, which sends transcript text and metrics to the provider the user chose
+for summaries (never an Ollama `-cloud` model). See [SECURITY.md](../SECURITY.md).
 
 ## Notion (`app/state/notion.py`, `app/routes/notion.py`, `app/utils/notion_queue.py`)
 
