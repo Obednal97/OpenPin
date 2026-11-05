@@ -3,7 +3,9 @@
 Same provider cascade and preference order as ``summarize()`` (Anthropic ->
 OpenAI -> OpenRouter -> local Ollama), minus DistilBART: a seq2seq news
 summariser cannot follow a JSON schema, so local-only users get Ollama or
-nothing. Each provider is asked for a JSON object matching the caller's schema
+nothing. Unlike ``summarize()``, a "local" (or "ollama") preference never falls
+through to a cloud provider: those users chose to keep the text on the Mac, so
+only Ollama is tried even when an API key is saved. Each provider is asked for a JSON object matching the caller's schema
 (structured outputs); a refusal, a response cut off at the token limit or
 unparseable JSON is an error and the cascade moves on.
 """
@@ -36,6 +38,18 @@ from app.providers.summarize import (
     pick_ollama_model,
 )
 from app.utils.constants import PROJECT_URL
+
+OLLAMA_DISPLAY_NAME = "Ollama (local)"
+_OLLAMA_NOT_RUNNING = "not running on"
+_OLLAMA_NO_MODEL = "no chat model pulled"
+
+
+def ollama_unavailable(error: str) -> bool:
+    """True when a ``call_llm_json`` error says Ollama isn't running or has no chat model."""
+    prefix = f"{OLLAMA_DISPLAY_NAME}: "
+    if not isinstance(error, str) or not error.startswith(prefix):
+        return False
+    return error[len(prefix) :].startswith((_OLLAMA_NOT_RUNNING, _OLLAMA_NO_MODEL))
 
 
 def _parse_json_object(content):
@@ -142,10 +156,10 @@ def _openrouter_json(api_key, model, system, user, schema, schema_name):
 def _ollama_json(model, system, user, schema):
     models = ollama_models()
     if models is None:
-        raise SummaryError(f"not running on {OLLAMA_URL}")
+        raise SummaryError(f"{_OLLAMA_NOT_RUNNING} {OLLAMA_URL}")
     chosen = pick_ollama_model(models, model)
     if not chosen:
-        raise SummaryError(f"no chat model pulled (try: ollama pull {OLLAMA_SUGGESTED_MODEL})")
+        raise SummaryError(f"{_OLLAMA_NO_MODEL} (try: ollama pull {OLLAMA_SUGGESTED_MODEL})")
     num_ctx = min(OLLAMA_MAX_CTX, max(8192, (len(system) + len(user)) // 3 + 8192))
     r = http_requests.post(
         f"{OLLAMA_URL}/api/chat",
@@ -171,10 +185,14 @@ def call_llm_json(system, user, schema, config, schema_name="result"):
     Returns ``(parsed, provider_name, errors)``; ``parsed`` is None and the
     provider name is "none" when every provider failed. Provider selection and
     order follow ``summarize()`` (``summarization_provider`` preference, API
-    keys and ``ollama_model`` from ``config``), without DistilBART.
+    keys and ``ollama_model`` from ``config``), without DistilBART, except that
+    a "local"/"ollama" preference tries Ollama only and never a cloud provider.
     """
     preferred = config.get("summarization_provider", "anthropic")
     or_key = config.get("openrouter_api_key")
+    ollama = (OLLAMA_DISPLAY_NAME, "ollama", lambda: _ollama_json(config.get("ollama_model"), system, user, schema))
+    if preferred in ("local", "ollama"):
+        return _try_in_order([ollama])
 
     all_providers = []
     if config.get("anthropic_api_key"):
@@ -209,9 +227,7 @@ def call_llm_json(system, user, schema, config, schema_name="result"):
                 lambda: _openrouter_json(or_key, OPENROUTER_OPENAI_SUMMARIZE, system, user, schema, schema_name),
             )
         )
-    all_providers.append(
-        ("Ollama (local)", "ollama", lambda: _ollama_json(config.get("ollama_model"), system, user, schema))
-    )
+    all_providers.append(ollama)
 
     preferred_group = _PREFERENCE_GROUP.get(preferred, 0)
     attempts = [
@@ -225,7 +241,11 @@ def call_llm_json(system, user, schema, config, schema_name="result"):
             ),
         )
     ]
+    return _try_in_order(attempts)
 
+
+def _try_in_order(attempts):
+    """Call each ``(display_name, provider_name, fn)`` until one answers; see ``call_llm_json``."""
     errors = []
     for display_name, prov_name, fn in attempts:
         try:

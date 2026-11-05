@@ -25,6 +25,7 @@ from app.coaching import store, voice
 from app.coaching.metrics import compute_metrics
 from app.coaching.review import review_conversation
 from app.coaching.targets import MIN_COACHING_SECONDS
+from app.providers.llm_json import ollama_unavailable
 from app.utils.config import load_config
 from app.utils.constants import TRANSCRIPTS_DIR
 from app.utils.transcript_locks import get_transcript_lock
@@ -49,6 +50,11 @@ _generation: dict[str, int] = {}  # latest run number per session; older runs dr
 
 
 # ---------------------------------------------------------------- inputs
+
+
+def has_transcript(session_id: str) -> bool:
+    """True when the recording has a transcript JSON (coaching needs one)."""
+    return (TRANSCRIPTS_DIR / f"{session_id}.json").is_file()
 
 
 def _read_transcript(session_id: str) -> dict | None:
@@ -150,7 +156,13 @@ def _review(segments, owner_labels, metrics, config) -> tuple[dict | None, list[
     return result.get("review"), list(result.get("errors") or [])
 
 
-def _analyse(sidecar: dict, transcript: dict, audio: str | None, force: bool, config: dict) -> tuple[dict, set]:
+def _local_only(config: dict) -> bool:
+    return config.get("summarization_provider") in ("local", "ollama")
+
+
+def _analyse(
+    sidecar: dict, words: list | None, transcript: dict, audio: str | None, force: bool, config: dict
+) -> tuple[dict, set]:
     """Work out this run's outcome. Returns (fields to set, keys to remove) for the sidecar."""
     segments = transcript.get("segments") or []
     labels = _speaker_labels(segments)
@@ -170,10 +182,9 @@ def _analyse(sidecar: dict, transcript: dict, audio: str | None, force: bool, co
     if set(owner_labels) >= set(labels):
         return {"status": "skipped", "status_reason": ONLY_YOU, "owner": owner}, set(_REPORT_KEYS)
 
-    words = sidecar.get("words")
     metrics = compute_metrics(
         segments,
-        words if isinstance(words, list) and words else None,
+        words or None,
         set(owner_labels),
         duration,
         bool(transcript.get("timestamps_estimated")),
@@ -181,7 +192,9 @@ def _analyse(sidecar: dict, transcript: dict, audio: str | None, force: bool, co
     review, errors = _review(segments, owner_labels, metrics, config)
     fields = {"owner": owner, "metrics": metrics, "review": review, "status": "done", "status_reason": ""}
     if review is None:
-        if config.get("summarization_provider") == "local":
+        # Local users without a usable Ollama still get their measured metrics. Any other
+        # error (broken JSON, a timeout) is a real failure, for them too.
+        if _local_only(config) and errors and all(ollama_unavailable(e) for e in errors):
             fields["status_reason"] = LOCAL_NEEDS_OLLAMA
         else:
             fields["status"] = "failed"
@@ -291,7 +304,7 @@ def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
     sidecar = store.update(session_id, _mark_running)
     try:
         audio = _resolve_audio(session_id, audio_path)
-        fields, drop = _analyse(sidecar, transcript, audio, force, config)
+        fields, drop = _analyse(sidecar, store.load_words(session_id), transcript, audio, force, config)
     except Exception as e:
         log.warning("coaching run for %s failed: %s", session_id, e, exc_info=True)
         fields, drop = {"status": "failed", "status_reason": f"Coaching failed: {e}"}, set()
@@ -305,15 +318,20 @@ def _commit(session_id, generation, start_hash, before, fields, drop) -> Callabl
     Runs under the sidecar lock. Re-reading the transcript there is safe (nothing takes the
     sidecar lock while holding a transcript lock) and closes the gap with ``mark_stale``: a
     transcript write after this check marks the new report stale once the lock is released.
+    If the transcript is gone (the recording was deleted meanwhile), nothing is written, so a
+    deleted recording's coaching data is not recreated.
     """
 
-    def mutate(d: dict) -> None:
+    def mutate(d: dict) -> bool | None:
         with _lock:
             superseded = _generation.get(session_id) != generation
         if superseded:
             log.info("coaching run for %s superseded by a newer run; result dropped", session_id)
-            return
+            return None
         current = _read_transcript(session_id)
+        if current is None and not has_transcript(session_id):
+            log.info("transcript %s deleted while coaching ran; result dropped", session_id)
+            return False
         if current is None or store.text_hash(current.get("text")) != start_hash:
             log.info("transcript %s changed while coaching ran; result dropped", session_id)
             if before["status"] in (None, "running"):
@@ -321,13 +339,14 @@ def _commit(session_id, generation, start_hash, before, fields, drop) -> Callabl
                 d.pop("status_reason", None)
             else:
                 d["status"], d["status_reason"] = before["status"], before["status_reason"]
-            return
+            return None
         for key in drop:
             d.pop(key, None)
         d.update(fields)
         d["mixed_up"] = bool(d.get("mixed_up", False))
         d["transcript_text_hash"] = start_hash
         d["created_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        return None
 
     return mutate
 
@@ -367,14 +386,8 @@ def current(session_id: str) -> dict:
     return store.update(session_id, _interrupted)
 
 
-def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
-    """Save the user's pick of which speaker label(s) are them, then coach the recording again.
-
-    Raises ValueError for an empty pick or a label not in the transcript. With ``learn``,
-    the pick also teaches the voice profile, but only if the voice model is already
-    installed and the recording's audio is on this Mac. The pick holds only while the
-    speaker labelling stays the same (see ``labelling_fingerprint``).
-    """
+def _owner_pick(session_id: str, labels) -> tuple[list[dict], list[str], dict]:
+    """Validate a pick against the transcript. Returns (segments, chosen labels, owner)."""
     transcript = _read_transcript(session_id)
     if transcript is None:
         raise ValueError("no transcript for this recording")
@@ -385,18 +398,75 @@ def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
     unknown = [x for x in chosen if x not in set(_speaker_labels(segments))]
     if unknown:
         raise ValueError(f"unknown speaker label: {', '.join(unknown)}")
-
     owner = {"labels": chosen, "source": "user", "confidence": 1.0, "labelling": labelling_fingerprint(segments)}
+    return segments, chosen, owner
+
+
+def _save_pick(session_id: str, owner: dict) -> dict:
+    """Save the owner and status "running" in one write, before any learning or run starts.
+
+    The caller must have registered the run (``_enter``) first and keep it registered until
+    the run ends, or ``current`` would rewrite this "running" as interrupted.
+    """
+    return store.update(session_id, lambda d: d.update(owner=owner, status="running", status_reason=""))
+
+
+def _learn_and_run(session_id: str, segments: list[dict], chosen: list[str], learn: bool) -> tuple[str | None, dict]:
+    audio = _resolve_audio(session_id, None)
+    if learn and audio and voice.model_available():
+        try:
+            voice.add_exemplars(audio, segments, chosen)
+        except Exception as e:
+            log.warning("could not add voice exemplars for %s: %s", session_id, e, exc_info=True)
+    return audio, _run_once(session_id, audio, force=True)
+
+
+def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
+    """Save the user's pick of which speaker label(s) are them, then coach the recording again.
+
+    Raises ValueError for an empty pick or a label not in the transcript. The owner and
+    status "running" are saved together first. With ``learn``, the pick also teaches the
+    voice profile, but only if the voice model is already installed and the recording's
+    audio is on this Mac. The pick holds only while the speaker labelling stays the same
+    (see ``labelling_fingerprint``).
+    """
+    segments, chosen, owner = _owner_pick(session_id, labels)
     _enter(session_id)
     audio = None
     try:
-        store.update(session_id, lambda d: d.update(owner=owner))
-        audio = _resolve_audio(session_id, None)
-        if learn and audio and voice.model_available():
-            try:
-                voice.add_exemplars(audio, segments, chosen)
-            except Exception as e:
-                log.warning("could not add voice exemplars for %s: %s", session_id, e, exc_info=True)
-        return _run_once(session_id, audio, force=True)
+        _save_pick(session_id, owner)
+        audio, out = _learn_and_run(session_id, segments, chosen, learn)
+        return out
+    finally:
+        _finish_sync(session_id, audio)
+
+
+def start_set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
+    """``set_owner`` for the routes: save the pick now, coach in a daemon thread.
+
+    Returns the sidecar as saved, already with status "running", so the UI never sees the
+    old status after a pick. Raises ValueError like ``set_owner``.
+    """
+    segments, chosen, owner = _owner_pick(session_id, labels)
+    _enter(session_id)
+    try:
+        saved = _save_pick(session_id, owner)
+        Thread(
+            target=_set_owner_in_background,
+            kwargs={"session_id": session_id, "segments": segments, "chosen": chosen, "learn": learn},
+            daemon=True,
+        ).start()
+    except BaseException:
+        _finish_sync(session_id, None)
+        raise
+    return saved
+
+
+def _set_owner_in_background(session_id: str, segments: list[dict], chosen: list[str], learn: bool) -> None:
+    audio = None
+    try:
+        audio, _ = _learn_and_run(session_id, segments, chosen, learn)
+    except Exception as e:
+        log.warning("coaching after an owner pick for %s failed: %s", session_id, e, exc_info=True)
     finally:
         _finish_sync(session_id, audio)

@@ -1,8 +1,10 @@
 """Coaching routes: reports, owner pick, progress and the voice profile.
 
-The sidecar's verbatim ``words`` never leave the backend through these routes.
+The verbatim ``words`` never leave the backend through these routes: they live in
+their own file, and ``_sidecar_response`` strips any an older sidecar still holds.
 ``/coaching/progress`` and ``/coaching/voice`` are fixed paths, registered before
-the ``<sid>`` routes (and "progress"/"voice" are not session ids anyway).
+the ``<sid>`` routes (and "progress"/"voice" are not session ids anyway). The
+store's other files ("voice_profile", "<sid>.words") are never session ids here.
 """
 
 import copy
@@ -39,13 +41,19 @@ def _valid(sid: str) -> bool:
         validate_session_id(sid)
     except InvalidSessionIdError:
         return False
-    return True
+    return store.is_sidecar_stem(sid)
 
 
-def _public(sidecar: dict) -> dict:
-    """The sidecar as the UI sees it: never the verbatim words."""
+def _no_transcript():
+    return jsonify({"error": "no transcript for this recording"}), 404
+
+
+def _sidecar_response(sidecar: dict, **extra):
+    """Every sidecar response: the sidecar without the verbatim words, plus the targets."""
     out = {k: v for k, v in (sidecar or {}).items() if k != "words"}
-    return out
+    out["targets"] = copy.deepcopy(TARGETS)
+    out.update(extra)
+    return jsonify(out)
 
 
 def _recording_time(session_id: str, sidecar_path: Path) -> float:
@@ -79,7 +87,8 @@ def get_progress():
     directory = store.COACHING_DIR
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
         sid = path.stem
-        if not _valid(sid):
+        # Skips the words files and the voice profile, and recordings deleted since.
+        if not _valid(sid) or not runner.has_transcript(sid):
             continue
         sidecar = store.load(sid)
         if not sidecar:
@@ -176,24 +185,17 @@ def voice_delete():
 def get_coaching(sid):
     if not _valid(sid):
         return _bad_id()
-    out = _public(runner.current(sid))
-    out["targets"] = copy.deepcopy(TARGETS)
-    return jsonify(out)
+    return _sidecar_response(runner.current(sid))
 
 
 @bp.route("/coaching/<sid>/run", methods=["POST"])
 def run_coaching(sid):
     if not _valid(sid):
         return _bad_id()
+    if not runner.has_transcript(sid):
+        return _no_transcript()
     runner.start_coaching_async(sid, None, force=True)
     return jsonify({"started": True})
-
-
-def _set_owner_in_background(sid: str, labels: list[str], learn: bool) -> None:
-    try:
-        runner.set_owner(sid, labels, learn)
-    except Exception as e:
-        log.warning("setting the coaching owner for %s failed: %s", sid, e, exc_info=True)
 
 
 @bp.route("/coaching/<sid>/owner", methods=["POST"])
@@ -206,15 +208,17 @@ def set_owner(sid):
         return jsonify({"error": "pick at least one speaker"}), 400
     transcript = runner._read_transcript(sid)
     if transcript is None:
-        return jsonify({"error": "no transcript for this recording"}), 404
+        return _no_transcript()
     known = set(runner._speaker_labels(transcript.get("segments") or []))
     unknown = sorted(set(labels) - known)
     if unknown:
         return jsonify({"error": f"unknown speaker label: {', '.join(unknown)}"}), 400
-    Thread(target=_set_owner_in_background, args=(sid, labels, bool(data.get("learn", True))), daemon=True).start()
-    out = _public(runner.current(sid))
-    out["started"] = True
-    return jsonify(out)
+    try:
+        # Saves the pick with status "running" before returning; coaching runs in the background.
+        saved = runner.start_set_owner(sid, labels, bool(data.get("learn", True)))
+    except ValueError as e:  # the transcript changed since the checks above
+        return jsonify({"error": str(e)}), 400
+    return _sidecar_response(saved, started=True)
 
 
 @bp.route("/coaching/<sid>/mixed-up", methods=["POST"])
@@ -225,7 +229,9 @@ def set_mixed_up(sid):
     flag = data.get("mixed_up")
     if not isinstance(flag, bool):
         return jsonify({"error": "mixed_up must be true or false"}), 400
-    return jsonify(_public(store.update(sid, lambda d: d.update(mixed_up=flag))))
+    if not runner.has_transcript(sid):
+        return _no_transcript()
+    return _sidecar_response(store.update(sid, lambda d: d.update(mixed_up=flag)))
 
 
 # ---------------------------------------------------------------- startup

@@ -137,7 +137,7 @@ def _flatten(v) -> list:
 def _speaker_clips(audio_path: str, segments: list[dict], max_seconds: float) -> dict[str, list[str]]:
     """Cut each speaker's longest segments (up to ``max_seconds`` in total) into
     temporary 16 kHz WAV clips. Returns {label: [clip paths]}; caller deletes them.
-    Segments shorter than 1.0 s are skipped."""
+    Segments shorter than 1.0 s, or with no speaker label, are skipped."""
     import soundfile as sf
 
     from src.transcribe import _to_wav16k
@@ -151,7 +151,7 @@ def _speaker_clips(audio_path: str, segments: list[dict], max_seconds: float) ->
         rate = info.samplerate
         by_speaker: dict[str, list[dict]] = {}
         for s in segments:
-            if s["end"] - s["start"] >= MIN_CLIP_SECONDS:
+            if s.get("speaker") is not None and s["end"] - s["start"] >= MIN_CLIP_SECONDS:
                 by_speaker.setdefault(s["speaker"], []).append(s)
         for label, segs in by_speaker.items():
             total = 0.0
@@ -299,7 +299,10 @@ def match_owner(audio_path: str, segments: list[dict]) -> dict:
 
 
 def loudest_label(audio_path: str, segments: list[dict]) -> str | None:
-    """The RMS-loudest speaker. A suggestion only; never decides the owner."""
+    """The RMS-loudest speaker. A suggestion only; never decides the owner.
+
+    Reads one labelled segment at a time as float32, so an hour-long recording never
+    sits in memory whole. Segments with no speaker label are skipped."""
     wav = None
     try:
         import numpy as np
@@ -310,13 +313,18 @@ def loudest_label(audio_path: str, segments: list[dict]) -> str | None:
         wav = _to_wav16k(audio_path)
         if not wav:
             return None
-        data, rate = sf.read(wav)
+        rate = sf.info(wav).samplerate
         sums: dict[str, list[float]] = {}  # label -> [sum of squares, samples]
         for s in segments:
-            chunk = data[int(s["start"] * rate) : int(s["end"] * rate)]
+            label = s.get("speaker")
+            start = int(s["start"] * rate)
+            frames = int(s["end"] * rate) - start
+            if label is None or frames <= 0:
+                continue
+            chunk, _ = sf.read(wav, start=start, frames=frames, dtype="float32")
             if len(chunk):
-                acc = sums.setdefault(s["speaker"], [0.0, 0])
-                acc[0] += float(np.sum(np.square(chunk)))
+                acc = sums.setdefault(label, [0.0, 0])
+                acc[0] += float(np.sum(np.square(chunk, dtype=np.float64)))
                 acc[1] += len(chunk)
         if not sums:
             return None

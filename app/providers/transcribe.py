@@ -221,20 +221,41 @@ def transcribe_groq(audio_path, api_key, language=None, vocab_prompt=None):
     return r.json()
 
 
-FILLER_TOKENS = frozenset({"um", "uh", "uhm", "umm", "er", "erm", "hmm", "mm", "mhm"})
+# Hesitation sounds dropped from the transcript the user reads. "hmm", "mm" and "mhm"
+# stay: they often carry meaning (agreeing, thinking aloud). The verbatim words keep
+# every filler for coaching (app/coaching/targets.FILLER_PHRASES decides what counts).
+FILLER_TOKENS = frozenset({"um", "uh", "uhm", "umm", "er", "erm"})
+_SENTENCE_END = (".", "?", "!")
 
 
 def _is_filler(token):
     return token.lower().strip(string.punctuation + " ") in FILLER_TOKENS
 
 
-def _clean_words_text(words):
-    """Join Deepgram word dicts into text, dropping filler tokens."""
+def _clean_words_text(words, transcript):
+    """Deepgram's text without filler tokens.
+
+    ``words`` are Deepgram word dicts and ``transcript`` is Deepgram's own text for
+    them. With no filler to drop, ``transcript`` is returned unchanged. Otherwise the
+    kept words are joined; a dropped filler that ends a sentence ("um." or "uh?")
+    hands its mark to the previous kept word unless that word already ends one
+    (replacing a trailing comma, so "there, um." reads "there.").
+    """
     kept = []
+    dropped = False
     for w in words:
         token = w.get("punctuated_word") or w.get("word") or ""
-        if token and not _is_filler(token):
+        if not token:
+            continue
+        if not _is_filler(token):
             kept.append(token)
+            continue
+        dropped = True
+        mark = token.rstrip()[-1:]
+        if mark in _SENTENCE_END and kept and not kept[-1].endswith(_SENTENCE_END):
+            kept[-1] = kept[-1].rstrip(",;:") + mark
+    if not dropped:
+        return transcript or ""
     return " ".join(kept)
 
 
@@ -278,7 +299,7 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
     # Fillers are requested so coaching can count them, but the transcript the
     # user reads stays clean: rebuild the text without them.
     raw_words = alt.get("words") or []
-    full_text = _clean_words_text(raw_words) if raw_words else alt.get("transcript", "")
+    full_text = _clean_words_text(raw_words, alt.get("transcript", ""))
     detected_lang = channel.get("detected_language") or (language if language != "auto" else None) or ""
     metadata = data.get("metadata", {})
     duration = metadata.get("duration", 0)
@@ -289,8 +310,8 @@ def transcribe_deepgram(audio_path, api_key, language=None, diarize=False, keywo
         speaker = None
         if diarize and utt.get("speaker") is not None:
             speaker = f"Speaker {utt['speaker'] + 1}"
-        utt_words = utt.get("words")
-        text = _clean_words_text(utt_words) if utt_words else utt.get("transcript", "").strip()
+        utt_words = utt.get("words") or []
+        text = _clean_words_text(utt_words, utt.get("transcript", "")).strip()
         if utt_words and not text:
             continue  # the utterance was only fillers
         segments.append(

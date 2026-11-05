@@ -29,14 +29,13 @@ from app.utils.webhooks import fire_webhooks
 
 
 def _save_coaching_words(session_id, words, text):
-    """Replace the coaching sidecar's verbatim words after a transcription.
+    """Replace the recording's verbatim words (the coaching words file) after a transcription.
 
     Providers without verbatim words (Groq, OpenAI, local Whisper) pass []
     so fillers from an earlier Deepgram run are never reused. The words stay
     out of the transcript JSON, the .txt, the summary input and webhooks.
     """
-    text_hash = coaching_store.text_hash(text)
-    coaching_store.update(session_id, lambda d: d.update(words=words or [], transcript_text_hash=text_hash))
+    coaching_store.save_words(session_id, words or [], coaching_store.text_hash(text))
 
 
 def _after_transcript_final(session_id, audio_path):

@@ -190,6 +190,7 @@ def test_speaker_clips_cuts_real_audio(tmp_path, monkeypatch):
         {"start": 0.0, "end": 5.0, "speaker": "A"},
         {"start": 5.0, "end": 5.5, "speaker": "A"},  # too short
         {"start": 6.0, "end": 11.0, "speaker": "B"},
+        {"start": 11.0, "end": 12.0, "speaker": None},  # no label: never a clip
     ]
     clips = voice._speaker_clips(str(wav), segs, 60.0)
     try:
@@ -197,3 +198,55 @@ def test_speaker_clips_cuts_real_audio(tmp_path, monkeypatch):
         assert sf.info(clips["A"][0]).frames == 16000 * 5
     finally:
         voice._remove_clips(clips)
+
+
+def _wav_copy(tmp_path, monkeypatch, data, rate=16000):
+    sf = pytest.importorskip("soundfile")
+    src = tmp_path / "src.wav"
+    sf.write(src, data, rate)
+    import src.transcribe as tr
+
+    copy = tmp_path / "copy.wav"
+    monkeypatch.setattr(tr, "_to_wav16k", lambda p: str(copy) if copy.write_bytes(src.read_bytes()) else None)
+    return copy
+
+
+def test_loudest_label_reads_float32_per_segment_and_skips_unlabelled(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    sf = pytest.importorskip("soundfile")
+    quiet, loud, louder = 0.05, 0.3, 0.9
+    data = np.concatenate([np.full(16000 * 2, quiet), np.full(16000 * 2, loud), np.full(16000 * 2, louder)]).astype(
+        "float32"
+    )
+    copy = _wav_copy(tmp_path, monkeypatch, data)
+    reads = []
+    real_read = sf.read
+
+    def spy(path, *args, **kwargs):
+        reads.append(kwargs)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(sf, "read", spy)
+    segs = [
+        {"start": 0.0, "end": 2.0, "speaker": "A"},
+        {"start": 2.0, "end": 4.0, "speaker": "B"},
+        {"start": 4.0, "end": 6.0, "speaker": None},  # loudest audio, but unlabelled
+    ]
+    assert voice.loudest_label("x.ogg", segs) == "B"
+    assert len(reads) == 2  # one read per labelled segment, never the whole file
+    assert all(r.get("dtype") == "float32" and r.get("frames") == 32000 for r in reads)
+    assert not copy.exists()  # the temporary WAV is removed
+
+
+def test_loudest_label_none_when_only_unlabelled(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    _wav_copy(tmp_path, monkeypatch, np.full(16000, 0.5).astype("float32"))
+    assert voice.loudest_label("x.ogg", [{"start": 0.0, "end": 1.0, "speaker": None}]) is None
+
+
+def test_speaker_embeddings_skip_unlabelled_segments(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    _wav_copy(tmp_path, monkeypatch, (0.1 * np.ones(16000 * 4)).astype("float32"))
+    monkeypatch.setattr(voice, "_embed_wav", lambda path: OWNER)
+    segs = [{"start": 0.0, "end": 2.0, "speaker": "A"}, {"start": 2.0, "end": 4.0, "speaker": None}]
+    assert set(voice.speaker_embeddings("x.ogg", segs)) == {"A"}

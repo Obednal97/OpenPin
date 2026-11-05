@@ -562,6 +562,15 @@ def _trash_files(paths):
     return trashed, locations, errors
 
 
+def _trash_coaching_files(session_id):
+    """Move a recording's coaching data (sidecar and verbatim words) to the Trash.
+
+    Takes the coaching store's own lock, so call it after releasing the transcript lock.
+    """
+    with coaching_store.session_lock(session_id):
+        return _trash_files(coaching_store.session_files(session_id))
+
+
 def _trash_location(locations):
     if not locations:
         return None
@@ -618,6 +627,13 @@ def delete_recordings():
         errors += [{"session_id": sid, **e} for e in errs]
         if not errs:
             gone.append(sid)
+        # Coaching data has its own lock, never taken inside the transcript lock. A failure
+        # here is reported, but the recording itself is gone (and the progress view skips
+        # coaching data without a transcript).
+        ct, cloc, cerrs = _trash_coaching_files(sid)
+        deleted += ct
+        locations |= cloc
+        errors += [{"session_id": sid, **e} for e in cerrs]
 
     def _apply(cfg):
         dismissed = set(cfg.get("deleted_ids", []))
@@ -951,6 +967,10 @@ def delete_transcript():
     paths = [TRANSCRIPTS_DIR / f"{session_id}.{ext}" for ext in ("json", "txt")]
     with get_transcript_lock(session_id):
         deleted, locations, errors = _trash_files(paths)
+    # Coaching is built from the transcript, so its data goes with it (after the
+    # transcript lock is released: the coaching store has its own lock).
+    ct, cloc, cerrs = _trash_coaching_files(session_id)
+    deleted, locations, errors = deleted + ct, locations | cloc, errors + cerrs
 
     return jsonify(
         {

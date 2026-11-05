@@ -2,8 +2,9 @@
 
 One structured-output LLM call per recording. The model sees the transcript with the owner
 marked, plus the measured metrics, and returns scores, a summary, actions and timestamped
-reactions and moments. ``ground`` then drops anything citing a time that is not in the
-transcript, so every judgement the user sees points at a real moment.
+reactions and moments. Each score cites the times it is based on (``evidence``). ``ground``
+then drops anything citing a time that is not in the transcript, and any score left with no
+real time, so every judgement the user sees points at a real moment.
 """
 
 import json
@@ -29,7 +30,13 @@ def _obj(properties):
     }
 
 
-_SCORE = _obj({"score": {"type": "integer"}, "reason": {"type": "string"}})
+_SCORE = _obj(
+    {
+        "score": {"type": "integer"},
+        "reason": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "number"}},
+    }
+)
 
 REVIEW_SCHEMA = _obj(
     {
@@ -65,11 +72,12 @@ def _system_prompt(owner_name, british, truncated):
         "You are a conversation coach reviewing one recorded conversation. " + who,
         "Be blunt, specific and kind but honest. Coach the (you) speaker only; never judge anyone else.",
         "Scores are integers from 0 to 100 with a one-line reason each: clarity, warmth, charisma, "
-        "listening, and reception (how the other people responded to them). Give 2 to 3 concrete "
+        "listening, and reception (how the other people responded to them). For each score, list in "
+        "evidence the times t (in seconds) of the lines it is based on. Give 2 to 3 concrete "
         "next_time actions. In reactions, for the (you) speaker's key points, say what the other "
         "person did next. In moments, note things like a strong question, a point that landed, "
         "rambling or hedging.",
-        "Every reaction and moment must cite a time t in seconds taken from a line you were given "
+        "Every reaction, moment and score evidence time must be a time t in seconds taken from a line you were given "
         "(the [mm:ss] at the start of that line, converted to seconds). Never invent a timestamp or "
         "quote words that are not in the transcript.",
         "The recording is single-channel audio, so the interruptions listed in the metrics are only "
@@ -117,7 +125,9 @@ def ground(review: dict, segments: list[dict], tolerance_s: float = 2.0, interru
     """Return a copy of ``review`` with ungrounded content removed and values tidied.
 
     Reactions and moments whose ``t`` is not within ``tolerance_s`` of a segment start are
-    dropped; scores are clamped to 0-100; ``next_time`` loses empty strings and keeps at most 3.
+    dropped. Each score keeps only the ``evidence`` times within tolerance of a segment start
+    and is dropped when none are left; kept scores are clamped to 0-100. ``next_time`` loses
+    empty strings and keeps at most 3.
     When ``interruption_candidates`` (times) is given, ``interruptions_confirmed`` keeps only
     entries within tolerance of a candidate: the model can confirm candidates, not invent them.
     Malformed shapes (non-dict entries, non-list arrays, non-finite times) are skipped, never raised.
@@ -131,6 +141,9 @@ def ground(review: dict, segments: list[dict], tolerance_s: float = 2.0, interru
         if not isinstance(v, dict):
             continue
         v = dict(v)
+        v["evidence"] = [t for t in _list(v.get("evidence")) if _number(t) and _near(t, starts, tolerance_s)]
+        if not v["evidence"]:
+            continue
         try:
             v["score"] = max(0, min(100, int(round(float(v.get("score", 0))))))
         except (TypeError, ValueError, OverflowError):
@@ -174,7 +187,12 @@ def review_conversation(segments, owner_labels, metrics, config, owner_name: str
     parsed, provider, errors = call_llm_json(system, user, REVIEW_SCHEMA, config, schema_name="coaching_review")
     if parsed is None:
         return {"review": None, "provider": provider, "errors": errors}
-    candidates = [m["t"] for m in metrics.get("moments", []) if m.get("kind") == "interruption"]
+    # Only interruptions the owner made are put up for confirmation (interruption moments also
+    # cover the owner being interrupted; "speaker" is the interrupting turn's label).
+    owners = set(owner_labels)
+    candidates = [
+        m["t"] for m in metrics.get("moments", []) if m.get("kind") == "interruption" and m.get("speaker") in owners
+    ]
     try:
         grounded = ground(parsed, segments, interruption_candidates=candidates)
     except Exception as e:  # broken model output must never crash the caller
