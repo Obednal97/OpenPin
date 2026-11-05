@@ -4,6 +4,7 @@ import requests as http_requests
 from flask import Blueprint, jsonify, request
 
 from app.mcp import access as mcp_access
+from app.mcp import clients as mcp_clients
 from app.utils.config import load_config, update_config
 from app.utils.constants import DEFAULT_RECORDINGS_DIR, DEFAULT_TAGS, HF_WHOAMI_URL, WHISPER_MODELS, get_recordings_dir
 from app.utils.system import get_ram_info
@@ -258,3 +259,57 @@ def _apply_mcp_enabled(on: bool) -> str | None:
         return f"Couldn't turn on AI tool access: {e}"
     update_config(lambda c: c.__setitem__("mcp_enabled", True))
     return None
+
+
+# ---------------------------------------------------------------------------
+# One-click setup for Claude Desktop and Claude Code (app/mcp/clients.py).
+# App-token routes like the rest of the window's API (not /mcp/v1, which only
+# AI tools use). The window may only name files that status() lists.
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/mcp/setup/status", methods=["GET"])
+def mcp_setup_status():
+    return jsonify(mcp_clients.status())
+
+
+def _mcp_setup_target():
+    """(kind, path) from the request body, or an error response."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}  # a list, string or number: no kind or path, so a 400 below
+    kind = data.get("kind")
+    path = mcp_clients.resolve(kind, data.get("path"))
+    if path is None:
+        return None, (
+            jsonify({"error": "Open Pin didn't find that settings file. Reopen Settings and try again."}),
+            400,
+        )
+    return (kind, path), None
+
+
+def _mcp_setup_change(action):
+    target, error = _mcp_setup_target()
+    if error:
+        return error
+    kind, path = target
+    try:
+        action(path, kind)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"Couldn't save {mcp_clients.shown_path(path)}: {e.strerror or e}"}), 500
+    return jsonify(mcp_clients.status())
+
+
+@bp.route("/mcp/setup/connect", methods=["POST"])
+def mcp_setup_connect():
+    if load_config().get("mcp_enabled", False) is not True:
+        return jsonify({"error": 'Turn on "Let AI tools on this Mac use Open Pin" first.'}), 409
+    return _mcp_setup_change(mcp_clients.connect)
+
+
+@bp.route("/mcp/setup/disconnect", methods=["POST"])
+def mcp_setup_disconnect():
+    # Allowed with access off: removing Open Pin's entry is always fine.
+    return _mcp_setup_change(mcp_clients.disconnect)

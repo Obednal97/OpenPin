@@ -432,6 +432,13 @@ window.plaud = {
   saveSettings: (settings) => apiCall('POST', '/settings', settings),
   validateKey: (provider, key) => apiCall('POST', '/validate-key', { provider, key }),
 
+  // AI tools (MCP): the library change counter, and one-click setup for
+  // Claude Desktop / Claude Code (path: one that mcpSetupStatus listed).
+  libraryChanges: () => apiCall('GET', '/changes'),
+  mcpSetupStatus: () => apiCall('GET', '/mcp/setup/status'),
+  mcpConnect: (kind, path) => apiCall('POST', '/mcp/setup/connect', { kind, path }),
+  mcpDisconnect: (kind, path) => apiCall('POST', '/mcp/setup/disconnect', { kind, path }),
+
   // Cloud account
   cloudStatus: () => apiCall('GET', '/cloud/status'),
   cloudLoginUrl: (region) => apiCall('POST', '/cloud/login-url', { region }),

@@ -82,6 +82,7 @@ class TestSettingsTabs:
                 {
                     "launch-login-toggle", "show-dock-toggle", "theme-setting", "check-updates-btn",
                     "settings-export-bug-report-btn", "open-diagnostics-log-btn",
+                    "mcp-enabled-toggle", "mcp-desktop-connect-btn", "mcp-code-connect-btn",
                 },
             ),
         ],
@@ -96,7 +97,7 @@ class TestSettingsTabs:
                    "Personalisation", "Other saved keys"],
             "automation": ["New recordings", "Webhooks", "Plaud cloud sync"],
             "accounts": ["Recordings folder", "Google Drive", "Plaud account", "Notion"],
-            "general": ["System", "Appearance", "About"],
+            "general": ["System", "Appearance", "AI tools (MCP)", "About"],
         }.items():
             assert re.findall(r"<h3>([^<]+)</h3>", _tab_panel(tab)) == headings, tab
 
