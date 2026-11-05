@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
 from app.utils import redownload_backup
+from app.utils import tags as tags_store
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
 from app.utils.paths import (
@@ -297,9 +298,65 @@ def list_recordings():
     return jsonify(recordings)
 
 
+def _change_tags(op):
+    """Shared body of /recordings/tags/add and /recordings/tags/remove.
+
+    ``{session_ids: [...], tags: [...]}`` -> ``{tags: {sid: [...]}}``, plus
+    ``errors: {sid: message}`` for recordings that couldn't take the change
+    (say, already at 20 tags). 400 if the input is bad or nothing could change.
+    """
+    data = request.get_json(silent=True) or {}
+    session_ids = data.get("session_ids")
+    tags = data.get("tags")
+    try:
+        validate_session_ids(session_ids)
+    except InvalidSessionIdError as e:
+        return _invalid(e)
+    if not session_ids:
+        return jsonify({"error": "No session_ids"}), 400
+    if not isinstance(tags, list) or not tags:
+        return jsonify({"error": "tags must be a non-empty list"}), 400
+
+    result, errors = {}, {}
+    for sid in dict.fromkeys(session_ids):
+        try:
+            result[sid] = op(sid, tags)
+        except ValueError as e:
+            errors[sid] = str(e)
+    if not result:
+        return jsonify({"error": next(iter(errors.values())), "errors": errors}), 400
+    body = {"tags": result}
+    if errors:
+        body["errors"] = errors
+    return jsonify(body)
+
+
+@bp.route("/recordings/tags/add", methods=["POST"])
+def add_recording_tags():
+    """Add tags to one or more recordings (new tags join the picker)."""
+    return _change_tags(tags_store.add_tags)
+
+
+@bp.route("/recordings/tags/remove", methods=["POST"])
+def remove_recording_tags():
+    """Remove tags from one or more recordings."""
+    return _change_tags(tags_store.remove_tags)
+
+
+@bp.route("/tags", methods=["GET"])
+def list_tags():
+    """Every tag with how many recordings carry it."""
+    return jsonify({"tags": tags_store.all_tags()})
+
+
 @bp.route("/recordings/tag", methods=["POST"])
 def tag_recording():
-    """Set tags for a recording."""
+    """Set a recording's whole tag list.
+
+    Kept for compatibility only: the app adds and removes single tags through
+    /recordings/tags/add and /recordings/tags/remove, so a stale window can't
+    wipe a tag something else added.
+    """
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id", "")
     tags = data.get("tags", [])
@@ -327,22 +384,10 @@ def tag_recording():
         except Exception:
             pass
 
-    # Enqueue a Notion tag sync — the background worker owns the actual call
-    # so this endpoint returns immediately and the UI stays responsive. If
-    # Notion is offline or the token expired, the queue retries with backoff.
-    notion_queued = False
-    try:
-        from app.routes.notion import _get_notion_page_url
-        from app.state import notion as _notion
-        from app.utils import notion_queue
+    from app.utils import changes
 
-        if _notion.is_connected() and _get_notion_page_url(session_id):
-            notion_queue.enqueue(session_id)
-            notion_queued = True
-    except Exception as e:
-        import logging as _logging
-
-        _logging.warning(f"Notion tag enqueue failed: {e}")
+    changes.bump()
+    notion_queued = tags_store.enqueue_notion_sync(session_id)
 
     return jsonify({"saved": True, "notion_queued": notion_queued})
 

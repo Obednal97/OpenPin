@@ -7,6 +7,7 @@ written concurrently by:
 - The background diarization thread (_bg_diarize in transcribe.py)
 - The /transcripts/update route (recordings.py)
 - The /recordings/tag and /recordings/rename routes (recordings.py)
+- Tag add/remove (app/utils/tags.py)
 - The /summarize route (transcribe.py)
 
 Without coordination, concurrent writes silently overwrite each other,

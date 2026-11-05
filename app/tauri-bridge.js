@@ -391,6 +391,10 @@ window.plaud = {
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
   deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
   tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),
+  // Add or remove single tags: { tags: { sid: [...] }, errors?: { sid: msg } }.
+  addTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/add', { session_ids, tags }),
+  removeTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/remove', { session_ids, tags }),
+  listTags: () => apiCall('GET', '/tags'),
   renameRecording: (session_id, title) => apiCall('POST', '/recordings/rename', { session_id, title }),
   exportRecording: (session_id) => apiCall('POST', '/recordings/export', { session_id }),
   cropRecording: (session_id, start, end, mode) =>

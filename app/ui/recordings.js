@@ -330,23 +330,26 @@ function updateSelectBar() {
             return rec && (rec.tags || []).includes(tag);
           });
 
+          // Add or remove just this tag (never the whole list, so a tag an AI
+          // tool added meanwhile survives). The reply holds each recording's
+          // real tags, and why any recording couldn't take the change.
+          let res;
+          try {
+            res = allHaveTag
+              ? await window.plaud.removeTags(ids, [tag])
+              : await window.plaud.addTags(ids, [tag]);
+          } catch (err) {
+            res = { error: (err && err.message) || 'unknown' };
+          }
+          const saved = (res && res.tags) || {};
           const failures = [];
           for (const sid of ids) {
             const rec = app.recordings.find((r) => r.session_id === sid);
-            if (!rec) continue;
-            const tags = rec.tags || [];
-            if (allHaveTag) {
-              rec.tags = tags.filter((t) => t !== tag);
+            if (saved[sid]) {
+              if (rec) rec.tags = saved[sid];
             } else {
-              if (!tags.includes(tag)) {
-                tags.push(tag);
-                rec.tags = tags;
-              }
-            }
-            try {
-              await window.plaud.tagRecording(sid, rec.tags);
-            } catch (err) {
-              failures.push({ sid, err });
+              const message = (res && res.errors && res.errors[sid]) || (res && res.error) || 'unknown';
+              failures.push({ sid, err: { message } });
             }
           }
           if (failures.length === 0) {
