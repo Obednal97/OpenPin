@@ -284,22 +284,24 @@ async function performSync(triggerBtn) {
   }
 
   const gen = _claimSync('ble');
-  showProgress('Syncing recordings...', 20);
+  showProgress('Checking the device for new recordings…', 0);
   toast('Syncing recordings from device...', 'info');
   setLoading(btn, false);
 
   // Poll BLE sync progress so the UI updates per-file instead of sitting frozen
   // on one blocking call. setTimeout is OS-throttled while the window is in the
   // background, but the transfer keeps running (App Nap is suppressed backend-side);
-  // the bar catches up on refocus. Download maps to 20–60%, leaving 60–100% for
-  // transcription so the bar stays monotonic.
+  // the bar catches up on refocus. The bar is the download itself: the backend
+  // counts only the recordings this Mac is missing ("Syncing recording 1 of 2")
+  // and moves the percentage with their bytes. Transcription runs afterwards in
+  // the background, with its own badges.
   let _syncPollActive = true;
   (async () => {
     while (_syncPollActive) {
       try {
         const s = await window.plaud.syncStatus();
         if (_syncPollActive && app.syncGen === gen && s && s.active && s.message) {
-          showProgress(s.message, 20 + (s.percent || 0) * 0.4);
+          showProgress(s.message, s.percent || 0);
         }
       } catch {}
       await new Promise((r) => setTimeout(r, 1000));
@@ -654,7 +656,9 @@ function _wifiSyncStageFromMessage(msg, pct) {
   if (m.includes('connecting to') || m.includes('hotspot')) return { icon: 'wifi', title: 'Connecting to device hotspot...', detail: 'Internet will be temporarily disconnected' };
   if (m.includes('handshake') || m.includes('secure')) return { icon: 'lock', title: 'Establishing secure connection...', detail: '' };
   if (m.includes('file list') || m.includes('discover')) return { icon: 'folder', title: 'Discovering recordings...', detail: '' };
-  if (m.includes('download') || m.includes('file')) return { icon: 'download', title: 'Downloading recordings...', detail: msg };
+  if (m.startsWith('syncing recording') || m.startsWith('synced ') || m.includes('to sync') || m.includes('download') || m.includes('file')) {
+    return { icon: 'download', title: 'Downloading recordings...', detail: msg };
+  }
   if (m.includes('restor') || m.includes('wifi')) return { icon: 'wifi', title: 'Restoring internet...', detail: msg };
   return { icon: 'preparing', title: msg, detail: '' };
 }

@@ -63,7 +63,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.append(_PROJECT_ROOT)
 
-from app.utils import ble_proto  # noqa: E402 — needs the path set above
+from app.utils import ble_proto, sync_progress  # noqa: E402 — needs the path set above
 from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     HANDSHAKE_REJECTED,
     HANDSHAKE_REJECTED_ERROR,
@@ -84,6 +84,8 @@ BIND_TOKEN = None  # Set from args — per-device token from cloud API
 
 
 _last_pct = 0
+_last_msg = ""
+PROGRESS_INTERVAL_S = 0.5  # at most this often a per-chunk progress line while downloading
 
 
 def status(msg, pct=None, **extra):
@@ -95,10 +97,11 @@ def status(msg, pct=None, **extra):
     would abort the worker's cleanup before the WiFi restore runs and leave the
     Mac on the Plaud hotspot.
     """
-    global _last_pct
+    global _last_pct, _last_msg
     if pct is None:
         pct = _last_pct
     _last_pct = pct
+    _last_msg = msg
     try:
         print(json.dumps({"status": msg, "percent": pct, **extra}), file=sys.stderr, flush=True)
     except (BrokenPipeError, OSError, ValueError):
@@ -1545,13 +1548,46 @@ class WifiSession:
         handled = {e["session_id"] for e in self.new_files}
         return [f for f in self.wifi_files if f["session_id"] not in handled]
 
-    def bytes_to_download(self):
-        return sum(
-            f["size"]
+    def waiting_files(self):
+        """Pending files that will actually be downloaded (not dismissed, no .ogg yet)."""
+        return [
+            f
             for f in self.pending_files()
             if str(f["session_id"]) not in self.dismissed
             and not (self.recordings_dir / f"{f['session_id']}.ogg").exists()
-        )
+        ]
+
+    def bytes_to_download(self):
+        return sum(f["size"] for f in self.waiting_files())
+
+    def transfer_progress(self, downloading=False, received=0):
+        """(index, count, done_bytes, total_bytes) for sync_progress.progress().
+
+        Counts only recordings this sync downloads: ones already fetched in this
+        run plus ones still waiting (the one in flight is still waiting until it
+        is saved). `received` is the in-flight recording's bytes so far.
+        """
+        sizes = {f["session_id"]: max(0, f["size"]) for f in self.wifi_files}
+        done = [e["session_id"] for e in self.new_files if e.get("status") != "exists"]
+        done_bytes = sum(sizes.get(sid, 0) for sid in done)
+        waiting = self.waiting_files()
+        count = len(done) + len(waiting)
+        total = done_bytes + sum(max(0, f["size"]) for f in waiting)
+        index = len(done) + (1 if downloading else 0)
+        return index, count, done_bytes + received, total
+
+    def report_progress(self, downloading=False, received=0):
+        index, count, done_bytes, total = self.transfer_progress(downloading, received)
+        if count == 0:
+            status(sync_progress.plan_message(0, 0), 90)
+            return
+        if index == 0:
+            status(sync_progress.plan_message(count, total), 35)
+            return
+        message, fraction = sync_progress.progress(index, count, done_bytes, total)
+        # The transfer is 35-90% of the whole Wi-Fi sync (joining the hotspot
+        # before it, restoring the Mac's Wi-Fi after it).
+        status(message, 35 + int(55 * fraction))
 
     def lost_for(self, now=None):
         """Seconds since the device's connection dropped (0 while connected)."""
@@ -1604,6 +1640,7 @@ class WifiSession:
 
         download_buf = bytearray()
         current = {"sid": 0, "size": 0, "active": False}
+        last_report = [0.0]  # monotonic time of the last per-chunk progress line
         queue = []
 
         async def download_next():
@@ -1614,8 +1651,11 @@ class WifiSession:
                 current["sid"], current["size"], current["active"] = f["session_id"], f["size"], True
                 req = build_wifi_packet(12, {"session": f["session_id"], "scene": 0, "start": 0, "end": f["size"]})
                 await websocket.send(encrypt(req))
-                status(f"Downloading session {f['session_id']}...", 40)
+                self.report_progress(downloading=True)
                 return True
+            index, count, _, _ = self.transfer_progress()
+            if count:
+                status(f"Synced {index} of {count} {'recording' if count == 1 else 'recordings'}", 90)
             self.all_done.set()
             return False
 
@@ -1653,7 +1693,8 @@ class WifiSession:
                             entries.append({"session_id": sid, "size": fsize, "codec": codec})
                         self.merge_file_list(entries)
                     self.file_list_received.set()
-                    status(f"{len(self.wifi_files)} file(s) found", 35)
+                    if not current["active"]:
+                        self.report_progress()
                     if current["active"]:
                         # Another list message (paging, or the device re-sending
                         # it) while a file is downloading: queue the new entries
@@ -1669,6 +1710,10 @@ class WifiSession:
                     chunk = decrypted[8 + json_len_c :]
                     if chunk:
                         download_buf.extend(chunk)
+                        now = time.monotonic()
+                        if now - last_report[0] >= PROGRESS_INTERVAL_S:
+                            last_report[0] = now
+                            self.report_progress(True, min(len(download_buf), max(0, current["size"])))
                     if info.get("last", 0):
                         # Same fail-safe rule as BLE: exact size → saved; a size
                         # mismatch is kept only if it decrypts, else partial.
@@ -1676,9 +1721,6 @@ class WifiSession:
                             self.recordings_dir, current["sid"], bytes(download_buf), current["size"], self.app_rsa_key
                         )
                         self.new_files.append(entry)
-                        done = sum(1 for f in self.new_files if f["status"] == "new")
-                        total = len(self.wifi_files)
-                        status(f"Downloaded {done}/{total}", 35 + int(55 * done / max(total, 1)))
                         await download_next()
 
                 elif cmd_id == 3:
@@ -1892,7 +1934,10 @@ async def transfer(args):
 
         total_bytes = session.bytes_to_download()
         dl_budget = compute_budget(total_bytes)["download_s"]
-        report_budget(total_bytes, f"{len(session.wifi_files)} file(s) found", 35)
+        # The session already reported what it's downloading (and may be part
+        # way through the first recording): repeat that line, adding the budget,
+        # rather than resetting the progress.
+        report_budget(total_bytes, _last_msg, None)
         deadline = time.monotonic() + dl_budget
         error = None
         while not await wait_event(session.all_done, 0.5):

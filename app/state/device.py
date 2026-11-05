@@ -17,7 +17,7 @@ from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from app.utils import ble_proto, pairing_store
+from app.utils import ble_proto, pairing_store, sync_progress
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
     HANDSHAKE_REJECTED,
@@ -70,7 +70,10 @@ _sync_abort = False  # Set True to abort current BLE sync (e.g. switching to WiF
 _wifi_sync_status = {"message": "", "percent": 0}  # Progress for WiFi sync polling
 # Progress for BLE sync polling — the frontend reads this via /device/sync-status
 # so the UI updates per-file instead of freezing on one blocking call.
-_ble_sync_status = {"message": "", "percent": 0, "active": False}
+# file_index/file_count count only the recordings being downloaded (1 of 2),
+# and percent follows bytes_done/bytes_total across them.
+_NO_FILE_PROGRESS = {"file_index": 0, "file_count": 0, "bytes_done": 0, "bytes_total": 0}
+_ble_sync_status = {"message": "", "percent": 0, "active": False, **_NO_FILE_PROGRESS}
 _loop = None
 _loop_thread = None
 
@@ -1549,14 +1552,16 @@ async def sync_files(progress_callback=None, _claimed=False, background=False):
     """
     if not _claimed and not claim_sync():
         return {"error": SYNC_BUSY_ERROR, "busy": True}
-    _ble_sync_status.update({"message": "Preparing…", "percent": 5, "active": True})
+    _ble_sync_status.update(
+        {"message": "Checking the device for new recordings…", "percent": 0, "active": True, **_NO_FILE_PROGRESS}
+    )
     try:
         # Suppress macOS App Nap so backgrounding the window can't throttle the
         # CoreBluetooth stream and trip the stall watchdog mid-transfer.
         with _keep_awake("Plaud BLE sync"):
             return await _sync_files_inner(progress_callback, background=background)
     finally:
-        _ble_sync_status.update({"message": "", "percent": 0, "active": False})
+        _ble_sync_status.update({"message": "", "percent": 0, "active": False, **_NO_FILE_PROGRESS})
         _syncing.release()
 
 
@@ -2449,15 +2454,11 @@ async def _sync_files_inner(progress_callback=None, background=False):
     verified_sids = []  # exact size + clean end + written to disk: eligible for auto-delete
     retry_capped = []  # background only: skipped after RETRY_CAP consecutive failures
     aborted = False
-    total = len(files)
-    for i, f in enumerate(files):
-        if _sync_abort:
-            aborted = True
-            logging.info("BLE sync aborted (between files)")
-            break
-
+    # Pass 1: work out which recordings this Mac is missing, so progress counts
+    # only those (not every file on the device) and moves with their bytes.
+    to_download = []
+    for f in files:
         sid = f["session_id"]
-        fsize = f["size"]
 
         if str(sid) in dismissed:
             continue
@@ -2499,15 +2500,51 @@ async def _sync_files_inner(progress_callback=None, background=False):
                 }
             )
             continue
+        to_download.append(f)
 
-        # Download via BLE
+    count = len(to_download)
+    total_bytes = sum(max(0, f["size"]) for f in to_download)
+    done_bytes = 0  # bytes of the recordings already finished (or given up on)
+    _ble_sync_status.update(
+        {
+            "message": sync_progress.plan_message(count, total_bytes),
+            "percent": 0 if count else 100,
+            "active": True,
+            "file_index": 0,
+            "file_count": count,
+            "bytes_done": 0,
+            "bytes_total": total_bytes,
+        }
+    )
+
+    def _report(index, received):
+        message, fraction = sync_progress.progress(index, count, done_bytes + received, total_bytes)
         _ble_sync_status.update(
             {
-                "message": f"Downloading recording {i + 1} of {total}…",
-                "percent": round(i / total * 100),
+                "message": message,
+                "percent": round(fraction * 100),
                 "active": True,
+                "file_index": index,
+                "file_count": count,
+                "bytes_done": min(done_bytes + received, total_bytes),
+                "bytes_total": total_bytes,
             }
         )
+
+    # Pass 2: download them.
+    for i, f in enumerate(to_download):
+        if i:
+            done_bytes += max(0, to_download[i - 1]["size"])
+        if _sync_abort:
+            aborted = True
+            logging.info("BLE sync aborted (between files)")
+            break
+
+        sid = f["session_id"]
+        fsize = f["size"]
+
+        # Download via BLE
+        _report(i + 1, 0)
         cl = _device_state["client"]
         file_data = _device_state["file_data"]
         file_done = _device_state["file_done"]
@@ -2571,14 +2608,7 @@ async def _sync_files_inner(progress_callback=None, background=False):
                 if current_len > last_progress_len:
                     last_progress_len = current_len
                     last_progress_time = now
-                    if fsize > 0:
-                        frac = min(1.0, current_len / fsize)
-                        _ble_sync_status.update(
-                            {
-                                "message": f"Downloading recording {i + 1} of {total}…",
-                                "percent": round((i + frac) / total * 100),
-                            }
-                        )
+                    _report(i + 1, min(current_len, max(0, fsize)))
                 elif now - last_progress_time > stall_timeout:
                     logging.warning(
                         f"Sync stalled for session {sid} — no data for {stall_timeout}s, device likely out of range"
