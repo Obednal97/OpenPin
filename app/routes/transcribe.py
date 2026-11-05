@@ -1,6 +1,5 @@
 """Transcription and summarization routes."""
 
-import hashlib
 import json
 import logging
 import os
@@ -11,6 +10,7 @@ from pathlib import Path
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
+from app.coaching import runner as coaching_runner
 from app.coaching import store as coaching_store
 from app.providers.summarize import generate_title, summarize
 from app.providers.transcribe import transcribe_deepgram, transcribe_groq, transcribe_openai
@@ -35,8 +35,20 @@ def _save_coaching_words(session_id, words, text):
     so fillers from an earlier Deepgram run are never reused. The words stay
     out of the transcript JSON, the .txt, the summary input and webhooks.
     """
-    text_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+    text_hash = coaching_store.text_hash(text)
     coaching_store.update(session_id, lambda d: d.update(words=words or [], transcript_text_hash=text_hash))
+
+
+def _after_transcript_final(session_id, audio_path):
+    """Start coaching once the transcript and its speaker labels are final.
+
+    Called next to each ``transcribe`` webhook. Never raises: a coaching
+    problem must not break transcription.
+    """
+    try:
+        coaching_runner.start_coaching_async(session_id, audio_path)
+    except Exception as e:
+        logging.warning("Could not start coaching for %s: %s", session_id, e)
 
 
 def _extract_spoken_tags(text):
@@ -248,6 +260,7 @@ def _background_diarize(
     if speakers:
         payload["speakers"] = speakers
     fire_webhooks("transcribe", payload)
+    _after_transcript_final(session_id, audio_path)
 
 
 def _plan_local_diarization(t_data):
@@ -524,6 +537,7 @@ def transcribe_file():
                         "segments": segments,
                     },
                 )
+                _after_transcript_final(session_id, str(path))
 
             resp = {
                 "session_id": session_id,
@@ -621,6 +635,7 @@ def transcribe_file():
                         "segments": local_segments,
                     },
                 )
+                _after_transcript_final(session_id, str(path))
 
             resp = {
                 "session_id": session_id,

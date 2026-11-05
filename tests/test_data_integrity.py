@@ -57,6 +57,8 @@ def env(flask_client, tmp_path):
         patch("app.utils.trash.APP_TRASH_DIR", app_trash),
         patch("app.utils.trash._system_trash", side_effect=fake_system_trash),
         patch("app.state.gdrive.get_cloud_only_recordings", return_value=[]),
+        # No real coaching runs from route tests (tests/test_coaching_runner.py patches over this).
+        patch("app.coaching.runner.start_coaching_async"),
     ):
         ns = types.SimpleNamespace(
             client=flask_client,
