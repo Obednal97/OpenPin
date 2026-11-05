@@ -125,6 +125,8 @@ out.overall = r('_coachOverall')(data.cases.done.sidecar.review);
 const aiKinds = ['interrupted_them', 'talked over', 'Cut in', 'cuts off', 'speaking over them', 'strong question'];
 out.aiKinds = aiKinds.map((kind) => r('_coachMoments')({ review: { moments: [{ t: 5, kind, note: 'x' }] } })[0].label);
 out.overallNone = r('_coachOverall')(null);
+out.overallPartial = r('_coachOverall')(data.cases.partial.sidecar.review);
+out.noEvidence = r('_coachEvidenceHtml')(undefined) + r('_coachEvidenceHtml')(['x', -1, null]);
 console.log(JSON.stringify(out));
 """
 
@@ -193,11 +195,11 @@ METRICS = {
 
 REVIEW = {
     "scores": {
-        "clarity": {"score": 70, "reason": "Clear on <script>price</script>."},
-        "warmth": {"score": 80, "reason": "Friendly."},
-        "charisma": {"score": 60, "reason": "Flat in the middle."},
-        "listening": {"score": 50, "reason": "Talked over them."},
-        "reception": {"score": 90, "reason": "They engaged."},
+        "clarity": {"score": 70, "reason": "Clear on <script>price</script>.", "evidence": [61.7, 0.0]},
+        "warmth": {"score": 80, "reason": "Friendly.", "evidence": [0.0]},
+        "charisma": {"score": 60, "reason": "Flat in the middle.", "evidence": [61.7]},
+        "listening": {"score": 50, "reason": "Talked over them.", "evidence": [70.1]},
+        "reception": {"score": 90, "reason": "They engaged.", "evidence": [4.5]},
     },
     "summary": "You came across as <i>warm</i> but rushed the pricing.",
     "next_time": ["Pause after the price.", "Ask one open question first."],
@@ -256,6 +258,16 @@ CASES = {
         }
     },
     "empty": {"sidecar": {"targets": TARGETS}},
+    # The review dropped listening and charisma: none of their evidence matched the transcript
+    "partial": {
+        "sidecar": {
+            **DONE,
+            "review": {
+                **REVIEW,
+                "scores": {k: v for k, v in REVIEW["scores"].items() if k not in ("listening", "charisma")},
+            },
+        }
+    },
 }
 
 
@@ -291,6 +303,24 @@ class TestReport:
         assert out["overall"] == 70
         assert out["overallNone"] is None
         assert ">70<" in out["done"]
+
+    def test_overall_is_mean_of_scores_present(self, out):
+        # (70 + 80 + 90) / 3: dropped scores neither render nor count
+        assert out["overallPartial"] == 80
+        html = out["partial"]
+        assert ">80<" in html
+        assert "Listening" not in html and "Charisma" not in html
+        assert "Clarity" in html and "Reception" in html
+
+    def test_score_evidence_chips_seek(self, out):
+        html = out["done"]
+        scores = html[html.index("coach-scores") : html.index("Next time")]
+        clarity = scores[scores.index("Clarity") : scores.index("Warmth")]
+        # Sorted, formatted like the transcript, and each one plays from its time
+        chips = re.findall(r'<button type="button" class="coach-chip" data-coach-seek="([\d.]+)"[^>]*>([^<]+)</button>', clarity)
+        assert chips == [("0", "00:00"), ("61.7", "01:01")]
+        assert scores.count('class="coach-chip"') == 6
+        assert out["noEvidence"] == ""
 
     def test_your_usual_only_with_baseline(self, out):
         assert "Your usual" in out["done"]

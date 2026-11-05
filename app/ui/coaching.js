@@ -140,7 +140,8 @@ function _coachBandState(value, target) {
 
 /* ---------- Data helpers ---------- */
 
-/** Mean of the five area scores, rounded (as progress.py's overall_score); null without scores. */
+/** Mean of the area scores present, rounded (as progress.py's overall_score); null without scores.
+    The review drops a score none of whose evidence matches the transcript. */
 function _coachOverall(review) {
   const scores = (review && review.scores) || {};
   const vals = _COACH_AREAS.map(([k]) => scores[k] && scores[k].score).filter(_coachIsNum);
@@ -281,6 +282,20 @@ function _coachPickerHtml(sidecar, segments, inline) {
     </div>`;
 }
 
+// The transcript times a score is based on, as chips that play from there
+function _coachEvidenceHtml(evidence) {
+  const times = [...new Set((Array.isArray(evidence) ? evidence : []).filter((t) => _coachIsNum(t) && t >= 0))];
+  if (!times.length) return '';
+  const chips = times
+    .sort((a, b) => a - b)
+    .map((t) => {
+      const label = escapeHtml(formatTime(t));
+      return `<button type="button" class="coach-chip" ${_coachSeekAttr(t)} title="Play from ${label}">${label}</button>`;
+    })
+    .join('');
+  return `<span class="coach-area-evidence" role="group" aria-label="Based on these moments">${chips}</span>`;
+}
+
 function _coachScoresHtml(review, baseline) {
   const overall = _coachOverall(review);
   if (overall === null) return '';
@@ -295,6 +310,7 @@ function _coachScoresHtml(review, baseline) {
         <span class="coach-bar" role="img" aria-label="${score} out of 100"><span class="coach-bar-fill" style="width:${score}%"></span></span>
         <span class="coach-area-score">${score}</span>
         ${s.reason ? `<span class="coach-area-reason">${escapeHtml(s.reason)}</span>` : ''}
+        ${_coachEvidenceHtml(s.evidence)}
       </div>`;
   }).join('');
   return `
