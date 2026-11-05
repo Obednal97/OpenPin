@@ -20,6 +20,11 @@ computed after it (so "built on" can use the review's reactions). Its three part
 into ``metrics.owner`` so Progress tracks them like any other measure. Laughter detection
 never stops a run: if it can't run, that part is "unavailable" with a reason.
 
+Coaching a finished report again never costs it its AI review: if the new review fails (a
+provider error, a bad key, Ollama not running), the previous review is kept, with status
+``done`` and ``REVIEW_KEPT``, as long as it was made for the same transcript and the same
+owner. The new metrics and engagement are saved either way.
+
 A result is dropped if the transcript text changed while the run was going, if a newer
 run for the same recording started meanwhile, or if the recording was excluded meanwhile.
 A trigger that arrives during a run is queued and runs once the current run finishes.
@@ -56,6 +61,8 @@ NO_AUDIO = "no audio file"
 LOCAL_NEEDS_OLLAMA = "AI feedback needs Ollama; showing measured metrics only"
 INTERRUPTED = "Coaching was interrupted. Try again."
 REVIEW_OFF = "AI review is off"
+# A re-run of a finished report whose new AI review failed: the previous review is kept.
+REVIEW_KEPT = "The AI review couldn’t be refreshed, so this is the previous one."
 EXCLUDED = "excluded"
 # The detector's own wording, so a reason reads the same wherever it was decided.
 LAUGHTER_NO_AUDIO = laughter.REASON_NO_AUDIO
@@ -280,9 +287,18 @@ def is_excluded(session_id: str) -> bool:
 
 
 def _analyse(
-    sidecar: dict, words: list | None, transcript: dict, audio: str | None, force: bool, config: dict
+    sidecar: dict,
+    words: list | None,
+    transcript: dict,
+    audio: str | None,
+    force: bool,
+    config: dict,
+    previous_review: dict | None = None,
 ) -> tuple[dict, set]:
-    """Work out this run's outcome. Returns (fields to set, keys to remove) for the sidecar."""
+    """Work out this run's outcome. Returns (fields to set, keys to remove) for the sidecar.
+
+    ``previous_review`` is the finished report's review when it was made for this transcript;
+    it is kept if the new review fails and the owner is unchanged."""
     segments = transcript.get("segments") or []
     labels = _speaker_labels(segments)
     if not labels:
@@ -326,6 +342,11 @@ def _analyse(
         return _fields(None, block, REVIEW_OFF), drop | ({"engagement"} if block is None else set())
     before_review = _engagement(None)
     review, errors = _review(segments, owner_labels, metrics, config, (before_review or {}).get("laughs") or [])
+    previous_owner = sorted((sidecar.get("owner") or {}).get("labels") or [])
+    if review is None and previous_review is not None and previous_owner == owner_labels:
+        log.warning("AI review failed (%s); keeping the previous one", "; ".join(errors) or "no answer")
+        block = _engagement(previous_review)
+        return _fields(previous_review, block, REVIEW_KEPT), drop | ({"engagement"} if block is None else set())
     block = _engagement(review)
     fields = _fields(review, block, "")
     if block is None:
@@ -441,6 +462,14 @@ def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
             before["excluded"] = True
             return False
         before.update(status=d.get("status"), status_reason=d.get("status_reason"))
+        review = d.get("review")
+        if (
+            d.get("status") == "done"
+            and isinstance(review, dict)
+            and not d.get("report_stale")
+            and d.get("transcript_text_hash") == start_hash
+        ):
+            before["review"] = review  # kept if this run's review fails
         d.update(status="running", status_reason="", mixed_up=bool(d.get("mixed_up", False)))
         return None
 
@@ -449,7 +478,8 @@ def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
         return sidecar
     try:
         audio = _resolve_audio(session_id, audio_path)
-        fields, drop = _analyse(sidecar, store.load_words(session_id), transcript, audio, force, config)
+        words = store.load_words(session_id)
+        fields, drop = _analyse(sidecar, words, transcript, audio, force, config, before.get("review"))
     except Exception as e:
         log.warning("coaching run for %s failed: %s", session_id, e, exc_info=True)
         fields, drop = {"status": "failed", "status_reason": f"Coaching failed: {e}"}, set()
@@ -722,14 +752,14 @@ def start_rerun_all() -> bool:
 
     Returns False, starting nothing, if a bulk re-run is already going.
     """
+    if rerun_all_status()["running"]:
+        return False
+    session_ids = rerun_candidates()  # before "running" shows, so its total is never 0 of 0
     with _bulk_lock:
         if _bulk["running"]:
             return False
-        _bulk.update(running=True, done=0, total=0, current=None, cancel=False)
+        _bulk.update(running=True, done=0, total=len(session_ids), current=None, cancel=False)
     try:
-        session_ids = rerun_candidates()
-        with _bulk_lock:
-            _bulk["total"] = len(session_ids)
         Thread(target=_rerun_all, kwargs={"session_ids": session_ids}, daemon=True).start()
     except BaseException:
         with _bulk_lock:

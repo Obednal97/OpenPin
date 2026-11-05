@@ -311,7 +311,9 @@ async function _coachProgRerunRefresh() {
   }
   if (seq !== _coachProgSeq || !_coachProgIsOpen()) return;
   if (!st || st.error) {
-    _coachProgRerunDraw(null); // nothing to offer if the backend can't say
+    // A run in progress keeps its last status and is asked again; otherwise there's nothing to offer
+    if (_coachProgRerunWasRunning) _coachProgRerunTimer = setTimeout(_coachProgRerunRefresh, COACH_PROG_RERUN_POLL_MS);
+    else _coachProgRerunDraw(null);
     return;
   }
   _coachProgRerunStatus = st;
@@ -333,7 +335,7 @@ async function _coachProgRerunStart(e) {
   const n = Number((_coachProgRerunStatus || {}).pending_count) || 0;
   if (n <= 0) return;
   let message = `Open Pin will coach ${n === 1 ? '1 conversation' : `${n} conversations`} again, one at a time.`;
-  if (_coachProgReviewOn()) message += ` With the AI review on, that’s ${n === 1 ? '1 AI call' : `${n} AI calls`} to your AI provider.`;
+  if (_coachProgReviewOn()) message += ` With the AI review on, that’s about ${n === 1 ? '1 AI call' : `${n} AI calls`} to your AI provider.`;
   const choice = await showConfirmDialog({
     title: 'Coach older reports again?',
     message,

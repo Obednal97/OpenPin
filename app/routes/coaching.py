@@ -107,7 +107,10 @@ def get_progress():
 @bp.route("/coaching/rerun-all", methods=["GET"])
 def rerun_all_status():
     """Progress's "Coach them again": how many reports still lack Engagement, and the bulk run's progress."""
-    return jsonify({"pending_count": len(runner.rerun_candidates()), **runner.rerun_all_status()})
+    status = runner.rerun_all_status()
+    # While a bulk run goes, the view shows its progress, not the count: skip reading every sidecar
+    pending = 0 if status["running"] else len(runner.rerun_candidates())
+    return jsonify({"pending_count": pending, **status})
 
 
 @bp.route("/coaching/rerun-all", methods=["POST"])

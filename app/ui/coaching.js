@@ -63,6 +63,8 @@ const _COACH_NEEDS_OWNER = {
 
 // Mirrors REVIEW_OFF in app/coaching/runner.py: the run skipped the AI review by choice
 const _COACH_REVIEW_OFF = 'AI review is off';
+// Mirrors REVIEW_KEPT: coached again, the new AI review failed, so the previous one is shown
+const _COACH_REVIEW_KEPT = 'The AI review couldn’t be refreshed, so this is the previous one.';
 
 // A laugh's chip plays from this many seconds before it (never before your line), so you
 // hear what you said and then the laugh
@@ -736,6 +738,8 @@ function _coachReportBodyHtml(sc, baseline, segments) {
     parts.push(_coachReviewOffHtml());
   } else if (!review) {
     parts.push(_coachNotice(escapeHtml(sc.status_reason || 'This report has measured metrics only.'), '', '', 'info'));
+  } else if (sc.status_reason === _COACH_REVIEW_KEPT) {
+    parts.push(_coachNotice(escapeHtml(_COACH_REVIEW_KEPT), '', '', 'info'));
   }
   if (review) parts.push(_coachScoresHtml(review, baseline), _coachSummaryHtml(review));
   if (hasMetrics || status === 'done') {

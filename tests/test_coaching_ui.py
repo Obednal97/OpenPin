@@ -336,6 +336,9 @@ CASES = {
     "stale": {"sidecar": {**DONE, "report_stale": True}},
     "metricsonly": {"sidecar": {**DONE, "review": None, "status_reason": "measured metrics only (no AI provider)"}},
     "reviewoff": {"sidecar": {**DONE, "review": None, "status_reason": "AI review is off"}},
+    "reviewkept": {
+        "sidecar": {**DONE, "status_reason": "The AI review couldn\u2019t be refreshed, so this is the previous one."}
+    },
     "excluded": {"sidecar": {"status": "excluded", "excluded": True, "status_reason": "", "targets": TARGETS}},
     "running": {"sidecar": {"status": "running", "targets": TARGETS}},
     "needs_owner": {
@@ -721,6 +724,23 @@ def again_out():
     )
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
+
+
+class TestReviewKept:
+    """Coached again, but the new AI review failed: the previous one is kept, with a quiet note."""
+
+    def test_report_with_a_quiet_note(self, out):
+        html = out["reviewkept"]
+        assert "coach-notice coach-notice-info" in html
+        assert "The AI review couldn’t be refreshed, so this is the previous one." in html
+        assert "Overall" in html and "How they responded" in html and "coach-engagement" in html
+        assert "coach-failed" not in html and "didn’t finish" not in html
+
+    def test_reason_mirrors_the_runner(self):
+        from app.coaching.runner import REVIEW_KEPT
+
+        m = re.search(r"^const _COACH_REVIEW_KEPT = '([^']+)';", _coach_src(), re.M)
+        assert m and m.group(1) == REVIEW_KEPT
 
 
 class TestCoachAgainRun:

@@ -548,6 +548,17 @@ const tick = async () => { const due = [...timers.entries()]; timers.clear(); fo
   await r('openProgressView')(); await settle();
   out.reopened = shown();
   out.reopenedPolls = polls();
+  // One failed poll: the last status stays, and polling carries on
+  const answer0 = ctx.window.plaud.coachingRerunAllStatus;
+  ctx.window.plaud.coachingRerunAllStatus = async () => { calls.push('status'); throw new Error('timeout'); };
+  await tick();
+  out.afterFailedPoll = shown();
+  out.pollsAfterFailure = polls();
+  ctx.window.plaud.coachingRerunAllStatus = async () => { calls.push('status'); return { error: 'busy' }; };
+  await tick();
+  out.afterErrorPoll = shown();
+  out.pollsAfterError = polls();
+  ctx.window.plaud.coachingRerunAllStatus = answer0;
   calls.splice(0);
   // Stop
   await r('_coachProgRerunStop')(); await settle();
@@ -595,7 +606,7 @@ class TestCoachThemAgain:
         d = rerun_out["dialog"]
         assert d["message"] == (
             "Open Pin will coach 3 conversations again, one at a time. "
-            "With the AI review on, that’s 3 AI calls to your AI provider."
+            "With the AI review on, that’s about 3 AI calls to your AI provider."
         )
         assert d["actions"] == [{"id": "rerun", "label": "Coach them again"}]
         assert d["cancelLabel"] == "Cancel"
@@ -615,6 +626,12 @@ class TestCoachThemAgain:
         assert rerun_out["pollsAfterClose"] == []
         assert "Coaching again: 2 of 3" in rerun_out["reopened"]
         assert rerun_out["reopenedPolls"] == [3000]
+
+    def test_a_failed_poll_keeps_the_status_and_keeps_polling(self, rerun_out):
+        assert "Coaching again: 2 of 3" in rerun_out["afterFailedPoll"]
+        assert rerun_out["pollsAfterFailure"] == [3000]
+        assert "Coaching again: 2 of 3" in rerun_out["afterErrorPoll"]
+        assert rerun_out["pollsAfterError"] == [3000]
 
     def test_stop(self, rerun_out):
         assert rerun_out["stopCalls"][0] == "cancel"

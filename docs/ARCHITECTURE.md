@@ -438,7 +438,11 @@ isn't excluded and has a transcript: one at a time on one daemon thread, each th
 `run_coaching(sid, None, force=True)`, so the run locks, run numbers, stale checks and
 `coaching_ai_review` apply as for one recording. Each is checked again just before its turn, a
 failure on one doesn't stop the rest, only one bulk run goes at a time, and cancelling stops it
-after the recording in progress. It keeps going when Progress closes; the state lives only in the
+after the recording in progress. Coaching a `done` report again never costs it its AI review: if
+the new review fails (provider error, bad key, Ollama not running), the run saves the new metrics
+and engagement but keeps the previous review and status `done`, with `REVIEW_KEPT` as the reason
+(the tab shows it as a quiet note), as long as that review was made for the same transcript and
+owner; otherwise the run fails as usual. It keeps going when Progress closes; the state lives only in the
 process, so quitting the app ends it (the recordings not reached still count as pending).
 
 Deleting a recording (`/recordings/delete`) or its transcript (`/transcripts/delete`) moves its
@@ -491,8 +495,9 @@ state of the tab but an excluded one ends with "Don't coach this recording", whi
 (`showConfirmDialog`); a finished report also has a quiet "Coach again" beside it. An excluded
 recording shows "This recording isn't coached." with "Coach this recording". When older reports
 lack Engagement, Progress says how many with "Coach them again", which asks first (saying how many
-AI calls that is, with the AI review on), then shows "Coaching again: k of N" with Stop, polls every
-3 s while open and reloads the progress when the run ends.
+AI calls that is, about one per report, with the AI review on), then shows "Coaching again: k of N"
+with Stop, polls every 3 s while open (a failed poll keeps the last status and polls again) and
+reloads the progress when the run ends.
 
 ### Privacy
 

@@ -33,9 +33,9 @@ def clean_bulk_state():
 
 def _wait_idle(timeout=5.0):
     end = time.time() + timeout
-    while runner.rerun_all_status()["running"] and time.time() < end:
+    while runner._bulk["running"] and time.time() < end:
         time.sleep(0.01)
-    assert not runner.rerun_all_status()["running"], "bulk re-run never finished"
+    assert not runner._bulk["running"], "bulk re-run never finished"
 
 
 def _transcript(trn, sid):
@@ -290,3 +290,111 @@ def test_routes_end_to_end(client):
     assert client.post("/coaching/rerun-all").status_code == 200  # inline thread: already finished
     body = client.get("/coaching/rerun-all").get_json()
     assert body == {"pending_count": 0, "running": False, "done": 1, "total": 1, "current": None}
+
+
+# ---------------------------------------------------------------- a failed AI review never costs a good report
+
+OWNER = {"labels": ["Speaker 1"], "source": "voice", "confidence": 0.8}
+
+
+def _good_old_report(env, sid, **extra):
+    """A finished v2.8 report: owner, review and the transcript it was made from, no engagement."""
+    _transcript(env["trn"], sid)
+    text = " ".join(s["text"] for s in SEGMENTS)
+    owner = {**OWNER, "labelling": runner.labelling_fingerprint(SEGMENTS)}
+    _sidecar(sid, **{**OLD_REPORT, "owner": owner, "transcript_text_hash": store.text_hash(text), **extra})
+
+
+FAILED_REVIEWS = {
+    "provider error": ({"review": None, "provider": "none", "errors": ["anthropic: 529 overloaded"]}, None),
+    "exception": (None, RuntimeError("bad key")),
+    "local without Ollama": ({"review": None, "provider": "none", "errors": [base.OLLAMA_DOWN]}, None),
+}
+
+
+def _fail_review(env, kind):
+    answer, raises = FAILED_REVIEWS[kind]
+    if kind == "local without Ollama":
+        env["config"]["summarization_provider"] = "local"
+    env["review"].return_value = answer
+    env["review"].side_effect = raises
+
+
+@pytest.mark.parametrize("kind", list(FAILED_REVIEWS))
+def test_bulk_rerun_keeps_the_old_review_when_the_new_one_fails(env, kind):
+    _good_old_report(env, "1715000001")
+    _good_old_report(env, "1715000002")
+    _fail_review(env, kind)
+    runner.start_rerun_all()  # env runs the thread inline
+    for sid in ("1715000001", "1715000002"):
+        saved = store.load(sid)
+        assert saved["status"] == "done", sid
+        assert saved["review"] == REVIEW
+        assert saved["status_reason"] == runner.REVIEW_KEPT
+        assert "engagement" in saved
+        assert saved["metrics"]["owner"]["follow_up_share"] == saved["engagement"]["follow_up_share"]
+    assert runner.rerun_candidates() == []
+
+
+@pytest.mark.parametrize("kind", list(FAILED_REVIEWS))
+def test_coach_again_keeps_the_old_review_when_the_new_one_fails(env, kind):
+    _good_old_report(env, "1715000001")
+    _fail_review(env, kind)
+    out = runner.run_coaching("1715000001", None, force=True)
+    assert out["status"] == "done"
+    assert out["review"] == REVIEW
+    assert out["status_reason"] == runner.REVIEW_KEPT
+    assert "engagement" in out
+
+
+def test_the_old_review_is_kept_only_while_it_still_fits(env):
+    _fail_review(env, "provider error")
+    # The transcript changed since that review: it no longer fits, so the failure shows
+    _good_old_report(env, "1715000001", transcript_text_hash="something else")
+    # The owner is someone else now (a new voice match): the old review was about another speaker
+    _good_old_report(env, "1715000002", owner={"labels": ["Speaker 2"], "source": "voice", "confidence": 0.7})
+    env["match_owner"].return_value = {"labels": ["Speaker 1"], "confidence": 0.8, "source": "voice"}
+    # A review that worked keeps no old one either
+    _good_old_report(env, "1715000003")
+    for sid in ("1715000001", "1715000002"):
+        out = runner.run_coaching(sid, None, force=True)
+        assert out["status"] == "failed", sid
+        assert out["review"] is None
+    env["review"].side_effect = None
+    env["review"].return_value = {"review": {**REVIEW, "summary": "new"}, "provider": "anthropic", "errors": []}
+    out = runner.run_coaching("1715000003", None, force=True)
+    assert out["review"]["summary"] == "new" and out["status_reason"] == ""
+    # And a failure keeps it only once: kept, then kept again (still the same review)
+    _fail_review(env, "provider error")
+    assert runner.run_coaching("1715000003", None, force=True)["review"]["summary"] == "new"
+    assert runner.run_coaching("1715000003", None, force=True)["review"]["summary"] == "new"
+
+
+# ---------------------------------------------------------------- status details
+
+
+def test_total_is_set_before_running_shows(env, monkeypatch):
+    _old_reports(env, ["1715000001"])
+    seen = []
+    real = runner.rerun_candidates
+
+    def watch():
+        seen.append(runner.rerun_all_status())
+        return real()
+
+    monkeypatch.setattr(runner, "rerun_candidates", watch)
+    monkeypatch.setattr(runner, "run_coaching", lambda *a, **k: seen.append(runner.rerun_all_status()) or {})
+    runner.start_rerun_all()
+    assert seen[0]["running"] is False  # the list is made before "running" shows
+    assert seen[1] == {"running": True, "done": 0, "total": 1, "current": "1715000001"}
+
+
+def test_status_route_skips_the_scan_while_running(client, monkeypatch):
+    scans = []
+    monkeypatch.setattr(runner, "rerun_candidates", lambda: scans.append(1) or ["1715000001"])
+    monkeypatch.setattr(
+        runner, "rerun_all_status", lambda: {"running": True, "done": 1, "total": 4, "current": "1715000002"}
+    )
+    body = client.get("/coaching/rerun-all").get_json()
+    assert scans == []
+    assert body == {"pending_count": 0, "running": True, "done": 1, "total": 4, "current": "1715000002"}
