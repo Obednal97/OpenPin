@@ -997,6 +997,19 @@ class TestSidecarManagement:
         assert release and dev and release.group(1) != dev.group(1)
         assert f'Path("~/Library/Application Support/{release.group(1)}")' in constants
 
+    def test_bundle_ships_every_app_package(self):
+        """tauri.conf.json lists app/ packages folder by folder; a Python
+        package missing from it makes the installed backend fail to import."""
+        conf = json.loads((PROJECT_ROOT / "src-tauri" / "tauri.conf.json").read_text())
+        bundled = set(conf["bundle"]["resources"].values())
+        packages = {
+            d.name for d in (PROJECT_ROOT / "app").iterdir()
+            if d.is_dir() and any(d.glob("*.py"))
+        }
+        assert packages, "no app packages found"
+        missing = sorted(p for p in packages if f"app/{p}/" not in bundled)
+        assert not missing, f"not bundled: {missing}"
+
     def test_bundle_ships_every_src_module_the_app_imports(self):
         """tauri.conf.json lists src/ modules one by one; every module the
         backend (or a bundled src/ module) imports must be among them."""
