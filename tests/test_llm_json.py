@@ -182,3 +182,49 @@ def test_ollama_truncation_is_an_error():
     ):
         parsed, provider, errors = _call({})
     assert parsed is None and provider == "none" and errors
+
+
+@pytest.mark.parametrize("preference", ["local", "ollama"])
+def test_local_preference_never_falls_through_to_a_cloud_key(preference):
+    config = {
+        "summarization_provider": preference,
+        "anthropic_api_key": "x",
+        "openai_api_key": "o",
+        "openrouter_api_key": "or",
+    }
+    client, anth_calls = _fake_anthropic_client()
+    with (
+        patch.object(L, "ollama_models", return_value=None),
+        patch.object(L, "_anthropic_client", return_value=client) as make_client,
+        patch.object(L.http_requests, "post") as post,
+    ):
+        parsed, provider, errors = _call(config)
+    assert (parsed, provider) == (None, "none")
+    assert len(errors) == 1 and errors[0].startswith("Ollama (local): not running")
+    assert L.ollama_unavailable(errors[0])
+    make_client.assert_not_called()
+    assert not anth_calls
+    post.assert_not_called()
+
+
+def test_local_preference_uses_ollama_when_running():
+    with (
+        patch.object(L, "ollama_models", return_value=["qwen3.5:9b"]),
+        patch.object(L.http_requests, "post", return_value=_http_response(_ollama_body())) as post,
+    ):
+        parsed, provider, errors = _call({"summarization_provider": "local", "anthropic_api_key": "x"})
+    assert (parsed, provider, errors) == (GOOD, "ollama", [])
+    assert post.call_args.args[0].endswith("/api/chat")
+
+
+def test_ollama_unavailable_only_for_not_running_or_no_model():
+    with patch.object(L, "ollama_models", return_value=["nomic-embed-text"]):
+        _, _, errors = _call({"summarization_provider": "local"})
+    assert L.ollama_unavailable(errors[0]) and "no chat model" in errors[0]
+    with (
+        patch.object(L, "ollama_models", return_value=["qwen3.5:9b"]),
+        patch.object(L.http_requests, "post", return_value=_http_response(_ollama_body(content="{broken"))),
+    ):
+        _, _, errors = _call({"summarization_provider": "local"})
+    assert errors and not L.ollama_unavailable(errors[0])
+    assert not L.ollama_unavailable("Anthropic (x): not running on y")
