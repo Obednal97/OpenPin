@@ -95,6 +95,7 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/gdrive/sync', '/gdrive/upload',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
   '/coaching/voice/install', // downloads and installs the speaker model
+  '/coaching/voice/setup', // a first setup can load the model and decode a whole recording
 ]);
 const DEFAULT_TIMEOUT_MS = 30000;
 
