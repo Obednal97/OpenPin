@@ -44,14 +44,10 @@ const _COACH_MOMENT_KINDS = {
   filler_burst: 'Run of filler words',
 };
 
-const _COACH_SKIP_REASONS = {
-  'no speaker labels': [
-    'This recording has no speaker labels, so there’s no telling who said what.',
-    'Turn on speaker labels in Settings › Transcription & AI, then re-transcribe it.',
-  ],
-  'only you spoke': ['Only you spoke in this recording, so there’s no conversation to coach.', ''],
-  'too short': ['This recording is too short to coach (under 2 minutes).', ''],
-};
+// Mirrors MIN_COACHING_SECONDS in app/coaching/targets.py (shorter recordings are skipped)
+const _COACH_MIN_COACHING_SECONDS = 120;
+// AI moment kinds that describe an interruption ("talked over", "cut in"...)
+const _COACH_INTERRUPT_RE = /interrupt|\b(talk(ed|s|ing)?|spoke|speak(s|ing)?) over\b|\bcut(s|ting)? (in|off|across)\b|over-?talk/i;
 
 let _coachPollHandle = null;
 let _coachSeq = 0;
@@ -173,11 +169,11 @@ function _coachMoments(sidecar) {
     if (!m || !_coachIsNum(m.t)) continue;
     const kind = String(m.kind || 'Moment').replace(/_/g, ' ');
     // Single-channel audio: an interruption is only ever "likely"
-    const label = /interrupt/i.test(kind) ? 'Likely interruption' : kind.charAt(0).toUpperCase() + kind.slice(1);
+    const interruption = _COACH_INTERRUPT_RE.test(kind);
     out.push({
       t: m.t,
-      kind: /interrupt/i.test(kind) ? 'interruption' : kind,
-      label,
+      kind: interruption ? 'interruption' : kind,
+      label: interruption ? 'Likely interruption' : kind.charAt(0).toUpperCase() + kind.slice(1),
       speaker: '',
       text: m.note || '',
       agreed: false,
@@ -438,6 +434,52 @@ function _coachSpinnerHtml(text) {
     </div>`;
 }
 
+function _coachMinLengthText() {
+  const s = _COACH_MIN_COACHING_SECONDS;
+  if (s % 60) return `${s} seconds`;
+  return s === 60 ? '1 minute' : `${s / 60} minutes`;
+}
+
+// force (Coach anyway) only bypasses the minimum length: the runner never coaches a
+// recording without speaker labels or where only you spoke, so those offer a fix instead.
+function _coachSkippedHtml(sc, segments) {
+  const reason = String(sc.status_reason || '');
+  if (reason === 'too short') {
+    return `
+      <div class="coach-state">
+        <p>This recording is too short to coach automatically (under ${escapeHtml(_coachMinLengthText())}).</p>
+        <button type="button" class="action-btn subtle" data-coach-action="run">Coach anyway</button>
+      </div>`;
+  }
+  if (reason === 'no speaker labels') {
+    return `
+      <div class="coach-state">
+        <p>This recording has no speaker labels, so there’s no telling who said what.</p>
+        <p class="coach-muted">Turn on speaker labels in Settings › Transcription &amp; AI, then re-transcribe this recording. Coaching runs again once the labels are in.</p>
+      </div>`;
+  }
+  if (reason === 'only you spoke') {
+    if (_coachSpeakers(sc, segments).length < 2) {
+      return `
+        <div class="coach-state">
+          <p>Only one voice was found in this recording, so there’s no conversation to coach.</p>
+        </div>`;
+    }
+    // Every speaker is marked as you: offer the picker in case that's wrong
+    return `
+      ${_coachOwnerLine(sc)}
+      ${_coachPickerHtml(sc, segments, false)}
+      <div class="coach-state">
+        <p>Every speaker in this recording is marked as you, so there’s no one else to compare with.</p>
+        <p class="coach-muted">If that’s wrong, use Change above to pick only the labels that are you.</p>
+      </div>`;
+  }
+  return `
+    <div class="coach-state">
+      <p>Not coached: ${escapeHtml(reason || 'no reason given')}.</p>
+    </div>`;
+}
+
 /** The whole tab for one sidecar. segments are the transcript's, for the speaker picker. */
 function _coachReportHtml(sidecar, baseline, segments) {
   const sc = sidecar || {};
@@ -458,16 +500,7 @@ function _coachReportHtml(sidecar, baseline, segments) {
         ${_coachPickerHtml(sc, segments, true)}
       </section>`;
   }
-  if (status === 'skipped') {
-    const reason = String(sc.status_reason || '');
-    const [text, hint] = _COACH_SKIP_REASONS[reason] || [`Not coached: ${reason || 'no reason given'}.`, ''];
-    return `
-      <div class="coach-state">
-        <p>${escapeHtml(text)}</p>
-        ${hint ? `<p class="coach-muted">${escapeHtml(hint)}</p>` : ''}
-        <button type="button" class="action-btn subtle" data-coach-action="run">Coach anyway</button>
-      </div>`;
-  }
+  if (status === 'skipped') return _coachSkippedHtml(sc, segments);
   if (status !== 'done' && status !== 'failed') {
     return `
       <div class="coach-state">
@@ -479,24 +512,28 @@ function _coachReportHtml(sidecar, baseline, segments) {
   const review = sc.review && typeof sc.review === 'object' ? sc.review : null;
   const parts = [];
   if (sc.report_stale) parts.push(_coachNotice('Transcript changed:', 'Update coaching'));
-  parts.push(_coachOwnerLine(sc), _coachPickerHtml(sc, segments, false));
+  if ((sc.owner && (sc.owner.labels || []).length) || status === 'done') {
+    parts.push(_coachOwnerLine(sc), _coachPickerHtml(sc, segments, false));
+  }
   if (sc.mixed_up) {
     parts.push(_coachNotice('Marked as speakers mixed up, so this report is left out of your progress.', '', '', 'info'));
   }
+  // A run that failed or was interrupted before measuring anything has no metrics
+  const hasMetrics = !!(sc.metrics && sc.metrics.owner);
   if (status === 'failed') {
     const errors = _coachErrors(sc.status_reason);
     parts.push(`
       <section class="coach-card coach-failed">
-        <h3 class="coach-h">The AI review didn’t finish</h3>
+        <h3 class="coach-h">${hasMetrics ? 'The AI review didn’t finish' : 'Coaching didn’t finish'}</h3>
         ${errors.length ? `<ul class="coach-errors">${errors.map((e) => `<li>${escapeHtml(e)}</li>`).join('')}</ul>` : ''}
-        <p class="coach-muted">The measured metrics below are still right.</p>
+        ${hasMetrics ? '<p class="coach-muted">The measured metrics below are still right.</p>' : ''}
         <button type="button" class="action-btn subtle" data-coach-action="run">Try again</button>
       </section>`);
   } else if (!review) {
     parts.push(_coachNotice(escapeHtml(sc.status_reason || 'This report has measured metrics only.'), '', '', 'info'));
   }
   if (review) parts.push(_coachScoresHtml(review, baseline), _coachSummaryHtml(review));
-  parts.push(_coachMeasuresHtml(sc, baseline), _coachMomentsHtml(sc));
+  if (hasMetrics || status === 'done') parts.push(_coachMeasuresHtml(sc, baseline), _coachMomentsHtml(sc));
   if (review) parts.push(_coachReactionsHtml(review));
   return parts.join('');
 }
@@ -594,24 +631,38 @@ async function _coachSaveOwner(container, sessionId, sidecar, btn) {
   const before = ((sidecar.owner && sidecar.owner.labels) || []).slice().sort().join('\n');
   const ownerChanged = sidecar.status === 'needs_owner' || labels.slice().sort().join('\n') !== before;
   setLoading(btn, true);
+  let latest = sidecar;
   try {
     if (mixed !== !!sidecar.mixed_up) {
+      // Saved at once; the response is the updated sidecar
       const res = await window.plaud.coachingMixedUp(sessionId, mixed);
-      if (res && res.error) throw new Error(res.error);
+      if (!res || res.error) throw new Error((res && res.error) || 'no response');
+      latest = res;
+      _coachBaseline = null; // mixed-up recordings are left out of "your usual"
     }
     if (ownerChanged) {
-      // Picking yourself re-runs coaching (an AI call), so show it as running.
-      // A mixed-up recording isn't used to learn your voice.
-      if (_coachStillShowing(container, sessionId)) _coachShowRunning(container);
+      // A mixed-up recording isn't used to learn your voice
       const res = await window.plaud.coachingSetOwner(sessionId, labels, !mixed);
-      if (res && res.error) throw new Error(res.error);
+      if (!res || res.error) throw new Error((res && res.error) || 'no response');
+      if (res.started) {
+        // Coaching runs again in the background: the response is the sidecar as it
+        // was before that run, so wait for it to change, like Coach anyway.
+        const { started: _started, ...snapshot } = res;
+        if (!_coachStillShowing(container, sessionId)) return;
+        _coachShowRunning(container);
+        _coachStartPoll(container, sessionId, JSON.stringify(snapshot));
+        return;
+      }
+      latest = res;
     }
   } catch (err) {
-    // A slow re-run can outlast the request timeout; the poll picks it up.
-    if (!(err && err.name === 'AbortError')) toast(`Couldn’t save: ${(err && err.message) || 'no response'}`, 'error');
+    toast(`Couldn’t save: ${(err && err.message) || 'no response'}`, 'error');
+    if (_coachStillShowing(container, sessionId)) renderCoachingTab(container, sessionId);
+    return;
   }
-  _coachBaseline = null;
-  if (_coachStillShowing(container, sessionId)) renderCoachingTab(container, sessionId);
+  const seq = ++_coachSeq;
+  const baseline = await _coachLoadBaseline();
+  if (seq === _coachSeq && _coachStillShowing(container, sessionId)) _coachDraw(container, sessionId, latest, baseline);
 }
 
 function _coachTogglePicker(container, open) {
@@ -637,7 +688,12 @@ async function renderCoachingTab(container, sessionId) {
     sidecar = { error: (err && err.message) || 'no response' };
   }
   if (seq !== _coachSeq || !_coachStillShowing(container, sessionId)) return;
-  sidecar = sidecar || {};
+  _coachDraw(container, sessionId, sidecar || {}, baseline);
+}
+
+/** Draw one sidecar into the tab and wire its buttons; polls while it's running. */
+function _coachDraw(container, sessionId, sidecar, baseline) {
+  _coachStopPoll();
   const t = app.transcripts[sessionId];
   container.innerHTML = _coachReportHtml(sidecar, baseline, (t && t.segments) || []);
 

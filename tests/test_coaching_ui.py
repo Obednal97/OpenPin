@@ -122,7 +122,8 @@ for (const [name, c] of Object.entries(data.cases)) {
 }
 out.moments = r('_coachMoments')(data.cases.done.sidecar);
 out.overall = r('_coachOverall')(data.cases.done.sidecar.review);
-out.aiInterruption = r('_coachMoments')({ review: { moments: [{ t: 5, kind: 'interrupted_them', note: 'x' }] } })[0].label;
+const aiKinds = ['interrupted_them', 'talked over', 'Cut in', 'cuts off', 'speaking over them', 'strong question'];
+out.aiKinds = aiKinds.map((kind) => r('_coachMoments')({ review: { moments: [{ t: 5, kind, note: 'x' }] } })[0].label);
 out.overallNone = r('_coachOverall')(null);
 console.log(JSON.stringify(out));
 """
@@ -234,6 +235,18 @@ CASES = {
         }
     },
     "skipped": {"sidecar": {"status": "skipped", "status_reason": "too short", "targets": TARGETS}},
+    "skipped_no_labels": {"sidecar": {"status": "skipped", "status_reason": "no speaker labels", "targets": TARGETS}},
+    "skipped_only_you": {
+        "sidecar": {
+            "status": "skipped",
+            "status_reason": "only you spoke",
+            "owner": {"labels": ["Speaker 1", "Speaker 2"], "source": "voice", "confidence": 0.7},
+            "targets": TARGETS,
+        }
+    },
+    "interrupted": {
+        "sidecar": {"status": "failed", "status_reason": "Coaching was interrupted. Try again.", "targets": TARGETS}
+    },
     "failed": {
         "sidecar": {
             **DONE,
@@ -302,7 +315,7 @@ class TestReport:
         assert "Likely interruption" in out["done"]
         assert 'data-coach-seek="70.1"' in out["done"]
         # An AI-written interruption moment is "likely" too
-        assert out["aiInterruption"] == "Likely interruption"
+        assert out["aiKinds"] == ["Likely interruption"] * 5 + ["Strong question"]
 
     def test_reactions(self, out):
         assert "Pushed back" in out["done"]
@@ -342,6 +355,35 @@ class TestReport:
     def test_skipped(self, out):
         assert "Coach anyway" in out["skipped"]
         assert 'data-coach-action="run"' in out["skipped"]
+        assert "under 2 minutes" in out["skipped"]
+
+    def test_skips_that_force_cannot_fix_offer_no_run(self, out):
+        # force only bypasses the minimum length (app/coaching/runner.py)
+        for name in ("skipped_no_labels", "skipped_only_you"):
+            assert 'data-coach-action="run"' not in out[name]
+            assert "Coach anyway" not in out[name]
+        assert "Turn on speaker labels in Settings" in out["skipped_no_labels"]
+        assert "re-transcribe" in out["skipped_no_labels"]
+
+    def test_only_you_offers_owner_picker(self, out):
+        html = out["skipped_only_you"]
+        assert "This is you:" in html
+        assert 'data-coach-action="change-owner"' in html
+        assert html.count('type="checkbox" name="coach-owner"') == 2
+
+    def test_min_length_copy_matches_backend(self):
+        from app.coaching.targets import MIN_COACHING_SECONDS
+
+        m = re.search(r"^const _COACH_MIN_COACHING_SECONDS = (\d+);", _coach_src(), re.M)
+        assert m and int(m.group(1)) == MIN_COACHING_SECONDS
+        assert "2 minutes" not in _coach_src()
+
+    def test_interrupted_run_offers_try_again(self, out):
+        html = out["interrupted"]
+        assert "Coaching was interrupted. Try again." in html
+        assert 'data-coach-action="run"' in html
+        assert "Measures" not in html
+        assert "still right" not in html
 
     def test_failed_shows_errors_metrics_and_retry(self, out):
         html = out["failed"]
@@ -351,3 +393,96 @@ class TestReport:
 
     def test_not_coached_yet(self, out):
         assert 'data-coach-action="run"' in out["empty"]
+
+
+_SAVE_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const el = () => ({ classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, setAttribute() {},
+  appendChild() {}, style: {}, dataset: {} });
+const timers = new Map(); // fake setInterval: run by tick()
+let nextId = 1;
+const ctx = { console, window: {}, setTimeout, clearTimeout, Date,
+  setInterval: (fn) => { timers.set(nextId, fn); return nextId++; }, clearInterval: (id) => timers.delete(id),
+  document: { querySelector: () => null, querySelectorAll: () => [], createElement: el, body: el() } };
+vm.createContext(ctx);
+for (const f of process.argv.slice(1, 3)) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx);
+const r = (code) => vm.runInContext(code, ctx);
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+const app = r('app');
+Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'coaching' });
+app.transcripts.s1 = { segments: data.segments };
+const calls = [];
+let serverSidecar = data.before;
+ctx.window.plaud = {
+  coaching: async () => { calls.push('get'); return serverSidecar; },
+  coachingProgress: async () => ({ baseline: null }),
+  coachingSetOwner: async (sid, labels, learn) => { calls.push(['owner', labels, learn]); return { ...data.before, started: true }; },
+  coachingMixedUp: async (sid, flag) => { calls.push(['mixed', flag]); return { ...serverSidecar, mixed_up: flag }; },
+};
+const container = (checked, mixed) => ({
+  innerHTML: '', dataset: {}, isConnected: true, classList: { contains: () => false },
+  querySelectorAll: (sel) => (sel.includes('coach-owner') ? checked.map((value) => ({ value })) : []),
+  querySelector: (sel) => (sel.includes('coach-mixed') ? { checked: mixed } : null),
+});
+const btn = () => ({ classList: { add() {}, remove() {} }, style: {}, disabled: false });
+const settle = () => new Promise((res) => setTimeout(res, 5));
+const tick = async () => { for (const fn of [...timers.values()]) await fn(); await settle(); };
+(async () => {
+  const out = {};
+  // 1. A new owner pick: running at once; the poll waits while the sidecar is unchanged,
+  //    then draws the finished report
+  const c1 = container(['Speaker 1'], false);
+  await r('_coachSaveOwner')(c1, 's1', data.before, btn());
+  out.ownerCalls = calls.splice(0);
+  out.runningAfterSave = c1.innerHTML.includes('coach-spinner');
+  out.polling = timers.size === 1;
+  await tick();
+  out.runningWhileUnchanged = c1.innerHTML.includes('coach-spinner');
+  serverSidecar = data.after;
+  await tick();
+  out.reportAfterRun = c1.innerHTML.includes('coach-overall') && c1.innerHTML.includes('you chose this');
+  out.pollStopped = timers.size === 0;
+  calls.splice(0);
+  // 2. Only the mixed-up flag: drawn from the response, no GET and no re-run
+  const c2 = container(['Speaker 1'], true);
+  await r('_coachSaveOwner')(c2, 's1', data.after, btn());
+  out.mixedCalls = calls.splice(0);
+  out.mixedNote = c2.innerHTML.includes('Marked as speakers mixed up');
+  r('_coachStopPoll')();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def save_out():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    before = {**DONE, "owner": {"labels": ["Speaker 2"], "source": "voice", "confidence": 0.6}}
+    after = {**DONE, "owner": {"labels": ["Speaker 1"], "source": "user", "confidence": 1.0}}
+    res = subprocess.run(
+        [node, "-e", _SAVE_JS, str(APP / "ui" / "utils.js"), str(COACH_JS)],
+        input=json.dumps({"before": before, "after": after, "segments": SEGMENTS}),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+class TestOwnerSave:
+    def test_new_owner_shows_running_and_polls(self, save_out):
+        assert save_out["ownerCalls"] == [["owner", ["Speaker 1"], True]]
+        assert save_out["runningAfterSave"]
+        assert save_out["polling"]
+        # The background run hasn't changed the sidecar yet: keep waiting, don't redraw the old one
+        assert save_out["runningWhileUnchanged"]
+
+    def test_report_drawn_when_the_run_finishes(self, save_out):
+        assert save_out["reportAfterRun"]
+        assert save_out["pollStopped"]
+
+    def test_mixed_up_only_draws_from_response(self, save_out):
+        assert save_out["mixedCalls"] == [["mixed", True]]
+        assert save_out["mixedNote"]
