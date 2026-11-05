@@ -1373,8 +1373,30 @@ function updateAutoPipelineState() {
     summariseToggle.disabled = false;
   }
 
+  _renderAutoCoachRow(syncOn && transcribeOn);
+
   // "Prefer Wi-Fi" (Device › Transfer) isn't part of this chain: manual syncs
   // use it too (performSync), so it stays available with auto-sync off.
+}
+
+// "Coach my conversations" is the coaching_auto setting, shared with the switch in
+// Transcription & AI › Your voice & coaching (_voiceRenderAutoToggle): each change
+// handler redraws the other switch. Coaching needs speaker labels (the backend turns
+// coaching_auto off with diarize). Unlike summarising, it isn't tied to the steps above:
+// the backend coaches after any transcription, including one the user starts, so the row
+// stays usable with them off and a hint says so.
+function _renderAutoCoachRow(stepsBeforeOn) {
+  const toggle = $('#auto-coach-toggle');
+  const row = $('#auto-coach-row');
+  if (!toggle || !row) return;
+  const labelsOn = !!(app.settings && app.settings.diarize);
+  toggle.checked = labelsOn && app.settings.coaching_auto !== false;
+  toggle.disabled = !labelsOn;
+  row.classList.remove('disabled');
+  row.classList.toggle('voice-auto-off', !labelsOn);
+  $('#auto-coach-needs').classList.toggle('hidden', labelsOn);
+  const hint = $('#automation-coach-hint');
+  if (hint) hint.classList.toggle('hidden', !labelsOn || stepsBeforeOn);
 }
 
 // Personalisation saves as you type (debounced) and on blur/change.
@@ -1569,6 +1591,7 @@ function initSettingsEvents() {
     // The backend turns automatic coaching off with speaker labels (it needs them)
     if (!e.target.checked) app.settings.coaching_auto = false;
     renderVoiceSettings();
+    updateAutoPipelineState();
   });
 
   // Automation pipeline toggles with cascade disable
@@ -1587,6 +1610,13 @@ function initSettingsEvents() {
     await window.plaud.saveSettings({ auto_transcribe: e.target.checked });
     updateAutoPipelineState();
     toast(e.target.checked ? 'New recordings will be transcribed' : 'Automatic transcription off', 'success');
+  });
+
+  $('#auto-coach-toggle').addEventListener('change', async (e) => {
+    app.settings.coaching_auto = e.target.checked;
+    _voiceRenderAutoToggle();
+    await window.plaud.saveSettings({ coaching_auto: e.target.checked });
+    toast(e.target.checked ? 'New conversations will be coached' : 'Automatic coaching off', 'success');
   });
 
   $('#auto-summarise-toggle').addEventListener('change', async (e) => {

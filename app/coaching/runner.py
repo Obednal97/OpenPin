@@ -3,15 +3,20 @@
 Runs after transcription and speaker labels are final (the ``transcribe`` webhook points
 in app/routes/transcribe.py), in a daemon thread. The outcome is written to the coaching
 sidecar as ``status``: ``running``, then ``done``, ``needs_owner``, ``skipped`` or ``failed``.
+A recording the user excluded ("Don't coach this recording") has ``excluded: true`` and
+status ``excluded``: no run starts for it and a run already going drops its result.
 
 Who the owner is, in order: the user's own pick for this recording, a confident voice
 match, otherwise ``needs_owner`` with every speaker's first line. Nothing is analysed
 against a guessed owner. The voice model is only used if already installed; this module
 never installs anything.
 
-A result is dropped if the transcript text changed while the run was going, or if a newer
-run for the same recording started meanwhile. A trigger that arrives during a run is queued
-and runs once the current run finishes.
+With ``coaching_ai_review`` off, the AI review is never asked for: the run ends ``done``
+with the measured metrics only.
+
+A result is dropped if the transcript text changed while the run was going, if a newer
+run for the same recording started meanwhile, or if the recording was excluded meanwhile.
+A trigger that arrives during a run is queued and runs once the current run finishes.
 """
 
 import json
@@ -38,10 +43,14 @@ TOO_SHORT = "too short"
 NO_AUDIO = "no audio file"
 LOCAL_NEEDS_OLLAMA = "AI feedback needs Ollama; showing measured metrics only"
 INTERRUPTED = "Coaching was interrupted. Try again."
+REVIEW_OFF = "AI review is off"
+EXCLUDED = "excluded"
 FIRST_LINE_CHARS = 200
 
 # Keys that describe one run's outcome; cleared when a run ends without a report.
 _REPORT_KEYS = ("metrics", "review", "report_stale", "candidates")
+# Removed when the user excludes a recording: everything a run or an owner pick wrote.
+_EXCLUDE_DROPS = ("metrics", "review", "owner", "candidates", "report_stale", "mixed_up", "created_at")
 
 _lock = Lock()
 _running: dict[str, int] = {}  # runs in progress per session in this process
@@ -160,6 +169,16 @@ def _local_only(config: dict) -> bool:
     return config.get("summarization_provider") in ("local", "ollama")
 
 
+def ai_review_on(config: dict) -> bool:
+    """The "Include an AI review" setting: off means coaching never contacts any provider."""
+    return config.get("coaching_ai_review", True) is not False
+
+
+def is_excluded(session_id: str) -> bool:
+    """True when the user chose "Don't coach this recording"."""
+    return bool(store.load(session_id).get("excluded"))
+
+
 def _analyse(
     sidecar: dict, words: list | None, transcript: dict, audio: str | None, force: bool, config: dict
 ) -> tuple[dict, set]:
@@ -189,6 +208,10 @@ def _analyse(
         duration,
         bool(transcript.get("timestamps_estimated")),
     )
+    if not ai_review_on(config):
+        # The user chose measured results only: the transcript never leaves the Mac.
+        fields = {"owner": owner, "metrics": metrics, "review": None, "status": "done", "status_reason": REVIEW_OFF}
+        return fields, {"report_stale", "candidates"}
     review, errors = _review(segments, owner_labels, metrics, config)
     fields = {"owner": owner, "metrics": metrics, "review": review, "status": "done", "status_reason": ""}
     if review is None:
@@ -274,7 +297,7 @@ def run_coaching(session_id: str, audio_path: str | None, force: bool = False) -
 
     ``force`` (the "Coach this recording" action) ignores the ``coaching_auto`` setting and
     the minimum length; it never coaches a recording without speaker labels or where only
-    the owner spoke. Without a transcript nothing is written.
+    the owner spoke, nor an excluded one. Without a transcript nothing is written.
     """
     _enter(session_id)
     try:
@@ -297,11 +320,17 @@ def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
 
     before: dict = {}
 
-    def _mark_running(d: dict) -> None:
+    def _mark_running(d: dict) -> bool | None:
+        if d.get("excluded"):
+            before["excluded"] = True
+            return False
         before.update(status=d.get("status"), status_reason=d.get("status_reason"))
         d.update(status="running", status_reason="", mixed_up=bool(d.get("mixed_up", False)))
+        return None
 
     sidecar = store.update(session_id, _mark_running)
+    if before.get("excluded"):
+        return sidecar
     try:
         audio = _resolve_audio(session_id, audio_path)
         fields, drop = _analyse(sidecar, store.load_words(session_id), transcript, audio, force, config)
@@ -323,6 +352,9 @@ def _commit(session_id, generation, start_hash, before, fields, drop) -> Callabl
     """
 
     def mutate(d: dict) -> bool | None:
+        if d.get("excluded"):
+            log.info("coaching for %s was turned off while it ran; result dropped", session_id)
+            return False
         with _lock:
             superseded = _generation.get(session_id) != generation
         if superseded:
@@ -354,11 +386,14 @@ def _commit(session_id, generation, start_hash, before, fields, drop) -> Callabl
 def start_coaching_async(session_id: str, audio_path: str | None, force: bool = False) -> None:
     """Coach a recording in a daemon thread.
 
-    Does nothing when automatic coaching is off (unless ``force``). If the recording is
+    Does nothing when automatic coaching is off (unless ``force``) or the recording is
+    excluded (even with ``force``: clear the exclusion first). If the recording is
     already being coached in this process, the request is queued as one rerun (``force``
     if any queued request asked for it) that starts when the current run finishes.
     """
     if not force and not load_config().get("coaching_auto", True):
+        return
+    if is_excluded(session_id):
         return
     with _lock:
         if session_id in _running:
@@ -406,14 +441,22 @@ def _save_pick(session_id: str, owner: dict) -> dict:
     """Save the owner and status "running" in one write, before any learning or run starts.
 
     The caller must have registered the run (``_enter``) first and keep it registered until
-    the run ends, or ``current`` would rewrite this "running" as interrupted.
+    the run ends, or ``current`` would rewrite this "running" as interrupted. Raises
+    ValueError, writing nothing, if the recording is excluded.
     """
-    return store.update(session_id, lambda d: d.update(owner=owner, status="running", status_reason=""))
+
+    def _pick(d: dict) -> None:
+        if d.get("excluded"):
+            raise ValueError("this recording isn't coached")
+        d.update(owner=owner, status="running", status_reason="")
+
+    return store.update(session_id, _pick)
 
 
 def _learn_and_run(session_id: str, segments: list[dict], chosen: list[str], learn: bool) -> tuple[str | None, dict]:
     audio = _resolve_audio(session_id, None)
-    if learn and audio and voice.model_available():
+    # An excluded recording never teaches the voice profile (it may have been excluded since the pick).
+    if learn and audio and voice.model_available() and not is_excluded(session_id):
         try:
             voice.add_exemplars(audio, segments, chosen)
         except Exception as e:
@@ -424,11 +467,11 @@ def _learn_and_run(session_id: str, segments: list[dict], chosen: list[str], lea
 def set_owner(session_id: str, labels: list[str], learn: bool = True) -> dict:
     """Save the user's pick of which speaker label(s) are them, then coach the recording again.
 
-    Raises ValueError for an empty pick or a label not in the transcript. The owner and
-    status "running" are saved together first. With ``learn``, the pick also teaches the
-    voice profile, but only if the voice model is already installed and the recording's
-    audio is on this Mac. The pick holds only while the speaker labelling stays the same
-    (see ``labelling_fingerprint``).
+    Raises ValueError for an empty pick, a label not in the transcript or an excluded
+    recording. The owner and status "running" are saved together first. With ``learn``, the
+    pick also teaches the voice profile, but only if the voice model is already installed and
+    the recording's audio is on this Mac. The pick holds only while the speaker labelling
+    stays the same (see ``labelling_fingerprint``).
     """
     segments, chosen, owner = _owner_pick(session_id, labels)
     _enter(session_id)
@@ -470,3 +513,35 @@ def _set_owner_in_background(session_id: str, segments: list[dict], chosen: list
         log.warning("coaching after an owner pick for %s failed: %s", session_id, e, exc_info=True)
     finally:
         _finish_sync(session_id, audio)
+
+
+def set_excluded(session_id: str, excluded: bool) -> dict:
+    """Exclude a recording from coaching ("Don't coach this recording"), or undo it. Returns the sidecar.
+
+    Excluding deletes the report (metrics, review, owner pick, candidates, the mixed-up flag)
+    and sets ``excluded: true`` with status ``excluded``; the verbatim words file is kept, as
+    it belongs to the transcription. It also counts as a newer run, so a run in progress drops
+    its result, and drops any queued rerun. Re-transcribing never clears it (``mark_stale``
+    and ``save_words`` leave other keys alone). Undoing it clears the flag and the status,
+    leaving the recording "not coached yet"; it does not start a run.
+    """
+    if excluded:
+        with _lock:
+            _generation[session_id] = _generation.get(session_id, 0) + 1
+            _pending.pop(session_id, None)
+
+    def mutate(d: dict) -> bool | None:
+        if excluded:
+            for key in _EXCLUDE_DROPS:
+                d.pop(key, None)
+            d.update(excluded=True, status=EXCLUDED, status_reason="")
+            return None
+        if not d.get("excluded") and d.get("status") != EXCLUDED:
+            return False
+        d.pop("excluded", None)
+        if d.get("status") == EXCLUDED:
+            d.pop("status", None)
+            d.pop("status_reason", None)
+        return None
+
+    return store.update(session_id, mutate)

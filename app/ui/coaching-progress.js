@@ -288,6 +288,8 @@ function _voiceRenderAutoToggle() {
   toggle.checked = labelsOn && app.settings.coaching_auto !== false;
   $('#coaching-auto-row').classList.toggle('voice-auto-off', !labelsOn);
   $('#coaching-auto-needs').classList.toggle('hidden', labelsOn);
+  const review = $('#coaching-ai-review-toggle');
+  if (review) review.checked = !app.settings || app.settings.coaching_ai_review !== false;
 }
 
 function _voiceInstalling(status) {
@@ -598,8 +600,21 @@ async function _voiceRenderOnce() {
   else if (setupEl.dataset.step !== 'pick') await _voiceRenderPickStep(setupEl);
 }
 
+// The same coaching_auto setting as Automation › "Coach my conversations" (_renderAutoCoachRow
+// in settings.js): redraw that switch too.
 $('#coaching-auto-toggle').addEventListener('change', async (e) => {
   app.settings.coaching_auto = e.target.checked;
+  updateAutoPipelineState();
   await window.plaud.saveSettings({ coaching_auto: e.target.checked });
   toast(e.target.checked ? 'New conversations will be coached' : 'Automatic coaching off', 'success');
+});
+
+// A privacy choice, so it applies to "Coach this recording" too (app/coaching/runner.py)
+$('#coaching-ai-review-toggle').addEventListener('change', async (e) => {
+  app.settings.coaching_ai_review = e.target.checked;
+  await window.plaud.saveSettings({ coaching_ai_review: e.target.checked });
+  toast(
+    e.target.checked ? 'Coaching will include an AI review' : 'AI review off: coaching stays on your Mac',
+    'success',
+  );
 });

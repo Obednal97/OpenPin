@@ -29,6 +29,11 @@
 }
 .coach-link:hover { text-decoration: underline; }
 
+/* "Don't coach this recording", at the foot of every coaching state */
+.coach-exclude-row { display: flex; justify-content: center; padding-top: var(--sp-2); }
+.coach-link.coach-exclude { color: var(--text-tertiary); font-size: var(--text-sm); }
+.coach-link.coach-exclude:hover { color: var(--destructive); }
+
 /* Loading, running, skipped, not coached yet */
 .coach-state {
   display: flex;

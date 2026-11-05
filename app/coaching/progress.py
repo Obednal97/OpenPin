@@ -1,7 +1,8 @@
 """Progress over weeks: pure aggregation of coaching sidecars (no I/O, no AI).
 
 Input is a list of (session_id, recorded_at_epoch, sidecar). Only sidecars with
-status "done" and mixed_up False count. Every key of targets.TARGETS is a series,
+status "done" and mixed_up False count, never one the user excluded from coaching. A
+report made with the AI review off has metrics but no review: its overall score is None. Every key of targets.TARGETS is a series,
 read from sidecar["metrics"]["owner"] (the units there already match the target
 bands, e.g. talk_share is a 0-1 fraction). One extra series, "overall_score", is the
 mean of the review scores present (ungrounded ones are dropped); it has no band and is left out of most_improved,
@@ -125,7 +126,7 @@ def compute_progress(sidecars: list[tuple[str, float, dict]], now: float, weeks:
     rows = [
         {"session_id": sid, "t": t, "values": _values(sc)}
         for sid, t, sc in sidecars
-        if sc.get("status") == "done" and sc.get("mixed_up") is False and start <= t <= now
+        if sc.get("status") == "done" and sc.get("mixed_up") is False and not sc.get("excluded") and start <= t <= now
     ]
     rows.sort(key=lambda r: r["t"])
     metrics = [*T.TARGETS, OVERALL]

@@ -406,6 +406,8 @@ window.plaud = {
     apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/owner`, { labels, learn }),
   coachingMixedUp: (session_id, mixed_up) =>
     apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/mixed-up`, { mixed_up }),
+  coachingExclude: (session_id, exclude) =>
+    apiCall('POST', `/coaching/${encodeURIComponent(session_id)}/exclude`, { exclude: !!exclude }),
   coachingProgress: (weeks) => apiCall('GET', `/coaching/progress?weeks=${encodeURIComponent(weeks ?? 12)}`),
   voiceStatus: () => apiCall('GET', '/coaching/voice'),
   voiceInstall: () => apiCall('POST', '/coaching/voice/install'),

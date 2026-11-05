@@ -40,7 +40,9 @@ stated here:
   local Ollama), using the same keys and order. No audio and no voice data is sent. As with
   summaries, Ollama `-cloud` models are never used, because they run on Ollama's servers. With
   Local as your summary provider, coaching text stays on the Mac: only Ollama is tried, even when
-  a cloud API key is saved, and without Ollama you get the measured metrics only.
+  a cloud API key is saved, and without Ollama you get the measured metrics only. With "Include
+  an AI review" off (Settings › Transcription & AI › Your voice & coaching) this call is never
+  made, for automatic and manual coaching alike, and nothing from coaching leaves the Mac.
 - **Wrong person**: if the app can't tell which speaker is you, it asks and analyses nobody
   until you pick.
 
