@@ -25,6 +25,23 @@ Mac, other machines on the network, and a tampered update.
 | A tampered or broken update | Downloaded through the Worker; size and SHA-256 checked; the install script refuses any bundle that isn't `com.plaud.v2` at the expected version, signed by the expected Apple team (the official releases' team unless the build set `APPLE_TEAM_ID`), and accepted by Gatekeeper |
 | Personal data in bug reports | The app sends no crash or bug reports. **Export bug report** saves a zip to `~/Downloads` that the user reviews and attaches to an issue themselves. Every file in it is scrubbed first (home folder, user names, serials, BLE IDs, keys, tokens, e-mail addresses, Notion and Drive links); `GET /diagnostics` returns only booleans, counts, the API host and the last four characters of serials. Recordings, transcripts and summaries are never included |
 
+Conversation coaching adds data that is more personal than a transcript, so its boundaries are
+stated here:
+
+- **Voice embeddings** (the numbers that describe your voice) are computed on the Mac with the
+  WeSpeaker model and stored in `DATA_DIR/coaching/voice_profile.json` (mode `0600`). They are
+  never sent anywhere. Removing your voice in Settings deletes the file.
+- **Verbatim words** (the transcript with filler words and per-word timing, kept for coaching
+  only) are stored in `DATA_DIR/coaching/<session_id>.json` and never leave the Mac. The
+  transcript, summary and Notion page stay free of filler words.
+- **The coaching AI call** sends the transcript text with timestamps and speaker labels, plus the
+  measured metrics, to the same provider you chose for summaries (Anthropic, OpenAI, OpenRouter or
+  local Ollama), using the same keys and order. No audio and no voice data is sent. As with
+  summaries, Ollama `-cloud` models are never used, because they run on Ollama's servers. With
+  Local as your summary provider, coaching text stays on the Mac.
+- **Wrong person**: if the app can't tell which speaker is you, it asks and analyses nobody
+  until you pick.
+
 Not in scope: malware running as the same user. It can read the config (API keys and device
 tokens are stored as plain JSON, not in the Keychain) and the backend's environment, which holds
 the token.
