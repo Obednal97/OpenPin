@@ -4,6 +4,7 @@ import hashlib
 import io
 import math
 import os
+import time
 import types
 
 import numpy as np
@@ -157,6 +158,14 @@ def test_event_end_clipped_to_audio():
     assert ev[0]["start"] == pytest.approx(1.0) and ev[0]["end"] == pytest.approx(1.8)
 
 
+def test_tail_window_past_the_end_dropped():
+    # audio ends at 1.2 s; the last window starts at 1.0 s, so its event would start at 1.5 s
+    ev = laughter.events_from_scores(np.array([0.0, 0.0, 0.5]), np.full(3, -30.0), _starts(3), duration=1.2)
+    assert ev == []
+    for e in laughter.events_from_scores(np.array([0.0, 0.5, 0.5]), np.full(3, -30.0), _starts(3), duration=1.2):
+        assert e["start"] < e["end"] <= 1.2
+
+
 # ----------------------------------------------------------------- download
 
 
@@ -224,6 +233,53 @@ def test_corrupt_existing_file_replaced(monkeypatch):
     laughter.model_path().write_bytes(b"something else")
     assert laughter.ensure_model() == (True, "")
     assert laughter.model_path().read_bytes() == b"the real model"
+
+
+def test_existing_file_not_deleted_before_download(monkeypatch):
+    _fake_download(monkeypatch, b"the real model")
+    laughter.model_path().parent.mkdir(parents=True)
+    laughter.model_path().write_bytes(b"old copy")
+    real = laughter.urllib.request.urlopen
+
+    def urlopen(*a, **k):
+        assert laughter.model_path().exists()  # replaced atomically, never removed first
+        return real(*a, **k)
+
+    monkeypatch.setattr(laughter.urllib.request, "urlopen", urlopen)
+    assert laughter.ensure_model() == (True, "")
+    assert laughter.model_path().read_bytes() == b"the real model"
+
+
+def test_stale_part_files_swept(monkeypatch):
+    _fake_download(monkeypatch, b"the real model")
+    folder = laughter.model_path().parent
+    folder.mkdir(parents=True)
+    laughter.model_path().write_bytes(b"the real model")
+    stale = folder / ".ced-tiny-old.part"
+    stale.write_bytes(b"half")
+    old = time.time() - 2 * laughter.DOWNLOAD_DEADLINE_S
+    os.utime(stale, (old, old))
+    fresh = folder / ".ced-tiny-new.part"  # another process may still be writing this one
+    fresh.write_bytes(b"half")
+    other = folder / "notes.part"
+    other.write_bytes(b"x")
+    assert laughter.ensure_model() == (True, "")
+    assert not stale.exists() and fresh.exists() and other.exists()
+
+
+def test_download_deadline(monkeypatch):
+    _fake_download(monkeypatch, b"x")
+    monkeypatch.setattr(laughter, "MODEL_SIZE", 10**9)
+
+    class Trickle(_FakeResponse):
+        def read(self, n=-1):
+            return b"x"
+
+    monkeypatch.setattr(laughter.urllib.request, "urlopen", lambda *a, **k: Trickle(b""))
+    clock = iter(range(0, 10**6, 60))
+    monkeypatch.setattr(laughter.time, "monotonic", lambda: next(clock))
+    assert laughter.ensure_model() == (False, "Couldn't download the laughter model")
+    assert list(laughter.model_path().parent.iterdir()) == []
 
 
 def test_download_network_error(monkeypatch):

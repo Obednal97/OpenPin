@@ -20,6 +20,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -29,7 +30,8 @@ MODEL_REVISION = "ace276d29dd0bb3f3517b0fa8cf300738c409019"
 MODEL_URL = f"https://huggingface.co/mispeech/ced-tiny/resolve/{MODEL_REVISION}/model.onnx"
 MODEL_SHA256 = "3890f227660be71886ff48633d11a731993e0206db8a486781412c28a0873435"
 MODEL_SIZE = 6_681_767
-DOWNLOAD_TIMEOUT_S = 60
+DOWNLOAD_TIMEOUT_S = 60  # per network read
+DOWNLOAD_DEADLINE_S = 600  # whole download, so a trickling server can't hold the lock
 
 THRESHOLD = 0.15
 MAX_EVENT_S = 8.0
@@ -101,18 +103,41 @@ def _ssl_context():
         return None
 
 
+_PART_PREFIX = ".ced-tiny-"
+_PART_SUFFIX = ".part"
+
+
+def _sweep_partials(folder: Path) -> None:
+    """Remove temp files left by an interrupted download. Only ones older than the
+    download deadline, so another process's download in progress is left alone."""
+    cutoff = time.time() - 2 * DOWNLOAD_DEADLINE_S
+    try:
+        for p in folder.glob(f"{_PART_PREFIX}*{_PART_SUFFIX}"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def _download(dest: Path) -> bool:
     """Fetch the pinned model to a temp file beside ``dest``, check it, then swap it in."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".ced-tiny-", suffix=".part")
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=_PART_PREFIX, suffix=_PART_SUFFIX)
     try:
         h = hashlib.sha256()
         size = 0
+        deadline = time.monotonic() + DOWNLOAD_DEADLINE_S
         with (
             os.fdopen(fd, "wb") as out,
             urllib.request.urlopen(MODEL_URL, timeout=DOWNLOAD_TIMEOUT_S, context=_ssl_context()) as resp,
         ):
             while size <= MODEL_SIZE:
+                if time.monotonic() > deadline:
+                    log.warning("laughter model download took too long")
+                    return False
                 block = resp.read(1 << 16)
                 if not block:
                     break
@@ -143,14 +168,11 @@ def ensure_model() -> tuple[bool, str]:
     SHA-256 check is deleted and fetched again. One download at a time."""
     path = model_path()
     with _download_lock:
+        _sweep_partials(path.parent)
         if _file_ok(path):
             return True, ""
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            log.warning("could not remove a bad laughter model: %s", e)
+        # A bad or missing file is replaced atomically by the download; it is only
+        # removed if it still fails the check afterwards.
         if _download(path) and _file_ok(path):
             return True, ""
         try:
@@ -238,8 +260,9 @@ def events_from_scores(scores, loudness_db, starts, duration: float | None = Non
         start = float(starts[i]) + EDGE_S
         end = float(starts[j]) + WINDOW_S - EDGE_S
         if duration is not None:
+            start = min(start, duration)
             end = min(end, duration)
-        if end - start <= MAX_EVENT_S:
+        if start < end and end - start <= MAX_EVENT_S:
             events.append(
                 {
                     "start": round(start, 2),
