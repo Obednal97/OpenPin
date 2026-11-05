@@ -445,12 +445,24 @@ def _save_pick(session_id: str, owner: dict) -> dict:
     ValueError, writing nothing, if the recording is excluded.
     """
 
+    before: dict = {}
+
     def _pick(d: dict) -> None:
         if d.get("excluded"):
             raise ValueError("this recording isn't coached")
+        before.update(d)
         d.update(owner=owner, status="running", status_reason="")
 
-    return store.update(session_id, _pick)
+    saved = store.update(session_id, _pick)
+    _owner_changed(session_id, before, saved)
+    return saved
+
+
+def _owner_changed(session_id: str, before: dict, after: dict) -> None:
+    """Your own pick puts your profile name on your speaker; a change reaches the window and Notion."""
+    from app.state import speakers
+
+    speakers.owner_changed(session_id, before, after)
 
 
 def _learn_and_run(session_id: str, segments: list[dict], chosen: list[str], learn: bool) -> tuple[str | None, dict]:
@@ -523,14 +535,18 @@ def set_excluded(session_id: str, excluded: bool) -> dict:
     it belongs to the transcription. It also counts as a newer run, so a run in progress drops
     its result, and drops any queued rerun. Re-transcribing never clears it (``mark_stale``
     and ``save_words`` leave other keys alone). Undoing it clears the flag and the status,
-    leaving the recording "not coached yet"; it does not start a run.
+    leaving the recording "not coached yet"; it does not start a run. Excluding removes
+    your profile name from your speaker (it needs a coached pick).
     """
     if excluded:
         with _lock:
             _generation[session_id] = _generation.get(session_id, 0) + 1
             _pending.pop(session_id, None)
 
+    before: dict = {}
+
     def mutate(d: dict) -> bool | None:
+        before.update(d)
         if excluded:
             for key in _EXCLUDE_DROPS:
                 d.pop(key, None)
@@ -544,4 +560,6 @@ def set_excluded(session_id: str, excluded: bool) -> dict:
             d.pop("status_reason", None)
         return None
 
-    return store.update(session_id, mutate)
+    saved = store.update(session_id, mutate)
+    _owner_changed(session_id, before, saved)
+    return saved
