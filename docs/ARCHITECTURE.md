@@ -404,8 +404,9 @@ session ids by the routes.
 
 `coaching_auto` (default on) starts coaching automatically. It has two switches showing the same
 value: "Coach my conversations automatically" in Transcription & AI › Your voice & coaching and
-"Coach my conversations" in Automation › New recordings, between transcribe and summarise (dimmed
-with a hint while the steps before it are off). Coaching needs speaker labels, so a one-time
+"Coach my conversations" in Automation › New recordings, between transcribe and summarise. Unlike
+summarising, it isn't tied to the steps before it: coaching follows any transcription, including one
+the user starts, so the row stays usable with them off and a hint says so. Coaching needs speaker labels, so a one-time
 migration turns `diarize` on for installs where it is off, and turning `diarize` off turns
 `coaching_auto` off; both switches then say "Needs speaker labels". `coaching_ai_review` (default
 on, "Include an AI review") decides whether the review runs at all; it is a privacy choice, so it

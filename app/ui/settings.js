@@ -1382,17 +1382,21 @@ function updateAutoPipelineState() {
 // "Coach my conversations" is the coaching_auto setting, shared with the switch in
 // Transcription & AI › Your voice & coaching (_voiceRenderAutoToggle): each change
 // handler redraws the other switch. Coaching needs speaker labels (the backend turns
-// coaching_auto off with diarize) and a transcript (the steps above).
+// coaching_auto off with diarize). Unlike summarising, it isn't tied to the steps above:
+// the backend coaches after any transcription, including one the user starts, so the row
+// stays usable with them off and a hint says so.
 function _renderAutoCoachRow(stepsBeforeOn) {
   const toggle = $('#auto-coach-toggle');
   const row = $('#auto-coach-row');
   if (!toggle || !row) return;
   const labelsOn = !!(app.settings && app.settings.diarize);
   toggle.checked = labelsOn && app.settings.coaching_auto !== false;
-  _setAutomationRow(row, toggle, $('#automation-coach-hint'), stepsBeforeOn);
-  if (!labelsOn) toggle.disabled = true;
+  toggle.disabled = !labelsOn;
+  row.classList.remove('disabled');
   row.classList.toggle('voice-auto-off', !labelsOn);
   $('#auto-coach-needs').classList.toggle('hidden', labelsOn);
+  const hint = $('#automation-coach-hint');
+  if (hint) hint.classList.toggle('hidden', !labelsOn || stepsBeforeOn);
 }
 
 // Personalisation saves as you type (debounced) and on blur/change.

@@ -375,9 +375,11 @@ class TestCoachingSwitches:
         assert {"coaching_auto": False} in sync_out["saved"]
         assert {"coaching_auto": True} in sync_out["saved"]
 
-    def test_disabled_with_a_hint_without_transcription(self, sync_out):
+    def test_stays_usable_without_automatic_transcription(self, sync_out):
+        # Coaching runs after any transcription, including one the user starts, so the
+        # switch must not look disabled while it still takes effect.
         s = sync_out["noTranscribe"]
-        assert s["row"] == ["disabled"] and s["autoDisabled"] and s["hint"]
+        assert s["row"] == [] and not s["autoDisabled"] and s["hint"]
         assert s["needs"] is False
 
     def test_needs_speaker_labels(self, sync_out):
