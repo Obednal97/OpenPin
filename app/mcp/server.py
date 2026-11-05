@@ -12,16 +12,17 @@ it starts fast and never imports ``app.*``. stdout carries protocol messages and
 nothing else; logs go to stderr.
 """
 
+import http.client
 import json
 import logging
 import os
 import plistlib
 import re
+import socket
 import sys
+import threading
 import tomllib
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 log = logging.getLogger("open-pin-mcp")
@@ -37,11 +38,13 @@ PACKAGED_DATA_DIR = "~/Library/Application Support/Plaud V2"
 CONNECTION_FILE = "mcp-connection.json"
 MCP_KEY_HEADER = "X-Open-Pin-MCP-Key"
 API_PREFIX = "/mcp/v1"
-HTTP_TIMEOUT_S = 10
+HTTP_TIMEOUT_S = 10  # total, per call: connecting, sending and reading the whole answer
+MAX_RESPONSE_BYTES = 50 * 1024 * 1024
 
 NOT_RUNNING = "Open Pin isn't running. Open it and try again."
 ACCESS_OFF = "AI tool access is turned off in Open Pin"
 TIMED_OUT = "Open Pin didn't answer in time. Try again."
+TOO_LARGE = "Open Pin's answer was too large to pass on. Ask for less, for example without the transcript."
 
 # JSON-RPC error codes
 PARSE_ERROR = -32700
@@ -153,6 +156,7 @@ TOOLS = [
                 "include": {
                     "type": "array",
                     "items": {"type": "string", "enum": _INCLUDE_PARTS},
+                    "minItems": 1,
                     "default": _INCLUDE_PARTS,
                     "description": "Which parts to return: any of transcript, summary, coaching.",
                 },
@@ -361,19 +365,65 @@ def read_connection() -> tuple[int, str]:
     return port, key
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None  # the backend never redirects; never follow one with the key
+class _TooLarge(Exception):
+    pass
 
 
-# No proxies (the key must only ever go to 127.0.0.1) and no redirects.
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+def _read_capped(response: http.client.HTTPResponse) -> bytes:
+    length = response.getheader("Content-Length")
+    if length and length.isdigit() and int(length) > MAX_RESPONSE_BYTES:
+        raise _TooLarge
+    chunks, total = [], 0
+    while chunk := response.read(1024 * 1024):
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise _TooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _exchange(port: int, method: str, path: str, data: bytes | None, headers: dict) -> tuple[int, bytes]:
+    """One HTTP request to the backend, finished within HTTP_TIMEOUT_S in total.
+
+    http.client's timeout applies to each socket operation, so a backend that
+    trickles bytes could hold a call for ever. The request runs on a worker
+    thread instead; at the deadline its socket is shut, which ends the thread.
+    http.client never uses a proxy or follows a redirect, so the key only ever
+    goes to 127.0.0.1.
+    """
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=HTTP_TIMEOUT_S)
+    outcome: dict = {}
+
+    def work():
+        try:
+            conn.request(method, path, body=data, headers=headers)
+            response = conn.getresponse()
+            outcome["answer"] = (response.status, _read_capped(response))
+        except BaseException as e:  # handed to the caller below
+            outcome["error"] = e
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=work, name="open-pin-mcp-http", daemon=True)
+    worker.start()
+    worker.join(HTTP_TIMEOUT_S)
+    if worker.is_alive():
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        raise ToolError(TIMED_OUT)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["answer"]
 
 
 def _error_message(body: bytes) -> str:
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return ""
     if isinstance(payload, dict) and isinstance(payload.get("error"), str):
         return payload["error"]
@@ -382,38 +432,34 @@ def _error_message(body: bytes) -> str:
 
 def backend(method: str, path: str, query: dict | None = None, body: dict | None = None):
     port, key = read_connection()
-    url = f"http://127.0.0.1:{port}{API_PREFIX}{path}"
+    target = API_PREFIX + path
     if query:
-        url += "?" + urllib.parse.urlencode(query)
+        target += "?" + urllib.parse.urlencode(query)
     headers = {MCP_KEY_HEADER: key, "Accept": "application/json"}
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with _opener.open(request, timeout=HTTP_TIMEOUT_S) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as e:
-        message = _error_message(e.read() or b"")
-        if e.code == 401:
-            raise ToolError(NOT_RUNNING) from None
-        if e.code == 403:
-            raise ToolError(message or ACCESS_OFF) from None
-        if e.code >= 500:
-            raise ToolError(f"Open Pin couldn't do that: {message or f'error {e.code}'}") from None
-        raise ToolError(message or f"Open Pin refused the request (error {e.code}).") from None
+        status, raw = _exchange(port, method, target, data, headers)
+    except _TooLarge:
+        raise ToolError(TOO_LARGE) from None
     except TimeoutError:
         raise ToolError(TIMED_OUT) from None
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, TimeoutError):
-            raise ToolError(TIMED_OUT) from None
+    except (OSError, http.client.HTTPException):
         raise ToolError(NOT_RUNNING) from None
-    except (ConnectionError, OSError):
-        raise ToolError(NOT_RUNNING) from None
+    if status >= 300:
+        message = _error_message(raw)
+        if status == 401:
+            raise ToolError(NOT_RUNNING)
+        if status == 403:
+            raise ToolError(message or ACCESS_OFF)
+        if status >= 500:
+            raise ToolError(f"Open Pin couldn't do that: {message or f'error {status}'}")
+        raise ToolError(message or f"Open Pin refused the request (error {status}).")
     try:
         return json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ToolError("Open Pin sent an answer the connector couldn't read.") from None
 
 
@@ -454,7 +500,8 @@ def call_tool(params) -> dict:
         raise RpcError(INVALID_PARAMS, f"Unknown tool: {name}")
     log.info("tool %s", name)
     try:
-        args = check_arguments(tool, params.get("arguments", {}))
+        arguments = params.get("arguments")
+        args = check_arguments(tool, {} if arguments is None else arguments)
         data = _run_tool(name, args)
     except ToolError as e:
         log.info("tool %s: %s", name, e)
@@ -539,7 +586,7 @@ def handle_message(msg):
 def _handle_line(line: bytes):
     try:
         msg = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: absurdly deep nesting
         return _error(None, PARSE_ERROR, "Parse error")
     if isinstance(msg, list):  # a batch (protocol versions before 2025-06-18)
         if not msg:
@@ -558,10 +605,15 @@ def main() -> int:
         for line in sys.stdin.buffer:
             if not line.strip():
                 continue
-            response = _handle_line(line)
-            if response is None:
-                continue
-            protocol_out.write(json.dumps(response).encode("ascii") + b"\n")  # ASCII: no encoding surprises
+            try:
+                response = _handle_line(line)
+                if response is None:
+                    continue
+                encoded = json.dumps(response).encode("ascii")  # ASCII: no encoding surprises
+            except Exception:  # no single line may end the loop
+                log.exception("couldn't handle a message")
+                encoded = json.dumps(_error(None, INTERNAL_ERROR, "Internal error")).encode("ascii")
+            protocol_out.write(encoded + b"\n")
             protocol_out.flush()
     except (BrokenPipeError, KeyboardInterrupt):
         pass

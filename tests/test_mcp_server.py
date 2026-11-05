@@ -8,12 +8,14 @@ script by path to reach the timeout and per-call file reading directly.
 
 import ast
 import importlib.util
+import io
 import json
 import os
 import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -446,6 +448,7 @@ def test_server_error_is_a_tool_error(data_dir, connected):
         ("get_recording", {"id": "a/b"}, "id"),
         ("get_recording", {"id": "abc", "include": ["audio"]}, "include"),
         ("get_recording", {"id": "abc", "include": "summary"}, "include"),
+        ("get_recording", {"id": "abc", "include": []}, "include"),
         ("list_recordings", {"limit": 500}, "limit"),
         ("list_recordings", {"limit": 0}, "limit"),
         ("list_recordings", {"limit": "ten"}, "limit"),
@@ -473,6 +476,27 @@ def test_arguments_that_are_not_an_object_are_a_tool_error(data_dir, connected):
     result = call_tool(data_dir, "list_tags", ["x"])
     assert result["isError"] is True
     assert connected.requests == []
+
+
+def test_null_arguments_count_as_none(data_dir, connected):
+    connected.routes[("GET", "/mcp/v1/tags")] = (200, {"items": []})
+    result = call_tool(data_dir, "list_tags", None)  # call() leaves arguments out for None
+    assert result["isError"] is False
+    responses = rpc(
+        data_dir,
+        initialize(),
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_tags", "arguments": None}},
+    )
+    assert responses[1]["result"]["isError"] is False
+    assert json.loads(text_of(responses[1]["result"])) == {"items": []}
+    assert len(connected.requests) == 2
+
+
+def test_deeply_nested_json_is_a_parse_error_and_the_server_keeps_going(data_dir):
+    out, _ = run_lines(data_dir, ["[" * 200_000, json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"})])
+    first, second = (json.loads(line) for line in out)
+    assert first["id"] is None and first["error"]["code"] == -32700
+    assert second == {"jsonrpc": "2.0", "id": 3, "result": {}}
 
 
 # --- in-process: per-call file reading, timeout, imports ------------------------------
@@ -517,6 +541,121 @@ def test_slow_backend_times_out_with_a_tool_error(data_dir, monkeypatch):
     result = response["result"]
     assert result["isError"] is True
     assert "didn't answer" in text_of(result)
+
+
+class RawBackend:
+    """One-connection socket server: reads the request, then hands the socket to ``respond``."""
+
+    def __init__(self, respond):
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+
+        def serve():
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                try:
+                    respond(conn)
+                except OSError:
+                    pass
+
+        self.thread = threading.Thread(target=serve, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.listener.close()
+
+
+def run_against(server, data_dir, respond, tool="list_tags"):
+    raw = RawBackend(respond)
+    try:
+        write_connection(data_dir, raw.port)
+        started = time.monotonic()
+        response = server.handle_message(call(tool, {}))
+        return response["result"], time.monotonic() - started
+    finally:
+        raw.close()
+
+
+def test_trickling_backend_hits_a_total_deadline(data_dir, monkeypatch):
+    server = load_server()
+    monkeypatch.setenv("PLAUD_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(server, "HTTP_TIMEOUT_S", 0.5)
+    body = b'{"items": [], "padding": "' + b"x" * 20 + b'"}'
+
+    def trickle(conn):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+        conn.sendall(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+        for byte in body:  # each byte well inside the per-read timeout, all of them well past it
+            conn.sendall(bytes([byte]))
+            time.sleep(0.05)
+
+    result, elapsed = run_against(server, data_dir, trickle)
+    assert result["isError"] is True
+    assert text_of(result) == server.TIMED_OUT
+    assert elapsed < 1.5
+
+
+def test_stalled_error_body_gives_the_timed_out_message(data_dir, monkeypatch):
+    server = load_server()
+    monkeypatch.setenv("PLAUD_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(server, "HTTP_TIMEOUT_S", 0.3)
+
+    def stall(conn):
+        conn.sendall(b"HTTP/1.1 404 NOT FOUND\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+        time.sleep(2)
+
+    result, _ = run_against(server, data_dir, stall)
+    assert result["isError"] is True
+    assert text_of(result) == server.TIMED_OUT
+
+
+def test_oversized_response_is_refused(data_dir, connected, monkeypatch):
+    server = load_server()
+    monkeypatch.setenv("PLAUD_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(server, "MAX_RESPONSE_BYTES", 1000)
+    connected.routes[("GET", "/mcp/v1/tags")] = (200, {"items": ["x" * 5000]})
+    result = server.handle_message(call("list_tags", {}))["result"]
+    assert result["isError"] is True
+    assert "too large" in text_of(result)
+
+
+def test_response_size_cap_is_generous():
+    assert load_server().MAX_RESPONSE_BYTES >= 50 * 1024 * 1024
+
+
+def test_one_failing_line_never_ends_the_loop(monkeypatch):
+    server = load_server()
+    real = server._handle_line
+
+    def flaky(line):
+        if b"boom" in line:
+            raise RuntimeError("boom")
+        return real(line)
+
+    monkeypatch.setattr(server, "_handle_line", flaky)
+    lines = [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "boom"}),
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+    ]
+    stdin = io.TextIOWrapper(io.BytesIO("".join(line + "\n" for line in lines).encode()))
+    stdout = io.TextIOWrapper(io.BytesIO())
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert server.main() == 0
+    out = [json.loads(line) for line in stdout.buffer.getvalue().decode().splitlines()]
+    assert out[0]["id"] is None and out[0]["error"]["code"] == -32603
+    assert out[1] == {"jsonrpc": "2.0", "id": 2, "result": {}}
 
 
 def test_default_http_timeout_is_ten_seconds():
