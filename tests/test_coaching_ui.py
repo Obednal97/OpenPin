@@ -283,7 +283,9 @@ CASES = {
     },
     "empty": {"sidecar": {"targets": TARGETS}},
     # A rerun that was interrupted: the review and metrics on file are the previous run's
-    "failed_previous": {"sidecar": {**DONE, "status": "failed", "status_reason": "Coaching was interrupted. Try again."}},
+    "failed_previous": {
+        "sidecar": {**DONE, "status": "failed", "status_reason": "Coaching was interrupted. Try again."}
+    },
     # The review dropped listening and charisma: none of their evidence matched the transcript
     "partial": {
         "sidecar": {
@@ -343,7 +345,9 @@ class TestReport:
         scores = html[html.index("coach-scores") : html.index("Next time")]
         clarity = scores[scores.index("Clarity") : scores.index("Warmth")]
         # Sorted, formatted like the transcript, and each one plays from its time
-        chips = re.findall(r'<button type="button" class="coach-chip" data-coach-seek="([\d.]+)"[^>]*>([^<]+)</button>', clarity)
+        chips = re.findall(
+            r'<button type="button" class="coach-chip" data-coach-seek="([\d.]+)"[^>]*>([^<]+)</button>', clarity
+        )
         assert chips == [("0", "00:00"), ("61.7", "01:01")]
         assert scores.count('class="coach-chip"') == 6
         assert out["noEvidence"] == ""
@@ -668,3 +672,108 @@ class TestRunPoll:
     def test_grace_period_ends_the_wait(self, save_out):
         assert save_out["graceStillWaiting"]
         assert save_out["graceDrawn"]
+
+
+# ---------------------------------------------------------------- real backend JSON
+#
+# The tests above feed hand-written sidecars to the UI. This one builds the sidecar the
+# way the app does (runner.set_owner: real metrics, the real ground() over a stubbed
+# model answer, the real store) and reads it back through the real GET route, so a shape
+# change on either side shows up here (final-fix-contract.md items 1 and 3).
+
+_REAL_JS = r"""
+const fs = require('fs'); const vm = require('vm');
+const el = () => ({ classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, setAttribute() {},
+  appendChild() {}, style: {}, dataset: {} });
+const ctx = { console, window: { plaud: {} }, setTimeout, clearTimeout, setInterval, clearInterval,
+  document: { querySelector: () => null, querySelectorAll: () => [], createElement: el, body: el() } };
+vm.createContext(ctx);
+for (const f of process.argv.slice(1, 3)) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx);
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+const r = (code) => vm.runInContext(code, ctx);
+console.log(JSON.stringify({
+  html: r('_coachReportHtml')(data.sidecar, null, data.segments),
+  overall: r('_coachOverall')(data.sidecar.review),
+}));
+"""
+
+REAL_SID = "1715000000"
+REAL_SEGMENTS = [
+    {"start": 0.0, "end": 30.0, "text": "Thanks for coming in. Shall we start?", "speaker": "Speaker 1"},
+    {"start": 31.0, "end": 70.0, "text": "Sure. Revenue is up, and um costs are flat.", "speaker": "Speaker 2"},
+    {"start": 71.0, "end": 100.0, "text": "Great. What drove the revenue?", "speaker": "Speaker 1"},
+    {"start": 100.5, "end": 140.0, "text": "Mostly the new plan. People like it.", "speaker": "Speaker 2"},
+    {"start": 141.0, "end": 170.0, "text": "Good. Let's keep going with that then.", "speaker": "Speaker 1"},
+]
+# What the model answers; ground() then keeps what matches the transcript
+MODEL_REVIEW = {
+    "scores": {
+        "clarity": {"score": 72, "reason": "Clear on the numbers.", "evidence": [31.0, 100.5]},
+        "warmth": {"score": 66, "reason": "Brisk but polite.", "evidence": [31.0]},
+        "charisma": {"score": 58, "reason": "Flat delivery.", "evidence": [100.5]},
+        "listening": {"score": 80, "reason": "Let them finish.", "evidence": [100.5]},
+        "reception": {"score": 75, "reason": "They asked a follow-up.", "evidence": [71.0]},
+    },
+    "summary": "You gave the numbers clearly.",
+    "next_time": ["Say why revenue moved."],
+    "reactions": [{"t": 71.0, "owner_point": "Revenue", "response": "follow_up", "evidence": "Asked what drove it."}],
+    "moments": [],
+    "interruptions_confirmed": [],
+}
+
+
+@pytest.fixture
+def real_sidecar(tmp_path, monkeypatch, flask_client):
+    from app.coaching import review, runner, store
+
+    coaching_dir = tmp_path / "coaching"
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    monkeypatch.setattr(store, "COACHING_DIR", coaching_dir)
+    monkeypatch.setattr(runner, "TRANSCRIPTS_DIR", transcripts)
+    monkeypatch.setattr(runner, "_resolve_audio", lambda sid, path: None)
+    monkeypatch.setattr(review, "call_llm_json", lambda *a, **k: (json.loads(json.dumps(MODEL_REVIEW)), "test", []))
+    text = " ".join(s["text"] for s in REAL_SEGMENTS)
+    (transcripts / f"{REAL_SID}.json").write_text(json.dumps({"text": text, "segments": REAL_SEGMENTS}))
+
+    runner.set_owner(REAL_SID, ["Speaker 2"], learn=False)
+    res = flask_client.get(f"/coaching/{REAL_SID}")
+    assert res.status_code == 200
+    return res.get_json()
+
+
+@pytest.fixture
+def real_out(real_sidecar):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "-e", _REAL_JS, str(APP / "ui" / "utils.js"), str(COACH_JS)],
+        input=json.dumps({"sidecar": real_sidecar, "segments": REAL_SEGMENTS}),
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+class TestRealSidecar:
+    def test_backend_shape(self, real_sidecar):
+        assert real_sidecar["status"] == "done"
+        assert "words" not in real_sidecar
+        assert set(real_sidecar["targets"]) >= {"pace_wpm", "talk_share", "interruption_rate"}
+        assert real_sidecar["review"]["scores"]["clarity"]["evidence"] == [31.0, 100.5]
+
+    def test_report_renders_owner_scores_and_targets(self, real_out):
+        html = real_out["html"]
+        assert "This is you: <strong>Speaker 2</strong>" in html
+        assert "you chose this" in html
+        for area in ("Clarity", "Warmth", "Charisma", "Listening", "Reception"):
+            assert area in html
+        assert real_out["overall"] == round((72 + 66 + 58 + 80 + 75) / 5)
+        assert f">{real_out['overall']}<" in html
+        assert 'class="coach-chip" data-coach-seek="100.5"' in html
+        # Target column from the route's targets, not hard-coded in the UI
+        assert "110–160 wpm" in html
+        assert "at most 1 in 10 turns" in html
+        assert "Asked a follow-up" in html
