@@ -221,15 +221,49 @@ def test_review_exception_is_a_failure(env):
     assert out["metrics"]["owner"]
 
 
-def test_local_only_without_ollama_is_done_with_metrics_note(env):
+OLLAMA_DOWN = "Ollama (local): not running on http://localhost:11434"
+OLLAMA_NO_MODEL = "Ollama (local): no chat model pulled (try: ollama pull qwen3.5:9b)"
+
+
+@pytest.mark.parametrize("preference", ["local", "ollama"])
+@pytest.mark.parametrize("errors", [[OLLAMA_DOWN], [OLLAMA_NO_MODEL]])
+def test_local_only_without_ollama_is_done_with_metrics_note(env, preference, errors):
     _write_transcript(env["trn"])
-    env["config"]["summarization_provider"] = "local"
-    env["review"].return_value = {"review": None, "provider": "none", "errors": ["Ollama: down"]}
+    env["config"]["summarization_provider"] = preference
+    env["review"].return_value = {"review": None, "provider": "none", "errors": errors}
     out = runner.run_coaching(SID, env["audio"])
     assert out["status"] == "done"
     assert out["review"] is None
     assert out["status_reason"] == "AI feedback needs Ollama; showing measured metrics only"
     assert out["metrics"]["owner"]
+
+
+@pytest.mark.parametrize(
+    "errors",
+    [
+        ["Ollama (local): response was not a valid JSON object"],
+        ["Ollama (local): Timed out — the service took too long to respond"],
+        [],
+    ],
+)
+def test_local_only_with_a_real_ollama_error_is_failed(env, errors):
+    _write_transcript(env["trn"])
+    env["config"]["summarization_provider"] = "local"
+    env["review"].return_value = {"review": None, "provider": "none", "errors": errors}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "failed"
+    assert out["status_reason"].startswith("AI feedback failed: ")
+    for e in errors:
+        assert e in out["status_reason"]
+    assert out["metrics"]["owner"]
+
+
+def test_local_only_invalid_review_shape_is_failed(env):
+    _write_transcript(env["trn"])
+    env["config"]["summarization_provider"] = "local"
+    env["review"].return_value = {"review": None, "provider": "ollama", "errors": ["invalid review shape: boom"]}
+    out = runner.run_coaching(SID, env["audio"])
+    assert out["status"] == "failed" and "invalid review shape" in out["status_reason"]
 
 
 def test_result_dropped_if_transcript_changed_meanwhile(env):
@@ -401,6 +435,70 @@ def test_trigger_during_set_owner_waits_then_reruns(env):
     assert not runner.is_running(SID)
 
 
+def test_set_owner_saves_owner_and_running_before_learning(env):
+    _write_transcript(env["trn"])
+    store.update(SID, lambda d: d.update(status="needs_owner", status_reason="no voice profile"))
+    seen = []
+
+    def learn(*args, **kwargs):
+        side = store.load(SID)
+        seen.append((side["status"], side["owner"]["labels"]))
+        return 1
+
+    env["add_exemplars"].side_effect = learn
+    assert runner.set_owner(SID, ["Speaker 2"])["status"] == "done"
+    assert seen == [("running", ["Speaker 2"])]
+
+
+def test_start_set_owner_returns_running_then_coaches_in_background(env):
+    _write_transcript(env["trn"])
+    store.update(SID, lambda d: d.update(status="needs_owner", status_reason="no voice profile"))
+    started = []
+    with patch(
+        "app.coaching.runner.Thread", lambda target, kwargs, daemon: MagicMock(start=lambda: started.append(kwargs))
+    ):
+        out = runner.start_set_owner(SID, ["Speaker 2"], learn=False)
+    assert out["status"] == "running" and out["status_reason"] == ""
+    assert out["owner"]["labels"] == ["Speaker 2"] and out["owner"]["source"] == "user"
+    assert runner.is_running(SID)  # so current() doesn't call it interrupted
+    assert runner.current(SID)["status"] == "running"
+    runner._set_owner_in_background(**started[0])
+    assert store.load(SID)["status"] == "done"
+    assert not runner.is_running(SID)
+
+
+def test_start_set_owner_rejects_bad_picks_without_writing(env):
+    _write_transcript(env["trn"])
+    with pytest.raises(ValueError):
+        runner.start_set_owner(SID, ["Speaker 9"])
+    assert store.load(SID) == {}
+    assert not runner.is_running(SID)
+
+
+def test_words_file_feeds_the_metrics(env):
+    _write_transcript(env["trn"])
+    words = [{"word": "hello", "start": 0.0, "end": 0.5, "speaker": "Speaker 1"}]
+    store.save_words(SID, words, "h")
+    with patch("app.coaching.runner.compute_metrics", wraps=runner.compute_metrics) as cm:
+        out = runner.run_coaching(SID, env["audio"])
+    assert cm.call_args.args[1] == words
+    assert "words" not in out and "words" not in store.load(SID)
+
+
+def test_transcript_deleted_mid_run_writes_nothing(env):
+    _write_transcript(env["trn"])
+
+    def delete_then_review(*args, **kwargs):
+        (env["trn"] / f"{SID}.json").unlink()
+        for path in store.session_files(SID):
+            path.unlink(missing_ok=True)
+        return {"review": REVIEW, "provider": "anthropic", "errors": []}
+
+    env["review"].side_effect = delete_then_review
+    runner.run_coaching(SID, env["audio"])
+    assert not store.coaching_path(SID).exists()
+
+
 def test_current_marks_an_orphaned_running_status_failed(env):
     store.update(SID, lambda d: d.update(status="running", status_reason=""))
     out = runner.current(SID)
@@ -452,7 +550,7 @@ def test_missing_transcript_writes_nothing(env):
 def test_mark_stale_still_sees_a_metrics_only_report(env):
     _write_transcript(env["trn"])
     env["config"]["summarization_provider"] = "local"
-    env["review"].return_value = {"review": None, "provider": "none", "errors": ["Ollama: down"]}
+    env["review"].return_value = {"review": None, "provider": "none", "errors": [OLLAMA_DOWN]}
     runner.run_coaching(SID, env["audio"])
     store.mark_stale(SID)
     assert store.load(SID)["report_stale"] is True

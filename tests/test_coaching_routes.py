@@ -43,15 +43,32 @@ def test_get_coaching_drops_words_and_adds_targets(env):
 
 
 def test_words_never_returned(env, monkeypatch):
+    # An older sidecar with inline words, plus the words file: neither is ever returned.
     store.update(SID, lambda d: d.update(status="done", words=[{"w": "secret"}]))
-    monkeypatch.setattr(runner, "set_owner", MagicMock())
+    store.save_words(SID, [{"w": "verbatim"}], "h")
+    store.update(SID, lambda d: d.update(words=[{"w": "secret"}]))
+    monkeypatch.setattr(runner, "start_set_owner", lambda sid, labels, learn: store.load(sid))
     for resp in (
         env.get(f"/coaching/{SID}"),
         env.post(f"/coaching/{SID}/mixed-up", json={"mixed_up": True}),
         env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"]}),
     ):
         assert resp.status_code == 200
-        assert "secret" not in resp.get_data(as_text=True)
+        text = resp.get_data(as_text=True)
+        assert "secret" not in text and "verbatim" not in text
+        assert "words" not in resp.get_json()
+
+
+def test_every_sidecar_response_has_the_same_shape(env, monkeypatch):
+    store.update(SID, lambda d: d.update(status="done", mixed_up=False))
+    monkeypatch.setattr(runner, "start_set_owner", lambda sid, labels, learn: store.load(sid))
+    got = env.get(f"/coaching/{SID}").get_json()
+    mixed = env.post(f"/coaching/{SID}/mixed-up", json={"mixed_up": False}).get_json()
+    owner = env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"]}).get_json()
+    assert got == mixed
+    assert owner.pop("started") is True
+    assert owner == got
+    assert got["targets"]["pace_wpm"]["high"] == 160.0
 
 
 def test_run_starts_forced(env, monkeypatch):
@@ -62,35 +79,69 @@ def test_run_starts_forced(env, monkeypatch):
     start.assert_called_once_with(SID, None, force=True)
 
 
-def test_owner_runs_set_owner_in_background(env, monkeypatch):
-    calls = []
-    monkeypatch.setattr(runner, "set_owner", lambda *a: calls.append(a))
-    monkeypatch.setattr(routes, "Thread", _SyncThread)
+def test_owner_response_already_says_running(env, monkeypatch):
+    store.update(SID, lambda d: d.update(status="needs_owner", status_reason="no voice profile"))
+    held = []
+    monkeypatch.setattr(runner, "Thread", lambda target, kwargs, daemon: MagicMock(start=lambda: held.append(kwargs)))
     r = env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"], "learn": False})
     assert r.status_code == 200
-    assert r.get_json()["started"] is True
-    assert calls == [(SID, ["Speaker 1"], False)]
+    body = r.get_json()
+    assert body["started"] is True
+    assert body["status"] == "running" and body["status_reason"] == ""
+    assert body["owner"]["labels"] == ["Speaker 1"]
+    assert "targets" in body
+    assert held[0]["learn"] is False and held[0]["chosen"] == ["Speaker 1"]
+    runner._running.clear()
 
 
 def test_owner_error_in_background_is_swallowed(env, monkeypatch):
-    def boom(*a):
+    def boom(*a, **k):
         raise RuntimeError("nope")
 
-    monkeypatch.setattr(runner, "set_owner", boom)
-    monkeypatch.setattr(routes, "Thread", _SyncThread)
-    assert env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"]}).status_code == 200
+    monkeypatch.setattr(runner, "_run_once", boom)
+    monkeypatch.setattr(runner, "Thread", _SyncThread)
+    assert env.post(f"/coaching/{SID}/owner", json={"labels": ["Speaker 1"], "learn": False}).status_code == 200
+    assert not runner.is_running(SID)
 
 
 @pytest.mark.parametrize("labels", [[], ["Speaker 9"], "Speaker 1", None])
 def test_owner_rejects_bad_labels(env, monkeypatch, labels):
     set_owner = MagicMock()
-    monkeypatch.setattr(runner, "set_owner", set_owner)
+    monkeypatch.setattr(runner, "start_set_owner", set_owner)
     assert env.post(f"/coaching/{SID}/owner", json={"labels": labels}).status_code == 400
     set_owner.assert_not_called()
 
 
 def test_owner_missing_transcript_404(env):
     assert env.post("/coaching/999/owner", json={"labels": ["Speaker 1"]}).status_code == 404
+
+
+def test_run_and_mixed_up_need_a_transcript(env, monkeypatch):
+    start = MagicMock()
+    monkeypatch.setattr(runner, "start_coaching_async", start)
+    assert env.post("/coaching/999/run").status_code == 404
+    assert env.post("/coaching/999/mixed-up", json={"mixed_up": True}).status_code == 404
+    start.assert_not_called()
+    assert not store.coaching_path("999").exists()
+    assert list(store.COACHING_DIR.iterdir()) == []
+
+
+def test_store_files_are_not_session_ids(env, monkeypatch):
+    voice._save_exemplars([[0.1, 0.2]])
+    mode = voice.PROFILE_PATH.stat().st_mode & 0o777
+    store.save_words(SID, [{"w": "x"}], "h")
+    start = MagicMock()
+    monkeypatch.setattr(runner, "start_coaching_async", start)
+    for sid in ("voice_profile", f"{SID}.words"):
+        assert env.get(f"/coaching/{sid}").status_code == 404
+        assert env.post(f"/coaching/{sid}/mixed-up", json={"mixed_up": True}).status_code == 404
+        assert env.post(f"/coaching/{sid}/run").status_code == 404
+        assert env.post(f"/coaching/{sid}/owner", json={"labels": ["Speaker 1"]}).status_code == 404
+    start.assert_not_called()
+    assert mode == 0o600
+    assert voice.PROFILE_PATH.stat().st_mode & 0o777 == 0o600
+    assert voice._load_exemplars() == [[0.1, 0.2]]
+    assert json.loads(store.words_path(SID).read_text())["words"] == [{"w": "x"}]
 
 
 def test_mixed_up_sets_flag(env):
@@ -104,13 +155,30 @@ def test_progress_route(env):
     now = time.time()
     # A done session dated by its id (a recent epoch), plus noise that must be skipped.
     recent = str(int(now) - 3600)
-    store.update(recent, lambda d: d.update(status="done", mixed_up=False, metrics={"pace_wpm": 130.0}))
+    deleted = str(int(now) - 7200)
+    done = {"status": "done", "mixed_up": False, "metrics": {"owner": {"pace_wpm": 130.0}}}
+    (runner.TRANSCRIPTS_DIR / f"{recent}.json").write_text(json.dumps({"text": "x", "segments": SEGMENTS}))
+    store.update(recent, lambda d: d.update(done))
+    store.save_words(recent, [{"word": "um"}], "h")
+    store.update(deleted, lambda d: d.update(done))  # its transcript is gone: not counted
+    voice._save_exemplars([[0.1, 0.2]])
     (store.COACHING_DIR / "notes.txt").write_text("x")
     r = env.get("/coaching/progress?weeks=999")
     assert r.status_code == 200
     body = r.get_json()
-    assert "baseline" in body or "weekly" in body or "series" in body
+    assert body["count"] == 1
+    assert [p["session_id"] for p in body["series"]["pace_wpm"]] == [recent]
     assert env.get("/coaching/progress?weeks=abc").status_code == 200
+
+
+def test_progress_lists_only_sidecars(env, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(routes, "compute_progress", lambda sc, now, weeks: seen.update(sids=[s[0] for s in sc]) or {})
+    store.update(SID, lambda d: d.update(status="done"))
+    store.save_words(SID, [{"word": "um"}], "h")
+    voice._save_exemplars([[0.1, 0.2]])
+    env.get("/coaching/progress")
+    assert seen["sids"] == [SID]
 
 
 def test_progress_clamps_weeks(env, monkeypatch):
@@ -257,6 +325,16 @@ def test_settings_coaching_auto_default_and_whitelist(env):
     assert env.get("/settings").get_json()["coaching_auto"] is True
     env.post("/settings", json={"coaching_auto": False})
     assert env.get("/settings").get_json()["coaching_auto"] is False
+
+
+def test_diarize_off_wins_in_the_same_request(env):
+    env.post("/settings", json={"diarize": True, "coaching_auto": True})
+    env.post("/settings", json={"diarize": False, "coaching_auto": True})
+    body = env.get("/settings").get_json()
+    assert body["diarize"] is False and body["coaching_auto"] is False
+    env.post("/settings", json={"coaching_auto": False, "diarize": True})
+    body = env.get("/settings").get_json()
+    assert body["diarize"] is True and body["coaching_auto"] is False
 
 
 def test_diarize_off_turns_coaching_off(env):

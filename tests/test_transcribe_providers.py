@@ -381,7 +381,9 @@ def test_cloud_route_saves_words_to_coaching_sidecar_not_transcript(route_env):
     assert r.status_code == 200, r.get_json()
     assert "words" not in r.get_json()
     side = store.load("1715000000")
-    assert side["words"] == words
+    assert "words" not in side  # the words live in their own file
+    assert store.load_words("1715000000") == words
+    assert store.words_path("1715000000").exists()
     assert side["transcript_text_hash"] == hashlib.sha1(RESULT["text"].encode()).hexdigest()
     assert "words" not in json.loads((trn / "1715000000.json").read_text())
     assert "um" not in json.loads((trn / "1715000000.json").read_text())["text"].split()
@@ -397,9 +399,9 @@ def test_retranscribe_with_non_deepgram_provider_clears_words(route_env):
     save_config({"deepgram_api_key": "k", "transcription_provider": "deepgram"})
     with patch("app.routes.transcribe.transcribe_deepgram", return_value={**RESULT, "words": words}):
         _transcribe(client, rec / "1715000000.ogg")
-    assert store.load("1715000000")["words"] == words
+    assert store.load_words("1715000000") == words
 
     save_config({"groq_api_key": "k", "transcription_provider": "groq"})
     with patch("app.routes.transcribe.transcribe_groq", return_value=dict(RESULT)):
         _transcribe(client, rec / "1715000000.ogg")
-    assert store.load("1715000000")["words"] == []
+    assert store.load_words("1715000000") == []

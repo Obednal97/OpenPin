@@ -92,3 +92,36 @@ def test_transcripts_update_marks_coaching_stale(route_env):  # noqa: F811
         r = client.post("/transcripts/update", json={"session_id": sid, "segments": seg})
     assert r.status_code == 200
     assert store.load(sid)["report_stale"] is True
+
+
+def test_words_live_in_their_own_file(coaching_dir):
+    words = [{"word": "um", "start": 0.0, "end": 0.2, "speaker": "Speaker 1"}]
+    store.update("s1", lambda d: d.update(status="done"))
+    store.save_words("s1", words, "hash1")
+    assert store.load_words("s1") == words
+    side = store.load("s1")
+    assert "words" not in side
+    assert side["status"] == "done" and side["transcript_text_hash"] == "hash1"
+    assert sorted(p.name for p in coaching_dir.iterdir()) == ["s1.json", "s1.words.json"]
+    assert store.session_files("s1") == [coaching_dir / "s1.json", coaching_dir / "s1.words.json"]
+
+
+def test_load_words_falls_back_to_an_old_inline_sidecar():
+    store.update("old", lambda d: d.update(words=[{"word": "uh"}]))
+    assert store.load_words("old") == [{"word": "uh"}]
+    assert store.load_words("missing") is None
+    # Saving new words drops the inline copy, so old fillers are never reused.
+    store.save_words("old", [], "h")
+    assert store.load_words("old") == []
+    assert "words" not in store.load("old")
+
+
+def test_is_sidecar_stem():
+    assert store.is_sidecar_stem("1715000000")
+    assert not store.is_sidecar_stem("1715000000.words")
+    assert not store.is_sidecar_stem("voice_profile")
+
+
+def test_update_returning_false_writes_nothing():
+    assert store.update("s2", lambda d: False) == {}
+    assert not store.coaching_path("s2").exists()
