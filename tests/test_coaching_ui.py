@@ -302,6 +302,10 @@ class TestReport:
         assert html.count('class="coach-badge coach-badge-estimated"') >= 2
         assert 'class="coach-badge coach-badge-unavailable"' in html
 
+    def test_interruption_target_copy(self, out):
+        # Same words as the Progress view and the backend focus sentence (inclusive bound)
+        assert "at most 1 in 10 turns" in out["done"]
+
     def test_wpm_per_speaker(self, out):
         assert "171" in out["done"] and "128" in out["done"]
         assert "62%" in out["done"] and "38%" in out["done"]
