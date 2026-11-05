@@ -8,6 +8,7 @@ transcript lock is non-reentrant and ``_merge_transcript`` already holds it,
 so callers there must call ``mark_stale`` after releasing it.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,11 @@ from app.utils.constants import COACHING_DIR
 from app.utils.transcript_locks import get_transcript_lock
 
 COACHING_SCHEMA_VERSION = 1
+
+
+def text_hash(text: str | None) -> str:
+    """sha1 hex of a transcript's text: what ``transcript_text_hash`` records."""
+    return hashlib.sha1((text or "").encode("utf-8")).hexdigest()
 
 
 def coaching_path(session_id: str) -> Path:
