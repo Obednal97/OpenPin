@@ -1,6 +1,6 @@
 [package]
 name = "plaud-v2"
-version = "2.7.0"
+version = "2.7.1"
 description = "Open Pin: sync, decrypt and transcribe Plaud NotePin S recordings locally"
 authors = ["Open Pin contributors"]
 license = "MIT"
