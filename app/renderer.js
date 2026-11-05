@@ -1021,6 +1021,8 @@ async function init() {
   await loadGdriveStatus();
   await loadSettings();
   await loadRecordings();
+  // Picks up speaker names and tags that AI tools change (ui/mcp-settings.js)
+  startMcpChangePoll();
 
   // First-run setup — show onboarding if no paired devices and not dismissed
   const isFirstRun = !app.settings.has_paired_devices && !app.settings.setup_dismissed;
