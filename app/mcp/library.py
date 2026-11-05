@@ -13,6 +13,8 @@ profile, pairing data, absolute paths outside a display folder, or audio bytes.
 import base64
 import binascii
 import json
+import logging
+import math
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -26,6 +28,8 @@ DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 INCLUDE_PARTS = ("transcript", "summary", "coaching")
 _NO_DATE = -1e18  # sorts recordings without a date last
+
+log = logging.getLogger(__name__)
 
 
 class BadRequest(ValueError):
@@ -88,12 +92,48 @@ class _Row:
     def __init__(self, entry: dict, profile: str, notion_urls: dict):
         self.entry = entry
         self.id = entry["session_id"]
+        self.raw_transcript, self.transcript, self.segments = None, None, None
         raw = recordings.load_transcript(self.id) if entry.get("has_transcript") else None
-        self.raw_transcript = raw
-        self.transcript = recordings.transcript_item(self.id, raw, profile) if raw is not None else None
+        if raw is not None:
+            try:
+                self._shape_transcript(raw, profile)
+            except Exception as e:
+                # The window skips a transcript it can't read, so do the same: the row
+                # stays a recording, without a transcript (or names from it).
+                log.warning("Transcript %s can't be read for AI tools: %s", self.id, e)
+                self.raw_transcript, self.transcript, self.segments = None, None, None
+                self.entry = {**entry, "participants": []}
         self.sidecar = runner.current(self.id)
         self.when = _recorded_at(entry)
-        self.notion_url = notion_urls.get(self.id) or (raw or {}).get("notion_page_url") or None
+        url = notion_urls.get(self.id) or (raw or {}).get("notion_page_url")
+        self.notion_url = url if isinstance(url, str) and url else None
+
+    def _shape_transcript(self, raw: dict, profile: str) -> None:
+        """Read the transcript the way the window does; raises if its shape is unusable."""
+        item = recordings.transcript_item(self.id, raw, profile)
+        if not isinstance(item["text"], str) or not isinstance(item["segments"], list):
+            raise ValueError("text or segments has the wrong type")
+        for key in ("summary", "auto_title"):
+            if not isinstance(item[key], str):
+                item[key] = ""
+        names = item["speaker_names"]
+        segments = []
+        for s in item["segments"]:
+            if not isinstance(s, dict):
+                raise ValueError("a segment isn't an object")
+            label = s.get("speaker")
+            if label is not None and not isinstance(label, str):
+                raise ValueError("a speaker label isn't text")
+            segments.append(
+                {
+                    "start_s": s.get("start"),
+                    "end_s": s.get("end"),
+                    "speaker_label": label or None,
+                    "speaker_name": names.get(label) if label else None,
+                    "text": s.get("text") if isinstance(s.get("text"), str) else "",
+                }
+            )
+        self.raw_transcript, self.transcript, self.segments = raw, item, segments
 
     @property
     def names(self) -> dict[str, str]:
@@ -166,21 +206,7 @@ class _Row:
         out["you"] = sn.confirmed_owner_labels(self.raw_transcript, self.sidecar) if self.raw_transcript else []
         t = self.transcript
         if "transcript" in include:
-            out["transcript"] = (
-                [
-                    {
-                        "start_s": s.get("start"),
-                        "end_s": s.get("end"),
-                        "speaker_label": s.get("speaker") or None,
-                        "speaker_name": names.get(s.get("speaker")) if s.get("speaker") else None,
-                        "text": s.get("text", ""),
-                    }
-                    for s in t.get("segments") or []
-                    if isinstance(s, dict)
-                ]
-                if t
-                else None
-            )
+            out["transcript"] = self.segments
         if "summary" in include:
             summary = t.get("summary") if t else None
             out["summary"] = sn.apply_names(summary, names) if isinstance(summary, str) and summary else None
@@ -229,9 +255,12 @@ def _parse_bound(raw, name: str, end: bool) -> datetime | None:
                 return datetime.combine(day + timedelta(days=1), time()).astimezone() - timedelta(microseconds=1)
             return datetime.combine(day, time()).astimezone()
         when = datetime.fromisoformat(raw.replace("Z", "+00:00") if raw.endswith("Z") else raw)
-    except ValueError:
+    except (ValueError, OverflowError):
         raise BadRequest(f"{name} must be a date (YYYY-MM-DD) or an ISO 8601 date-time") from None
-    return when.astimezone()
+    try:
+        return when.astimezone()
+    except (ValueError, OverflowError):
+        raise BadRequest(f"{name} is too far in the past or future to use") from None
 
 
 def encode_cursor(key: tuple[float, str]) -> str:
@@ -254,7 +283,13 @@ def decode_cursor(raw) -> tuple[float, str] | None:
         or not isinstance(value[1], str)
     ):
         raise BadRequest("cursor isn't valid: pass next_cursor from the previous page")
-    return (float(value[0]), value[1])
+    try:
+        when = float(value[0])
+    except (ValueError, OverflowError):
+        when = math.nan
+    if not math.isfinite(when):
+        raise BadRequest("cursor isn't valid: pass next_cursor from the previous page")
+    return (when, value[1])
 
 
 def parse_include(raw) -> tuple[str, ...]:

@@ -713,3 +713,104 @@ def test_connector_end_to_end(env):
     assert payload(6) == {"items": [{"name": "Sarah Jones", "recordings": 1}]}
     for i in (7, 8):
         assert replies[i] == {"content": [{"type": "text", "text": NOT_FOUND}], "isError": True}
+
+
+# ---------------------------------------------------------------- bad files and bad bounds
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"text": None, "segments": SEGMENTS},
+        {"text": "hi", "segments": None},
+        {"text": "hi", "segments": ["x"]},
+        {"text": "hi", "segments": [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": ["Speaker 1"]}]},
+        {"text": "hi", "segments": [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": 5}]},
+        {"text": "hi", "segments": [{"start": 0.0, "end": 1.0, "text": None, "speaker": "Speaker 1"}]},
+        {"text": "hi", "segments": SEGMENTS, "summary": ["not text"], "auto_title": 7},
+        ["not", "an", "object"],
+        "not json at all {",
+    ],
+)
+def test_malformed_transcript_is_skipped_not_a_500(env, bad):
+    """One bad transcript file must not break listing or search (the window skips it too)."""
+    _recording(env, SID)
+    _audio(env, SID2)
+    path = env.trn / f"{SID2}.json"
+    path.write_text(bad if isinstance(bad, str) else json.dumps(bad))
+    save_config({"recording_tags": {SID2: ["Work"]}})
+
+    status, body = _get(env, "/mcp/v1/recordings")
+    assert status == 200, body
+    items = {i["id"]: i for i in body["items"]}
+    assert set(items) == {SID, SID2}
+    assert items[SID]["has_transcript"] is True
+    broken = items[SID2]
+    assert broken["participants"] == []
+    assert broken["tags"] == ["Work"]
+    assert isinstance(broken["title"], str) and broken["title"]
+
+    status, body = _get(env, "/mcp/v1/recordings", query="forecast")
+    assert status == 200 and [i["id"] for i in body["items"]] == [SID]
+    assert _get(env, "/mcp/v1/recordings", query="work")[0] == 200
+
+    status, body = _get(env, f"/mcp/v1/recordings/{SID2}")
+    assert status == 200, body
+    assert body["id"] == SID2
+    assert body["file"]["audio_on_mac"] is True
+    if body["has_transcript"] is False:
+        assert body["transcript"] is None and body["speakers"] == {}
+    json.dumps(body)
+
+
+def test_malformed_transcript_names_no_participants(env):
+    """A transcript the read model can't use gives no participants, even if a name is stored."""
+    _audio(env, SID)
+    (env.trn / f"{SID}.json").write_text(
+        json.dumps({"text": None, "segments": SEGMENTS, "speaker_names": {"Speaker 2": "Sarah"}})
+    )
+    item = _get(env, "/mcp/v1/recordings")[1]["items"][0]
+    assert item["has_transcript"] is False
+    assert item["participants"] == []
+    assert _get(env, "/mcp/v1/recordings", query="sarah")[1]["items"] == []
+    body = _get(env, f"/mcp/v1/recordings/{SID}")[1]
+    assert body["transcript"] is None and body["summary"] is None and body["speakers"] == {}
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"to": "9999-12-31"},
+        {"from": "9999-12-31"},
+        {"from": "0001-01-01"},
+        {"from": "0001-01-01T00:00:00"},
+        {"to": "0001-01-01T00:00:00"},
+        {"to": "9999-12-31T23:59:59.999999"},
+        {"from": "9999-12-31T23:59:59-23:59"},
+    ],
+)
+def test_extreme_dates_are_400_not_500(env, params):
+    _recording(env, SID, transcript=False)
+    status, body = _get(env, "/mcp/v1/recordings", **params)
+    assert status in (200, 400), body
+    if status == 400:
+        assert body["error"]
+
+
+def test_extreme_dates_that_cannot_be_used_are_400(env):
+    _recording(env, SID, transcript=False)
+    for params in ({"to": "9999-12-31"}, {"from": "0001-01-01T00:00:00"}):
+        status, body = _get(env, "/mcp/v1/recordings", **params)
+        assert status == 400, (params, body)
+        assert "from" in body["error"] or "to" in body["error"]
+
+
+def test_out_of_range_cursor_is_400(env):
+    import base64
+
+    _recording(env, SID, transcript=False)
+    for value in ('[1e400, "x"]', '["NaN", "x"]', '[NaN, "x"]', '[Infinity, "x"]', f'[{10**400}, "x"]'):
+        cursor = base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+        status, body = _get(env, "/mcp/v1/recordings", cursor=cursor)
+        assert status == 400, (value, body)
+        assert "cursor" in body["error"]
