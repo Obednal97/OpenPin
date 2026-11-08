@@ -183,7 +183,6 @@
 .badge-partial { background: var(--yellow-subtle); color: var(--yellow-text); }
 .badge-transcribed { background: var(--green-subtle); color: var(--green-text); }
 .badge-cloud { background: var(--accent-subtle); color: var(--accent); }
-.badge-transcribing { background: var(--yellow-subtle); color: var(--yellow-text); animation: pulse 1.5s ease-in-out infinite; }
 .badge-processing {
   background: var(--accent-subtle);
   color: var(--accent);
@@ -384,11 +383,8 @@
   border: 3px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
-  animation: setupSpin 0.8s linear infinite;
+  animation: spin 0.8s linear infinite;
   margin-bottom: var(--sp-4);
-}
-@keyframes setupSpin {
-  to { transform: rotate(360deg); }
 }
 
 .setup-hint {
@@ -496,7 +492,7 @@
   border: 3px solid transparent;
   border-top-color: var(--accent);
   border-right-color: var(--accent);
-  animation: wifiSpin 1s linear infinite;
+  animation: spin 1s linear infinite;
 }
 .wifi-sync-stage-icon.success {
   background: var(--green-subtle);
@@ -506,9 +502,6 @@
 .wifi-sync-stage-icon.error {
   background: var(--destructive-subtle);
   color: var(--destructive);
-}
-@keyframes wifiSpin {
-  to { transform: rotate(360deg); }
 }
 @keyframes wifiPop {
   0% { transform: scale(0.8); opacity: 0; }
@@ -545,17 +538,6 @@
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-.wifi-sync-stages {
-  display: flex;
-  justify-content: center;
-  gap: var(--sp-3);
-  margin-top: var(--sp-4);
-  font-size: var(--text-xs);
-  color: var(--text-tertiary);
-}
-.wifi-sync-stages span { display: flex; align-items: center; gap: var(--sp-1); }
-.wifi-sync-stages span.active { color: var(--accent); font-weight: var(--weight-semibold); }
-.wifi-sync-stages span.done { color: var(--green-text); }
 
 .setup-perm-icon {
   width: 48px;

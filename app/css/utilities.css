@@ -4,7 +4,6 @@
 .hidden { display: none !important; }
 .flex-1 { flex: 1; }
 .w-full { width: 100%; }
-.text-center { text-align: center; }
 .text-destructive { color: var(--destructive); }
 .inline { display: inline; width: auto; }
 .valign-mid { vertical-align: middle; }
@@ -16,7 +15,6 @@
 .mb-0 { margin-bottom: 0; }
 .mt-0 { margin-top: 0; }
 .mb-2 { margin-bottom: var(--sp-2); }
-.mb-3 { margin-bottom: var(--sp-3); }
 .mr-1 { margin-right: var(--sp-1); }
 .my-2 { margin: var(--sp-2) 0; }
 .settings-btn-compact { padding: var(--sp-1_5) var(--sp-3); font-size: var(--text-sm); }

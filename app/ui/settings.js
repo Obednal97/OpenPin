@@ -2349,12 +2349,7 @@ function initStorageEvents() {
 
   if (changeBtn) {
     changeBtn.addEventListener('click', async () => {
-      let dir;
-      if (window.plaud.selectDirectory) {
-        dir = await window.plaud.selectDirectory();
-      } else {
-        dir = prompt('Enter the full path for new recording saves:');
-      }
+      const dir = await window.plaud.selectDirectory();
       if (!dir) return;
 
       const oldDir = (app.settings.save_directory || app.settings.default_save_directory || '');
