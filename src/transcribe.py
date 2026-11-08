@@ -6,11 +6,6 @@ Speaker identification ("diarization") tries, in order:
 2. pyannote (``pyannote/speaker-diarization-3.1``), only when a Hugging Face
    token is saved and pyannote.audio is already installed. The app never
    installs pyannote itself (it isn't in the pinned lockfiles).
-
-Usage:
-    python -m src.transcribe path/to/audio.mp3
-    python -m src.transcribe path/to/audio.mp3 --diarize
-    python -m src.transcribe cloud_recordings/ --all
 """
 
 from __future__ import annotations
@@ -21,7 +16,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -207,38 +201,6 @@ def delete_hf_token() -> None:
         Path(HF_TOKEN_PATH).unlink()
     except FileNotFoundError:
         pass
-
-
-def setup_diarization() -> bool:
-    """Command-line setup for the optional pyannote fallback. Returns True if a token was saved."""
-    models = "\n".join(f"     - https://huggingface.co/{m}" for m in PYANNOTE_GATED_MODELS)
-    print("\n" + "=" * 60)
-    print("  Speaker identification: optional pyannote fallback")
-    print("=" * 60)
-    print(f"""
-  The built-in speaker model (the 'diarize' package) needs no account
-  or token. A Hugging Face token only enables the pyannote fallback,
-  which also needs pyannote.audio installed in this Python.
-
-  Steps:
-  1. Create a free account at https://huggingface.co/join
-  2. Accept the model terms (one-time):
-{models}
-  3. Create a "Read" access token at https://huggingface.co/settings/tokens
-  4. Paste the token below. (In the app: Settings > Processing >
-     Speaker Identification.)
-""")
-    token = input("  HuggingFace token (hf_...): ").strip()
-    if not token or not token.startswith("hf_"):
-        print("  Invalid token. Must start with 'hf_'.")
-        return False
-
-    save_hf_token(token)
-    print(f"  Token saved to {HF_TOKEN_PATH}")
-    if not _pyannote_installed():
-        print("  pyannote.audio isn't installed here; install it with pip to use the fallback.")
-    print("=" * 60)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -694,97 +656,3 @@ def transcribe(
             transcript = merge_transcript_with_diarization(transcript, result.segments)
 
     return transcript
-
-
-def transcribe_directory(
-    directory: str,
-    output_dir: str | None = None,
-    model: str = "base",
-    diarize: bool = False,
-) -> list[tuple[str, Transcript]]:
-    """Transcribe all audio files in a directory."""
-    audio_extensions = {".mp3", ".wav", ".opus", ".m4a", ".ogg", ".flac"}
-    dir_path = Path(directory)
-    out_path = Path(output_dir) if output_dir else dir_path / "transcripts"
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    audio_files = [f for f in sorted(dir_path.iterdir()) if f.suffix.lower() in audio_extensions]
-
-    if not audio_files:
-        print(f"No audio files found in {directory}")
-        return []
-
-    print(f"Found {len(audio_files)} audio file(s) to transcribe")
-    results = []
-
-    for i, audio_file in enumerate(audio_files):
-        transcript_path = out_path / (audio_file.stem + ".json")
-        formatted_path = out_path / (audio_file.stem + ".txt")
-
-        if transcript_path.exists():
-            print(f"[{i + 1}/{len(audio_files)}] Skipping (exists): {audio_file.name}")
-            t = Transcript.load(str(transcript_path))
-            results.append((str(audio_file), t))
-            continue
-
-        print(f"\n[{i + 1}/{len(audio_files)}] {audio_file.name}")
-        t = transcribe(str(audio_file), model=model, diarize=diarize)
-
-        if t.text:
-            t.save(str(transcript_path))
-            formatted_path.write_text(t.formatted, encoding="utf-8")
-            print(f"  Saved: {transcript_path.name}")
-
-        results.append((str(audio_file), t))
-
-    return results
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Transcribe audio files locally")
-    parser.add_argument("path", nargs="?", help="Audio file or directory path")
-    parser.add_argument("--model", default="small", help="Whisper model: base/small/medium/turbo/large (default: small)")
-    parser.add_argument("--diarize", action="store_true", help="Label speakers (Speaker 1, Speaker 2...)")
-    parser.add_argument(
-        "--setup-diarize", action="store_true", help="Save a Hugging Face token for the optional pyannote fallback"
-    )
-    parser.add_argument("--language", default=None, help="Force language (e.g., en)")
-    parser.add_argument("--all", action="store_true", help="Transcribe all files in directory")
-    parser.add_argument("--output", default=None, help="Output directory for transcripts")
-
-    args = parser.parse_args()
-
-    if args.setup_diarize:
-        setup_diarization()
-        sys.exit(0)
-
-    if not args.path:
-        parser.print_help()
-        sys.exit(1)
-
-    path = Path(args.path)
-
-    if path.is_dir() or args.all:
-        results = transcribe_directory(
-            str(path),
-            output_dir=args.output,
-            model=args.model,
-            diarize=args.diarize,
-        )
-        print(f"\nTranscribed {len(results)} file(s)")
-    elif path.is_file():
-        t = transcribe(
-            str(path),
-            model=args.model,
-            diarize=args.diarize,
-            language=args.language,
-        )
-        if t.text:
-            out = str(path.with_suffix(".json"))
-            t.save(out)
-            print(f"\nSaved: {out}")
-            print(f"\n--- Transcript ---\n{t.formatted[:2000]}")
-    else:
-        print(f"Path not found: {path}")

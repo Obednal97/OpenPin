@@ -1,7 +1,8 @@
-"""The page the browser shows when Notion or Google Drive sends the user back.
+"""The OAuth callback server, PKCE pair and the page the browser shows when
+Notion or Google Drive sends the user back.
 
-The OAuth callback servers in app/state/notion.py and app/state/gdrive.py
-answer with ``send(handler, service, outcome, detail)``. The page is fully
+``serve_callback`` (used by app/state/notion.py and app/state/gdrive.py)
+answers with ``send(handler, service, outcome, detail)``. The page is fully
 self-contained: no fonts, images or scripts from anywhere else (the URL holds
 the one-time code, and nothing should carry it off as a Referer), and its only
 script removes that code from the address bar.
@@ -15,8 +16,15 @@ Outcomes:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
+import os
 import secrets
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
 
 OUTCOMES = ("connected", "cancelled", "expired", "failed")
 
@@ -323,3 +331,57 @@ def send(handler, service: str, outcome: str, detail: str | None = None) -> None
     )
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def pkce_pair() -> tuple[str, str]:
+    """A PKCE (code_verifier, S256 code_challenge) pair."""
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def serve_callback(port: int, path: str, service: str, state_fn, exchange_fn) -> None:
+    """Answer the provider's redirect to ``path`` on 127.0.0.1:``port``, from a daemon thread.
+
+    Expired when the state isn't ``state_fn()``; otherwise ``exchange_fn(code)`` runs and
+    the page says connected, or failed if it raised. The server stops after the first
+    answer, or after 120 s.
+    """
+    done = threading.Event()
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path != path:
+                self.send_response(404)
+                self.end_headers()
+                return
+            params = parse_qs(parsed.query)
+            error = params.get("error", [None])[0]
+            if error == "access_denied":
+                send(self, service, "cancelled")
+            elif error:
+                desc = params.get("error_description", [""])[0]
+                send(self, service, "failed", f"{error}: {desc}" if desc else error)
+            elif params.get("state", [None])[0] != state_fn():
+                send(self, service, "expired")
+            else:
+                try:
+                    exchange_fn(params.get("code", [None])[0])
+                    send(self, service, "connected")
+                except Exception as e:
+                    send(self, service, "failed", str(e))
+            done.set()
+
+        def log_message(self, format, *args):
+            pass
+
+    def run_server():
+        server = HTTPServer(("127.0.0.1", port), CallbackHandler)
+        server.timeout = 1
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not done.is_set():
+            server.handle_request()
+        server.server_close()
+
+    threading.Thread(target=run_server, daemon=True).start()

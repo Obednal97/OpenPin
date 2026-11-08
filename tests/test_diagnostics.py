@@ -56,6 +56,7 @@ def _plant_cloud(monkeypatch):
 
 def test_diagnostics_shape(flask_client, monkeypatch):
     monkeypatch.setitem(dev._device_state, "last_handshake", None)
+    monkeypatch.setitem(dev._device_state, "connected", False)  # another file may leave a fake device connected
     r = flask_client.get("/diagnostics")
     assert r.status_code == 200
     data = r.get_json()

@@ -3,7 +3,6 @@
 from flask import Blueprint, jsonify, request
 
 from app.state import gdrive
-from app.utils.paths import InvalidSessionIdError, validate_session_id
 
 bp = Blueprint("gdrive", __name__, url_prefix="/gdrive")
 
@@ -68,31 +67,6 @@ def set_folder():
     return jsonify({"saved": True})
 
 
-@bp.route("/upload", methods=["POST"])
-def upload():
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    if not session_id:
-        return jsonify({"error": "No session_id"}), 400
-    try:
-        validate_session_id(session_id)
-    except InvalidSessionIdError as e:
-        return jsonify({"error": str(e)}), 400
-
-    from app.routes.recordings import _find_recording
-
-    path = _find_recording(session_id)
-    if not path:
-        return jsonify({"error": "Recording not found"}), 404
-
-    try:
-        drive_id = gdrive.upload_file(str(path))
-        gdrive.mark_synced(session_id, drive_id, path.stat().st_size)
-        return jsonify({"uploaded": True, "drive_file_id": drive_id})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @bp.route("/sync", methods=["POST"])
 def sync():
     try:
@@ -100,13 +74,3 @@ def sync():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@bp.route("/sync-status")
-def sync_status():
-    return jsonify(gdrive.get_sync_status())
-
-
-@bp.route("/upload-progress")
-def upload_progress():
-    return jsonify(gdrive.get_upload_progress())

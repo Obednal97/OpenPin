@@ -2,9 +2,7 @@
 
 import json
 import logging
-import os
 import re
-import tempfile
 import threading
 import time as _time
 import traceback
@@ -13,7 +11,7 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from app.state import notion
-from app.utils import notion_legacy, speaker_names
+from app.utils import notion_legacy, speaker_names, transcripts
 from app.utils.config import load_config, update_config
 from app.utils.constants import DEFAULT_TAGS, TRANSCRIPTS_DIR
 from app.utils.paths import InvalidSessionIdError, validate_session_id
@@ -97,27 +95,7 @@ def _mutate_transcript_json(session_id, mutate):
     file was written.
     """
     validate_session_id(session_id)
-    path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    with get_transcript_lock(session_id):
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text())
-        if not isinstance(data, dict):
-            return False
-        if not mutate(data):
-            return False
-        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".notion_", suffix=".json.tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2, ensure_ascii=False))
-            os.replace(tmp_path, path)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        return True
+    return transcripts.update(TRANSCRIPTS_DIR / f"{session_id}.json", lambda d: bool(mutate(d)))
 
 
 _last_notion_verify = 0

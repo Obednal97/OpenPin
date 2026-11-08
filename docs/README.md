@@ -11,7 +11,7 @@ use that (see [ARCHITECTURE.md](ARCHITECTURE.md#names)). Then, in reading order:
 | [RELEASING.md](RELEASING.md) | Build, sign, notarise and publish a release; rotate the update server's token; what an exported bug report contains |
 | [../SECURITY.md](../SECURITY.md) | Report a problem; threat model; secrets policy; accepted risks |
 | [../infra/update-worker/README.md](../infra/update-worker/README.md) | The `plaud-v2-updates` Cloudflare Worker: endpoints, limits, deploy, smoke tests |
-| [../scripts/README.md](../scripts/README.md) | Build scripts and the legacy device scripts |
+| [../scripts/README.md](../scripts/README.md) | Build scripts |
 | [superpowers/specs/](superpowers/specs/) and [superpowers/plans/](superpowers/plans/) | The design and build plan behind each recent feature: conversation coaching, the MCP server and speaker names, Engagement and laughter. The code is the final word where they differ |
 
 ## Reverse engineering

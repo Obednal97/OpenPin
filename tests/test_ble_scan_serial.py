@@ -136,7 +136,6 @@ def test_scan_device_unpaired_returns_advertised_serial(fake_scanner, monkeypatc
 
 @pytest.fixture
 def connect_env(tmp_path, monkeypatch, paired):
-    monkeypatch.setattr(dev, "SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(dev, "_HANDSHAKE_REPLY_TIMEOUT_S", 0.1)
     monkeypatch.setattr(dev, "SN_SIG_REPLY_WAIT_S", 1)
     sigs = {SN: base64.b64encode(bytes(256)).decode()}

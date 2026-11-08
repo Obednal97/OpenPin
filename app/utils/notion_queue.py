@@ -38,16 +38,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.utils.constants import NOTION_QUEUE_PATH
+from app.utils.fileio import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ _PERMANENT_ERROR_MARKERS = (
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017 (requires-python >=3.10)
+    return datetime.now(UTC).isoformat()
 
 
 def _stronger_kind(a: str | None, b: str | None) -> str:
@@ -157,20 +156,11 @@ class _State:
             "paused": self.paused,
             "pause_reason": self.pause_reason,
         }
-        tmp_path = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(prefix=".notion_queue.", dir=str(self.path.parent))
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(payload, f, indent=2)
-            os.replace(tmp_path, self.path)
+            atomic_write(self.path, json.dumps(payload, indent=2))
         except Exception as e:
             log.warning(f"[notion-queue] could not write {self.path}: {e}")
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     # ---- public API ----
 

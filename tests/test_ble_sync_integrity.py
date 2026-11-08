@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 import app.state.device as dev
 from app.utils.audio import BleDecryptError, decrypt_ble_file
-from tests.plaud_fakes import TOC, make_plaud_file, py310_asyncio
+from tests.plaud_fakes import TOC, make_plaud_file
 
 CHUNK = 240
 
@@ -719,7 +719,7 @@ def test_second_sync_rejected_while_first_waits_for_ble_lock(env, monkeypatch):
     can't slip in behind the first and run a full second sync."""
     calls = []
 
-    async def fake_inner(progress_callback=None, background=False):
+    async def fake_inner(background=False):
         calls.append(1)
         return {"files": []}
 
@@ -921,27 +921,3 @@ def test_sync_route_background_flag(flask_client, monkeypatch, kwargs, expected)
     r = flask_client.post("/device/sync", **kwargs)
     assert r.status_code == 200
     assert seen["background"] is expected
-
-
-# ---------------------------------------------------------------------------
-# Python 3.10: asyncio.TimeoutError is not the builtin TimeoutError
-# ---------------------------------------------------------------------------
-
-
-def test_send_cmd_timeout_handled_with_py310_asyncio(env, monkeypatch):
-    monkeypatch.setattr(dev, "asyncio", py310_asyncio())
-    device = FakeDevice({})
-
-    async def go():
-        device.install()
-        return await dev.send_cmd(bytes([1, 9, 0]), timeout=0.05)  # fake device never answers cmd 9
-
-    assert asyncio.run(go()) is None
-
-
-def test_stall_detected_with_py310_asyncio(env, app_key, monkeypatch):
-    monkeypatch.setattr(dev, "asyncio", py310_asyncio())
-    data = make_plaud_file(app_key)
-    result = run_sync(FakeDevice({171: data}, {171: "stall"}), [(171, len(data))])
-    e = entry(result, 171)
-    assert e["status"] == "partial" and e["reason"] == "stalled"

@@ -166,7 +166,7 @@ def parent(tmp_path, monkeypatch):
             events.append("awake end")
 
     monkeypatch.setattr(dev, "_syncing", SpyLock(events))
-    monkeypatch.setattr(dev, "_keep_awake", KeepAwake)
+    monkeypatch.setattr(dev, "keep_awake", KeepAwake)
     monkeypatch.setattr(dev, "DATA_DIR", tmp_path)
     monkeypatch.setattr(dev, "get_recordings_dir", lambda: tmp_path / "rec")
     monkeypatch.setattr(dev, "load_config", lambda: {})

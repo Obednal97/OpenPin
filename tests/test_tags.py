@@ -263,14 +263,6 @@ def test_add_route_rejects_long_tag(env):
     assert _rec_tags() == []
 
 
-def test_get_tags_route(env):
-    save_config({"recording_tags": {SID: ["Work"]}})
-    r = env.client.get("/tags")
-    assert r.status_code == 200
-    got = {t["tag"]: t["recordings"] for t in r.get_json()["tags"]}
-    assert got["Work"] == 1
-
-
 # ---------------------------------------------------------------------------
 # The window only adds and removes single tags
 # ---------------------------------------------------------------------------

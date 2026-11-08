@@ -33,8 +33,6 @@ from app.utils.constants import (
     APP_KEY_PATH,
     BLE_SERVICE_UUID,
     DATA_DIR,
-    PROJECT_ROOT,
-    SESSIONS_DIR,
     get_all_recordings_dirs,
     get_recordings_dir,
 )
@@ -44,6 +42,8 @@ from app.utils.constants import (
 from app.utils.constants import (
     BLE_WRITE_UUID as W,
 )
+from app.utils.fileio import atomic_write
+from app.utils.system import keep_awake
 from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
 
 # Module-level state
@@ -94,11 +94,6 @@ _REFUSED_GRACE_S = 5
 RETRY_CAP = 3
 _download_failures = {}  # str(session id) -> consecutive failed attempts
 _download_failures_lock = threading.Lock()
-
-
-def _update_config(mutate):
-    """Load the config, apply `mutate(config)` in place, save it — under the config lock."""
-    update_config(mutate)
 
 
 def _finalize_redownload_backup(sid):
@@ -464,45 +459,6 @@ async def read_battery():
     except Exception as e:
         logging.debug(f"Battery read (cmd 9) failed: {e}")
     return None, None
-
-
-class _keep_awake:
-    """Context manager that disables macOS App Nap for its duration.
-
-    When the app window loses focus, macOS throttles the process and coalesces
-    timers, which delays CoreBluetooth notification delivery. During a long BLE
-    file transfer that stall can exceed the watchdog window and abort the sync.
-    NSProcessInfo's begin/endActivity keeps the process responsive while syncing.
-    No-op on non-macOS or if pyobjc Foundation is unavailable.
-    """
-
-    # NSActivityUserInitiated — user-initiated work; disables App Nap and idle sleep.
-    _OPTIONS = 0x00FFFFFF
-
-    def __init__(self, reason="Plaud BLE sync"):
-        self._reason = reason
-        self._token = None
-
-    def __enter__(self):
-        try:
-            from Foundation import NSProcessInfo
-
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
-        except Exception as e:
-            logging.debug(f"App Nap suppression unavailable: {e}")
-            self._token = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._token is not None:
-            try:
-                from Foundation import NSProcessInfo
-
-                NSProcessInfo.processInfo().endActivity_(self._token)
-            except Exception:
-                pass
-            self._token = None
-        return False
 
 
 def _get_loop():
@@ -1052,30 +1008,6 @@ async def connect_device(address=None):
             }
         return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
 
-    # Save session (atomic write — prevents corruption on mid-write crash)
-    SESSIONS_DIR.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_path = str(SESSIONS_DIR / f"session_{ts}.json")
-    tmp_path = session_path + ".tmp"
-    session_data = {
-        "key": key.hex(),
-        "nonce": nonce.hex(),
-        "aad": aad.hex(),
-        "status": "ACTIVE",
-        "timestamp": datetime.now().isoformat(),
-    }
-    try:
-        with open(tmp_path, "w") as f:
-            json.dump(session_data, f, indent=2)
-        os.replace(tmp_path, session_path)
-    except Exception as e:
-        logging.warning("Failed to save session: %s", e)
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
     _device_state["session_keys"] = (key, nonce, aad)
     cipher = ChaCha20Poly1305(key)
     _device_state["cipher"] = cipher
@@ -1204,7 +1136,7 @@ async def send_cmd(pt, timeout=5):
         return None
     try:
         await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
-    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+    except TimeoutError:
         pass
     return cmd_resp[0]
 
@@ -1277,7 +1209,7 @@ async def depair_device():
             try:
                 await asyncio.wait_for(verify_ack.wait(), timeout=5)
                 depair_verified = True
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+            except TimeoutError:
                 depair_verified = False
 
         await cl.stop_notify(N)
@@ -1287,13 +1219,6 @@ async def depair_device():
     await asyncio.sleep(1)
     await disconnect_device()
 
-    if SESSIONS_DIR.exists():
-        for sf in SESSIONS_DIR.glob("session_*.json"):
-            try:
-                sf.unlink()
-            except Exception:
-                pass
-
     forgotten = {depair_sn} if depair_sn else set()
 
     def _forget_devices(config):
@@ -1302,18 +1227,11 @@ async def depair_device():
         config.pop("known_devices_by_sn", None)
         config.pop("known_devices", None)
 
-    _update_config(_forget_devices)
+    update_config(_forget_devices)
     # The device is unpaired so it can pair elsewhere: drop the Keychain backup
     # too, or the next launch would restore the pairing. (The credentials stay
     # in the config, as before; only paired devices are backed up.)
     pairing_store.forget_async(forgotten)
-
-    sk_path = PROJECT_ROOT / "session_keys.json"
-    if sk_path.exists():
-        try:
-            sk_path.unlink()
-        except Exception:
-            pass
 
     return {"depaired": True, "depair_response": depair_ok, "depair_verified": depair_verified}
 
@@ -1365,37 +1283,14 @@ async def list_device_files():
 
 
 async def get_device_info():
-    """Query all available device information in one call."""
+    """Query the device information the Settings Device panel shows, in one call."""
     info = {}
 
-    # cmd 2 — Get SSN (serial number + firmware version)
+    # cmd 2 — Get SSN; the firmware version is the u24 at offset 60 (patch, minor, major)
     try:
         r = await send_cmd(bytes([1, 2, 0]), timeout=3)
-        if r and len(r) >= 10:
-            # Serial number: null-terminated string starting at offset 3 (relative to payload)
-            # But our send_cmd strips the cmd_type prefix, so payload starts at byte 0
-            # Actually send_cmd returns the decrypted payload dd[1:] — let's check
-            # The handler strips the first byte (dd[0] = type), so we get from byte 1 onward
-            # cmd_resp = dd = decrypted[4:] then response is dd
-            # dd[0] = type (1=cmd, 2=file), dd[1:3] = cmd_id, dd[3:] = payload
-            # So offset 3 in raw = index 3 in our response
-            sn_bytes = r[3:59] if len(r) >= 59 else r[3:]
-            null_idx = sn_bytes.find(0)
-            if null_idx >= 0:
-                sn_bytes = sn_bytes[:null_idx]
-            sn = bytes(sn_bytes).decode("ascii", errors="ignore").strip("\x00")
-            if sn:
-                info["serial_number_full"] = sn
-
-            if len(r) >= 63:
-                ver_num = r[60] | (r[61] << 8) | (r[62] << 16)
-                # Version is typically encoded as major*65536 + minor*256 + patch
-                # e.g. 65546 = 1*65536 + 0*256 + 10 = v1.0.10
-                major = (ver_num >> 16) & 0xFF
-                minor = (ver_num >> 8) & 0xFF
-                patch = ver_num & 0xFF
-                info["firmware_version"] = f"{major}.{minor}.{patch}"
-                info["firmware_version_raw"] = ver_num
+        if r and len(r) >= 63:
+            info["firmware_version"] = f"{r[62]}.{r[61]}.{r[60]}"
     except Exception:
         pass
 
@@ -1403,32 +1298,17 @@ async def get_device_info():
     try:
         r = await send_cmd(bytes([1, 3, 0]), timeout=3)
         if r and len(r) >= 8:
-            state_val = struct.unpack_from("<I", r, 3)[0] if len(r) >= 7 else 0
-            info["recording_state"] = (
-                state_val  # raw device state bitfield (idle=1, recording=0x1003) — kept for reference, NOT used for is_recording
-            )
             # Recording is determined by the active session id, not `state`:
             # measured idle -> session 0, scene 0; recording -> session != 0, scene 1.
-            # (The `state` field is a bitfield, not a 0-3 enum, so the old
-            # `state in (1,3)` check was wrong both ways.)
             session_id = struct.unpack_from("<I", r, 11)[0] if len(r) >= 15 else 0
             info["active_session_id"] = session_id
             info["is_recording"] = session_id != 0
-            if len(r) >= 8:
-                info["privacy_enabled"] = bool(r[7])
-            if len(r) >= 9:
-                info["key_state"] = r[8]
-                info["button_pressed"] = r[8] == 1
             if len(r) >= 10:
                 info["usb_connected"] = bool(r[9])
             if len(r) >= 11:
                 scene = r[10]
-                info["scene"] = scene
                 scene_names = {0: "Idle", 1: "Recording", 2: "Meeting", 3: "Call", 4: "Lecture"}
                 info["scene_name"] = scene_names.get(scene, f"Mode {scene}")
-            if len(r) >= 16:
-                info["find_my_state"] = r[15]
-                info["find_my_enabled"] = r[15] > 0
     except Exception:
         pass
 
@@ -1438,15 +1318,12 @@ async def get_device_info():
         if r and len(r) >= 19:
             free_bytes = struct.unpack_from("<Q", r, 3)[0]
             total_bytes = struct.unpack_from("<Q", r, 11)[0]
-            info["storage_free_bytes"] = free_bytes
             info["storage_total_bytes"] = total_bytes
             info["storage_used_bytes"] = total_bytes - free_bytes
             if total_bytes > 0:
                 info["storage_used_pct"] = round((total_bytes - free_bytes) / total_bytes * 100, 1)
             # Estimate remaining recording time (80 bytes per 20ms frame = 4000 bytes/sec)
             info["storage_remaining_hours"] = round(free_bytes / 4000 / 3600, 1)
-            if len(r) >= 27:
-                info["storage_field3_raw"] = struct.unpack_from("<Q", r, 19)[0]
     except Exception:
         pass
 
@@ -1456,27 +1333,7 @@ async def get_device_info():
     if chg is not None:
         info["charging"] = chg
 
-    # cmd 36 — Accelerometer / orientation
-    try:
-        r = await send_cmd(bytes([1, 36, 0]), timeout=3)
-        if r and len(r) >= 15:
-            pitch = struct.unpack_from("<i", r, 3)[0]
-            roll = struct.unpack_from("<i", r, 7)[0]
-            yaw = struct.unpack_from("<i", r, 11)[0]
-            info["accelerometer"] = {"pitch": pitch, "roll": roll, "yaw": yaw}
-    except Exception:
-        pass
-
     return info
-
-
-async def set_find_my(enabled):
-    """Enable or disable Find My on the device (cmd 109)."""
-    r = await send_cmd(bytes([1, 109, 0, 1 if enabled else 0]), timeout=3)
-    # Read back to confirm
-    if r and len(r) >= 4:
-        return {"find_my_enabled": bool(r[3])}
-    return {"find_my_enabled": enabled}
 
 
 async def delete_device_file(session_id):
@@ -1505,18 +1362,6 @@ async def delete_device_file(session_id):
     return {"deleted": True, "session_id": session_id}
 
 
-async def start_recording():
-    """Start recording on the device."""
-    await send_cmd(bytes([1, 20, 0]))
-    return {"recording": True}
-
-
-async def stop_recording():
-    """Stop recording on the device."""
-    await send_cmd(bytes([1, 23, 0]))
-    return {"recording": False}
-
-
 SYNC_BUSY_ERROR = "Sync already in progress"
 
 
@@ -1540,7 +1385,7 @@ def release_sync():
     _syncing.release()
 
 
-async def sync_files(progress_callback=None, _claimed=False, background=False):
+async def sync_files(_claimed=False, background=False):
     """Download all files from device, decrypt, save as .ogg.
 
     `_claimed=True` means the caller already took the sync slot via
@@ -1558,8 +1403,8 @@ async def sync_files(progress_callback=None, _claimed=False, background=False):
     try:
         # Suppress macOS App Nap so backgrounding the window can't throttle the
         # CoreBluetooth stream and trip the stall watchdog mid-transfer.
-        with _keep_awake("Plaud BLE sync"):
-            return await _sync_files_inner(progress_callback, background=background)
+        with keep_awake("Plaud BLE sync"):
+            return await _sync_files_inner(background=background)
     finally:
         _ble_sync_status.update({"message": "", "percent": 0, "active": False, **_NO_FILE_PROGRESS})
         _syncing.release()
@@ -1797,12 +1642,6 @@ def is_already_synced(sid, rec_dirs=None, cloud_ids=None):
     return str(sid) in cloud_ids
 
 
-def _atomic_write(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
 async def _send_stop_sync():
     """Tell the device to stop streaming the current file (cmd 30)."""
     try:
@@ -1902,10 +1741,7 @@ def scrub_wifi_logs(data_dir=None):
             text = path.read_text(encoding="utf-8", errors="replace")
             clean = redact_secrets(text, secrets)
             if clean != text:
-                tmp = path.with_name(path.name + ".tmp")
-                tmp.write_text(clean, encoding="utf-8")
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, path)
+                atomic_write(path, clean)
                 logging.info(f"[WiFi] removed credentials from {name}")
         marker.write_text("wifi_sync logs redacted\n")
         return True
@@ -2108,7 +1944,7 @@ def do_wifi_sync_blocking():
         {"active": True, "budget_s": compute_budget(0)["total_s"], "deadline": deadline.wall_clock()}
     )
     try:
-        with _keep_awake("Plaud WiFi sync"):
+        with keep_awake("Plaud WiFi sync"):
             return _do_wifi_sync_locked(deadline)
     finally:
         _wifi_sync_status["active"] = False
@@ -2344,7 +2180,7 @@ def _save_partial(sid, raw, expected, reason, rec_dir):
     if raw:
         try:
             if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
-                _atomic_write(partial_path, raw)
+                atomic_write(partial_path, raw)
             saved = str(partial_path)
         except OSError as e:
             logging.warning(f"Could not save partial download for session {sid}: {e}")
@@ -2396,7 +2232,7 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encryp
     ogg_path = rec_dir / f"{sid}.ogg"
     partial_path = rec_dir / f"{sid}_partial.bin"
     try:
-        _atomic_write(enc_path, raw)
+        atomic_write(enc_path, raw)
     except OSError as e:
         logging.warning(f"Could not save encrypted download for session {sid}: {e}")
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
@@ -2416,7 +2252,7 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encryp
             "encrypted_path": str(enc_path),
         }
     try:
-        _atomic_write(ogg_path, wrap_opus_ogg(opus_frames))
+        atomic_write(ogg_path, wrap_opus_ogg(opus_frames))
     except OSError as e:
         logging.warning(f"Could not write {ogg_path}: {e} — encrypted original kept")
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
@@ -2429,7 +2265,7 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encryp
     return {"session_id": sid, "ogg_path": str(ogg_path), "duration": round(duration, 1), "status": "new"}
 
 
-async def _sync_files_inner(progress_callback=None, background=False):
+async def _sync_files_inner(background=False):
     """Internal BLE sync implementation."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
@@ -2587,7 +2423,7 @@ async def _sync_files_inner(progress_callback=None, background=False):
                 break
             try:
                 await asyncio.wait_for(file_done.wait(), timeout=_RECV_POLL_S)
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+            except TimeoutError:
                 now = time.time()
                 # Connection genuinely dropped — stop immediately rather than
                 # waiting out the stall window.
@@ -2726,7 +2562,7 @@ def save_known_device(address, name=None, serial_number=None):
         }
         config["paired_devices"] = paired
 
-    _update_config(_remember)
+    update_config(_remember)
     pairing_store.backup_serial_async(sn, name)
 
 
