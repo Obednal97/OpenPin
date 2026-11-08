@@ -1113,32 +1113,14 @@ fn python_env_info() -> String {
     info.join("\n")
 }
 
-/// Backend fields for the system-info block, or None if the server lock is
-/// held and `wait` is false.
-fn server_snapshot(wait: bool) -> Option<(bool, u16, String, String)> {
-    let server = if wait {
+/// System info for an exported report. `python_env_info` runs `pip` twice
+/// (a second or more).
+fn system_info_block(version: &str) -> String {
+    let (python_running, port, py_path, py_ver) = {
         // Tolerate a poisoned lock.
-        python::get_server().lock().unwrap_or_else(|e| e.into_inner())
-    } else {
-        match python::get_server().try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        }
-    };
-    Some((server.process.is_some(), server.port, server.python_path.clone(), server.python_version.clone()))
-}
-
-/// `include_python_env` runs `pip` twice (a second or more); the panic path
-/// passes false: it skips that, and it never waits for the backend lock —
-/// the panicking thread may be the one holding it (the panic hook runs
-/// before unwinding releases it), so a blocking `lock()` would stall the
-/// report until the hook gives up. If the lock is busy the backend lines say
-/// so instead.
-fn system_info_block(version: &str, include_python_env: bool) -> String {
-    let (python_running, port, py_path, py_ver) = match server_snapshot(include_python_env) {
-        Some((running, port, path, ver)) => (if running { "running" } else { "not running" }, port.to_string(), path, ver),
-        None => ("unknown (lock busy)", "unknown".to_string(), "unknown".to_string(), "unknown".to_string()),
+        let server = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
+        let running = if server.process.is_some() { "running" } else { "not running" };
+        (running, server.port, server.python_path.clone(), server.python_version.clone())
     };
 
     let mem_mb = {
@@ -1156,11 +1138,7 @@ fn system_info_block(version: &str, include_python_env: bool) -> String {
             .unwrap_or(0)
     };
 
-    let py_env = if include_python_env {
-        python_env_info()
-    } else {
-        "_(skipped)_".to_string()
-    };
+    let py_env = python_env_info();
 
     format!(
         "- **Device:** `{}`\n- **Version:** {version}\n- **Framework:** Tauri\n- **macOS:** {}\n- **Arch:** {}\n- **RAM:** {} MB\n- **API port:** {port}\n- **Python:** {py_ver}\n- **Python path:** `{py_path}`\n- **Python server:** {}\n\n**Python environment**\n{py_env}",
@@ -1342,7 +1320,7 @@ fn gather_report_inputs(
 ) -> ReportInputs {
     let log_dir = crate::paths::log_dir();
     ReportInputs {
-        sys_info: system_info_block(&version, true),
+        sys_info: system_info_block(&version),
         version,
         is_dev: is_dev_mode(),
         backend_health: backend_health()
@@ -2130,18 +2108,6 @@ exit 0"#
         assert!(err.starts_with("Download interrupted"), "{err}");
         assert!(!dest.exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn panic_path_never_waits_for_the_server_lock() {
-        // Same thread holding the lock = the panicking thread's situation; a
-        // blocking lock() here would deadlock the test.
-        let guard = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
-        assert!(server_snapshot(false).is_none());
-        let info = system_info_block("2.3.0", false);
-        assert!(info.contains("**Python server:** unknown (lock busy)"), "{info}");
-        drop(guard);
-        assert!(server_snapshot(true).is_some());
     }
 
     #[test]
