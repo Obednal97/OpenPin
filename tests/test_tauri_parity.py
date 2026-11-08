@@ -99,6 +99,7 @@ class TestTauriBridgeAPISurface:
         "/device/status",
         "/device/rssi",
         "/device/info",
+        "/device/find-my",
         "/device/files",
         "/device/check-new",
         "/device/sync",

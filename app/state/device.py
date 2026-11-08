@@ -1309,6 +1309,8 @@ async def get_device_info():
                 scene = r[10]
                 scene_names = {0: "Idle", 1: "Recording", 2: "Meeting", 3: "Call", 4: "Lecture"}
                 info["scene_name"] = scene_names.get(scene, f"Mode {scene}")
+            if len(r) >= 16:
+                info["find_my_enabled"] = r[15] > 0
     except Exception:
         pass
 
@@ -1334,6 +1336,19 @@ async def get_device_info():
         info["charging"] = chg
 
     return info
+
+
+async def set_find_my(enabled):
+    """Turn Find My on or off (cmd 109), then read back what the pin kept (cmd 3, byte 15).
+
+    In March 2026 the pin didn't keep the setting, so the UI shows the read-back
+    value, and it is logged at WARNING so it reaches app.log.
+    """
+    await send_cmd(bytes([1, 109, 0, 1 if enabled else 0]), timeout=3)
+    r = await send_cmd(bytes([1, 3, 0]), timeout=3)
+    kept = r[15] > 0 if r and len(r) >= 16 else None
+    logging.warning(f"[BLE] Find My set to {enabled}; pin reports {kept}")
+    return {"find_my_enabled": kept}
 
 
 async def delete_device_file(session_id):

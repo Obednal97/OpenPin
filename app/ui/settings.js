@@ -1266,6 +1266,27 @@ function renderDeviceInfoPanel(panel, info) {
   }
 
   panel.innerHTML = `<div class="dm-info-grid">${items.join('')}</div>`;
+
+  // Find My: the toggle shows what the pin reports after each change, not what was asked for.
+  if (info.find_my_enabled != null) {
+    panel.insertAdjacentHTML('beforeend', `<label class="toggle-label mt-2">
+      <input type="checkbox" id="dm-find-my-toggle" class="toggle-input" ${info.find_my_enabled ? 'checked' : ''}>
+      <span class="toggle-switch"></span>
+      <span>Find My</span>
+    </label>`);
+    $('#dm-find-my-toggle').addEventListener('change', async (e) => {
+      const want = e.target.checked;
+      try {
+        const { find_my_enabled: kept } = await window.plaud.setFindMy(want);
+        e.target.checked = !!kept;
+        if (kept === want) toast(want ? 'Find My is on' : 'Find My is off', 'success');
+        else toast("The pin didn't keep that setting", 'error');
+      } catch (err) {
+        e.target.checked = !want;
+        toast(`Couldn't change Find My: ${err.message}`, 'error');
+      }
+    });
+  }
 }
 
 function rssiToSignalLevel(rssi) {

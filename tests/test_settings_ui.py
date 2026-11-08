@@ -133,7 +133,7 @@ class TestSettingsTabs:
 class TestSettingsScript:
     SRC = (APP / "ui" / "settings.js").read_text()
     # Built at runtime by settings.js itself
-    DYNAMIC = {"notion-queue-notice"}
+    DYNAMIC = {"notion-queue-notice", "dm-find-my-toggle"}
 
     def test_every_looked_up_id_exists(self):
         looked_up = set(re.findall(r"\$\('#([\w-]+)'\)", self.SRC))

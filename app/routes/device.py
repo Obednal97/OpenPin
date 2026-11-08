@@ -254,6 +254,20 @@ def info():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/find-my", methods=["POST"])
+def find_my():
+    """Turn Find My on or off on the pin; returns the state the pin reports afterwards."""
+    if not dev.is_connected():
+        return jsonify({"error": "Not connected"}), 400
+    if dev.is_syncing():
+        return _busy_response()
+    enabled = bool((request.get_json(silent=True) or {}).get("enabled"))
+    try:
+        return jsonify(dev.run_async(dev.set_find_my(enabled)))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route("/scan-known", methods=["POST"])
 def scan_known():
     """Scan for a previously paired Plaud device, matched by serial number."""
