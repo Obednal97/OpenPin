@@ -1186,7 +1186,7 @@ fn diagnostics_log_path() -> std::path::PathBuf {
     crate::paths::app_support_dir().join("diagnostics.log")
 }
 
-fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {
+fn append_diagnostic(context: &str, message: &str, stack: &str) {
     let path = diagnostics_log_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1200,7 +1200,6 @@ fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &st
         "version": app_version(),
         "context": context,
         "message": message,
-        "fingerprint": fingerprint,
         "stackTruncated": stack_trunc,
     }).to_string();
     line.push('\n');
@@ -1267,52 +1266,19 @@ pub fn open_diagnostics_log() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn error_fingerprint(message: &str) -> String {
-    // Strip variable parts for deduplication:
-    // BLE UUIDs and long hex strings → HEX, digits → N.
-    // (Digits are hex digits too, so short runs must have their digits
-    // replaced when flushed — they used to be kept verbatim, so
-    // "timeout after 30s" and "after 45s" fingerprinted differently.)
-    fn flush(result: &mut String, run: &mut String) {
-        if run.len() >= 8 {
-            result.push_str("HEX");
-        } else {
-            result.extend(run.chars().map(|c| if c.is_ascii_digit() { 'N' } else { c }));
-        }
-        run.clear();
-    }
-    let mut result = String::new();
-    let mut hex_run = String::new();
-    for c in message.chars() {
-        if c.is_ascii_hexdigit() {
-            hex_run.push(c);
-        } else {
-            flush(&mut result, &mut hex_run);
-            result.push(c);
-        }
-    }
-    flush(&mut result, &mut hex_run);
-    result.chars().take(100).collect()
-}
-
 // ---- Error logging ----
 //
 // Errors are only logged: to the app log and the local diagnostics log.
 // Nothing is sent anywhere. To report a bug, people export a bug report
 // (`export_bug_report`) and attach it to a GitHub issue themselves.
 
-fn record_error_locally(message: &str, stack: Option<&str>, context: Option<&str>) {
-    let ctx = context.unwrap_or("unknown");
-    log::error!("[BugReporter] {ctx}: {message}");
-    let fingerprint = error_fingerprint(message);
-    append_diagnostic(ctx, message, stack.unwrap_or_default(), &fingerprint);
-}
-
 /// Log an error and append it to the local diagnostics log. Sends nothing.
 /// (Signature relied on by the frontend IPC and by the panic hook.)
 #[tauri::command]
 pub fn report_error(message: String, stack: Option<String>, context: Option<String>) {
-    record_error_locally(&message, stack.as_deref(), context.as_deref());
+    let ctx = context.as_deref().unwrap_or("unknown");
+    log::error!("[BugReporter] {ctx}: {message}");
+    append_diagnostic(ctx, &message, stack.as_deref().unwrap_or_default());
 }
 
 // ---- Bug report export ----
