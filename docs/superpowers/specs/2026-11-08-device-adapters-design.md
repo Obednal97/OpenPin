@@ -24,7 +24,7 @@ Downstream of a download (transcription, coaching, Notion, Google Drive, the MCP
 
 ## Anti-goals (a failure even if it works)
 
-- Any change in NotePin behaviour: pairing, Bluetooth sync, Wi-Fi fast sync, battery, delete-after-sync, the Settings Device panel, or the auto-sync timing.
+- Any change in NotePin behaviour: pairing, Bluetooth sync, Wi-Fi fast sync, find-my, battery, delete-after-sync, the Settings Device panel, or the auto-sync timing.
 - Existing users losing anything: config keys (`paired_devices`, `deleted_ids`, etc.), Keychain pairing backup, recordings named `<session_id>.ogg`, transcripts, Notion links. No data migration should be needed.
 - A contract shaped by guesses about future devices. Every method in it must be something the NotePin does today. Anything only the NotePin needs stays inside the NotePin folder.
 - More code overall than before, beyond the contract itself (the owner wants lean code; see the trim review).
@@ -48,7 +48,7 @@ The contract (`app/devices/base.py`), required for every device:
 - download one recording into the recordings folder as `<id>.ogg` (Ogg Opus, the format the library, player and transcription already use), reporting bytes as it goes
 - delete one recording from the device
 
-Optional extras the device declares, so the UI only shows what a device has: battery, signal strength, Wi-Fi fast sync, device info for the Settings panel. (Find-my and recording start/stop over Bluetooth are deleted in the trim as unused, so they are not in the contract.)
+Optional extras the device declares, so the UI only shows what a device has: battery, signal strength, find-my (back since #126), Wi-Fi fast sync, device info for the Settings panel. (Recording start/stop over Bluetooth was deleted in the trim as unused, so it is not in the contract.)
 
 Layout:
 
@@ -59,7 +59,7 @@ Layout:
 
 Calls made after the builder check (owner can overrule):
 
-- Wi-Fi fast sync keeps its own rules for what to skip. Today it checks only `deleted_ids` and the active recordings folder, with no Google Drive check, retry cap or auto-delete, unlike Bluetooth. It stays a NotePin-only path and the worker's inputs don't change. Making the two paths consistent is a behaviour change and a separate piece of work.
+- Wi-Fi fast sync skips the same recordings as Bluetooth since #127 (`device._wifi_skip_ids`: deleted, in any recordings folder, in Drive). That set is shared app code; the Wi-Fi transport stays NotePin-only. It still has no auto-delete, on purpose.
 - The plan is written against master after the trim has merged. The review's "next in line" de-duplications on the device path (BLE/Wi-Fi save paths, RSA handshake and BIND_TOKEN check, credential auto-fetch: section 2.8) are out of scope. This work only moves code. Once both copies sit in one folder, merging them is an easy follow-up.
 - Plaud Cloud sign-in, cloud recordings (`download_cloud_recordings`) and `routes/cloud.py` stay where they are: they are a Plaud service integration, not the device link. Plaud sign-in remains part of NotePin pairing only; a future non-Plaud device wouldn't need it.
 
