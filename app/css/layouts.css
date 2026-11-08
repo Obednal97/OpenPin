@@ -22,12 +22,6 @@
   background: var(--border-strong);
   flex-shrink: 0;
 }
-.app-title {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-bold);
-  letter-spacing: -0.3px;
-  color: var(--text);
-}
 .app-wordmark {
   -webkit-app-region: no-drag;
   user-select: none;
@@ -130,10 +124,6 @@
   line-height: 1;
 }
 .update-dismiss-btn:hover { color: var(--white); }
-@keyframes slideDown {
-  from { transform: translateY(-100%); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
 
 /* === LAYOUT: Main Content === */
 #main-content {
