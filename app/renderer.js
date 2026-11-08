@@ -473,25 +473,6 @@ window.plaud.onUpdateStatus((data) => {
     message.textContent = `v${data.version} ready to install`;
     actionBtn.style.display = '';
     actionBtn.textContent = 'Restart to update';
-  } else if (data.status === 'major-update-downloading') {
-    // Major version DMG downloading
-    banner.classList.remove('hidden');
-    const pct = data.percent ? ` ${data.percent}%` : '...';
-    message.textContent = `Downloading v${data.version} (major upgrade)${pct}`;
-    actionBtn.style.display = 'none';
-  } else if (data.status === 'major-update') {
-    // Major version DMG ready — auto-opened by main process
-    banner.classList.remove('hidden');
-    message.textContent = `v${data.version} ready — drag to Applications to install`;
-    actionBtn.style.display = '';
-    actionBtn.textContent = 'Open DMG Again';
-    actionBtn.disabled = false;
-    actionBtn.onclick = (e) => {
-      e.preventDefault();
-      if (data.dmgPath) {
-        window.plaud.openExternal(`file://${data.dmgPath}`);
-      }
-    };
   } else if (data.status === 'error') {
     console.error('[Updater]', data.message);
     // If an update was in progress (banner showing), say what went wrong

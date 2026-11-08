@@ -76,7 +76,7 @@ function _bridgeHeaders(extra) {
   return headers;
 }
 
-// --- HTTP proxy (same logic as preload.js apiCall) ---
+// --- HTTP proxy ---
 
 const REPORT_ENDPOINTS = new Set([
   '/device/connect', '/device/scan', '/device/scan-known', '/device/wifi-sync',
@@ -328,7 +328,7 @@ function addListener(eventName, callback) {
   }
 }
 
-// --- Expose window.plaud (identical API to preload.js) ---
+// --- Expose window.plaud ---
 
 window.plaud = {
   // Device
