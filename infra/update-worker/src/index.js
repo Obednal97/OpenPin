@@ -80,10 +80,6 @@ export function versionFromTag(tag) {
   return String(tag || '').replace(/^v/, '');
 }
 
-/**
- * No @mentions, and no HTML comments at all, so client text can never forge
- * our `<!-- plaud-v2-worker -->` / `<!-- fp:… -->` markers.
- */
 // ---------------------------------------------------------------------------
 // HTTP plumbing
 // ---------------------------------------------------------------------------
@@ -97,9 +93,9 @@ function json(data, status = 200, extraHeaders = {}) {
 
 const notFound = () => json({ ok: false, error: 'not found' }, 404);
 
-function ghHeaders(env, accept = 'application/vnd.github+json') {
+function ghHeaders(env) {
   const headers = {
-    Accept: accept,
+    Accept: 'application/vnd.github+json',
     'User-Agent': USER_AGENT,
     'X-GitHub-Api-Version': '2022-11-28',
   };
@@ -109,11 +105,8 @@ function ghHeaders(env, accept = 'application/vnd.github+json') {
   return headers;
 }
 
-async function ghJson(env, path, init = {}) {
-  const resp = await fetch(`${GH_API}${path}`, {
-    ...init,
-    headers: { ...ghHeaders(env), ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) },
-  });
+async function ghJson(env, path) {
+  const resp = await fetch(`${GH_API}${path}`, { headers: ghHeaders(env) });
   let data = null;
   try {
     data = await resp.json();
