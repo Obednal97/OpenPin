@@ -967,7 +967,7 @@ function showStartupError(error) {
 
   const footer = document.createElement('div');
   footer.style.cssText = 'margin-top:12px;font-size:11px;opacity:0.5;';
-  footer.textContent = `This error has been automatically reported. Error code: ${code}`;
+  footer.textContent = `Details are in the log. To share them, use Report a bug › Export bug report. Error code: ${code}`;
   p.appendChild(footer);
 }
 
