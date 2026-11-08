@@ -549,9 +549,9 @@ function offerWifiSync(totalSize, fileCount, isBackground) {
     // App is in tray/background — show system notification
     window.plaud.showNotification(
       'Large recordings detected',
-      `${sizeStr} to sync. Click to use Wi-Fi transfer (temporarily disconnects the internet).`,
-      'wifi-sync',
+      `${sizeStr} to sync. Confirm the Wi-Fi transfer in Open Pin (it temporarily disconnects the internet).`,
     );
+    startWifiSync(); // shows the Wi-Fi confirmation in the window
     return;
   }
 
@@ -849,13 +849,6 @@ $('#wifi-confirm-cancel').addEventListener('click', dismissWifiConfirm);
 $('#wifi-confirm-start').addEventListener('click', () => _beginWifiTransfer());
 $('#wifi-confirm-overlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) dismissWifiConfirm();
-});
-
-// Handle notification action from background
-window.plaud.onNotificationAction((action) => {
-  if (action === 'wifi-sync') {
-    startWifiSync();
-  }
 });
 
 // ---- System Wake Recovery ----

@@ -2,10 +2,8 @@
 //!
 //! * Startup: `start_python_server` (python.rs) can take minutes on a first
 //!   launch (finding or installing Python, pip installs), so it runs on a
-//!   background thread after the window is shown. Its progress messages
-//!   (`startup-status` events) are also kept here, because the page usually
-//!   loads after the first ones were emitted. The page polls
-//!   `get_startup_status` instead of relying on the events.
+//!   background thread after the window is shown. Its progress messages are
+//!   kept here, and the page polls `get_startup_status` for them.
 //! * Shutdown: stopping the backend (BLE disconnect + SIGTERM/SIGKILL) takes
 //!   2-5 s. It runs once, off the main thread where possible, and the app exits
 //!   when it's done.
@@ -18,16 +16,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{commands, python};
 
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
-
-/// Event python.rs emits with human-readable progress ("Looking for Python...").
-const STARTUP_STATUS_EVENT: &str = "startup-status";
 
 /// True while a `start_python_server` call is in progress.
 static STARTUP_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -52,7 +47,8 @@ fn startup_state() -> std::sync::MutexGuard<'static, StartupState> {
     STARTUP_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn set_startup_message(msg: &str) {
+/// Latest human-readable progress message from python.rs ("Looking for Python...").
+pub(crate) fn set_startup_message(msg: &str) {
     startup_state().message = msg.to_string();
 }
 
@@ -144,15 +140,6 @@ pub fn current_status() -> StartupStatus {
         attempt: STARTUP_ATTEMPT.load(Ordering::Acquire),
         error,
     }
-}
-
-/// Keep the latest `startup-status` message python.rs emits.
-pub fn track_startup_messages(app: &AppHandle) {
-    app.listen(STARTUP_STATUS_EVENT, |event: tauri::Event| {
-        let msg = serde_json::from_str::<String>(event.payload())
-            .unwrap_or_else(|_| event.payload().trim_matches('"').to_string());
-        set_startup_message(&msg);
-    });
 }
 
 /// Run `start_python_server` on a background thread. Returns false if a start
@@ -379,16 +366,13 @@ pub fn handle_termination_signals(app: &AppHandle) {
 /// Set while a panic is being recorded, so a burst of follow-on panics
 /// (e.g. threads hitting a poisoned mutex) only logs.
 static PANIC_REPORT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// Passed to `report_error_blocking`, which no longer waits for anything
-/// (nothing is sent over the network; see commands::report_error).
-const PANIC_REPORT_GRACE: Duration = Duration::from_secs(3);
 
 /// Record Rust panics in the app log and the local diagnostics log.
 ///
 /// Nothing is sent anywhere: a panic shows up in an exported bug report
-/// (Report a bug › Export bug report). On the main thread a panic aborts the
-/// process when the hook returns, so the hook writes the record directly
-/// (`report_error_blocking`, no extra thread) before returning.
+/// (Report a bug › Export bug report). The record is written directly, with no
+/// extra thread, because on the main thread a panic aborts the process when the
+/// hook returns.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let message = format!("{info}");
@@ -401,15 +385,7 @@ pub fn install_panic_hook() {
         if PANIC_REPORT_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
         }
-        let msg = format!("[PANIC] {message}");
-        let ctx = Some("rust-panic".to_string());
-        if thread_name == "main" {
-            // A main-thread panic takes the process down: write the record
-            // before returning.
-            let _ = commands::report_error_blocking(msg, Some(backtrace), ctx, PANIC_REPORT_GRACE);
-        } else {
-            commands::report_error(msg, Some(backtrace), ctx);
-        }
+        commands::report_error(format!("[PANIC] {message}"), Some(backtrace), Some("rust-panic".to_string()));
         PANIC_REPORT_IN_FLIGHT.store(false, Ordering::Release);
     }));
 }

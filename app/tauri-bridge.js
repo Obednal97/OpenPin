@@ -251,10 +251,8 @@ async function apiCall(method, endpoint, body = null) {
 
 const _eventCallbacks = {
   'startup-error': [],
-  'startup-status': [],
   'oauth-callback': [],
   'system-wake': [],
-  'notification-action': [],
   'update-status': [],
   'tray-sync': [],
 };
@@ -465,7 +463,6 @@ window.plaud = {
   // URL resolution; callers checking server status need a fresh value.
   getApiInfo: () => invoke('get_api_info'),
   onStartupError: (callback) => addListener('startup-error', callback),
-  onStartupStatus: (callback) => addListener('startup-status', callback),
 
   // Notion
   notionStatus: () => apiCall('GET', '/notion/status'),
@@ -527,9 +524,7 @@ window.plaud = {
   onSystemWake: (callback) => addListener('system-wake', callback),
   // Tray "Sync Device" menu item — routed through the normal in-app sync flow
   onTraySync: (callback) => addListener('tray-sync', callback),
-  showNotification: (title, body, actionLabel) =>
-    invoke('show_notification', { title, body, actionLabel }),
-  onNotificationAction: (callback) => addListener('notification-action', callback),
+  showNotification: (title, body) => invoke('show_notification', { title, body }),
 
   // Directory picker
   selectDirectory: () => invoke('select_directory'),
