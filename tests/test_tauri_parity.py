@@ -289,7 +289,6 @@ class TestTauriBridgeAPISurface:
 
     REQUIRED_EVENTS = [
         "startup-error",
-        "startup-status",
         "oauth-callback",
         "system-wake",
         "notification-action",

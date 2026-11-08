@@ -885,11 +885,10 @@ fn set_startup_error(code: &str, title: &str, friendly: &str, hint: &str, detail
     }
 }
 
-fn emit_startup_status(app: &AppHandle, msg: &str) {
+/// Log a startup progress message and keep it for `get_startup_status`.
+fn startup_status(msg: &str) {
     log::info!("[Startup] {msg}");
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.emit("startup-status", msg);
-    }
+    crate::lifecycle::set_startup_message(msg);
 }
 
 /// Build PATH with common Python locations + bundled bin dir
@@ -1021,10 +1020,9 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     }
 
     let full_path = build_path(app);
-    let status = |msg: &str| emit_startup_status(app, msg);
     // Find (or download) the base interpreter
-    emit_startup_status(app, "Looking for Python...");
-    let Some((base, downloaded)) = ensure_base_python(&status, &full_path) else {
+    startup_status("Looking for Python...");
+    let Some((base, downloaded)) = ensure_base_python(&startup_status, &full_path) else {
         let detail = format!(
             "Couldn't download Python {STANDALONE_PY_VERSION}, and no Python {}.{} was found at: {}",
             REQUIRED_PYTHON.0,
@@ -1042,12 +1040,12 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         );
         return Err(detail.into());
     };
-    emit_startup_status(app, &format!("Found {}", base.version));
+    startup_status(&format!("Found {}", base.version));
     get_server().lock().unwrap().runtime = base.kind.as_str().to_string();
 
     // App venv with the pinned core packages
-    emit_startup_status(app, "Checking dependencies...");
-    let venv = match ensure_venv(&status, &base, &full_path) {
+    startup_status("Checking dependencies...");
+    let venv = match ensure_venv(&startup_status, &base, &full_path) {
         Ok(v) => v,
         Err(e) => {
             log::error!(
@@ -1103,7 +1101,7 @@ pub fn start_python_server(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
         server.url = format!("http://127.0.0.1:{port}");
     }
 
-    emit_startup_status(app, "Starting server...");
+    startup_status("Starting server...");
     let generation = match spawn_and_register(app, &venv.python, port, &api_token) {
         Ok(g) => g,
         Err(SpawnError::Quitting) => return Err(QUITTING.into()),

@@ -251,7 +251,6 @@ async function apiCall(method, endpoint, body = null) {
 
 const _eventCallbacks = {
   'startup-error': [],
-  'startup-status': [],
   'oauth-callback': [],
   'system-wake': [],
   'notification-action': [],
@@ -471,7 +470,6 @@ window.plaud = {
   // URL resolution; callers checking server status need a fresh value.
   getApiInfo: () => invoke('get_api_info'),
   onStartupError: (callback) => addListener('startup-error', callback),
-  onStartupStatus: (callback) => addListener('startup-status', callback),
 
   // Notion
   notionStatus: () => apiCall('GET', '/notion/status'),
