@@ -83,7 +83,6 @@ is on (see [MCP server and speaker names](#mcp-server-and-speaker-names-appmcp-a
 | `logging.rs` | `~/Library/Logs/Plaud V2/app.log` (rotates at 1 MB, one old file kept). Backend stdout/stderr lands here too. `RUST_LOG` overrides levels |
 | `commands/mod.rs` | IPC commands: API info, theme, login item, dock visibility, folder picker, notifications, the updater, error logging, the bug report export (`export_bug_report`, `reveal_in_finder`) and the diagnostics log |
 | `commands/report_scrub.rs` | Removes secrets and personal data from exported bug reports |
-| `commands/sha256.rs` | The shell's only SHA-256: update and Python-download checksums, the venv lockfile stamp, report IDs (no hashing crate in `Cargo.toml`) |
 
 ### Python backend
 

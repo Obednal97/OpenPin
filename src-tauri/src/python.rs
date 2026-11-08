@@ -327,7 +327,7 @@ fn choose_base_python(
 }
 
 /// SHA-256 as lowercase hex, for the downloaded tarball and the lockfile stamp.
-use crate::commands::sha256::hex_digest as sha256_hex;
+use crate::commands::sha256_hex;
 
 /// What a venv was last synced from.
 #[derive(Clone, Debug, PartialEq, Eq)]

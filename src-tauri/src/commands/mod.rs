@@ -245,7 +245,13 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 // a secret, so it can be rotated without an app release.
 
 mod report_scrub;
-pub(crate) mod sha256;
+
+use sha2::{Digest, Sha256};
+
+/// SHA-256 as lowercase hex.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
 
 /// Base URL of the update Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://openpin.bednal.com";
@@ -434,18 +440,10 @@ pub(crate) fn running_app_path() -> String {
 
 /// SHA-256 of a file on disk (hex).
 fn file_sha256(path: &std::path::Path) -> Result<String, String> {
-    use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
-    let mut h = sha256::Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize_hex())
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).map_err(|e| format!("Read error: {e}"))?;
+    Ok(format!("{:x}", h.finalize()))
 }
 
 /// Does an already-downloaded file match the release asset?
@@ -602,7 +600,7 @@ fn download_update_with_idle(
     let total = resp.content_length().unwrap_or(expected);
     let result = (|| -> Result<(), String> {
         let mut file = std::fs::File::create(&part).map_err(|e| format!("Failed to create file: {e}"))?;
-        let mut hasher = sha256::Sha256::new();
+        let mut hasher = Sha256::new();
         let mut downloaded: u64 = 0;
         let mut last_pct: u32 = u32::MAX;
         let mut buf = vec![0u8; 1 << 16];
@@ -629,7 +627,7 @@ fn download_update_with_idle(
         if downloaded != expected {
             return Err(format!("Download incomplete: got {downloaded} of {expected} bytes"));
         }
-        let digest = hasher.finalize_hex();
+        let digest = format!("{:x}", hasher.finalize());
         if let Some(want) = &release.asset.sha256 {
             if !digest.eq_ignore_ascii_case(want) {
                 return Err("Downloaded update failed its checksum — not installing it".to_string());
@@ -883,7 +881,7 @@ fn platform_uuid() -> Option<String> {
 /// Same value the old `shasum`-based version produced, so it stays stable.
 fn device_id() -> String {
     match platform_uuid() {
-        Some(uuid) => sha256::hex_digest(uuid.as_bytes()).chars().take(8).collect(),
+        Some(uuid) => sha256_hex(uuid.as_bytes()).chars().take(8).collect(),
         None => "unknown".to_string(),
     }
 }
@@ -905,12 +903,12 @@ fn tail_lines(s: &str, max_lines: usize) -> String {
 /// can't be brute-forced back to the serial but still groups reports from one
 /// device.
 fn id_tag(salt: &str, value: &str) -> String {
-    let mut h = sha256::Sha256::new();
+    let mut h = Sha256::new();
     h.update(b"plaud-v2-report-id:");
     h.update(salt.as_bytes());
     h.update(b":");
     h.update(value.to_ascii_uppercase().as_bytes());
-    h.finalize_hex().chars().take(8).collect()
+    format!("{:x}", h.finalize()).chars().take(8).collect()
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -1790,6 +1788,17 @@ mod tests {
         assert!(!is_translocated("/Applications/Open Pin.app"));
     }
 
+    #[test]
+    fn sha256_known_vectors() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // NIST "one million a", streamed from a file as update downloads are.
+        let path = std::env::temp_dir().join(format!("open-pin-sha-{}", std::process::id()));
+        std::fs::write(&path, vec![b'a'; 1_000_000]).unwrap();
+        let digest = file_sha256(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(digest, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
     /// Runs the real install script against fake bundles, with stub
     /// `hdiutil` (the "DMG" is a file naming a folder to "mount"), `codesign`,
     /// `spctl` and `open` (which records what it was asked to open) first on
@@ -2227,7 +2236,7 @@ exit 0"#
         assert_eq!(dest.metadata().unwrap().len(), r.asset.size);
         let digest = file_sha256(&dest).unwrap();
         let shasum = std::process::Command::new("/usr/bin/shasum").args(["-a", "256"]).arg(&dest).output().unwrap();
-        assert!(String::from_utf8_lossy(&shasum.stdout).starts_with(&digest), "pure-Rust SHA-256 disagrees with shasum");
+        assert!(String::from_utf8_lossy(&shasum.stdout).starts_with(&digest), "SHA-256 disagrees with shasum");
         let mut good = r.clone();
         good.asset.sha256 = Some(digest);
         assert!(cached_download_matches(&dest, &good.asset));
