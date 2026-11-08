@@ -80,6 +80,7 @@ from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
 )
 from app.utils.constants import BLE_NOTIFY_UUID as N  # noqa: E402
 from app.utils.constants import BLE_WRITE_UUID as W  # noqa: E402
+from app.utils.fileio import atomic_write  # noqa: E402
 
 WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
@@ -250,12 +251,7 @@ def _fsync_dir(path):
 def _write_json_durably(path, data, strict=False):
     """Atomically replace `path` with JSON and fsync it. Raises OSError if the
     file can't be written or fsynced (with strict, also if the directory can't)."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(json.dumps(data, indent=2).encode("utf-8"))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(data, indent=2), fsync=True)
     if not _fsync_dir(path.parent) and strict:
         raise OSError(f"could not fsync {path.parent}")
 
@@ -1207,12 +1203,6 @@ def compute_budget(total_bytes):
     }
 
 
-def _atomic_write(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(path)
-
-
 async def wait_event(event, timeout):
     """Wait for an asyncio.Event; True if it was set, False on timeout."""
     try:
@@ -1253,7 +1243,7 @@ def _save_wifi_partial(recordings_dir, sid, raw, expected_size, reason):
     if raw:
         try:
             if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
-                _atomic_write(partial_path, raw)
+                atomic_write(partial_path, raw)
         except OSError:
             pass
     return {
@@ -1303,7 +1293,7 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
     enc_path = recordings_dir / f"{sid}_encrypted.bin"
     try:
-        _atomic_write(enc_path, raw)
+        atomic_write(enc_path, raw)
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
     partial_path.unlink(missing_ok=True)
@@ -1314,7 +1304,7 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
             return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed", "error": str(e)}
     final_path = recordings_dir / f"{sid}.ogg"
     try:
-        _atomic_write(final_path, wrap_opus_ogg(frames))
+        atomic_write(final_path, wrap_opus_ogg(frames))
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
     if raw_size <= 500_000 and not size_mismatch:

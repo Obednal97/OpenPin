@@ -14,13 +14,12 @@ tags (an existing tag's spelling wins), at most 20 tags per recording and per ca
 
 import json
 import logging
-import os
-import tempfile
 import unicodedata
 
 from app.utils import changes
 from app.utils.config import load_config, update_config
 from app.utils.constants import DEFAULT_TAGS, TRANSCRIPTS_DIR
+from app.utils.fileio import atomic_write
 from app.utils.paths import InvalidSessionIdError, validate_session_id
 from app.utils.transcript_locks import get_transcript_lock
 
@@ -79,17 +78,7 @@ def _write_transcript_tags(session_id, tags):
         if not isinstance(data, dict) or data.get("tags") == tags:
             return
         data["tags"] = tags
-        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".tags_", suffix=".json.tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2, ensure_ascii=False))
-            os.replace(tmp_path, path)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
     except Exception as e:
         logging.warning(f"Could not save tags in transcript {session_id}: {e}")
 

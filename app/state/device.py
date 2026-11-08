@@ -42,6 +42,7 @@ from app.utils.constants import (
 from app.utils.constants import (
     BLE_WRITE_UUID as W,
 )
+from app.utils.fileio import atomic_write
 from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
 
 # Module-level state
@@ -1679,12 +1680,6 @@ def is_already_synced(sid, rec_dirs=None, cloud_ids=None):
     return str(sid) in cloud_ids
 
 
-def _atomic_write(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
 async def _send_stop_sync():
     """Tell the device to stop streaming the current file (cmd 30)."""
     try:
@@ -1784,10 +1779,7 @@ def scrub_wifi_logs(data_dir=None):
             text = path.read_text(encoding="utf-8", errors="replace")
             clean = redact_secrets(text, secrets)
             if clean != text:
-                tmp = path.with_name(path.name + ".tmp")
-                tmp.write_text(clean, encoding="utf-8")
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, path)
+                atomic_write(path, clean)
                 logging.info(f"[WiFi] removed credentials from {name}")
         marker.write_text("wifi_sync logs redacted\n")
         return True
@@ -2226,7 +2218,7 @@ def _save_partial(sid, raw, expected, reason, rec_dir):
     if raw:
         try:
             if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
-                _atomic_write(partial_path, raw)
+                atomic_write(partial_path, raw)
             saved = str(partial_path)
         except OSError as e:
             logging.warning(f"Could not save partial download for session {sid}: {e}")
@@ -2278,7 +2270,7 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encryp
     ogg_path = rec_dir / f"{sid}.ogg"
     partial_path = rec_dir / f"{sid}_partial.bin"
     try:
-        _atomic_write(enc_path, raw)
+        atomic_write(enc_path, raw)
     except OSError as e:
         logging.warning(f"Could not save encrypted download for session {sid}: {e}")
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
@@ -2298,7 +2290,7 @@ def _save_complete(sid, raw, app_rsa_key, rec_dir, opus_frames=None, keep_encryp
             "encrypted_path": str(enc_path),
         }
     try:
-        _atomic_write(ogg_path, wrap_opus_ogg(opus_frames))
+        atomic_write(ogg_path, wrap_opus_ogg(opus_frames))
     except OSError as e:
         logging.warning(f"Could not write {ogg_path}: {e} — encrypted original kept")
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}

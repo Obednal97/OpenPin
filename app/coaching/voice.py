@@ -17,6 +17,7 @@ import threading
 from datetime import UTC, datetime
 
 from app.utils.constants import COACHING_DIR
+from app.utils.fileio import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -227,18 +228,7 @@ def _save_exemplars(exemplars: list[list[float]]) -> None:
         "exemplars": exemplars,
         "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
-    fd, tmp = tempfile.mkstemp(dir=PROFILE_PATH.parent, prefix=".voice_profile-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, PROFILE_PATH)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write(PROFILE_PATH, json.dumps(payload), mode=0o600)
 
 
 def delete_profile() -> None:

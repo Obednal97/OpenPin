@@ -13,13 +13,8 @@ written concurrently by:
 Without coordination, concurrent writes silently overwrite each other,
 losing diarization data, tags, or summaries.
 
-Use get_transcript_lock(session_id) to obtain a per-session Lock and wrap
-every read-modify-write sequence with:
-
-    with get_transcript_lock(session_id):
-        data = json.loads(path.read_text())
-        ...mutate data...
-        path.write_text(json.dumps(data, ...))
+Use app.utils.transcripts.load/update, or wrap every read-modify-write in
+get_transcript_lock(session_id) and write with fileio.atomic_write.
 """
 
 import threading

@@ -10,11 +10,12 @@ from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
 from app.state import speakers
-from app.utils import redownload_backup
+from app.utils import redownload_backup, transcripts
 from app.utils import speaker_names as sn
 from app.utils import tags as tags_store
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
+from app.utils.fileio import atomic_write
 from app.utils.paths import (
     InvalidSessionIdError,
     PathOutsideError,
@@ -426,20 +427,16 @@ def rename_recording():
     update_config(_apply)
 
     # Also persist name in the transcript JSON for recovery after config resets
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if transcript_path.exists():
-        try:
-            import json as _json
+    def _name(t_data):
+        if title:
+            t_data["custom_name"] = title
+        else:
+            t_data.pop("custom_name", None)
 
-            with get_transcript_lock(session_id):
-                t_data = _json.loads(transcript_path.read_text())
-                if title:
-                    t_data["custom_name"] = title
-                else:
-                    t_data.pop("custom_name", None)
-                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+    try:
+        transcripts.update(TRANSCRIPTS_DIR / f"{session_id}.json", _name)
+    except Exception:
+        pass
 
     # Rename reaches Notion as a properties-only update (never raises).
     from app.routes.notion import enqueue_property_sync
@@ -894,13 +891,7 @@ def load_transcript(session_id) -> dict | None:
     Read under the transcript lock: without it, json.loads can catch a partial write
     from a diarization or summarization background task. The caller validates the id.
     """
-    path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    try:
-        with get_transcript_lock(session_id):
-            data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return transcripts.load(TRANSCRIPTS_DIR / f"{session_id}.json")
 
 
 def transcript_item(session_id, data: dict, profile: str) -> dict:
@@ -1049,8 +1040,8 @@ def update_transcript():
             # A summary the user saved by hand is current by definition.
             transcript.pop("summary_stale", None)
 
-        json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
-        txt_path.write_text(transcript.get("text", ""))
+        atomic_write(json_path, json.dumps(transcript, ensure_ascii=False, indent=2))
+        atomic_write(txt_path, transcript.get("text", ""))
         text_changed = transcript.get("text") != old_text
 
     # After releasing the transcript lock: the coaching store has its own lock.

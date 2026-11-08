@@ -25,6 +25,7 @@ from app.utils.constants import (
     get_all_recordings_dirs,
     get_recordings_dir,
 )
+from app.utils.fileio import atomic_write
 from app.utils.paths import InvalidSessionIdError, is_auxiliary_stem, validate_session_id
 from app.utils.recording_utils import extract_recording_date
 
@@ -443,11 +444,7 @@ def save_cloud_token(token, api_domain=None, ut=None, urt=None):
         data["ut"] = ut
     if urt:
         data["urt"] = urt
-    # Write atomically: write to a sibling temp file then rename so a crash
-    # mid-write cannot leave a partial config file.
-    tmp_path = PLAUD_CONFIG_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2))
-    tmp_path.replace(PLAUD_CONFIG_PATH)
+    atomic_write(PLAUD_CONFIG_PATH, json.dumps(data, indent=2))
 
 
 def cloud_api(endpoint, method="GET", params=None, json_body=None):

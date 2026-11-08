@@ -19,10 +19,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import re
 import struct
-import tempfile
 import threading
 import time
 import unicodedata
@@ -30,6 +28,7 @@ import zlib
 from datetime import datetime
 
 from app.utils.constants import DATA_DIR
+from app.utils.fileio import atomic_write
 
 CACHE_PATH = DATA_DIR / ".notion_legacy_cache.json"
 CACHE_VERSION = 1
@@ -379,20 +378,11 @@ def load_cache() -> dict:
 
 def save_cache(cache: dict) -> None:
     with _cache_lock:
-        tmp_path = None
         try:
             CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(prefix=".notion_legacy.", dir=str(CACHE_PATH.parent))
-            with os.fdopen(fd, "w") as f:
-                json.dump(cache, f)
-            os.replace(tmp_path, CACHE_PATH)
+            atomic_write(CACHE_PATH, json.dumps(cache))
         except OSError as e:
             logging.warning(f"Could not write {CACHE_PATH}: {e}")
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
 
 def cached_entry(cache: dict, page_id: str, edited: str | None, now: float | None = None) -> dict | None:

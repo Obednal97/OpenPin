@@ -16,11 +16,11 @@ already holds it, so callers there must call ``mark_stale`` after releasing it.
 import hashlib
 import json
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 
 from app.utils.constants import COACHING_DIR
+from app.utils.fileio import atomic_write
 from app.utils.transcript_locks import get_transcript_lock
 
 COACHING_SCHEMA_VERSION = 1
@@ -77,9 +77,7 @@ def _read(path: Path) -> dict:
 
 def _write_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def load(session_id: str) -> dict:
