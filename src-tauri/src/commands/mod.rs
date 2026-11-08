@@ -1315,19 +1315,6 @@ pub fn report_error(message: String, stack: Option<String>, context: Option<Stri
     record_error_locally(&message, stack.as_deref(), context.as_deref());
 }
 
-/// For the panic hook: same as `report_error`. It used to wait up to
-/// `timeout` for a network send; the signature is kept, and it always
-/// returns true now that there is nothing to wait for.
-pub fn report_error_blocking(
-    message: String,
-    stack: Option<String>,
-    context: Option<String>,
-    _timeout: std::time::Duration,
-) -> bool {
-    record_error_locally(&message, stack.as_deref(), context.as_deref());
-    true
-}
-
 // ---- Bug report export ----
 //
 // "Report a bug" saves a zip to ~/Downloads: the user's answers, system info,

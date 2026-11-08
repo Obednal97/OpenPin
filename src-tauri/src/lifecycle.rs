@@ -379,16 +379,13 @@ pub fn handle_termination_signals(app: &AppHandle) {
 /// Set while a panic is being recorded, so a burst of follow-on panics
 /// (e.g. threads hitting a poisoned mutex) only logs.
 static PANIC_REPORT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-/// Passed to `report_error_blocking`, which no longer waits for anything
-/// (nothing is sent over the network; see commands::report_error).
-const PANIC_REPORT_GRACE: Duration = Duration::from_secs(3);
 
 /// Record Rust panics in the app log and the local diagnostics log.
 ///
 /// Nothing is sent anywhere: a panic shows up in an exported bug report
-/// (Report a bug › Export bug report). On the main thread a panic aborts the
-/// process when the hook returns, so the hook writes the record directly
-/// (`report_error_blocking`, no extra thread) before returning.
+/// (Report a bug › Export bug report). The record is written directly, with no
+/// extra thread, because on the main thread a panic aborts the process when the
+/// hook returns.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let message = format!("{info}");
@@ -401,15 +398,7 @@ pub fn install_panic_hook() {
         if PANIC_REPORT_IN_FLIGHT.swap(true, Ordering::AcqRel) {
             return;
         }
-        let msg = format!("[PANIC] {message}");
-        let ctx = Some("rust-panic".to_string());
-        if thread_name == "main" {
-            // A main-thread panic takes the process down: write the record
-            // before returning.
-            let _ = commands::report_error_blocking(msg, Some(backtrace), ctx, PANIC_REPORT_GRACE);
-        } else {
-            commands::report_error(msg, Some(backtrace), ctx);
-        }
+        commands::report_error(format!("[PANIC] {message}"), Some(backtrace), Some("rust-panic".to_string()));
         PANIC_REPORT_IN_FLIGHT.store(false, Ordering::Release);
     }));
 }
