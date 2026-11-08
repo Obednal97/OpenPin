@@ -1631,39 +1631,11 @@ pub struct NotificationResult {
 }
 
 #[tauri::command]
-pub fn show_notification(
-    app: tauri::AppHandle,
-    title: String,
-    body: String,
-    action_label: Option<String>,
-) -> NotificationResult {
-    use tauri::Emitter;
+pub fn show_notification(app: tauri::AppHandle, title: String, body: String) -> NotificationResult {
     use tauri_plugin_notification::NotificationExt;
 
-    let mut builder = app.notification().builder().title(&title).body(&body);
-
-    if let Some(ref label) = action_label {
-        builder = builder.action_type_id(label);
-    }
-
-    let result = builder.show();
-
-    // Show window when any notification is interacted with
-    // (Tauri notification plugin doesn't have per-notification callbacks,
-    // so we handle this globally via the plugin's event system)
-    if let Some(label) = action_label {
-        let app_clone = app.clone();
-        std::thread::spawn(move || {
-            // Small delay to let the notification appear
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            // Emit notification-action event for the frontend, using the
-            // action label as payload so the frontend can dispatch accordingly.
-            let _ = app_clone.emit("notification-action", label);
-        });
-    }
-
     NotificationResult {
-        shown: result.is_ok(),
+        shown: app.notification().builder().title(&title).body(&body).show().is_ok(),
     }
 }
 

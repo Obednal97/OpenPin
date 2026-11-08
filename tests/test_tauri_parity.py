@@ -291,7 +291,6 @@ class TestTauriBridgeAPISurface:
         "startup-error",
         "oauth-callback",
         "system-wake",
-        "notification-action",
         "update-status",
     ]
 

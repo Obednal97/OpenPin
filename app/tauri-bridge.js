@@ -253,7 +253,6 @@ const _eventCallbacks = {
   'startup-error': [],
   'oauth-callback': [],
   'system-wake': [],
-  'notification-action': [],
   'update-status': [],
   'tray-sync': [],
 };
@@ -534,9 +533,7 @@ window.plaud = {
   onSystemWake: (callback) => addListener('system-wake', callback),
   // Tray "Sync Device" menu item — routed through the normal in-app sync flow
   onTraySync: (callback) => addListener('tray-sync', callback),
-  showNotification: (title, body, actionLabel) =>
-    invoke('show_notification', { title, body, actionLabel }),
-  onNotificationAction: (callback) => addListener('notification-action', callback),
+  showNotification: (title, body) => invoke('show_notification', { title, body }),
 
   // Directory picker
   selectDirectory: () => invoke('select_directory'),
