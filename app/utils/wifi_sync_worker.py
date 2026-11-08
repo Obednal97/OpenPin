@@ -81,6 +81,7 @@ from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
 from app.utils.constants import BLE_NOTIFY_UUID as N  # noqa: E402
 from app.utils.constants import BLE_WRITE_UUID as W  # noqa: E402
 from app.utils.fileio import atomic_write  # noqa: E402
+from app.utils.system import keep_awake  # noqa: E402
 
 WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
@@ -1757,37 +1758,6 @@ async def run_guarded(body, cleanup):
             loop.remove_signal_handler(signal.SIGTERM)
 
 
-class _KeepAwake:
-    """NSProcessInfo activity (as app/state/device.py's _keep_awake): no App Nap
-    and no idle system sleep while the Mac is on the hotspot. No-op without pyobjc."""
-
-    _OPTIONS = 0x00FFFFFF  # NSActivityUserInitiated
-
-    def __init__(self, reason):
-        self._reason = reason
-        self._token = None
-
-    def __enter__(self):
-        try:
-            from Foundation import NSProcessInfo
-
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
-        except Exception:
-            self._token = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._token is not None:
-            try:
-                from Foundation import NSProcessInfo
-
-                NSProcessInfo.processInfo().endActivity_(self._token)
-            except Exception:
-                pass
-            self._token = None
-        return False
-
-
 def _emit_result(result):
     """Final JSON result on stdout; never raises (the parent may be gone)."""
     try:
@@ -2019,7 +1989,7 @@ async def main():
                         }
                     )
                     return
-        with _KeepAwake("Plaud WiFi sync"):
+        with keep_awake("Plaud WiFi sync"):
             try:
                 result = await transfer(args)
             except Exception as e:  # the restore already ran (run_guarded's cleanup)

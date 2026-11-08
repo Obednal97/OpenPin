@@ -43,6 +43,7 @@ from app.utils.constants import (
     BLE_WRITE_UUID as W,
 )
 from app.utils.fileio import atomic_write
+from app.utils.system import keep_awake
 from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
 
 # Module-level state
@@ -458,45 +459,6 @@ async def read_battery():
     except Exception as e:
         logging.debug(f"Battery read (cmd 9) failed: {e}")
     return None, None
-
-
-class _keep_awake:
-    """Context manager that disables macOS App Nap for its duration.
-
-    When the app window loses focus, macOS throttles the process and coalesces
-    timers, which delays CoreBluetooth notification delivery. During a long BLE
-    file transfer that stall can exceed the watchdog window and abort the sync.
-    NSProcessInfo's begin/endActivity keeps the process responsive while syncing.
-    No-op on non-macOS or if pyobjc Foundation is unavailable.
-    """
-
-    # NSActivityUserInitiated — user-initiated work; disables App Nap and idle sleep.
-    _OPTIONS = 0x00FFFFFF
-
-    def __init__(self, reason="Plaud BLE sync"):
-        self._reason = reason
-        self._token = None
-
-    def __enter__(self):
-        try:
-            from Foundation import NSProcessInfo
-
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
-        except Exception as e:
-            logging.debug(f"App Nap suppression unavailable: {e}")
-            self._token = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._token is not None:
-            try:
-                from Foundation import NSProcessInfo
-
-                NSProcessInfo.processInfo().endActivity_(self._token)
-            except Exception:
-                pass
-            self._token = None
-        return False
 
 
 def _get_loop():
@@ -1441,7 +1403,7 @@ async def sync_files(_claimed=False, background=False):
     try:
         # Suppress macOS App Nap so backgrounding the window can't throttle the
         # CoreBluetooth stream and trip the stall watchdog mid-transfer.
-        with _keep_awake("Plaud BLE sync"):
+        with keep_awake("Plaud BLE sync"):
             return await _sync_files_inner(background=background)
     finally:
         _ble_sync_status.update({"message": "", "percent": 0, "active": False, **_NO_FILE_PROGRESS})
@@ -1982,7 +1944,7 @@ def do_wifi_sync_blocking():
         {"active": True, "budget_s": compute_budget(0)["total_s"], "deadline": deadline.wall_clock()}
     )
     try:
-        with _keep_awake("Plaud WiFi sync"):
+        with keep_awake("Plaud WiFi sync"):
             return _do_wifi_sync_locked(deadline)
     finally:
         _wifi_sync_status["active"] = False

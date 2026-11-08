@@ -11,6 +11,7 @@ import sys
 import sysconfig
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.utils.constants import BUNDLED_REQUIREMENTS_DIR, REQUIREMENTS_DIR_ENV
@@ -330,3 +331,28 @@ def get_ram_info():
         return total_bytes / 1024**3, used_bytes / 1024**3
     except Exception:
         return 16.0, 8.0  # fallback
+
+
+@contextmanager
+def keep_awake(reason):
+    """Hold an NSProcessInfo activity for the block: no App Nap, no idle system sleep.
+
+    When the window loses focus, macOS throttles the process and delays CoreBluetooth
+    notifications, which can stall a long transfer. No-op without pyobjc Foundation.
+    """
+    token = None
+    try:
+        from Foundation import NSProcessInfo
+
+        # NSActivityUserInitiated
+        token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(0x00FFFFFF, reason)
+    except Exception as e:
+        log.debug(f"App Nap suppression unavailable: {e}")
+    try:
+        yield
+    finally:
+        if token is not None:
+            try:
+                NSProcessInfo.processInfo().endActivity_(token)
+            except Exception:
+                pass

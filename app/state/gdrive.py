@@ -1,15 +1,10 @@
 """Google Drive integration — OAuth, upload, sync tracking."""
 
-import base64
-import hashlib
 import json
 import logging
-import os
-import queue
-import threading
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode
 
 import requests as http_requests
 
@@ -106,15 +101,6 @@ def save():
     GDRIVE_CONFIG_PATH.write_text(json.dumps(save_data, indent=2))
 
 
-# ---- PKCE ----
-
-
-def _generate_pkce():
-    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
-    return code_verifier, code_challenge
-
-
 # ---- Token Management ----
 
 
@@ -204,7 +190,7 @@ def start_connect(client_id=None, client_secret=None):
     if not cid:
         raise ValueError("No Google OAuth Client ID configured")
 
-    code_verifier, code_challenge = _generate_pkce()
+    code_verifier, code_challenge = oauth_page.pkce_pair()
     _gdrive_state["code_verifier"] = code_verifier
 
     import uuid as uuid_mod
@@ -232,102 +218,51 @@ def start_connect(client_id=None, client_secret=None):
 
 def _start_callback_server():
     """Start a temporary HTTP server to handle the OAuth callback."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    oauth_page.serve_callback(
+        GDRIVE_CALLBACK_PORT, "/gdrive/callback", "gdrive", lambda: _gdrive_state.get("state"), _exchange_code
+    )
 
-    class CallbackHandler(BaseHTTPRequestHandler):
-        def _signal(self, result):
-            """Put result onto the queue without blocking if it's already full."""
-            try:
-                type(self)._result_queue.put_nowait(result)
-            except queue.Full:
-                pass  # First result already wins; ignore duplicates
 
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            if parsed.path == "/gdrive/callback":
-                params = parse_qs(parsed.query)
-                code = params.get("code", [None])[0]
-                state = params.get("state", [None])[0]
-                error = params.get("error", [None])[0]
+def _exchange_code(code):
+    """Exchange the authorization code for tokens, then fetch the account's email."""
+    try:
+        payload = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": f"http://localhost:{GDRIVE_CALLBACK_PORT}/gdrive/callback",
+            "code_verifier": _gdrive_state["code_verifier"],
+            "client_id": _get_client_id(),
+        }
+        secret = _get_client_secret()
+        if secret:
+            payload["client_secret"] = secret
 
-                if error:
-                    if error == "access_denied":
-                        oauth_page.send(self, "gdrive", "cancelled")
-                    else:
-                        desc = params.get("error_description", [""])[0]
-                        oauth_page.send(self, "gdrive", "failed", f"{error}: {desc}" if desc else error)
-                    self._signal({"error": error})
-                    return
+        r = http_requests.post(GDRIVE_TOKEN_ENDPOINT, data=payload, timeout=15)
+        r.raise_for_status()
+        tokens = r.json()
 
-                if state != _gdrive_state.get("state"):
-                    oauth_page.send(self, "gdrive", "expired")
-                    self._signal({"error": "csrf_mismatch"})
-                    return
+        _gdrive_state["access_token"] = tokens["access_token"]
+        _gdrive_state["refresh_token"] = tokens.get("refresh_token", "")
+        _gdrive_state["token_expires_at"] = time.time() + tokens.get("expires_in", 3600)
+        _gdrive_state["code_verifier"] = None
+        _gdrive_state["state"] = None
 
-                try:
-                    # Exchange code for tokens
-                    payload = {
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "redirect_uri": f"http://localhost:{GDRIVE_CALLBACK_PORT}/gdrive/callback",
-                        "code_verifier": _gdrive_state["code_verifier"],
-                        "client_id": _get_client_id(),
-                    }
-                    secret = _get_client_secret()
-                    if secret:
-                        payload["client_secret"] = secret
-
-                    r = http_requests.post(GDRIVE_TOKEN_ENDPOINT, data=payload, timeout=15)
-                    r.raise_for_status()
-                    tokens = r.json()
-
-                    _gdrive_state["access_token"] = tokens["access_token"]
-                    _gdrive_state["refresh_token"] = tokens.get("refresh_token", "")
-                    _gdrive_state["token_expires_at"] = time.time() + tokens.get("expires_in", 3600)
-                    _gdrive_state["code_verifier"] = None
-                    _gdrive_state["state"] = None
-
-                    # Fetch user email
-                    try:
-                        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
-                        info = http_requests.get(
-                            "https://www.googleapis.com/oauth2/v2/userinfo",
-                            headers=headers,
-                            timeout=10,
-                        ).json()
-                        _gdrive_state["user_email"] = info.get("email", "")
-                    except Exception:
-                        pass
-
-                    _gdrive_state["connected"] = True
-                    save()
-
-                    oauth_page.send(self, "gdrive", "connected")
-                    self._signal({"ok": True})
-                except Exception as e:
-                    logging.error(f"Google Drive token exchange failed: {e}")
-                    oauth_page.send(self, "gdrive", "failed", str(e))
-                    self._signal({"error": str(e)})
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def log_message(self, format, *args):
+        try:
+            headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+            info = http_requests.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers=headers,
+                timeout=10,
+            ).json()
+            _gdrive_state["user_email"] = info.get("email", "")
+        except Exception:
             pass
 
-    result_queue: queue.Queue = queue.Queue(maxsize=1)
-    CallbackHandler._result_queue = result_queue  # type: ignore[attr-defined]
-
-    def run_server():
-        server = HTTPServer(("127.0.0.1", GDRIVE_CALLBACK_PORT), CallbackHandler)
-        server.timeout = 1
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline and result_queue.empty():
-            server.handle_request()
-        server.server_close()
-
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
+        _gdrive_state["connected"] = True
+        save()
+    except Exception as e:
+        logging.error(f"Google Drive token exchange failed: {e}")
+        raise
 
 
 def disconnect():
