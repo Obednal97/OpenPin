@@ -43,15 +43,6 @@ _gdrive_state = {
     "client_secret": None,
 }
 
-_upload_progress = {
-    "active": False,
-    "current_file": "",
-    "current_index": 0,
-    "total_files": 0,
-    "bytes_sent": 0,
-    "bytes_total": 0,
-}
-
 
 def get_state():
     """Get a read-only snapshot of Google Drive state."""
@@ -69,10 +60,6 @@ def is_connected():
 
 def get_folder_id():
     return _gdrive_state.get("folder_id")
-
-
-def get_upload_progress():
-    return dict(_upload_progress)
 
 
 # ---- Persistence ----
@@ -412,10 +399,6 @@ def upload_file(file_path):
     file_size = path.stat().st_size
     file_name = path.name
 
-    _upload_progress["current_file"] = file_name
-    _upload_progress["bytes_total"] = file_size
-    _upload_progress["bytes_sent"] = 0
-
     if file_size < 5 * 1024 * 1024:
         # Simple multipart upload for small files
         return _simple_upload(path, file_name, folder_id)
@@ -454,7 +437,6 @@ def _simple_upload(path, file_name, folder_id):
         timeout=60,
     )
     r.raise_for_status()
-    _upload_progress["bytes_sent"] = len(file_data)
     return r.json()["id"]
 
 
@@ -490,7 +472,6 @@ def _resumable_upload(path, file_name, folder_id, file_size):
             }
             r = http_requests.put(upload_url, headers=headers, data=chunk, timeout=60)
             sent += len(chunk)
-            _upload_progress["bytes_sent"] = sent
 
             if r.status_code == 200 or r.status_code == 201:
                 return r.json()["id"]
@@ -563,25 +544,16 @@ def sync_all():
 
     unsynced = [f for f in all_ogg if f.stem not in dismissed and f.stem not in synced]
 
-    _upload_progress["active"] = True
-    _upload_progress["total_files"] = len(unsynced)
-    _upload_progress["current_index"] = 0
-
     uploaded = []
     errors = []
-
-    try:
-        for i, f in enumerate(unsynced):
-            _upload_progress["current_index"] = i + 1
-            try:
-                drive_id = upload_file(str(f))
-                mark_synced(f.stem, drive_id, f.stat().st_size)
-                uploaded.append(f.stem)
-            except Exception as e:
-                logging.warning(f"Google Drive upload failed for {f.stem}: {e}")
-                errors.append({"session_id": f.stem, "error": str(e)})
-    finally:
-        _upload_progress["active"] = False
+    for f in unsynced:
+        try:
+            drive_id = upload_file(str(f))
+            mark_synced(f.stem, drive_id, f.stat().st_size)
+            uploaded.append(f.stem)
+        except Exception as e:
+            logging.warning(f"Google Drive upload failed for {f.stem}: {e}")
+            errors.append({"session_id": f.stem, "error": str(e)})
 
     return {"uploaded": len(uploaded), "errors": errors, "total": len(unsynced)}
 

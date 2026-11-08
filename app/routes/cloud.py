@@ -32,12 +32,6 @@ def login_url():
     return jsonify({"url": url, "desktop_uuid": desktop_uuid})
 
 
-@bp.route("/auto-detect")
-def auto_detect():
-    """Check if we can auto-detect the Plaud desktop app token."""
-    return jsonify(cloud.auto_detect())
-
-
 @bp.route("/exchange-token", methods=["POST"])
 def exchange_token():
     """Exchange auth code for bearer token after OAuth flow."""
@@ -83,18 +77,6 @@ def logout():
     return jsonify(cloud.logout())
 
 
-@bp.route("/recordings")
-def recordings_list():
-    """List recordings available in the Plaud cloud."""
-    if not cloud.is_logged_in():
-        return jsonify({"error": "Not logged in"}), 401
-    try:
-        result = cloud.list_cloud_recordings()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @bp.route("/sync", methods=["POST"])
 def sync():
     """Sync with Plaud Cloud. Downloads by default, uploads too if two-way is enabled."""
@@ -123,18 +105,6 @@ def sync():
         )
     except Exception as e:
         return jsonify(_error_json({}, e)), 500
-
-
-@bp.route("/devices")
-def devices():
-    """List devices bound to the Plaud account."""
-    if not cloud.is_logged_in():
-        return jsonify({"error": "Not logged in"}), 401
-    try:
-        result = cloud.list_cloud_devices()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/bind-device", methods=["POST"])

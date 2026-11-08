@@ -1470,15 +1470,6 @@ async def get_device_info():
     return info
 
 
-async def set_find_my(enabled):
-    """Enable or disable Find My on the device (cmd 109)."""
-    r = await send_cmd(bytes([1, 109, 0, 1 if enabled else 0]), timeout=3)
-    # Read back to confirm
-    if r and len(r) >= 4:
-        return {"find_my_enabled": bool(r[3])}
-    return {"find_my_enabled": enabled}
-
-
 async def delete_device_file(session_id):
     """Delete a file from the device by session ID (cmd 31).
 
@@ -1503,18 +1494,6 @@ async def delete_device_file(session_id):
     if status != 0:
         return {"deleted": False, "session_id": session_id, "status": status, "error": f"Device status {status}"}
     return {"deleted": True, "session_id": session_id}
-
-
-async def start_recording():
-    """Start recording on the device."""
-    await send_cmd(bytes([1, 20, 0]))
-    return {"recording": True}
-
-
-async def stop_recording():
-    """Stop recording on the device."""
-    await send_cmd(bytes([1, 23, 0]))
-    return {"recording": False}
 
 
 SYNC_BUSY_ERROR = "Sync already in progress"

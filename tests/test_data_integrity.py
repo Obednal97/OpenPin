@@ -177,7 +177,6 @@ TRAVERSAL = ["../../victim", "/etc/passwd", "..", "a/b"]
 
 def _route_bodies(sid):
     return [
-        ("/recordings/tag", {"session_id": sid, "tags": ["X"]}),
         ("/recordings/rename", {"session_id": sid, "title": "T"}),
         ("/recordings/export", {"session_id": sid}),
         ("/recordings/crop", {"session_id": sid, "start": 0, "end": 1}),
@@ -187,9 +186,7 @@ def _route_bodies(sid):
         ("/recordings/restore-redownload", {"session_ids": [sid]}),
         ("/recordings/move", {"session_ids": [sid], "destination": "/tmp/plaud-test-never-created"}),
         ("/transcripts/update", {"session_id": sid, "summary": "pwned"}),
-        ("/transcripts/delete", {"session_id": sid}),
         ("/summarize", {"session_id": sid}),
-        ("/gdrive/upload", {"session_id": sid}),
     ]
 
 
@@ -208,7 +205,6 @@ def test_traversal_delete_does_not_touch_outside_files(env):
         (victim_dir / f"secret.{ext}").write_text("keep me")
     sid = "../victim/secret"
     _post(env.client, "/recordings/delete", {"session_ids": [sid]})
-    _post(env.client, "/transcripts/delete", {"session_id": sid})
     _post(env.client, "/transcripts/update", {"session_id": sid, "summary": "x"})
     _post(env.client, "/recordings/redownload", {"session_ids": [sid]})
     for ext in ("ogg", "json", "txt"):
@@ -289,8 +285,9 @@ def test_summarize_keeps_existing_custom_name(env):
 def test_tag_and_rename_use_locked_updates(env):
     from app.utils.config import save_config
 
+    (env.rec / "1715000000.ogg").write_bytes(b"audio")
     save_config({"deleted_ids": ["keep"], "recording_tags": {"other": ["Y"]}})
-    _post(env.client, "/recordings/tag", {"session_id": "1715000000", "tags": ["X"]})
+    _post(env.client, "/recordings/tags/add", {"session_ids": ["1715000000"], "tags": ["X"]})
     _post(env.client, "/recordings/rename", {"session_id": "1715000000", "title": "T"})
     cfg = _cfg()
     assert cfg["deleted_ids"] == ["keep"]
@@ -514,16 +511,6 @@ def test_delete_recordings_moves_to_trash(env):
     assert (env.rec / f"{sid}.deleted").exists()
 
 
-def test_delete_transcript_moves_to_trash(env):
-    sid = "1715000000"
-    (env.trn / f"{sid}.json").write_text("{}")
-    r = _post(env.client, "/transcripts/delete", {"session_id": sid})
-    body = r.get_json()
-    assert body["trashed"] is True
-    assert body["deleted"] == [str(env.trn / f"{sid}.json")]
-    assert [p.name for p in env.system_trash] == [f"{sid}.json"]
-
-
 def _coaching_files(sid):
     from app.coaching import store
 
@@ -542,16 +529,6 @@ def test_delete_recordings_trashes_coaching_data(env):
     assert not sidecar.exists() and not words.exists()
     assert str(sidecar) in body["deleted"] and str(words) in body["deleted"]
     assert f"{sid}.words.json" in {p.name for p in env.system_trash}
-
-
-def test_delete_transcript_trashes_coaching_data(env):
-    sid = "1715000000"
-    (env.trn / f"{sid}.json").write_text("{}")
-    sidecar, words = _coaching_files(sid)
-    body = _post(env.client, "/transcripts/delete", {"session_id": sid}).get_json()
-    assert body["trashed"] is True
-    assert not sidecar.exists() and not words.exists()
-    assert sorted(p.name for p in env.system_trash) == sorted([f"{sid}.json", f"{sid}.json", f"{sid}.words.json"])
 
 
 def test_delete_nothing_found_shape(env):
@@ -856,7 +833,7 @@ def test_legacy_odd_cloud_ids_can_be_tagged_renamed_deleted(env, name):
     listing = env.client.get("/recordings").get_json()
     assert [x["session_id"] for x in listing] == [sid]
 
-    assert _post(env.client, "/recordings/tag", {"session_id": sid, "tags": ["X"]}).status_code == 200
+    assert _post(env.client, "/recordings/tags/add", {"session_ids": [sid], "tags": ["X"]}).status_code == 200
     assert _post(env.client, "/recordings/rename", {"session_id": sid, "title": "T"}).status_code == 200
     cfg = _cfg()
     assert cfg["recording_tags"][sid] == ["X"]

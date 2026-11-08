@@ -6,7 +6,7 @@ Verifies:
 - Auto-tagging case insensitivity
 - Tauri bridge API surface matches Flask routes
 - Settings save/load cycle
-- Recording tag/rename operations
+- Recording rename
 - All route blueprints register correctly
 - Transcript CRUD operations
 - Audio file serving
@@ -99,7 +99,6 @@ class TestTauriBridgeAPISurface:
         "/device/status",
         "/device/rssi",
         "/device/info",
-        "/device/find-my",
         "/device/files",
         "/device/check-new",
         "/device/sync",
@@ -114,15 +113,12 @@ class TestTauriBridgeAPISurface:
         "/recordings",
         "/recordings/delete",
         "/recordings/restore-redownload",
-        "/recordings/tag",
         "/recordings/tags/add",
         "/recordings/tags/remove",
-        "/tags",
         "/recordings/rename",
         "/recordings/export",
         "/recordings/crop",
         "/transcripts/update",
-        "/transcripts/delete",
         # Settings
         "/settings",
         "/validate-key",
@@ -132,9 +128,7 @@ class TestTauriBridgeAPISurface:
         "/cloud/exchange-token",
         "/cloud/login-token",
         "/cloud/logout",
-        "/cloud/recordings",
         "/cloud/sync",
-        "/cloud/devices",
         "/cloud/bind-device",
         "/cloud/sn-sign",
         "/cloud/trash",
@@ -228,10 +222,8 @@ class TestTauriBridgeAPISurface:
         "recordings",
         "deleteRecordings",
         "restoreRedownload",
-        "tagRecording",
         "addTags",
         "removeTags",
-        "listTags",
         "renameRecording",
         "exportRecording",
         "cropRecording",
@@ -266,9 +258,7 @@ class TestTauriBridgeAPISurface:
         "cloudExchangeToken",
         "cloudLoginToken",
         "cloudLogout",
-        "cloudRecordings",
         "cloudSync",
-        "cloudDevices",
         "cloudBindDevice",
         "cloudSnSign",
         "cloudTrash",
@@ -410,15 +400,6 @@ class TestEndpointJSONShapes:
         data = flask_client.get("/transcripts").get_json()
         assert isinstance(data, list)
 
-    def test_tag_recording_shape(self, flask_client):
-        r = flask_client.post(
-            "/recordings/tag",
-            json={"session_id": "test_123", "tags": ["Meeting"]},
-            content_type="application/json",
-        )
-        data = r.get_json()
-        assert data["saved"] is True
-
     def test_rename_recording_shape(self, flask_client):
         r = flask_client.post(
             "/recordings/rename",
@@ -437,15 +418,6 @@ class TestEndpointJSONShapes:
         data = r.get_json()
         assert "deleted" in data
         assert "count" in data
-
-    def test_delete_transcript_shape(self, flask_client):
-        r = flask_client.post(
-            "/transcripts/delete",
-            json={"session_id": "fake_id_999"},
-            content_type="application/json",
-        )
-        data = r.get_json()
-        assert "deleted" in data
 
     def test_transcribe_missing_file(self, flask_client):
         r = flask_client.post(
@@ -605,32 +577,12 @@ class TestSettingsRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Recording tag & rename operations
+# Recording rename
 # ---------------------------------------------------------------------------
 
 
 class TestRecordingTagRename:
-    """Tag and rename operations persist through the config."""
-
-    def test_tag_recording_persists(self, flask_client):
-        flask_client.post(
-            "/recordings/tag",
-            json={"session_id": "sess_abc", "tags": ["Meeting", "Important"]},
-            content_type="application/json",
-        )
-        # Tags should appear in the recordings list for that session
-        # (no actual OGG file, so we verify via a second tag call)
-        flask_client.post(
-            "/recordings/tag",
-            json={"session_id": "sess_abc", "tags": ["Meeting", "Important", "Follow-up"]},
-            content_type="application/json",
-        )
-        r = flask_client.post(
-            "/recordings/tag",
-            json={"session_id": "sess_abc", "tags": ["Journal"]},
-            content_type="application/json",
-        )
-        assert r.get_json()["saved"] is True
+    """Rename persists through the config."""
 
     def test_rename_recording_persists(self, flask_client):
         flask_client.post(
@@ -650,14 +602,6 @@ class TestRecordingTagRename:
             content_type="application/json",
         )
         assert r.get_json()["saved"] is True
-
-    def test_tag_no_session_returns_400(self, flask_client):
-        r = flask_client.post(
-            "/recordings/tag",
-            json={"tags": ["Test"]},
-            content_type="application/json",
-        )
-        assert r.status_code == 400
 
     def test_rename_no_session_returns_400(self, flask_client):
         r = flask_client.post(
@@ -1111,10 +1055,6 @@ class TestErrorHandling:
 
     def test_summarize_error_has_error_key(self, flask_client):
         r = flask_client.post("/summarize", json={}, content_type="application/json")
-        assert "error" in r.get_json()
-
-    def test_tag_error_has_error_key(self, flask_client):
-        r = flask_client.post("/recordings/tag", json={}, content_type="application/json")
         assert "error" in r.get_json()
 
     def test_rename_error_has_error_key(self, flask_client):

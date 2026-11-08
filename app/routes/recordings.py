@@ -403,55 +403,6 @@ def remove_recording_tags():
     return _change_tags(tags_store.remove_tags)
 
 
-@bp.route("/tags", methods=["GET"])
-def list_tags():
-    """Every tag with how many recordings carry it."""
-    return jsonify({"tags": tags_store.all_tags()})
-
-
-@bp.route("/recordings/tag", methods=["POST"])
-def tag_recording():
-    """Set a recording's whole tag list.
-
-    Kept for compatibility only: the app adds and removes single tags through
-    /recordings/tags/add and /recordings/tags/remove, so a stale window can't
-    wipe a tag something else added.
-    """
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    tags = data.get("tags", [])
-    if not session_id:
-        return jsonify({"error": "No session_id"}), 400
-    try:
-        validate_session_id(session_id)
-    except InvalidSessionIdError as e:
-        return _invalid(e)
-    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-        return jsonify({"error": "tags must be a list of strings"}), 400
-
-    update_config(lambda c: c.setdefault("recording_tags", {}).__setitem__(session_id, tags))
-
-    # Also persist tags in the transcript JSON for recovery after config resets
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if transcript_path.exists():
-        try:
-            import json as _json
-
-            with get_transcript_lock(session_id):
-                t_data = _json.loads(transcript_path.read_text())
-                t_data["tags"] = tags
-                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
-
-    from app.utils import changes
-
-    changes.bump()
-    notion_queued = tags_store.enqueue_notion_sync(session_id)
-
-    return jsonify({"saved": True, "notion_queued": notion_queued})
-
-
 @bp.route("/recordings/rename", methods=["POST"])
 def rename_recording():
     """Set a custom title for a recording."""
@@ -1106,39 +1057,6 @@ def update_transcript():
     if text_changed:
         coaching_store.mark_stale(session_id)
     return jsonify({"saved": True})
-
-
-@bp.route("/transcripts/delete", methods=["POST"])
-def delete_transcript():
-    """Move just the transcript for a recording to the Trash (keeps the audio).
-
-    Response: {"deleted": [paths], "trashed": bool, "trash_location": ..., "errors": [...]}.
-    """
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    if not session_id:
-        return jsonify({"error": "No session_id provided"}), 400
-    try:
-        validate_session_id(session_id)
-    except InvalidSessionIdError as e:
-        return _invalid(e)
-
-    paths = [TRANSCRIPTS_DIR / f"{session_id}.{ext}" for ext in ("json", "txt")]
-    with get_transcript_lock(session_id):
-        deleted, locations, errors = _trash_files(paths)
-    # Coaching is built from the transcript, so its data goes with it (after the
-    # transcript lock is released: the coaching store has its own lock).
-    ct, cloc, cerrs = _trash_coaching_files(session_id)
-    deleted, locations, errors = deleted + ct, locations | cloc, errors + cerrs
-
-    return jsonify(
-        {
-            "deleted": deleted,
-            "trashed": not errors,
-            "trash_location": _trash_location(locations),
-            "errors": errors,
-        }
-    )
 
 
 # ---------------------------------------------------------------- speaker names

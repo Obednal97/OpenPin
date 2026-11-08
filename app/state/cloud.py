@@ -633,14 +633,6 @@ def get_login_url(region="eu"):
     return login_url, desktop_uuid
 
 
-def auto_detect():
-    """Check if we can auto-detect the Plaud desktop app token."""
-    token, api_domain = _extract_plaud_desktop_token()
-    if token:
-        return {"found": True, "api_domain": api_domain}
-    return {"found": False}
-
-
 # Region in a sign-in code's suffix ("aws:eu-central-1") -> PLAUD_API_DOMAINS key.
 # Only "eu-" has been checked against a real code; the others follow Plaud's
 # domain names, and anything unrecognised keeps the current domain.
@@ -1176,45 +1168,6 @@ def trash_cloud_files(cloud_ids):
     )
     r.raise_for_status()
     return r.json()
-
-
-def list_cloud_recordings():
-    """List recordings available in the Plaud cloud."""
-    data = cloud_api(
-        "/file/simple/web",
-        params={
-            "skip": 0,
-            "limit": 9999,
-            "is_trash": 0,
-            "sort_by": "start_time",
-            "is_desc": "true",
-        },
-    )
-    files = data.get("data_file_list", data.get("data_list", []))
-    result = []
-    for f in files:
-        dur = f.get("duration", 0)
-        if dur > 10000:
-            dur = dur / 1000
-        ts = f.get("start_time", 0)
-        if ts > 1e12:
-            ts = ts / 1000
-        result.append(
-            {
-                "file_id": f.get("id", ""),
-                "filename": f.get("filename", "unknown"),
-                "duration": dur,
-                "start_time": ts,
-                "scene": f.get("scene", 0),
-            }
-        )
-    return result
-
-
-def list_cloud_devices():
-    """List devices bound to the Plaud account."""
-    data = cloud_api("/device/list")
-    return data.get("data_devices", [])
 
 
 def _cloud_call_error(exc):

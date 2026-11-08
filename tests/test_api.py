@@ -127,12 +127,6 @@ def test_cors_headers(flask_client):
     assert r.headers.get("Access-Control-Allow-Origin") == "tauri://localhost"
 
 
-def test_tag_recording_no_session(flask_client):
-    """POST /recordings/tag with no session_id returns error."""
-    r = flask_client.post("/recordings/tag", json={"tags": ["test"]}, content_type="application/json")
-    assert r.status_code == 400
-
-
 def test_rename_recording_no_session(flask_client):
     """POST /recordings/rename with no session_id returns error."""
     r = flask_client.post("/recordings/rename", json={"title": "test"}, content_type="application/json")
