@@ -1648,6 +1648,18 @@ def find_local_recording(sid, rec_dirs=None):
     return None
 
 
+def _wifi_skip_ids():
+    """Recordings a Wi-Fi sync must skip, by the same rules as Bluetooth: deleted
+    ones, ones already in any recordings folder, and ones already in Google Drive.
+    The worker treats every id here as present."""
+    try:
+        dirs = list(get_all_recordings_dirs())
+    except Exception:
+        dirs = [get_recordings_dir()]
+    local = {p.stem for d in dirs if d.is_dir() for p in d.glob("*.ogg")}
+    return {str(s) for s in load_config().get("deleted_ids", [])} | local | gdrive_cloud_synced_ids()
+
+
 def is_already_synced(sid, rec_dirs=None, cloud_ids=None):
     """True if the recording is present locally or (cloud mode) in Google Drive."""
     if find_local_recording(sid, rec_dirs) is not None:
@@ -2055,7 +2067,7 @@ def _do_wifi_sync_locked(deadline):
                 "sn": sn,
                 "recordings_dir": str(get_recordings_dir()),
                 "app_key_path": str(APP_KEY_PATH),
-                "dismissed": list(load_config().get("deleted_ids", [])),
+                "dismissed": sorted(_wifi_skip_ids()),
                 "bind_token": device_token,
                 "sn_sig": device_sig,
                 # Lock file + WiFi restore record live here (survive a crash).
