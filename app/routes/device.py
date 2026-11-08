@@ -242,7 +242,7 @@ def rssi():
 
 @bp.route("/info")
 def info():
-    """Get comprehensive device information (storage, firmware, state, accelerometer)."""
+    """Get device information for the Device panel (storage, firmware, state, battery)."""
     if not dev.is_connected():
         return jsonify({"error": "Not connected"}), 400
     if dev.is_syncing():

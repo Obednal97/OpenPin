@@ -78,6 +78,8 @@ from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     describe_status_reply,
     reply_matches,
 )
+from app.utils.constants import BLE_NOTIFY_UUID as N  # noqa: E402
+from app.utils.constants import BLE_WRITE_UUID as W  # noqa: E402
 
 WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
@@ -1212,16 +1214,11 @@ def _atomic_write(path, data):
 
 
 async def wait_event(event, timeout):
-    """Wait for an asyncio.Event; True if it was set, False on timeout.
-
-    Catches asyncio.TimeoutError explicitly: on Python 3.10 (allowed by
-    pyproject) it is NOT the builtin TimeoutError, so `except TimeoutError`
-    would let the timeout escape and skip the clean error result.
-    """
+    """Wait for an asyncio.Event; True if it was set, False on timeout."""
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
         return True
-    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+    except TimeoutError:
         return False
 
 
@@ -1330,8 +1327,6 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
-W = "00002bb1-0000-1000-8000-00805f9b34fb"
-N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
 
 async def ble_connect_and_setup():
@@ -1467,7 +1462,7 @@ async def ble_connect_and_setup():
             await cl.write_gatt_char(W, enc(pt), response=False)
             try:
                 await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+            except TimeoutError:
                 pass
             return cmd_resp[0]
         finally:
@@ -1883,9 +1878,6 @@ async def transfer(args):
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
     app_rsa_key = load_pem_private_key(app_key_path.read_bytes(), password=None)
-    # The app's own modules (decrypt, ogg wrapping) are imported lazily from the
-    # project root.
-    sys.path.insert(0, str(app_key_path.parent.parent))
     status(f"WiFi interface: {get_wifi_interface()}", 3)
 
     wifi_ssid = f"Plaud{sn[-4:]}"

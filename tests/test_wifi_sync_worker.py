@@ -17,7 +17,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 import app.utils.wifi_sync_worker as worker
-from tests.plaud_fakes import FakeMac, Gate, make_plaud_file, py310_asyncio
+from tests.plaud_fakes import FakeMac, Gate, make_plaud_file
 
 
 @pytest.fixture(scope="module")
@@ -177,18 +177,6 @@ def test_wifi_worker_never_deletes_an_existing_ogg(tmp_path):
     ]
     assert not (tmp_path / "13.ogg.partial").exists()  # legacy leftovers (never an .ogg) still cleaned
     assert worker.next_wifi_download(queue, tmp_path, set(), new_files) is None
-
-
-def test_wait_event_handles_py310_asyncio_timeout(monkeypatch):
-    monkeypatch.setattr(worker, "asyncio", py310_asyncio())
-
-    async def go():
-        evt = asyncio.Event()
-        timed_out = await worker.wait_event(evt, 0.01)
-        evt.set()
-        return timed_out, await worker.wait_event(evt, 0.01)
-
-    assert asyncio.run(go()) == (False, True)
 
 
 def test_wifi_decrypt_failure_keeps_encrypted(tmp_path, app_key):

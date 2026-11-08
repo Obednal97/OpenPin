@@ -241,9 +241,3 @@ def mark_off(port: int) -> None:
         _port = int(port)
         _remove_file(force=True)
         _write_off_marker()
-
-
-def remove_connection_file() -> None:
-    """Delete the connection file whoever wrote it (a stale one left by a crash)."""
-    with _lock:
-        _remove_file(force=True)

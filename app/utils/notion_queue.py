@@ -44,7 +44,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.utils.constants import NOTION_QUEUE_PATH
@@ -92,7 +92,7 @@ _PERMANENT_ERROR_MARKERS = (
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017 (requires-python >=3.10)
+    return datetime.now(UTC).isoformat()
 
 
 def _stronger_kind(a: str | None, b: str | None) -> str:

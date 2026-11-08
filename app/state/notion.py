@@ -685,9 +685,5 @@ def get_database_id():
     return _notion_state.get("database_id")
 
 
-def get_database_name():
-    return _notion_state.get("database_name")
-
-
 # Load saved state on import
 load()

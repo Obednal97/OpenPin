@@ -18,7 +18,6 @@ from app.utils import pairing_store
 from app.utils.audio import unwrap_ogg_to_raw_opus, wrap_opus_ogg
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
-    CLOUD_RECORDINGS_DIR,
     PLAUD_API_DOMAINS,
     PLAUD_CONFIG_PATH,
     PLAUD_WEB_HOST,
@@ -177,11 +176,8 @@ def _decode_body(raw):
         text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
         text = text.strip()
         if text.startswith("gAAAAAB"):
-            try:
-                from cryptography.fernet import Fernet
-            except ImportError:
-                logging.warning("[Cloud] cryptography unavailable; can't decrypt Plaud's reply")
-                return {}
+            from cryptography.fernet import Fernet
+
             text = Fernet(PLAUD_FERNET_KEY).decrypt(text.encode()).decode("utf-8")
         body = json.loads(text)
         return body if isinstance(body, dict) else {}
@@ -854,7 +850,6 @@ def download_cloud_recordings():
     if not files:
         return {"files": [], "message": "No recordings in cloud"}
 
-    CLOUD_RECORDINGS_DIR.mkdir(exist_ok=True)
     active_rec_dir = get_recordings_dir()
     active_rec_dir.mkdir(exist_ok=True)
     config = load_config()

@@ -20,7 +20,6 @@ TOKEN = "T" * 32
 
 @pytest.fixture
 def connect_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(dev, "SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(dev, "_HANDSHAKE_REPLY_TIMEOUT_S", 0.1)
     monkeypatch.setattr(dev, "SN_SIG_REPLY_WAIT_S", 1)
     monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: base64.b64encode(bytes(256)).decode())
