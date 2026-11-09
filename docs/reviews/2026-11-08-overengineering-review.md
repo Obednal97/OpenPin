@@ -124,7 +124,7 @@ Fix: import it inside `_anthropic_client` and `validate_key`. In the error class
 - `state/device.py:224-280`: `FILTER_DATA_SESSIONS` and `ENFORCE_DATA_OFFSETS`. Neither is set in production.
 - `state/device.py:1590-1665`: `CRC16_ENFORCED_VARIANT=None`, with five CRC variants computed on every download for logging only.
 - `FAIL_ON_HANDSHAKE_REJECTED=False` at `device.py:1146` and `wifi_sync_worker.py:1498`. Never set in production.
-- Together about 120 lines. If the MacBook's `app.log` shows which CRC variant matches, and that the switches never fire, they can be settled. There are no logs on ai-mini to check, so the risk is high until then.
+- Together about 120 lines. If the MacBook's `app.log` shows which CRC variant matches, and that the switches never fire, they can be settled. There were no logs on the review machine to check, so the risk is high until then.
 - `state/device.py:1861-1915 scrub_wifi_logs` is a one-time clean-up for logs from before v2.4.1. ~40 lines. Risk med: someone upgrading straight from before v2.4.1 would keep unredacted logs.
 
 ## 3. Frontend
@@ -188,7 +188,7 @@ Duplicates:
 
 ### 4.1 Hand-rolled SHA-256 (`src-tauri/src/commands/sha256.rs`, 175 lines, low-med)
 
-Its header says it exists because `sha2` "is only a transitive dependency here", so it couldn't be imported without editing Cargo.toml. Cargo.lock already has sha2 0.10.9 (via `wry` and `tauri-codegen`). Adding `sha2 = "0.10"` and replacing the 5 call sites removes hand-rolled crypto from the update-verification path. Unverified whether wry's copy is compiled for macOS (no cargo on ai-mini); if it isn't, sha2 is still a tiny crate.
+Its header says it exists because `sha2` "is only a transitive dependency here", so it couldn't be imported without editing Cargo.toml. Cargo.lock already has sha2 0.10.9 (via `wry` and `tauri-codegen`). Adding `sha2 = "0.10"` and replacing the 5 call sites removes hand-rolled crypto from the update-verification path. Unverified whether wry's copy is compiled for macOS (cargo wasn't on the review machine's PATH); if it isn't, sha2 is still a tiny crate.
 
 ### 4.2 Leftovers from the retired `/v1/report` (~125 lines, low)
 
