@@ -8,7 +8,6 @@ from the optional ``diarize`` extra, so they are imported lazily and
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -208,65 +207,69 @@ def speaker_embeddings(
 
 
 def _load_exemplars() -> list[list[float]]:
-    try:
-        data = json.loads(PROFILE_PATH.read_text())
-        ex = data["exemplars"]
-        if data.get("version") != 1 or not isinstance(ex, list):
-            return []
-        return [[float(x) for x in e] for e in ex if e]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return []
+    from app.people import store
+
+    return [s["vec"] for s in store.load()["people"][store.ME]["samples"]]
 
 
-def _save_exemplars(exemplars: list[list[float]]) -> None:
-    """Atomic write (temp + replace), file mode 0600. Keeps the newest MAX_EXEMPLARS."""
-    exemplars = exemplars[-MAX_EXEMPLARS:]
-    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": 1,
-        "exemplars": exemplars,
-        "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }
-    fd, tmp = tempfile.mkstemp(dir=PROFILE_PATH.parent, prefix=".voice_profile-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, PROFILE_PATH)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+def _learn_into(data: dict, vectors: list[list[float]], session_id: str | None, labels: list[str] | None) -> list[dict]:
+    """New owner samples for ``vectors``; any earlier sample for the same recording speaker
+    is removed from everyone first, so re-learning never leaves a stale twin."""
+    from app.people import store
+
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    out = []
+    for i, vec in enumerate(vectors):
+        label = labels[i] if labels and i < len(labels) else None
+        if session_id is not None:
+            store.remove_sample(data, session_id, label)
+        out.append({"vec": vec, "session_id": session_id, "label": label, "seconds": 0, "added_at": stamp})
+    return out
 
 
 def delete_profile() -> None:
+    """Forget the owner's voice: clear the ``me`` samples and remove the v1 file and its backup."""
+    from app.people import store
+
+    store.mutate(lambda data: data["people"][store.ME].update(samples=[]))  # also unlinks the v1 mirror
     try:
-        PROFILE_PATH.unlink()
+        PROFILE_PATH.with_name(PROFILE_PATH.name + ".v1-backup").unlink()
     except FileNotFoundError:
         pass
 
 
-def add_exemplars(audio_path: str, segments: list[dict], labels: list[str]) -> int:
+def _learn(vectors: list[list[float]], session_id: str | None, labels: list[str], replace: bool) -> None:
+    """Add (or swap in) owner samples in one store transaction: no read-then-write gap.
+    The store keeps the MAX_EXEMPLARS most varied."""
+    from app.people import store
+
+    def fn(data: dict) -> None:
+        new = _learn_into(data, vectors, session_id, labels)  # first: it may drop twins from `me`
+        me = [] if replace else data["people"][store.ME]["samples"]
+        data["people"][store.ME]["samples"] = me + new
+
+    store.mutate(fn)
+
+
+def add_exemplars(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
     """Add one exemplar per given label from this recording (voice setup and the
-    correction path). Returns how many were added. Oldest exemplars drop past 20."""
+    correction path). Returns how many were added. Past 20, the least varied drop."""
     embeddings = speaker_embeddings(audio_path, segments)
-    new = [embeddings[label] for label in labels if label in embeddings]
-    if new:
-        _save_exemplars(_load_exemplars() + new)
-    return len(new)
+    got = [label for label in labels if label in embeddings]
+    if got:
+        _learn([embeddings[label] for label in got], session_id, got, replace=False)
+    return len(got)
 
 
-def replace_profile(audio_path: str, segments: list[dict], labels: list[str]) -> int:
+def replace_profile(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
     """Redo voice setup: build exemplars from this recording and swap them in for the old
     profile, but only if at least one was produced (a failed redo keeps the old voice).
     Returns how many exemplars the new profile has (0 = nothing changed)."""
     embeddings = speaker_embeddings(audio_path, segments)
-    new = [embeddings[label] for label in labels if label in embeddings]
-    if new:
-        _save_exemplars(new)
-    return len(new)
+    got = [label for label in labels if label in embeddings]
+    if got:
+        _learn([embeddings[label] for label in got], session_id, got, replace=True)
+    return len(got)
 
 
 # ------------------------------------------------------------------ matching
@@ -276,7 +279,7 @@ def _none(reason: str) -> dict:
     return {"labels": [], "confidence": 0.0, "source": "none", "reason": reason}
 
 
-def match_owner(audio_path: str, segments: list[dict]) -> dict:
+def match_owner(audio_path: str, segments: list[dict], session_id: str | None = None) -> dict:
     """Which speaker labels are the owner. Never installs the model, never raises."""
     try:
         exemplars = _load_exemplars()
@@ -284,7 +287,12 @@ def match_owner(audio_path: str, segments: list[dict]) -> dict:
             return _none("no voice profile")
         if not model_available():
             return _none("voice model not installed")
-        embeddings = speaker_embeddings(audio_path, segments)
+        if session_id:
+            from app.people import embeddings as cache
+
+            embeddings = cache.get(session_id, segments, audio_path) or {}
+        else:
+            embeddings = speaker_embeddings(audio_path, segments)
         scores = {label: max(_cosine(e, ex) for ex in exemplars) for label, e in embeddings.items()}
         if not scores:
             return _none("no confident match")

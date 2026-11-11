@@ -85,7 +85,7 @@ def set_speaker_names(recording_id):
     if not isinstance(names, dict) or not names:
         return _error("names must map speaker labels to a name or null", 400)
     try:
-        speakers.set_names(recording_id, names)
+        speakers.set_names(recording_id, names, from_ai=True)
     except KeyError:
         return _error("This recording has no transcript yet, so it has no speakers to name", 400)
     except ValueError as e:

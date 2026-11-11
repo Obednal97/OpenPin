@@ -810,7 +810,7 @@ function renderTranscriptSegments(container, t, sessionId) {
         (seg, i) => `
       <div class="segment" data-index="${i}" data-start="${escapeHtml(seg.start)}">
         <span class="segment-time">${formatTime(seg.start, withHours)}</span>
-        ${seg.speaker ? _txSpeakerButtonHtml(seg.speaker, names) : ''}
+        ${seg.speaker ? _txSpeakerButtonHtml(seg.speaker, names, _txSources(t)) : ''}
         <span class="segment-text" contenteditable="true" data-index="${i}">${escapeHtml(seg.text)}</span>
         <button class="segment-delete" data-index="${i}" title="Remove segment">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -932,6 +932,11 @@ function _txNames(t) {
   return (t && t.speaker_names && typeof t.speaker_names === 'object') ? t.speaker_names : {};
 }
 
+// Labels named by voice: { label: { source: 'voice', score } }
+function _txSources(t) {
+  return (t && t.speaker_name_sources && typeof t.speaker_name_sources === 'object') ? t.speaker_name_sources : {};
+}
+
 function _txStoredNames(t) {
   return (t && t.stored_speaker_names && typeof t.stored_speaker_names === 'object') ? t.stored_speaker_names : {};
 }
@@ -950,9 +955,10 @@ function _txSpeakerLabels(t) {
   return [...seen];
 }
 
-function _txSpeakerButtonHtml(label, names) {
+function _txSpeakerButtonHtml(label, names, sources) {
   const name = names[label];
-  const title = name ? `${name} (${label}). Click to rename` : `${label}. Click to name this speaker`;
+  const byVoice = !!(name && sources && sources[label]);
+  const title = byVoice ? 'Matched by voice' : name ? `${name} (${label}). Click to rename` : `${label}. Click to name this speaker`;
   return `<button type="button" class="segment-speaker${name ? ' named' : ''}" data-label="${escapeHtml(label)}" title="${escapeHtml(title)}">${escapeHtml(name || label)}</button>`;
 }
 
@@ -1029,12 +1035,13 @@ function _txNoticeNamesCleared(sessionId, t) {
 }
 
 // Put new names on every cached copy of a recording's transcript, and its list row.
-function _txSetNames(sessionId, effective, stored, extra) {
+function _txSetNames(sessionId, effective, stored, extra, sources) {
   const targets = new Set([app.transcripts[sessionId], extra, _txShownT && _txShownT.session_id === sessionId ? _txShownT : null]);
   for (const obj of targets) {
     if (!obj) continue;
     obj.speaker_names = { ...effective };
     obj.stored_speaker_names = { ...stored };
+    if (sources) obj.speaker_name_sources = { ...sources };
   }
   const rec = app.recordings.find((r) => r.session_id === sessionId);
   if (rec) rec.participants = [...new Set(Object.values(effective))];
@@ -1055,7 +1062,7 @@ async function refreshSpeakerNames(sessionId, t) {
   }
   const fresh = (list || []).find((x) => x && x.session_id === sessionId);
   if (!fresh) return false;
-  _txSetNames(sessionId, fresh.speaker_names || {}, fresh.stored_speaker_names || {}, t);
+  _txSetNames(sessionId, fresh.speaker_names || {}, fresh.stored_speaker_names || {}, t, fresh.speaker_name_sources || {});
   return true;
 }
 
@@ -1095,22 +1102,90 @@ function redrawOpenTranscript(sessionId) {
 
 // Why your own name is on a speaker, and how to change it
 const _TX_DEFAULT_NAME_HELP =
-  'This is your name because you picked this speaker as you in Coaching. To change that, use Which one is you '
-  + '(Change, in the Coaching tab), or type another name here.';
+  'This is your name because Open Pin recognised your voice, or you picked this speaker in Coaching. '
+  + 'Type another name to change it.';
 
-function _txSpeakerEditorHtml(label, current, isDefault, hasStored) {
-  const hint = isDefault ? _TX_DEFAULT_NAME_HELP : 'Names you’ve used before are suggested as you type.';
+const _TX_PICK_MAX_ROWS = 8;
+const _TX_PICK_VOICE_ICON =
+  '<svg class="speaker-name-voice-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linecap="round" aria-label="Known by voice"><rect x="9" y="2" width="6" height="12" rx="3"/>'
+  + '<path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg>';
+
+function _txPickLevenshtein(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// The known person whose name matches `typed` ignoring case, or undefined
+function _txPickExact(known, typed) {
+  const low = typed.trim().toLowerCase();
+  return known.find((p) => p.name.toLowerCase() === low);
+}
+
+/**
+ * The known name to offer instead of `typed`, or null. Offered when typed is a single
+ * word that starts exactly one longer known name ("will" for "Will Moss"), or is
+ * within Levenshtein distance 2 of a known name. The closest wins; ties go to the most used.
+ */
+function _txPickDidYouMean(typed, known) {
+  const low = typed.trim().toLowerCase();
+  if (!low || _txPickExact(known, low)) return null;
+  const first = /\s/.test(low) ? [] : known.filter((p) => /\s/.test(p.name.trim()) && p.name.trim().split(/\s+/)[0].toLowerCase() === low);
+  const scored = first.length === 1
+    ? [{ p: first[0], d: 0 }]
+    : known.map((p) => ({ p, d: _txPickLevenshtein(low, p.name.toLowerCase()) })).filter((x) => x.d <= 2);
+  scored.sort((x, y) => x.d - y.d || (y.p.recordings || 0) - (x.p.recordings || 0));
+  return scored.length ? scored[0].p.name : null;
+}
+
+// Names that match what is typed (as listed: people known by voice first), at most 8
+function _txPickMatches(known, typed) {
+  const low = typed.trim().toLowerCase();
+  return known.filter((p) => p.name.toLowerCase().includes(low)).slice(0, _TX_PICK_MAX_ROWS);
+}
+
+// The suggestion rows: the matching names, then "Add new person" unless typed is a known name
+function _txPickRowsHtml(known, typed, active) {
+  const rows = _txPickMatches(known, typed).map((p) => ({ attr: `data-pick="${escapeHtml(p.name)}"`, cls: '',
+    body: `<span>${escapeHtml(p.name)}</span>${p.has_voice ? _TX_PICK_VOICE_ICON : ''}` }));
+  const name = typed.trim();
+  if (name && !_txPickExact(known, name)) {
+    rows.push({ attr: 'data-pick-new="1"', cls: ' speaker-name-option-new', body: `Add new person: “${escapeHtml(name)}”` });
+  }
+  return rows
+    .map((r, i) => `<div class="speaker-name-option${r.cls}" role="option" id="speaker-name-opt-${i}" ${r.attr}`
+      + `${i === active ? ' aria-selected="true"' : ''}>${r.body}</div>`)
+    .join('');
+}
+
+function _txSpeakerEditorHtml(label, current, isDefault, hasStored, byVoice) {
+  const hint = isDefault ? _TX_DEFAULT_NAME_HELP : 'Pick a name from the list or type a new one, with the full name if you can.';
   const clearTitle = hasStored ? 'Remove this name' : 'Only a name you typed can be cleared';
+  const voice = byVoice
+    ? '<p class="speaker-name-voice">Matched by voice. <button type="button" class="action-btn subtle" data-speaker-action="reject">Not them</button></p>'
+    : '';
   return `
     <label class="speaker-name-label" for="speaker-name-input">Name for <strong>${escapeHtml(label)}</strong></label>
-    <input type="text" id="speaker-name-input" class="speaker-name-input" list="speaker-name-suggestions" maxlength="80"
-      autocomplete="off" spellcheck="false" placeholder="Name, such as Sarah Jones" value="${escapeHtml(current)}">
-    <datalist id="speaker-name-suggestions"></datalist>
+    <div class="speaker-name-field">
+      <input type="text" id="speaker-name-input" class="speaker-name-input" role="combobox" aria-autocomplete="list"
+        aria-expanded="true" aria-controls="speaker-name-list" maxlength="80"
+        autocomplete="off" spellcheck="false" placeholder="Full name, such as Harry Fisher" value="${escapeHtml(current)}">
+      <div id="speaker-name-list" class="speaker-name-list" role="listbox" aria-label="People"></div>
+    </div>
     <div class="speaker-name-actions">
       <button type="button" class="action-btn subtle" data-speaker-action="cancel">Cancel</button>
       <button type="button" class="action-btn subtle" data-speaker-action="clear" title="${clearTitle}"${hasStored ? '' : ' disabled'}>Clear</button>
       <button type="button" class="action-btn accent" data-speaker-action="save">Save</button>
     </div>
+    ${voice}
+    <p class="speaker-name-dym" hidden></p>
     <p class="speaker-name-hint">${escapeHtml(hint)}</p>
     <p class="speaker-name-error" role="alert" hidden></p>`;
 }
@@ -1125,7 +1200,8 @@ function _txSpeakerNameChange(t, label, typed) {
   const stored = _txStoredNames(t)[label];
   if (!name) return stored ? { [label]: null } : null;
   if (name === stored) return null;
-  if (!stored && name === _txNames(t)[label]) return null;
+  // Your default name stays as it is; a voice match saved as it is counts as accepting it
+  if (!stored && name === _txNames(t)[label] && !_txSources(t)[label]) return null;
   return { [label]: name };
 }
 
@@ -1138,88 +1214,175 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
   }
   const current = _txNames(t)[label] || '';
   const hasStored = !!_txStoredNames(t)[label];
+  const byVoice = !!current && !hasStored && !!_txSources(t)[label];
   const editor = document.createElement('div');
   editor.className = 'speaker-name-editor';
   editor.setAttribute('role', 'group');
   editor.setAttribute('aria-label', `Name ${label}`);
-  editor.innerHTML = _txSpeakerEditorHtml(label, current, !!current && !hasStored, hasStored);
+  // The owner help only fits your own name: a person matched by voice has the normal hint
+  const profileName = String((app.settings.profile || {}).name || '').trim().toLowerCase();
+  const isDefault = !!current && !hasStored && (!byVoice || current.toLowerCase() === profileName);
+  editor.innerHTML = _txSpeakerEditorHtml(label, current, isDefault, hasStored, byVoice);
   row.insertAdjacentElement('afterend', editor);
   _txSpeakerEditorEl = editor;
 
   const input = editor.querySelector('.speaker-name-input');
+  const listEl = editor.querySelector('.speaker-name-list');
+  const dymEl = editor.querySelector('.speaker-name-dym');
+  const errorEl = editor.querySelector('.speaker-name-error');
   input.value = current;
   input.focus();
   input.select();
 
-  // Suggestions: names typed for speakers anywhere in the library
+  // The picker: everyone known (people with a voice first), filtered by what you type.
+  // Until you type, the list is unfiltered, so your current name doesn't hide the rest.
+  let known = [];
+  let query = '';
+  let active = -1;
+  let listOpen = !byVoice; // a matched name's editor starts with the list closed, so "Not them" isn't covered
+  const showList = () => {
+    const html = listOpen ? _txPickRowsHtml(known, query, active) : '';
+    listEl.innerHTML = html;
+    listEl.hidden = !html;
+    input.setAttribute('aria-expanded', String(!!html));
+    if (active >= 0) input.setAttribute('aria-activedescendant', `speaker-name-opt-${active}`);
+    else input.removeAttribute('aria-activedescendant');
+  };
+  const rowCount = () => _txPickMatches(known, query).length + (query.trim() && !_txPickExact(known, query) ? 1 : 0);
   Promise.resolve()
     .then(() => window.plaud.people())
     .then((people) => {
-      const list = editor.querySelector('#speaker-name-suggestions');
-      if (!list || !Array.isArray(people)) return;
-      list.innerHTML = people
-        .filter((p) => p && typeof p.name === 'string')
-        .slice(0, 200)
-        .map((p) => `<option value="${escapeHtml(p.name)}"></option>`)
-        .join('');
+      if (!Array.isArray(people)) return;
+      known = people.filter((p) => p && typeof p.name === 'string' && p.name.trim());
+      showList();
     })
     .catch(() => {});
 
   let busy = false;
-  const act = async (action) => {
+  const fail = (message) => {
+    busy = false;
+    errorEl.textContent = message;
+    errorEl.hidden = false;
+    editor.querySelectorAll('button[data-speaker-action]').forEach((b) => {
+      b.disabled = b.dataset.speakerAction === 'clear' && !_txStoredNames(t)[label];
+    });
+    input.focus();
+  };
+  const reject = async () => {
+    busy = true;
+    editor.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    let res;
+    try {
+      res = await window.plaud.rejectVoiceMatch(sessionId, label);
+    } catch (err) {
+      res = { error: `Couldn’t do that: ${(err && err.message) || 'no response'}` };
+    }
+    if (!res || res.error || !res.speaker_names || typeof res.speaker_names !== 'object') {
+      fail((res && res.error) || 'Couldn’t do that');
+      return;
+    }
+    _txSetNames(sessionId, res.speaker_names, _txStoredNames(t), t, res.speaker_name_sources || {});
+    _txCloseSpeakerEditor();
+    _txRedrawSegments(container, t, sessionId);
+  };
+
+  // action: save, clear, cancel, reject, use-known (the offered name), keep-typed (no question asked)
+  const act = async (action, name) => {
     if (busy) return;
     if (action === 'cancel') {
       _txCloseSpeakerEditor();
       return;
     }
+    if (action === 'reject') {
+      await reject();
+      return;
+    }
+    if (action === 'use-known') input.value = name;
     let change;
     if (action === 'clear') change = _txStoredNames(t)[label] ? { [label]: null } : null;
     else change = _txSpeakerNameChange(t, label, input.value);
     if (!change && action === 'save' && !String(input.value || '').trim() && _txNames(t)[label] && !_txStoredNames(t)[label]) {
       // Emptied your own name: it can't be cleared here, so say how to change it
-      const errorEl = editor.querySelector('.speaker-name-error');
-      if (errorEl) {
-        errorEl.textContent = _TX_DEFAULT_NAME_HELP;
-        errorEl.hidden = false;
-      }
+      errorEl.textContent = _TX_DEFAULT_NAME_HELP;
+      errorEl.hidden = false;
       input.focus();
       return;
+    }
+    if (change && change[label] && action !== 'keep-typed') {
+      // An exact match ignoring case keeps the known spelling; a near miss gets a question
+      const exact = _txPickExact(known, change[label]);
+      const maybe = exact ? null : _txPickDidYouMean(change[label], known);
+      if (exact) change = _txSpeakerNameChange(t, label, exact.name);
+      else if (maybe) {
+        dymEl.innerHTML = `Did you mean ${escapeHtml(maybe)}? `
+          + `<button type="button" class="action-btn subtle" data-speaker-action="use-known" data-speaker-name="${escapeHtml(maybe)}">${escapeHtml(maybe)}</button> `
+          + `<button type="button" class="action-btn subtle" data-speaker-action="keep-typed">Keep “${escapeHtml(change[label])}”</button>`;
+        dymEl.hidden = false;
+        listOpen = false;
+        showList();
+        return;
+      }
     }
     if (!change) {
       _txCloseSpeakerEditor();
       return;
     }
     busy = true;
-    const errorEl = editor.querySelector('.speaker-name-error');
+    listOpen = false;
+    showList();
     editor.querySelectorAll('button').forEach((b) => (b.disabled = true));
-    await _txSaveSpeakerName(container, sessionId, t, change, (message) => {
-      busy = false;
-      if (errorEl) {
-        errorEl.textContent = message;
-        errorEl.hidden = false;
-      }
-      editor.querySelectorAll('button[data-speaker-action]').forEach((b) => {
-        b.disabled = b.dataset.speakerAction === 'clear' && !_txStoredNames(t)[label];
-      });
-      input.focus();
-    });
+    await _txSaveSpeakerName(container, sessionId, t, change, fail);
   };
 
   editor.addEventListener('click', (e) => {
     e.stopPropagation(); // not a click on the transcript behind it
-    const btn = e.target && e.target.closest ? e.target.closest('[data-speaker-action]') : null;
-    if (btn && !btn.disabled) act(btn.dataset.speakerAction);
+    const find = (sel) => (e.target && e.target.closest ? e.target.closest(sel) : null);
+    const btn = find('[data-speaker-action]');
+    const pick = find('[data-pick]');
+    if (btn && !btn.disabled) act(btn.dataset.speakerAction, btn.dataset.speakerName);
+    else if (pick) {
+      input.value = pick.dataset.pick;
+      act('save');
+    } else if (find('[data-pick-new]')) act('keep-typed');
+  });
+  input.addEventListener('input', () => {
+    query = input.value;
+    listOpen = true;
+    active = -1;
+    dymEl.hidden = true;
+    showList();
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      act('save');
+      const matches = _txPickMatches(known, query);
+      if (active >= 0 && active < matches.length) {
+        input.value = matches[active].name;
+        act('save');
+      } else act(active >= 0 ? 'keep-typed' : 'save');
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      listOpen = true;
+      const n = rowCount();
+      if (!n) return;
+      active = e.key === 'ArrowDown' ? (active + 1) % n : (active - 1 + n) % n;
+      showList();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      act('cancel');
+      if (listOpen && rowCount()) {
+        listOpen = false; // first Escape closes the list, the next cancels the editor
+        showList();
+      } else act('cancel');
     }
   });
+}
+
+// Redraw the segments after a name change, unless the view has moved on or an editor is open
+function _txRedrawSegments(container, t, sessionId) {
+  if (app.currentView === 'transcript' && app.currentSessionId === sessionId && app.activeTab === 'transcript' && !speakerNameEditorOpen()) {
+    renderTranscriptSegments(container, t, sessionId);
+  }
 }
 
 // Send a name change; on success update every copy of the names and redraw the
@@ -1244,16 +1407,14 @@ async function _txSaveSpeakerName(container, sessionId, t, change, onError) {
     if (stored[label]) effective[label] = stored[label];
     else if (before[label] && !beforeStored[label]) effective[label] = before[label];
   }
-  _txSetNames(sessionId, effective, stored, t);
+  // A name you typed is no longer a voice match
+  const sources = { ..._txSources(t) };
+  for (const [label, name] of Object.entries(change)) if (name) delete sources[label];
+  _txSetNames(sessionId, effective, stored, t, sources);
   _txCloseSpeakerEditor();
-  const redraw = () => {
-    if (app.currentView === 'transcript' && app.currentSessionId === sessionId && app.activeTab === 'transcript' && !speakerNameEditorOpen()) {
-      renderTranscriptSegments(container, t, sessionId);
-    }
-  };
-  redraw();
+  _txRedrawSegments(container, t, sessionId);
   // A cleared name may have hidden your own name, which only the backend can tell
-  if (Object.values(change).includes(null) && (await refreshSpeakerNames(sessionId, t))) redraw();
+  if (Object.values(change).includes(null) && (await refreshSpeakerNames(sessionId, t))) _txRedrawSegments(container, t, sessionId);
 }
 
 function renderEditableSummary(container, t, sessionId, rec) {

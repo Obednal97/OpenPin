@@ -40,15 +40,21 @@ def _save_coaching_words(session_id, words, text):
 
 
 def _after_transcript_final(session_id, audio_path):
-    """Start coaching once the transcript and its speaker labels are final.
+    """Start coaching and queue voice matching once the transcript and its speaker labels are final.
 
-    Called next to each ``transcribe`` webhook. Never raises: a coaching
-    problem must not break transcription.
+    Called next to each ``transcribe`` webhook. Never raises: a coaching or
+    matching problem must not break transcription.
     """
     try:
         coaching_runner.start_coaching_async(session_id, audio_path)
     except Exception as e:
         logging.warning("Could not start coaching for %s: %s", session_id, e)
+    try:
+        from app.people import worker
+
+        worker.enqueue("match", session_id=session_id, audio_path=audio_path)
+    except Exception as e:
+        logging.warning("Could not queue voice matching for %s: %s", session_id, e)
 
 
 def _extract_spoken_tags(text):

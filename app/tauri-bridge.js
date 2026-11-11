@@ -96,11 +96,17 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
   '/coaching/voice/install', // downloads and installs the speaker model
   '/coaching/voice/setup', // a first setup can load the model and decode a whole recording
+  // People writes edit every transcript and wait for the voice job in hand
+  '/people/backlog', '/transcripts/speaker-names/reject',
 ]);
+// Rename, merge and delete a person: /people/<id>, /people/<id>/rename, /people/<id>/merge
+const NO_TIMEOUT_PREFIXES = ['/people/p_'];
 const DEFAULT_TIMEOUT_MS = 30000;
 
 async function _fetchWithTimeout(url, opts, endpoint) {
-  if (NO_TIMEOUT_ENDPOINTS.has(endpoint)) return fetch(url, opts);
+  if (NO_TIMEOUT_ENDPOINTS.has(endpoint) || NO_TIMEOUT_PREFIXES.some((p) => endpoint.startsWith(p))) {
+    return fetch(url, opts);
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   try {
@@ -408,8 +414,23 @@ window.plaud = {
     apiCall('POST', '/transcripts/speaker-names', { session_id, names }),
   ackSpeakerNamesCleared: (session_id) =>
     apiCall('POST', '/transcripts/speaker-names/ack-cleared', { session_id }),
-  // Every name typed for a speaker, [{ name, recordings }], most used first
+  // Name suggestions, [{ name, recordings, person_id, has_voice }]: people known by
+  // voice first, then other typed names, each most used first
   people: () => apiCall('GET', '/people'),
+  // "Not them" on a voice-matched speaker: { speaker_names, speaker_name_sources }
+  rejectVoiceMatch: (session_id, label) =>
+    apiCall('POST', '/transcripts/speaker-names/reject', { session_id, label }),
+
+  // People known by voice (Settings › People). Rename, merge and delete return the
+  // directory afterwards, or { error } with a message to show.
+  peopleDirectory: () => apiCall('GET', '/people/directory'),
+  renamePerson: (id, name) => apiCall('POST', `/people/${encodeURIComponent(id)}/rename`, { name }),
+  mergePerson: (id, into) => apiCall('POST', `/people/${encodeURIComponent(id)}/merge`, { into }),
+  deletePerson: (id) => apiCall('DELETE', `/people/${encodeURIComponent(id)}`),
+  peopleBacklog: () => apiCall('GET', '/people/backlog'), // { phase, done, total, running }
+  startPeopleBacklog: () => apiCall('POST', '/people/backlog'),
+  cancelPeopleBacklog: () => apiCall('DELETE', '/people/backlog'),
+  foldNamesake: () => apiCall('POST', '/people/fold-namesake'), // { queued }
 
   // Conversation coaching
   coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),

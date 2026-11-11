@@ -52,7 +52,17 @@ def _registered_commands() -> set[str]:
 class TestBlueprintRegistration:
     """All route blueprints must be registered on the Flask app."""
 
-    EXPECTED_BLUEPRINTS = {"core", "device", "cloud", "notion", "recordings", "transcribe", "settings", "diagnostics"}
+    EXPECTED_BLUEPRINTS = {
+        "core",
+        "device",
+        "cloud",
+        "notion",
+        "recordings",
+        "transcribe",
+        "settings",
+        "diagnostics",
+        "people",
+    }
 
     def test_all_blueprints_registered(self, flask_client):
         """Every expected blueprint is present in app.blueprints."""
@@ -155,6 +165,10 @@ class TestTauriBridgeAPISurface:
         # Coaching: "Coach them again" in Progress
         "/coaching/rerun-all",
         "/coaching/rerun-all/cancel",
+        # People known by voice
+        "/people/directory",
+        "/people/backlog",
+        "/transcripts/speaker-names/reject",
     ]
 
     def test_bridge_references_all_endpoints(self):
@@ -331,12 +345,39 @@ class TestTauriBridgeAPISurface:
             assert re.search(rf"\b{method}: \(\) => apiCall\('{verb}', '{re.escape(path)}'\)", self.bridge_src), method
             assert any(r.rule == path and verb in r.methods for r in app.url_map.iter_rules()), path
 
+    def test_people_bridge_calls_its_routes(self, flask_client):
+        """The People methods call the routes with the right verbs, and each route exists."""
+        from app.api_server import app
+
+        for method, verb, call, rule in (
+            ("peopleDirectory", "GET", "'/people/directory'", "/people/directory"),
+            ("peopleBacklog", "GET", "'/people/backlog'", "/people/backlog"),
+            ("renamePerson", "POST", "`/people/${encodeURIComponent(id)}/rename`", "/people/<person_id>/rename"),
+            ("mergePerson", "POST", "`/people/${encodeURIComponent(id)}/merge`", "/people/<person_id>/merge"),
+            ("deletePerson", "DELETE", "`/people/${encodeURIComponent(id)}`", "/people/<person_id>"),
+            ("startPeopleBacklog", "POST", "'/people/backlog'", "/people/backlog"),
+            ("cancelPeopleBacklog", "DELETE", "'/people/backlog'", "/people/backlog"),
+            ("rejectVoiceMatch", "POST", "'/transcripts/speaker-names/reject'", "/transcripts/speaker-names/reject"),
+        ):
+            assert re.search(rf"\b{method}: \([^)]*\) =>\s*apiCall\('{verb}', {re.escape(call)}", self.bridge_src), (
+                method
+            )
+            assert any(r.rule == rule and verb in r.methods for r in app.url_map.iter_rules()), rule
+
     def test_long_coaching_calls_never_time_out(self):
         """Installing the speaker model and a first voice setup can both run for minutes."""
         block = self.bridge_src[self.bridge_src.index("const NO_TIMEOUT_ENDPOINTS") :]
         block = block[: block.index("]);")]
         for ep in ("'/coaching/voice/install'", "'/coaching/voice/setup'"):
             assert ep in block
+
+    def test_people_writes_never_time_out(self):
+        """People writes edit every transcript and wait for the voice job in hand."""
+        block = self.bridge_src[self.bridge_src.index("const NO_TIMEOUT_ENDPOINTS") :]
+        block = block[: block.index("async function _fetchWithTimeout")]
+        for ep in ("'/people/backlog'", "'/transcripts/speaker-names/reject'", "'/people/p_'"):
+            assert ep in block
+        assert "NO_TIMEOUT_PREFIXES.some((p) => endpoint.startsWith(p))" in self.bridge_src
 
 
 # ---------------------------------------------------------------------------

@@ -208,7 +208,7 @@ Other rules:
 
 | Path | Contents |
 |---|---|
-| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.notion_legacy_cache.json`, `.gdrive_config.json`, `coaching/` (see below), `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/`, `mcp-connection.json` (only while AI tool access is on) |
+| `~/Library/Application Support/Plaud V2/` | User data (the packaged app's `DATA_DIR`): `recordings/`, `transcripts/`, `sessions/`, `.plaud_v2_config.json` (settings, API keys, device tokens, recording metadata), `.plaud_config.json` (Plaud token), `.notion_mcp.json`, `.notion_queue.json`, `.notion_legacy_cache.json`, `.gdrive_config.json`, `coaching/` (see below), `people/` (voices, see "People and voices"), `.hf_token` (optional), `wifi_restore.json`, `wifi_sync.lock`, `wifi_sync.log`, `.trash/`, `.redownload_backup/`, `mcp-connection.json` (only while AI tool access is on) |
 | `~/Library/Application Support/com.plaud.v2/` | Shell-managed: `python/`, `venv/`, `requirements/`, `bin/ffmpeg`, `updates/`, `server.pid`, `tauri-prefs.json` (dock visibility), `diagnostics.log`, `mcp/open-pin-mcp` (the launcher for AI tools, written while AI tool access is on) |
 | `~/Library/Logs/Plaud V2/` | `app.log`, `update.log` |
 | `... Plaud V2 (Dev)/`, `com.plaud.v2.dev/`, `Logs/Plaud V2 (Dev)/` | The same, for debug builds (`tauri dev`). They share only `com.plaud.v2/python/` and `bin/` with the installed app |
@@ -673,6 +673,58 @@ Tags are kept in the config's `recording_tags` and the transcript JSON's `tags`.
   Connect needs the switch on; the setup routes use the app token like the rest of the window's API.
 - Settings keys added: `mcp_enabled` (saved, default off). `GET /settings` also returns the derived
   `mcp_active` (a key exists now, which can be false if turning it on failed).
+
+## People and voices (`app/people/`, `app/routes/people.py`)
+
+Open Pin learns who is speaking from the names you type and, once it is confident, names speakers
+on other recordings. A wrong name is worse than none, so every rule leans towards leaving a
+speaker unnamed. Everything runs on the Mac with the WeSpeaker model; voice data never leaves it
+and never goes through the MCP connector.
+
+- **Store** (`store.py`): `DATA_DIR/people/voices.json` (mode `0600`) holds the people, each with
+  a name and up to 20 voice samples (256-number embeddings plus the recording and speaker label
+  they came from), and your own voice as the person `me`. The v1 `coaching/voice_profile.json` is
+  kept as a mirror of your voice so older versions still work. Writes are atomic and under a lock.
+- **Cache** (`embeddings.py`): one embedding per speaker label per recording, in
+  `people/embeddings/<session_id>.json`, computed once (the slow part: audio is converted and
+  embedded) and recomputed only when the speaker labelling changes. Matching and calibration use
+  the cache only, so they never touch audio.
+- **Matching** (`matching.py`, pure): a speaker's embedding is compared with each person's samples
+  and the best cosine score counts. It is named only when that score reaches the threshold, the
+  runner-up is at least 0.05 behind, and the person was not rejected for that label with "Not
+  them". A recording is never matched against its own samples.
+- **Calibration**: the threshold is its own setting (`people_match_threshold`), not the coaching
+  one. `matching.calibrate` tests every named speaker with 15 s or more of speech against the
+  library without its own recording and picks the lowest threshold on a 0.025 grid, from the
+  0.55 floor, that names at least 10 with under 2% wrong (and under 2% for the people who aren't
+  you, once 10 of them are named). Samples from no recording (your migrated v1 ones) are left out,
+  since they can't be held out. Below 20 instances or 2 people it uses 0.70; if nothing qualifies
+  it falls back to 0.80. It runs after the backlog and again when the instances double. `scripts/voice_eval.py` prints the same table for a real library.
+- **Effective name** (`app/utils/speaker_names.py`): per speaker, in order, a name you typed; your
+  profile name where you picked the speaker as yourself for coaching; a voice match valid for the
+  current labelling. Matches live on the transcript (`speaker_voice_matches`) and are stored for
+  that labelling only (editing segments keeps them for the labels still there). A match to a
+  deleted or nameless person shows nothing. Clearing a known person's typed name rejects them for
+  that label, so their voice doesn't name it again. A name sent through the MCP connector that
+  equals the label's voice-matched name changes nothing, so AI tools can't turn matches into
+  typed names that teach.
+- **Worker** (`worker.py`): one background thread runs `match`, `learn`, `unlearn`,
+  `forget_recording` (a recording marked mixed up forgets every sample it taught), `rematch` and
+  `backlog` jobs one at a time; identical waiting jobs are not queued twice. A job lock covers each
+  job. A backlog hands the thread back after any recording while other jobs wait.
+- **Backlog** (`backlog.py`): runs at launch and from Settings › People, newest recording first,
+  in three phases: learning (typed names teach voices), calibrating, then naming (nothing is named
+  before a threshold is saved). Progress is in `people/backlog.json`, so a quit or cancel resumes.
+- **Directory** (`directory.py`, `routes/people.py`): list, rename, merge and delete people. These
+  edit each transcript directly under its lock, never through `speakers.set_names`, so nothing is
+  learnt or rejected by a rename. Each holds the job lock throughout, so no voice job sees a person
+  half changed. Deleting a person turns the names their voice gave into typed names, so
+  transcripts read the same, and freezes those and the names typed with their name, so nothing
+  teaches the voice back. Merge into You folds a person into `me` (samples from recordings excluded from coaching are
+  dropped); committing your profile name (blur or Enter, or setup) queues a `fold_into_me` job that
+  does the same for a person with that name, read when the job runs. Autosaving the name never folds. No response carries a vector.
+- **Notion**: when a match or a directory change alters the names a transcript shows, the usual
+  Notion queue is told, so the page is updated like after any rename.
 
 ## Notion (`app/state/notion.py`, `app/routes/notion.py`, `app/utils/notion_queue.py`)
 

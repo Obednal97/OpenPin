@@ -469,6 +469,24 @@ function _voiceStep(n, title) {
   return `<div class="voice-step-title"><span class="voice-step-num">Step ${n} of 2</span>${escapeHtml(title)}</div>`;
 }
 
+/** Start the voice model install (also used by Settings › People); redraws the voice section. */
+async function _voiceStartInstall(btn) {
+  setLoading(btn, true);
+  _voiceInstallAskedAt = Date.now();
+  let res;
+  try {
+    res = await window.plaud.voiceInstall();
+  } catch (err) {
+    res = { error: (err && err.message) || String(err) };
+  }
+  if (res && res.error) {
+    _voiceInstallAskedAt = 0;
+    toast(`Couldn’t start the install: ${res.error}`, 'error');
+  }
+  renderVoiceSettings();
+  return res;
+}
+
 function _voiceRenderInstallStep(setupEl, status) {
   setupEl.dataset.step = 'install';
   if (_voiceInstalling(status)) {
@@ -489,21 +507,7 @@ function _voiceRenderInstallStep(setupEl, status) {
       <button class="action-btn primary settings-btn-compact" id="voice-install-btn">${status.install_error ? 'Try again' : 'Install voice model'}</button>
       <button class="action-btn subtle settings-btn-compact" id="voice-cancel-btn">Cancel</button>
     </div>`;
-  $('#voice-install-btn').addEventListener('click', async (e) => {
-    setLoading(e.currentTarget, true);
-    _voiceInstallAskedAt = Date.now();
-    let res;
-    try {
-      res = await window.plaud.voiceInstall();
-    } catch (err) {
-      res = { error: (err && err.message) || String(err) };
-    }
-    if (res && res.error) {
-      _voiceInstallAskedAt = 0;
-      toast(`Couldn’t start the install: ${res.error}`, 'error');
-    }
-    renderVoiceSettings();
-  });
+  $('#voice-install-btn').addEventListener('click', (e) => _voiceStartInstall(e.currentTarget));
   $('#voice-cancel-btn').addEventListener('click', _voiceCancel);
 }
 

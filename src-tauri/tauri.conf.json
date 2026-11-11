@@ -1,6 +1,6 @@
 {
   "productName": "Open Pin",
-  "version": "2.9.2",
+  "version": "2.10.0",
   "identifier": "com.plaud.v2",
   "build": {
     "beforeBuildCommand": { "script": "bash scripts/prepare-frontend.sh", "cwd": ".." },
@@ -52,6 +52,7 @@
       "../app/api_server.py": "app/api_server.py",
       "../app/coaching/*": "app/coaching/",
       "../app/mcp/*": "app/mcp/",
+      "../app/people/*": "app/people/",
       "../app/routes/*": "app/routes/",
       "../app/state/*": "app/state/",
       "../app/providers/*": "app/providers/",

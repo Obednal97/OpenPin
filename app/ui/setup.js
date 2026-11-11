@@ -415,6 +415,7 @@ function _showProfileSetup() {
       try {
         await window.plaud.saveSettings({ profile });
         if (typeof app !== 'undefined') app.settings.profile = profile;
+        if (profile.name) await window.plaud.foldNamesake();
       } catch {}
     }
     completeSetup();

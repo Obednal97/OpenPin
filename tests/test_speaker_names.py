@@ -463,7 +463,9 @@ def test_list_people_counts(env):
     speakers.set_names(SID2, {"Speaker 1": "Sarah", "Speaker 10": "Sarah"})
     store.update(SID2, lambda d: d.update(_user_owner(["Speaker 2"])))  # the profile default isn't a person
     assert speakers.list_people() == [{"name": "Sarah", "recordings": 2}, {"name": "Bob", "recordings": 1}]
-    assert env["client"].get("/people").get_json() == speakers.list_people()
+    items = env["client"].get("/people").get_json()  # the same, plus who is known by voice
+    assert [{"name": i["name"], "recordings": i["recordings"]} for i in items] == speakers.list_people()
+    assert all(set(i) == {"name", "recordings", "person_id", "has_voice"} for i in items)
 
 
 def test_routes_404_and_400(env):

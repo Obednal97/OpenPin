@@ -153,6 +153,10 @@ def _install_voice_model() -> None:
         error = f"Could not install the speaker model ({e})."
     with _voice_lock:
         _voice_state.update(installing=False, error=error)
+    if error is None:  # now voices can be learnt from past recordings
+        from app.people import backlog
+
+        backlog.start_if_pending()
 
 
 @bp.route("/coaching/voice/install", methods=["POST"])
@@ -193,16 +197,25 @@ def voice_setup():
         return jsonify({"error": "no audio file for this recording"}), 404
     try:
         add = voice.replace_profile if data.get("replace") is True else voice.add_exemplars
-        added = add(audio, segments, sorted(set(labels)))
+        added = add(audio, segments, sorted(set(labels)), session_id=sid)
     except Exception as e:
         log.warning("voice setup failed for %s: %s", sid, e, exc_info=True)
         return jsonify({"error": "Could not learn your voice from this recording"}), 500
+    if added:  # your voice changed: past matches to you may come or go
+        _rematch()
     return jsonify({"exemplars": added})
+
+
+def _rematch() -> None:
+    from app.people import worker
+
+    worker.enqueue("rematch")
 
 
 @bp.route("/coaching/voice", methods=["DELETE"])
 def voice_delete():
     voice.delete_profile()
+    _rematch()
     return jsonify({"deleted": True})
 
 
@@ -272,6 +285,10 @@ def set_mixed_up(sid):
     saved = store.update(sid, _mark)
     # Mixed up undoes your pick for naming: your profile name leaves your speaker (and comes back).
     runner._owner_changed(sid, before, saved)
+    if flag and before.get("mixed_up") is not True:  # its speaker split was wrong: unteach it
+        from app.people import worker
+
+        worker.enqueue("forget_recording", session_id=sid)
     return _sidecar_response(saved)
 
 

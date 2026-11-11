@@ -325,7 +325,7 @@ def test_user_owner_choice_persists_and_reruns(env):
         "labelling": runner.labelling_fingerprint(SEGMENTS),
     }
     assert "candidates" not in out
-    env["add_exemplars"].assert_called_once_with(env["audio"], SEGMENTS, ["Speaker 2"])
+    env["add_exemplars"].assert_called_once_with(env["audio"], SEGMENTS, ["Speaker 2"], session_id=SID)
     assert env["review"].call_args.args[1] == ["Speaker 2"]
 
     # A later automatic run keeps the user's choice and doesn't ask the voice model.

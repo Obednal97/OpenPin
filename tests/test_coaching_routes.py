@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.coaching import runner, store, voice
+from app.people import store as people_store
 from app.routes import coaching as routes
 from app.utils.config import load_config, update_config
 
@@ -26,6 +27,7 @@ def env(tmp_path, monkeypatch, flask_client):
     monkeypatch.setattr(store, "COACHING_DIR", coaching_dir)
     monkeypatch.setattr(runner, "TRANSCRIPTS_DIR", trn)
     monkeypatch.setattr(voice, "PROFILE_PATH", coaching_dir / "voice_profile.json")
+    monkeypatch.setattr(people_store, "VOICES_PATH", tmp_path / "people" / "voices.json")
     monkeypatch.setattr(runner, "current", lambda sid: store.load(sid), raising=False)
     monkeypatch.setattr(routes, "_voice_state", {"installing": False, "error": None})
     (trn / f"{SID}.json").write_text(json.dumps({"text": "x", "segments": SEGMENTS}))
@@ -127,7 +129,7 @@ def test_run_and_mixed_up_need_a_transcript(env, monkeypatch):
 
 
 def test_store_files_are_not_session_ids(env, monkeypatch):
-    voice._save_exemplars([[0.1, 0.2]])
+    voice._learn([[0.1, 0.2]], None, [], replace=True)
     mode = voice.PROFILE_PATH.stat().st_mode & 0o777
     store.save_words(SID, [{"w": "x"}], "h")
     start = MagicMock()
@@ -161,7 +163,7 @@ def test_progress_route(env):
     store.update(recent, lambda d: d.update(done))
     store.save_words(recent, [{"word": "um"}], "h")
     store.update(deleted, lambda d: d.update(done))  # its transcript is gone: not counted
-    voice._save_exemplars([[0.1, 0.2]])
+    voice._learn([[0.1, 0.2]], None, [], replace=True)
     (store.COACHING_DIR / "notes.txt").write_text("x")
     r = env.get("/coaching/progress?weeks=999")
     assert r.status_code == 200
@@ -193,7 +195,7 @@ def test_progress_lists_only_sidecars(env, monkeypatch):
     monkeypatch.setattr(routes, "compute_progress", lambda sc, now, weeks: seen.update(sids=[s[0] for s in sc]) or {})
     store.update(SID, lambda d: d.update(status="done"))
     store.save_words(SID, [{"word": "um"}], "h")
-    voice._save_exemplars([[0.1, 0.2]])
+    voice._learn([[0.1, 0.2]], None, [], replace=True)
     env.get("/coaching/progress")
     assert seen["sids"] == [SID]
 
@@ -269,7 +271,7 @@ def test_voice_setup_adds_exemplars(env, monkeypatch, tmp_path):
     monkeypatch.setattr(voice, "add_exemplars", add)
     r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"]})
     assert r.get_json() == {"exemplars": 1}
-    add.assert_called_once_with(str(audio), SEGMENTS, ["Speaker 1"])
+    add.assert_called_once_with(str(audio), SEGMENTS, ["Speaker 1"], session_id=SID)
     bad = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Nobody"]})
     assert bad.status_code == 400
 
@@ -281,33 +283,42 @@ def _fake_embeddings(monkeypatch, result):
 
 
 def test_voice_setup_replace_swaps_profile(env, monkeypatch):
-    voice._save_exemplars([[1.0, 0.0], [0.0, 1.0]])
+    voice._learn([[1.0, 0.0], [0.0, 1.0]], None, [], replace=True)
     _fake_embeddings(monkeypatch, {"Speaker 1": [0.5, 0.5]})
+    enqueue = MagicMock()
+    monkeypatch.setattr("app.people.worker.enqueue", enqueue)
     r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"], "replace": True})
     assert r.get_json() == {"exemplars": 1}
     assert voice._load_exemplars() == [[0.5, 0.5]]
+    enqueue.assert_called_once_with("rematch")  # your new voice may name (or unname) others
 
 
 def test_voice_setup_replace_failure_keeps_old_voice(env, monkeypatch):
-    voice._save_exemplars([[1.0, 0.0]])
+    voice._learn([[1.0, 0.0]], None, [], replace=True)
     _fake_embeddings(monkeypatch, {})
+    enqueue = MagicMock()
+    monkeypatch.setattr("app.people.worker.enqueue", enqueue)
     r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"], "replace": True})
     assert r.get_json() == {"exemplars": 0}
     assert voice._load_exemplars() == [[1.0, 0.0]]
+    assert not enqueue.called
 
 
 def test_voice_setup_without_replace_appends(env, monkeypatch):
-    voice._save_exemplars([[1.0, 0.0]])
+    voice._learn([[1.0, 0.0]], None, [], replace=True)
     _fake_embeddings(monkeypatch, {"Speaker 1": [0.5, 0.5]})
     env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"]})
     assert len(voice._load_exemplars()) == 2
 
 
-def test_voice_delete(env):
-    voice._save_exemplars([[0.1, 0.2]])
+def test_voice_delete(env, monkeypatch):
+    voice._learn([[0.1, 0.2]], None, [], replace=True)
+    enqueue = MagicMock()
+    monkeypatch.setattr("app.people.worker.enqueue", enqueue)
     assert env.get("/coaching/voice").get_json()["exemplars"] == 1
     assert env.delete("/coaching/voice").get_json() == {"deleted": True}
     assert env.get("/coaching/voice").get_json()["exemplars"] == 0
+    enqueue.assert_called_once_with("rematch")  # matches to you go
 
 
 def test_bad_session_id_404(env):
@@ -396,7 +407,7 @@ def test_exclude_route_validates(env, monkeypatch):
     assert env.post("/coaching/999/exclude", json={"exclude": True}).status_code == 404
     assert not store.coaching_path("999").exists()
     store.save_words(SID, [{"w": "x"}], "h")
-    voice._save_exemplars([[0.1, 0.2]])
+    voice._learn([[0.1, 0.2]], None, [], replace=True)
     for sid in ("voice_profile", f"{SID}.words", ".hidden"):
         assert env.post(f"/coaching/{sid}/exclude", json={"exclude": True}).status_code == 404
     assert voice._load_exemplars() == [[0.1, 0.2]]
@@ -444,3 +455,27 @@ class _SyncThread:
 
     def start(self):
         self._t(*self._a, **self._k)
+
+
+@pytest.mark.parametrize(
+    "saved, installed, starts",
+    [
+        (None, True, True),  # never run: starts
+        ({"phase": "learning", "cancelled": False, "learned": [], "named": []}, True, True),  # resumes
+        ({"phase": "done", "cancelled": False, "learned": [], "named": []}, True, False),
+        ({"phase": "naming", "cancelled": True, "learned": [], "named": []}, True, False),  # you cancelled it
+        (None, False, False),  # the install failed
+    ],
+)
+def test_installing_the_voice_model_starts_the_backlog(env, monkeypatch, tmp_path, saved, installed, starts):
+    from app.people import backlog
+
+    monkeypatch.setattr(backlog, "STATE_PATH", tmp_path / "people" / "backlog.json")
+    if saved is not None:
+        backlog._save(saved)
+    started = []
+    monkeypatch.setattr(backlog, "start", lambda: started.append(1) or True)
+    monkeypatch.setattr(voice, "install_model", lambda: (installed, "" if installed else "no network"))
+    routes._install_voice_model()
+    assert started == ([1] if starts else [])
+    assert routes._voice_state["installing"] is False

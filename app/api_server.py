@@ -35,6 +35,7 @@ from app.routes import (
     gdrive,
     mcp_api,
     notion,
+    people,
     recordings,
     settings,
     transcribe,
@@ -302,6 +303,7 @@ app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
 app.register_blueprint(coaching.bp)
+app.register_blueprint(people.bp)
 # AI tools (MCP): the guard above opens it with the MCP key only.
 app.register_blueprint(mcp_api.bp)
 
@@ -390,6 +392,15 @@ if __name__ == "__main__":
     from app.utils import notion_queue as _notion_queue
 
     _notion_queue.start_worker()
+    # Learn voices from names typed in past recordings, then name them: once, in the
+    # background, and only with the voice model installed (otherwise it stays pending).
+    # Never stops the app from starting.
+    try:
+        from app.people import backlog as _people_backlog
+
+        _people_backlog.start_on_launch()
+    except Exception as e:
+        logging.warning(f"[People] Couldn't start learning from past recordings: {e}")
 
     start_port = int(os.environ.get("PLAUD_API_PORT", "5123"))
     # Walk past occupied ports if our initial pick was claimed in the window

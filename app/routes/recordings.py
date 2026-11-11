@@ -9,6 +9,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
+from app.people import embeddings as voice_embeddings
 from app.state import speakers
 from app.utils import redownload_backup
 from app.utils import speaker_names as sn
@@ -673,7 +674,9 @@ def _trash_coaching_files(session_id):
     Takes the coaching store's own lock, so call it after releasing the transcript lock.
     """
     with coaching_store.session_lock(session_id):
-        return _trash_files(coaching_store.session_files(session_id))
+        result = _trash_files(coaching_store.session_files(session_id))
+    voice_embeddings.delete(session_id)  # derived data: plain delete, not trash
+    return result
 
 
 def _trash_location(locations):
@@ -956,6 +959,7 @@ def transcript_item(session_id, data: dict, profile: str) -> dict:
     """One ``GET /transcripts`` item. ``profile`` is ``speakers.profile_name() or ""``."""
     labels = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
     path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    names, name_sources = speakers.names_and_sources(session_id, data, profile=profile)
     return {
         "session_id": session_id,
         "text_preview": (data.get("text", "")[:150] + "...")
@@ -969,8 +973,9 @@ def transcript_item(session_id, data: dict, profile: str) -> dict:
         # Names over the labels: the effective ones to show (your profile name on
         # your speaker once you picked it), the ones typed, and whether a
         # re-transcription just cleared them (the UI says so once).
-        "speaker_names": speakers.names_for(session_id, data, profile=profile),
+        "speaker_names": names,
         "stored_speaker_names": sn.stored_names(data),
+        "speaker_name_sources": name_sources,
         "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
         "summary": data.get("summary", ""),
         "summary_stale": bool(data.get("summary_stale", False)),
@@ -1030,14 +1035,23 @@ def _validate_segments(segments):
     return True, ""
 
 
-def _keep_names_for_edited_segments(transcript):
-    """After the user edited segments: keep names only for labels still there, for the new labelling."""
-    if not transcript.get("speaker_names"):
-        return
+def _keep_names_for_edited_segments(transcript, old_segments):
+    """After the user edited segments: keep names and voice matches only for labels still
+    there, for the new labelling (a match block that was already stale stays stale)."""
     from app.coaching.runner import labelling_fingerprint
 
-    transcript["speaker_names"] = sn.stored_names(transcript)
-    transcript["speaker_names_labelling"] = labelling_fingerprint(transcript.get("segments") or [])
+    segments = transcript.get("segments") or []
+    labelling = labelling_fingerprint(segments)
+    if transcript.get("speaker_names"):
+        transcript["speaker_names"] = sn.stored_names(transcript)
+        transcript["speaker_names_labelling"] = labelling
+    block = transcript.get("speaker_voice_matches")
+    if isinstance(block, dict) and block.get("labelling") == labelling_fingerprint(old_segments or []):
+        labels = set(sn.speaker_labels(segments))
+        for key in ("matches", "rejected"):
+            if isinstance(block.get(key), dict):
+                block[key] = {label: v for label, v in block[key].items() if label in labels}
+        block["labelling"] = labelling
 
 
 @bp.route("/transcripts/update", methods=["POST"])
@@ -1087,10 +1101,14 @@ def update_transcript():
                 return jsonify({"error": f"No speaker called {unknown[0]} in this recording"}), 400
             names = summary_names
 
+        names_moved = False
         if "segments" in data:
+            shown = speakers.names_for(session_id, transcript, profile=profile)
+            old_segments = transcript.get("segments")
             transcript["segments"] = data["segments"]
             transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
-            _keep_names_for_edited_segments(transcript)
+            _keep_names_for_edited_segments(transcript, old_segments)
+            names_moved = speakers.names_for(session_id, transcript, profile=profile) != shown
 
         if "summary" in data:
             summary = data["summary"]
@@ -1105,6 +1123,8 @@ def update_transcript():
     # After releasing the transcript lock: the coaching store has its own lock.
     if text_changed:
         coaching_store.mark_stale(session_id)
+    if names_moved:
+        speakers._names_changed(session_id)
     return jsonify({"saved": True})
 
 
@@ -1191,5 +1211,8 @@ def ack_speaker_names_cleared():
 
 @bp.route("/people")
 def list_people():
-    """Every speaker name used across the library, with counts (name suggestions)."""
-    return jsonify(speakers.list_people())
+    """Name suggestions: every speaker name used across the library and everyone known by voice,
+    ``[{name, recordings, person_id, has_voice}]``, people with a voice first."""
+    from app.people import directory
+
+    return jsonify(directory.suggestions())

@@ -8,6 +8,7 @@ import stat
 import pytest
 
 from app.coaching import voice
+from app.people import store as people_store
 
 
 def _unit(v):
@@ -22,6 +23,7 @@ OTHER = _unit([0.0, 1.0, 0.0])
 @pytest.fixture(autouse=True)
 def _profile_path(tmp_path, monkeypatch):
     monkeypatch.setattr(voice, "PROFILE_PATH", tmp_path / "coaching" / "voice_profile.json")
+    monkeypatch.setattr(people_store, "VOICES_PATH", tmp_path / "people" / "voices.json")
 
 
 def _fake(monkeypatch, vectors):
@@ -40,7 +42,7 @@ def _segs(*labels):
 
 
 def _save_profile(vec=OWNER):
-    voice._save_exemplars([vec])
+    voice._learn([vec], None, [], replace=True)
 
 
 def test_match_owner_needs_profile(monkeypatch):
@@ -106,12 +108,13 @@ def test_add_exemplars_caps_at_20(monkeypatch):
     assert "updated_at" in data
 
 
-def test_add_exemplars_drops_oldest(monkeypatch):
-    voice._save_exemplars([[float(i), 0.0] for i in range(20)])
+def test_add_exemplars_keeps_the_most_varied(monkeypatch):
+    odd = _unit([0.0, 0.0, 1.0])  # the oldest, and unlike the rest: kept
+    voice._learn([odd] + [_unit([1.0, i / 100, 0.0]) for i in range(19)], None, [], replace=True)
     _fake(monkeypatch, {"A": OWNER})
     voice.add_exemplars("a.wav", _segs("A"), ["A"])
     ex = json.loads(voice.PROFILE_PATH.read_text())["exemplars"]
-    assert len(ex) == 20 and ex[0][0] == 1.0 and ex[-1] == OWNER
+    assert len(ex) == 20 and ex[0] == odd
 
 
 def test_profile_file_is_0600(monkeypatch):

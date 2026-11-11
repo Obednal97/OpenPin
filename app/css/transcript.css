@@ -552,9 +552,10 @@ button.segment-speaker:focus-visible { outline: 2px solid var(--accent); outline
 }
 .speaker-name-label { font-size: var(--text-sm); color: var(--text-secondary); white-space: nowrap; }
 .speaker-name-label strong { color: var(--text); font-weight: var(--weight-semibold); }
+.speaker-name-field { position: relative; flex: 1 1 180px; min-width: 0; }
 .speaker-name-input {
-  flex: 1 1 180px;
-  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
   font-size: var(--text-sm);
   font-family: var(--font);
   padding: var(--sp-1) var(--sp-2);
@@ -565,8 +566,48 @@ button.segment-speaker:focus-visible { outline: 2px solid var(--accent); outline
   outline: none;
 }
 .speaker-name-input:focus { border-color: var(--accent); }
+.speaker-name-list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-solid);
+  box-shadow: var(--shadow-md);
+}
+.speaker-name-list[hidden] { display: none; }
+.speaker-name-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.speaker-name-option:hover,
+.speaker-name-option[aria-selected="true"] { background: var(--bg-hover); }
+.speaker-name-option-new { color: var(--text-secondary); }
+.speaker-name-voice-icon { flex: none; color: var(--accent); }
 .speaker-name-input::placeholder { color: var(--text-tertiary); }
 .speaker-name-actions { display: flex; gap: var(--sp-1); margin-left: auto; }
+.speaker-name-voice,
+.speaker-name-dym {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.speaker-name-dym[hidden] { display: none; }
 .speaker-name-hint,
 .speaker-name-error { flex-basis: 100%; margin: 0; font-size: var(--text-xs); line-height: 1.4; }
 .speaker-name-hint { color: var(--text-tertiary); }
