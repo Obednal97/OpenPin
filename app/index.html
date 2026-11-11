@@ -578,6 +578,12 @@
           <div id="voice-setup" class="voice-setup hidden"></div>
         </div>
 
+        <!-- People Open Pin recognises by voice (renderPeopleSettings, ui/people.js) -->
+        <div class="settings-section" id="people-section">
+          <h3>People</h3>
+          <div id="people-body" class="people-body"></div>
+        </div>
+
         <!-- 3. Summarisation -->
         <div class="settings-section">
           <div class="proc-section-header">
@@ -609,6 +615,7 @@
           <div class="profile-field">
             <label class="settings-label" for="profile-name">Your name</label>
             <input type="text" id="profile-name" class="settings-input" placeholder="e.g. John, John Doe, Johnny">
+            <p class="settings-hint">Used for your voice in transcripts. See People.</p>
           </div>
           <div class="profile-field">
             <label class="settings-label" for="profile-job">Job</label>
@@ -1081,6 +1088,7 @@
   <script src="ui/settings.js"></script>
   <script src="ui/mcp-settings.js"></script>
   <script src="ui/setup.js"></script>
+  <script src="ui/people.js"></script>
   <script src="ui/coaching-progress.js"></script>
   <script src="renderer.js"></script>
 </body>

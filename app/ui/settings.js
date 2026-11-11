@@ -64,6 +64,7 @@ function renderSettings() {
   renderStorageSettings();
   renderAutomationState();
   renderVoiceSettings();
+  renderPeopleSettings();
   renderMcpSettings();
 }
 

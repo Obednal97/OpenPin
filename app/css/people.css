@@ -1,0 +1,20 @@
+/* Settings › People (ui/people.js) */
+.ppl-list { display: flex; flex-direction: column; margin-top: var(--sp-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-card); }
+.ppl-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sp-1) var(--sp-3);
+  align-items: center;
+  padding: var(--sp-3) var(--sp-4);
+}
+.ppl-row + .ppl-row { border-top: 1px solid var(--border); }
+.ppl-main { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.ppl-name { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text); overflow-wrap: anywhere; }
+.ppl-badge { font-size: var(--text-xs); color: var(--text-secondary); }
+.ppl-meta { grid-column: 1; font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; }
+.ppl-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--sp-2); }
+.ppl-link { font-size: var(--text-xs); color: var(--accent); text-decoration: none; }
+.ppl-link:hover { color: var(--accent-hover); text-decoration: underline; }
+.ppl-input, .ppl-select { width: 180px; }
+.ppl-backlog { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
+.ppl-progress { font-size: var(--text-xs); color: var(--text-secondary); }

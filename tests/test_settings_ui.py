@@ -93,7 +93,7 @@ class TestSettingsTabs:
     def test_sections_have_headings(self):
         for tab, headings in {
             "device": ["NotePin", "Transfer"],
-            "ai": ["Language", "Transcription", "Speaker identification", "Your voice &amp; coaching", "Summarisation",
+            "ai": ["Language", "Transcription", "Speaker identification", "Your voice &amp; coaching", "People", "Summarisation",
                    "Personalisation", "Other saved keys"],
             "automation": ["New recordings", "Webhooks", "Plaud cloud sync"],
             "accounts": ["Recordings folder", "Google Drive", "Plaud account", "Notion"],
