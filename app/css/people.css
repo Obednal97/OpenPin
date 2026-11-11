@@ -11,9 +11,14 @@
 .ppl-main { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
 .ppl-name { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--text); overflow-wrap: anywhere; }
 .ppl-badge { font-size: var(--text-xs); color: var(--text-secondary); }
-.ppl-meta { grid-column: 1; font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; }
-.ppl-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--sp-2); }
-.ppl-link { font-size: var(--text-xs); color: var(--accent); text-decoration: none; }
+.ppl-meta { grid-column: 1 / -1; grid-row: 2; min-width: 0; font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; }
+.ppl-actions { grid-column: 2; grid-row: 1; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--sp-2); }
+.ppl-link { font: inherit; font-size: var(--text-xs); color: var(--accent); text-decoration: none; background: none; border: 0; padding: 0; cursor: pointer; }
+.ppl-danger, .ppl-link.ppl-danger:hover { color: var(--destructive); }
+/* Row actions stay out of the way until the row is hovered or focused (opacity, so Tab still reaches them) */
+.ppl-row:not(.ppl-me):not(.ppl-editing) .ppl-actions { opacity: 0; transition: opacity var(--duration) var(--ease); gap: var(--sp-3); }
+.ppl-row:not(.ppl-me):hover .ppl-actions, .ppl-row:not(.ppl-me):focus-within .ppl-actions { opacity: 1; }
+.ppl-row-error { grid-column: 1 / -1; margin: 0; }
 .ppl-link:hover { color: var(--accent-hover); text-decoration: underline; }
 .ppl-input, .ppl-select { width: 180px; }
 .ppl-backlog { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }

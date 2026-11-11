@@ -101,3 +101,22 @@ def test_install_handler_is_shared():
 def test_frontend_copy_script_ships_ui_and_css():
     script = (PROJECT_ROOT / "scripts" / "prepare-frontend.sh").read_text()
     assert '"$APP"/ui/*.js' in script and '"$APP"/css/*.css' in script
+
+
+def test_rows_are_light_and_dates_have_no_time():
+    css = CSS_PATH.read_text()
+    assert ":focus-within .ppl-actions" in css and "opacity: 0" in css and "display: none" not in css
+    assert "ppl-danger" in css and 'class="ppl-link ppl-danger"' in JS
+    assert "formatDate(" not in JS and "toLocaleDateString" in JS
+    assert "settings-btn-compact\" data-ppl=\"rename\"" not in JS
+
+
+def test_failed_poll_keeps_data_and_reschedules():
+    body = JS[JS.index("if (!d || d.error) {") :][:500]
+    assert "_pplSchedule()" in body
+
+
+def test_rejected_rename_keeps_the_editor_and_text():
+    assert "_pplEditing.value = input.value" in JS
+    assert ", true);" in JS and "keepEditor" in JS
+    assert "ppl-row-error" in JS

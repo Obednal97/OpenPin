@@ -16,6 +16,11 @@ function _pplSize(bytes) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function _pplDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 function _pplPlural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -44,29 +49,30 @@ function _pplMeRow(me) {
 
 function _pplPersonRow(p, people) {
   const id = escapeHtml(p.id);
-  const last = p.last_heard ? ` · Last heard ${escapeHtml(formatDate(p.last_heard))}` : '';
+  const last = p.last_heard ? ` · Last heard ${escapeHtml(_pplDate(p.last_heard))}` : '';
   const meta = `${_pplPlural(p.recordings || 0, 'recording', 'recordings')} · ${p.samples} of 20 samples · ${_pplSize(p.bytes)}${last}`;
   const editing = _pplEditing && _pplEditing.id === p.id ? _pplEditing.mode : '';
   let actions;
   if (editing === 'rename') {
-    actions = `<input type="text" class="settings-input ppl-input" data-ppl-input aria-label="New name" value="${escapeHtml(p.name || '')}">
+    actions = `<input type="text" class="settings-input ppl-input" data-ppl-input aria-label="New name" value="${escapeHtml(_pplEditing.value !== undefined ? _pplEditing.value : p.name || '')}">
       <button class="action-btn primary settings-btn-compact" data-ppl="rename-save" data-id="${id}">Save</button>
       <button class="action-btn subtle settings-btn-compact" data-ppl="edit-cancel">Cancel</button>`;
   } else if (editing === 'merge') {
     const others = people.filter((o) => o.id !== p.id);
-    const options = others.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name || 'Unnamed')}</option>`).join('');
+    const options = others.map((o) => `<option value="${escapeHtml(o.id)}"${_pplEditing.value === o.id ? ' selected' : ''}>${escapeHtml(o.name || 'Unnamed')}</option>`).join('');
     actions = `<select class="settings-select ppl-select" data-ppl-input aria-label="Merge into">${options}</select>
       <button class="action-btn primary settings-btn-compact" data-ppl="merge-go" data-id="${id}">Merge</button>
       <button class="action-btn subtle settings-btn-compact" data-ppl="edit-cancel">Cancel</button>`;
   } else {
-    actions = `<button class="action-btn subtle settings-btn-compact" data-ppl="rename" data-id="${id}">Rename</button>
-      <button class="action-btn subtle settings-btn-compact" data-ppl="merge" data-id="${id}"${people.length < 2 ? ' disabled' : ''}>Merge into…</button>
-      <button class="action-btn subtle settings-btn-compact voice-remove" data-ppl="delete" data-id="${id}">Delete</button>`;
+    actions = `<button type="button" class="ppl-link" data-ppl="rename" data-id="${id}">Rename</button>
+      <button type="button" class="ppl-link" data-ppl="merge" data-id="${id}"${people.length < 2 ? ' disabled' : ''}>Merge into…</button>
+      <button type="button" class="ppl-link ppl-danger" data-ppl="delete" data-id="${id}">Delete</button>`;
   }
-  return `<div class="ppl-row">
+  const error = editing && _pplError ? `<p class="voice-error ppl-row-error" role="alert">${escapeHtml(_pplError)}</p>` : '';
+  return `<div class="ppl-row${editing ? ' ppl-editing' : ''}">
     <div class="ppl-main"><span class="ppl-name">${escapeHtml(p.name || 'Unnamed')}</span></div>
     <div class="ppl-meta">${meta}</div>
-    <div class="ppl-actions">${actions}</div>
+    <div class="ppl-actions">${actions}</div>${error}
   </div>`;
 }
 
@@ -90,7 +96,7 @@ function _pplRender() {
   let html = `<p class="settings-desc">Open Pin recognises ${_pplPlural(n, 'person', 'people')} by voice. Voice data stays on this Mac (about ${_pplSize(d.total_bytes)}).</p>`;
   const cal = _pplCalibrationLine(d.calibration);
   if (cal) html += `<p class="settings-desc">${escapeHtml(cal)}</p>`;
-  if (_pplError) html += `<p class="voice-error" role="alert">${escapeHtml(_pplError)}</p>`;
+  if (_pplError && !_pplEditing) html += `<p class="voice-error" role="alert">${escapeHtml(_pplError)}</p>`;
   if (!d.model) {
     const installing = _pplInstalling();
     html += `<div class="ppl-backlog"><span class="ppl-progress">Install the voice model to recognise people.</span>
@@ -142,6 +148,8 @@ async function renderPeopleSettings(polling) {
   if (!d || d.error) {
     if (!_pplData) {
       $('#people-body').innerHTML = `<p class="voice-error">Couldn’t load people: ${escapeHtml((d && d.error) || 'no reply')}</p>`;
+    } else {
+      _pplSchedule(); // keep the last data; a running backlog keeps being polled
     }
     return;
   }
@@ -155,15 +163,14 @@ function _pplFail(res) {
   return !!_pplError;
 }
 
-async function _pplCall(fn) {
+async function _pplCall(fn, keepEditor) {
   let res;
   try {
     res = await fn();
   } catch (err) {
     res = { error: (err && err.message) || String(err) };
   }
-  _pplFail(res);
-  _pplEditing = null;
+  if (!(_pplFail(res) && keepEditor && _pplEditing)) _pplEditing = null;
   await renderPeopleSettings();
   return res;
 }
@@ -197,7 +204,7 @@ async function _pplConfirmMerge(id, into) {
     actions: [{ id: 'merge', label: 'Merge' }],
     cancelLabel: 'Cancel',
   });
-  if (choice === 'merge') await _pplCall(() => window.plaud.mergePerson(id, into));
+  if (choice === 'merge') await _pplCall(() => window.plaud.mergePerson(id, into), true);
 }
 
 function _pplFocusSoon(selector) {
@@ -228,8 +235,12 @@ function _pplClick(e) {
     case 'rename': _pplEditing = { id, mode: 'rename' }; _pplError = ''; return _pplRender();
     case 'merge': _pplEditing = { id, mode: 'merge' }; _pplError = ''; return _pplRender();
     case 'edit-cancel': _pplEditing = null; return _pplRender();
-    case 'rename-save': return _pplCall(() => window.plaud.renamePerson(id, input.value.trim()));
-    case 'merge-go': return input && input.value ? _pplConfirmMerge(id, input.value) : undefined;
+    case 'rename-save':
+      _pplEditing.value = input.value;
+      return _pplCall(() => window.plaud.renamePerson(id, input.value.trim()), true);
+    case 'merge-go':
+      if (_pplEditing) _pplEditing.value = input && input.value;
+      return input && input.value ? _pplConfirmMerge(id, input.value) : undefined;
     case 'delete': _pplError = ''; return _pplConfirmDelete(id);
     case 'backlog-start': return _pplCall(() => window.plaud.startPeopleBacklog());
     case 'backlog-cancel': return _pplCall(() => window.plaud.cancelPeopleBacklog());
