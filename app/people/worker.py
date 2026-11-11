@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 _cond = threading.Condition()
 _queue: deque[tuple[str, tuple]] = deque()
 _busy = False
+_current: str | None = None  # the kind of the job running now
 _thread: threading.Thread | None = None
 
 
@@ -63,10 +64,10 @@ def _learn(session_id: str, label: str, name: str) -> None:
         _forget(session_id, label)
         return
     add_samples([(name, sample)])
+    enqueue("rematch")  # first: a failing recalibration must not cost the re-match
     from app.people import backlog
 
     backlog.maybe_recalibrate()
-    enqueue("rematch")
 
 
 def add_samples(named: list[tuple[str, dict]]) -> None:
@@ -180,21 +181,27 @@ def enqueue(kind: str, **kw) -> None:
 
 
 def _run() -> None:
-    global _busy
+    global _busy, _current
     while True:
         with _cond:
             while not _queue:
                 _cond.wait()
             kind, kw = _queue.popleft()
-            _busy = True
+            _busy, _current = True, kind
         try:
             _HANDLERS[kind](**dict(kw))
         except Exception as e:
             log.warning("people job %s failed: %s", kind, e, exc_info=True)
         finally:
             with _cond:
-                _busy = False
+                _busy, _current = False, None
                 _cond.notify_all()
+
+
+def has_job(kind: str) -> bool:
+    """Whether a job of this kind is running or waiting."""
+    with _cond:
+        return _current == kind or any(k == kind for k, _ in _queue)
 
 
 def wait_idle(timeout: float | None = None) -> bool:

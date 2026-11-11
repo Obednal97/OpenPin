@@ -143,7 +143,7 @@ def test_backlog_learns_then_calibrates_then_names(env):
     # Named: the recording with no typed names gets both speakers by voice.
     assert speakers.get_names(unnamed) == {"Speaker 1": "Harry", "Speaker 2": "Sam"}
     assert picked in env["gets"]  # embedded for calibration, though nothing was typed
-    assert backlog.state() == {"phase": "done", "done": 14, "total": 14}
+    assert backlog.state() == {"phase": "done", "done": 14, "total": 14, "running": False}
 
 
 def test_backlog_groups_names_case_insensitively(env):
@@ -199,7 +199,7 @@ def test_backlog_resumes_after_restart(env):
     env["on_get"] = die_on_third
     with pytest.raises(_Killed):
         _go()
-    assert backlog.state() == {"phase": "learning", "done": 2, "total": 4}
+    assert backlog.state() == {"phase": "learning", "done": 2, "total": 4, "running": False}
     assert _sessions("Harry") == sorted(sids[2:])
 
     env["on_get"] = None
@@ -229,14 +229,14 @@ def test_backlog_cancel_stops_after_current(env):
     env["on_get"] = cancel_during_second
     backlog.run(cancel)
     assert _sessions("Harry") == sorted(sids[2:])  # the current one still finished
-    assert backlog.state() == {"phase": "cancelled", "done": 2, "total": 4}
+    assert backlog.state() == {"phase": "cancelled", "done": 2, "total": 4, "running": False}
     assert matching.current_threshold() is None
 
     env["on_get"] = None
     assert backlog.start() is True
     assert worker.wait_idle(10)
     assert _sessions("Harry") == sorted(sids)
-    assert backlog.state() == {"phase": "done", "done": 4, "total": 4}
+    assert backlog.state() == {"phase": "done", "done": 4, "total": 4, "running": False}
 
 
 def test_cancel_through_the_worker(env):
@@ -244,13 +244,13 @@ def test_cancel_through_the_worker(env):
     env["on_get"] = lambda sid: backlog.cancel()
     assert backlog.start() is True
     assert worker.wait_idle(10)
-    assert backlog.state() == {"phase": "cancelled", "done": 1, "total": 3}
+    assert backlog.state() == {"phase": "cancelled", "done": 1, "total": 3, "running": False}
 
 
 def test_backlog_yields_to_other_jobs(env):
     sids = [_named(env, i) for i in range(3)]
     assert backlog.run(threading.Event(), should_yield=lambda: True) is True
-    assert backlog.state() == {"phase": "learning", "done": 1, "total": 3}
+    assert backlog.state() == {"phase": "learning", "done": 1, "total": 3, "running": False}
     assert _sessions("Harry") == [sids[2]]
 
 
@@ -259,7 +259,7 @@ def test_start_without_the_model_stays_pending(env):
     with patch.object(voice, "model_available", return_value=False):
         assert backlog.start() is False
     assert worker.wait_idle(10)
-    assert backlog.state() == {"phase": "idle", "done": 0, "total": 0}
+    assert backlog.state() == {"phase": "idle", "done": 0, "total": 0, "running": False}
     assert env["gets"] == []
 
 
@@ -270,7 +270,7 @@ def test_start_again_after_done_runs_again(env):
     _named(env, 2)
     assert backlog.start() is True
     assert worker.wait_idle(10)
-    assert backlog.state() == {"phase": "done", "done": 2, "total": 2}
+    assert backlog.state() == {"phase": "done", "done": 2, "total": 2, "running": False}
     assert _sessions("Harry") == [_sid(1), _sid(2)]
 
 
@@ -374,3 +374,90 @@ def test_api_server_starts_it_only_when_run_as_the_app():
     src = Path(backlog.__file__).parents[1].joinpath("api_server.py").read_text()
     main = src.split('if __name__ == "__main__":', 1)
     assert "start_on_launch()" in main[1] and "start_on_launch" not in main[0]
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_malformed_transcript_still_calibrates(env):
+    for i in range(3):
+        _named(env, i)
+    bad = [{"start": "soon", "end": "later", "speaker": "Speaker 1"}, "not a segment"]
+    sid = _write(env, 9, {"Speaker 1": "Harry"}, {"Speaker 1": _vec(HARRY)}, segments=bad)
+    env["cache"][sid] = env["emb"][sid]  # reaches the speech count in calibration
+    _go()
+    assert load_config()["people_calibration"]["instances"] == 6
+    assert matching.current_threshold() == matching.DEFAULT_THRESHOLD
+    assert backlog.state()["phase"] == "done"
+
+
+def test_learn_still_rematches_when_recalibration_fails(env):
+    sid = _write(env, 1, emb={"Speaker 1": _vec(HARRY)})
+    passes = []
+    with (
+        patch.object(backlog, "maybe_recalibrate", side_effect=RuntimeError("boom")),
+        patch.dict(worker._HANDLERS, {"rematch": lambda: passes.append(1)}),
+    ):
+        speakers.set_names(sid, {"Speaker 1": "Harry"})
+        assert worker.wait_idle(10)
+    assert passes == [1]
+    assert _sessions("Harry") == [sid]
+
+
+def test_state_says_whether_it_is_running(env):
+    _named(env, 1)
+    with worker._cond:  # the worker can't pick the job up yet
+        assert backlog.start() is True
+        assert backlog.state()["running"] is True
+    assert worker.wait_idle(10)
+    assert backlog.state()["running"] is False
+    # A partial run stopped by a quit: in progress, but not running.
+    _named(env, 2)
+    backlog._update(lambda s: s.update(phase="learning", learned=[_sid(2)]))
+    assert backlog.state() == {"phase": "learning", "done": 1, "total": 2, "running": False}
+
+
+def test_progress_ignores_deleted_recordings(env):
+    sids = [_named(env, i) for i in range(4)]
+    backlog.run(threading.Event(), should_yield=lambda: True)
+    backlog.run(threading.Event(), should_yield=lambda: True)
+    assert backlog.state()["done"] == 2  # sids[3], sids[2]
+    (env["trn"] / f"{sids[3]}.json").unlink()
+    (env["trn"] / f"{sids[0]}.json").unlink()
+    assert backlog.state() == {"phase": "learning", "done": 1, "total": 2, "running": False}
+    _go()
+    assert backlog._load()["learned"] == [sids[2], sids[1]]
+    assert backlog.state() == {"phase": "done", "done": 2, "total": 2, "running": False}
+
+
+def test_recordings_added_mid_phase_are_picked_up(env):
+    _named(env, 1)
+
+    def add_one(session_id):
+        if session_id == _sid(1) and _sid(5) not in env["emb"]:
+            _named(env, 5)
+
+    env["on_get"] = add_one
+    _go()
+    assert set(backlog._load()["learned"]) == {_sid(1), _sid(5)}
+    assert _sessions("Harry") == [_sid(1), _sid(5)]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        "[]",
+        json.dumps({"phase": "learning", "total": "lots", "learned": 5, "named": {"a": 1}, "cancelled": "yes"}),
+        json.dumps({"phase": ["learning"]}),
+        json.dumps({"phase": "sideways"}),
+    ],
+)
+def test_odd_state_file_never_breaks_state(env, content):
+    _named(env, 1)
+    backlog.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    backlog.STATE_PATH.write_text(content)
+    st = backlog.state()
+    assert st["phase"] in ("idle", "learning") and st["done"] == 0
+    _go()
+    assert backlog.state()["phase"] == "done"

@@ -45,25 +45,27 @@ cancel_event = threading.Event()
 
 
 def _fresh() -> dict:
-    return {"phase": "idle", "cancelled": False, "learned": [], "named": [], "total": 0}
+    return {"phase": "idle", "cancelled": False, "learned": [], "named": []}
+
+
+def _ids(value) -> list[str]:
+    return [s for s in value if isinstance(s, str)] if isinstance(value, list) else []
 
 
 def _load() -> dict:
+    """The saved progress; anything unreadable or oddly shaped counts as never started."""
     try:
         data = json.loads(STATE_PATH.read_text())
     except (OSError, ValueError):
         return _fresh()
     if not isinstance(data, dict) or data.get("phase") not in ("idle", "done", *_ACTIVE):
         return _fresh()
-    out = _fresh()
-    out.update(
-        phase=data["phase"],
-        cancelled=data.get("cancelled") is True,
-        learned=[s for s in data.get("learned") or [] if isinstance(s, str)],
-        named=[s for s in data.get("named") or [] if isinstance(s, str)],
-        total=int(data.get("total") or 0),
-    )
-    return out
+    return {
+        "phase": data["phase"],
+        "cancelled": data.get("cancelled") is True,
+        "learned": _ids(data.get("learned")),
+        "named": _ids(data.get("named")),
+    }
 
 
 def _save(st: dict) -> None:
@@ -79,14 +81,27 @@ def _update(fn: Callable[[dict], None]) -> dict:
 
 
 def state() -> dict:
-    """``{"phase", "done", "total"}``; phase is idle, learning, calibrating, naming, done or cancelled."""
+    """``{"phase", "done", "total", "running"}``.
+
+    ``phase`` is idle, learning, calibrating, naming, done or cancelled. ``done`` and
+    ``total`` count the recordings there are now (one deleted since doesn't count);
+    while calibrating both are 0. ``running`` is whether a backlog job is running or
+    queued, so a stopped partial run (after a quit) can be told apart from one in hand.
+    """
     st = _load()
     phase = st["phase"]
-    done = {"learning": len(st["learned"]), "naming": len(st["named"]), "done": len(st["named"])}.get(phase, 0)
-    total = st["total"] if phase in ("learning", "naming", "done") else 0
+    done = total = 0
+    if phase in ("learning", "naming", "done"):
+        ids = _sessions()
+        total = len(ids)
+        if phase == "done":
+            done = total
+        else:
+            processed = set(st["learned" if phase == "learning" else "named"])
+            done = sum(1 for sid in ids if sid in processed)
     if st["cancelled"] and phase in _ACTIVE:
         phase = "cancelled"
-    return {"phase": phase, "done": min(done, total), "total": total}
+    return {"phase": phase, "done": done, "total": total, "running": worker.has_job("backlog")}
 
 
 def is_done() -> bool:
@@ -159,31 +174,40 @@ def _instances() -> list[tuple[str, str, list[float], str]]:
     people = {"people": people_store.load()["people"]}
     out = []
     for session_id in _sessions():
-        transcript = speakers._read(session_id)
-        if transcript is None:
+        try:  # one malformed recording never stops calibration
+            out.extend(_instances_for(session_id, people, profile))
+        except Exception as e:
+            log.warning("calibration skipped %s: %s", session_id, e)
+    return out
+
+
+def _instances_for(session_id: str, people: dict, profile: str) -> list[tuple[str, str, list[float], str]]:
+    transcript = speakers._read(session_id)
+    if transcript is None:
+        return []
+    sidecar = coaching_store.load(session_id)
+    if sidecar.get("mixed_up") is True:
+        return []
+    segments = transcript.get("segments") or []
+    emb = embeddings.cached(session_id, segments)
+    if not emb:
+        return []
+    seconds = embeddings.speech_seconds(segments)
+    long_enough = {label for label, s in seconds.items() if s >= matching.MIN_LEARN_SECONDS and emb.get(label)}
+    typed = sn.stored_names(transcript)
+    out = []
+    for label, name in _typed_labels(transcript).items():
+        if label not in long_enough:
             continue
-        sidecar = coaching_store.load(session_id)
-        if sidecar.get("mixed_up") is True:
-            continue
-        segments = transcript.get("segments") or []
-        emb = embeddings.cached(session_id, segments)
-        if not emb:
-            continue
-        seconds = embeddings.speech_seconds(segments)
-        long_enough = {label for label, s in seconds.items() if s >= matching.MIN_LEARN_SECONDS and emb.get(label)}
-        typed = sn.stored_names(transcript)
-        for label, name in _typed_labels(transcript).items():
-            if label not in long_enough:
-                continue
-            if profile and people_store._norm_name(name) == profile:
-                pid = people_store.ME
-            else:
-                pid = people_store.find_person(people, name)
-            if pid is not None:
-                out.append((session_id, label, emb[label], pid))
-        for label in sn.confirmed_owner_labels(transcript, sidecar):
-            if label in long_enough and label not in typed:
-                out.append((session_id, label, emb[label], people_store.ME))
+        if profile and people_store._norm_name(name) == profile:
+            pid = people_store.ME
+        else:
+            pid = people_store.find_person(people, name)
+        if pid is not None:
+            out.append((session_id, label, emb[label], pid))
+    for label in sn.confirmed_owner_labels(transcript, sidecar):
+        if label in long_enough and label not in typed:
+            out.append((session_id, label, emb[label], people_store.ME))
     return out
 
 
@@ -224,25 +248,28 @@ def maybe_recalibrate() -> None:
 def _phase(name: str, key: str, step: Callable[[str], None], cancel: threading.Event, should_yield) -> str:
     """Run ``step`` on every recording not yet in ``st[key]``, saving after each.
 
-    Returns "finished", "cancelled" or "yielded".
+    Ids of recordings deleted since are dropped, and recordings added meanwhile are
+    picked up before the phase finishes. Returns "finished", "cancelled" or "yielded".
     """
-    ids = _sessions()
-    st = _update(lambda s: s.update(total=len(ids)))
-    done = set(st[key])
-    for session_id in ids:
-        if session_id in done:
-            continue
-        if cancel.is_set():
-            _update(lambda s: s.update(cancelled=True))
-            return "cancelled"
-        try:
-            step(session_id)
-        except Exception as e:  # one bad recording never stops the backlog
-            log.warning("backlog %s of %s failed: %s", name, session_id, e, exc_info=True)
-        _update(lambda s, sid=session_id: s[key].append(sid))
-        if should_yield is not None and should_yield():
-            return "yielded"
-    return "finished"
+    while True:
+        ids = _sessions()
+        current = set(ids)
+        st = _update(lambda s, keep=current: s.update({key: [sid for sid in s[key] if sid in keep]}))
+        seen = set(st[key])
+        pending = [sid for sid in ids if sid not in seen]
+        if not pending:
+            return "finished"
+        for session_id in pending:
+            if cancel.is_set():
+                _update(lambda s: s.update(cancelled=True))
+                return "cancelled"
+            try:
+                step(session_id)
+            except Exception as e:  # one bad recording never stops the backlog
+                log.warning("backlog %s of %s failed: %s", name, session_id, e, exc_info=True)
+            _update(lambda s, sid=session_id: s[key].append(sid))
+            if should_yield is not None and should_yield():
+                return "yielded"
 
 
 def run(cancel: threading.Event, should_yield: Callable[[], bool] | None = None) -> bool:
@@ -310,14 +337,19 @@ def start_on_launch() -> threading.Thread:
     pending and the People section offers it.
     """
 
-    def go() -> None:
-        try:
-            st = _load()
-            if st["phase"] != "done" and not st["cancelled"]:
-                start()
-        except Exception as e:
-            log.warning("could not start learning from past recordings: %s", e)
-
-    t = threading.Thread(target=go, name="people-backlog-launch", daemon=True)
+    t = threading.Thread(target=start_if_pending, name="people-backlog-launch", daemon=True)
     t.start()
     return t
+
+
+def start_if_pending() -> bool:
+    """``start()`` unless the backlog is done or you cancelled it (at launch, and once the
+    voice model is installed). Never raises; True when it was queued."""
+    try:
+        st = _load()
+        if st["phase"] == "done" or st["cancelled"]:
+            return False
+        return start()
+    except Exception as e:
+        log.warning("could not start learning from past recordings: %s", e)
+        return False

@@ -446,3 +446,27 @@ class _SyncThread:
 
     def start(self):
         self._t(*self._a, **self._k)
+
+
+@pytest.mark.parametrize(
+    "saved, installed, starts",
+    [
+        (None, True, True),  # never run: starts
+        ({"phase": "learning", "cancelled": False, "learned": [], "named": []}, True, True),  # resumes
+        ({"phase": "done", "cancelled": False, "learned": [], "named": []}, True, False),
+        ({"phase": "naming", "cancelled": True, "learned": [], "named": []}, True, False),  # you cancelled it
+        (None, False, False),  # the install failed
+    ],
+)
+def test_installing_the_voice_model_starts_the_backlog(env, monkeypatch, tmp_path, saved, installed, starts):
+    from app.people import backlog
+
+    monkeypatch.setattr(backlog, "STATE_PATH", tmp_path / "people" / "backlog.json")
+    if saved is not None:
+        backlog._save(saved)
+    started = []
+    monkeypatch.setattr(backlog, "start", lambda: started.append(1) or True)
+    monkeypatch.setattr(voice, "install_model", lambda: (installed, "" if installed else "no network"))
+    routes._install_voice_model()
+    assert started == ([1] if starts else [])
+    assert routes._voice_state["installing"] is False

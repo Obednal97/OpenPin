@@ -153,6 +153,10 @@ def _install_voice_model() -> None:
         error = f"Could not install the speaker model ({e})."
     with _voice_lock:
         _voice_state.update(installing=False, error=error)
+    if error is None:  # now voices can be learnt from past recordings
+        from app.people import backlog
+
+        backlog.start_if_pending()
 
 
 @bp.route("/coaching/voice/install", methods=["POST"])
