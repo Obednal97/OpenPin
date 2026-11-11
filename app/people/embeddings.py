@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from app.utils import paths
@@ -20,6 +21,9 @@ from app.utils.constants import PEOPLE_DIR
 log = logging.getLogger(__name__)
 
 MIN_SEGMENT_SECONDS = 1.0
+
+_locks: dict[str, threading.Lock] = {}  # one per recording, so it is embedded once at a time
+_locks_guard = threading.Lock()
 
 
 def _dir() -> Path:
@@ -87,24 +91,35 @@ def _write(session_id: str, payload: dict) -> None:
 
 
 def get(session_id: str, segments: list[dict], audio_path: str | None = None) -> dict[str, list[float]] | None:
-    """Cached embeddings, else computed (needs the model and audio) and saved. Never raises."""
+    """Cached embeddings, else computed (needs the model and audio) and saved. Never raises.
+
+    Two callers at once for one recording (coaching and the people worker) embed it once:
+    the second waits on the recording's lock and then reads the cache. Never call it while
+    holding a transcript or voice-store lock.
+    """
     try:
         hit = _read(session_id, segments)
         if hit is not None:
             return hit
-        from app.coaching import runner, voice
+        with _locks_guard:
+            lock = _locks.setdefault(session_id, threading.Lock())
+        with lock:
+            hit = _read(session_id, segments)
+            if hit is not None:
+                return hit
+            from app.coaching import runner, voice
 
-        if not voice.model_available():
-            return None
-        audio = runner._resolve_audio(session_id, audio_path)
-        if not audio:
-            return None
-        emb = voice.speaker_embeddings(audio, segments)
-        _write(
-            session_id,
-            {"labelling": _fingerprint(segments), "embeddings": emb, "seconds": speech_seconds(segments)},
-        )
-        return emb
+            if not voice.model_available():
+                return None
+            audio = runner._resolve_audio(session_id, audio_path)
+            if not audio:
+                return None
+            emb = voice.speaker_embeddings(audio, segments)
+            _write(
+                session_id,
+                {"labelling": _fingerprint(segments), "embeddings": emb, "seconds": speech_seconds(segments)},
+            )
+            return emb
     except Exception as e:
         log.warning("speaker embeddings failed for %s: %s", session_id, e, exc_info=True)
         return None

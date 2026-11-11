@@ -84,3 +84,28 @@ def test_match_owner_uses_cache_with_session_id(calls, monkeypatch):
     assert len(calls) == 1
     voice.match_owner("audio.wav", SEGS)
     assert len(calls) == 2
+
+
+def test_two_callers_at_once_embed_once(monkeypatch):
+    import threading
+
+    n, started, release = [], threading.Event(), threading.Event()
+
+    def slow(audio, segments, *a, **k):
+        n.append(1)
+        started.set()
+        release.wait(5)
+        return {"Speaker 1": [1.0, 0.0]}
+
+    monkeypatch.setattr(voice, "speaker_embeddings", slow)
+    out = []
+    first = threading.Thread(target=lambda: out.append(embeddings.get("s1", SEGS)))
+    second = threading.Thread(target=lambda: out.append(embeddings.get("s1", SEGS)))
+    first.start()
+    assert started.wait(5)
+    second.start()
+    second.join(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert len(n) == 1 and out == [{"Speaker 1": [1.0, 0.0]}] * 2
