@@ -81,6 +81,15 @@ def name_sources(session_id: str, transcript: dict, *, profile: str | None) -> d
     return {label: {"source": "voice", "score": score} for label, score in scores.items()}
 
 
+def names_and_sources(session_id: str, transcript: dict, *, profile: str | None) -> tuple[dict, dict]:
+    """``names_for`` and ``name_sources`` together, reading the sidecar and voices once."""
+    sidecar = coaching_store.load(session_id)
+    people = people_names(profile)
+    names = sn.effective_names(transcript, sidecar, profile, people)
+    scores = sn.voice_matched(transcript, sidecar, profile, people)
+    return names, {label: {"source": "voice", "score": score} for label, score in scores.items()}
+
+
 def get_names(session_id: str) -> dict[str, str]:
     """The effective names for a recording, or {} without a transcript."""
     transcript = _read(session_id)

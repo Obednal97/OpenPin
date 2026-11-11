@@ -959,6 +959,7 @@ def transcript_item(session_id, data: dict, profile: str) -> dict:
     """One ``GET /transcripts`` item. ``profile`` is ``speakers.profile_name() or ""``."""
     labels = list({s.get("speaker", "") for s in data.get("segments", []) if s.get("speaker")})
     path = TRANSCRIPTS_DIR / f"{session_id}.json"
+    names, name_sources = speakers.names_and_sources(session_id, data, profile=profile)
     return {
         "session_id": session_id,
         "text_preview": (data.get("text", "")[:150] + "...")
@@ -972,9 +973,9 @@ def transcript_item(session_id, data: dict, profile: str) -> dict:
         # Names over the labels: the effective ones to show (your profile name on
         # your speaker once you picked it), the ones typed, and whether a
         # re-transcription just cleared them (the UI says so once).
-        "speaker_names": speakers.names_for(session_id, data, profile=profile),
+        "speaker_names": names,
         "stored_speaker_names": sn.stored_names(data),
-        "speaker_name_sources": speakers.name_sources(session_id, data, profile=profile),
+        "speaker_name_sources": name_sources,
         "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
         "summary": data.get("summary", ""),
         "summary_stale": bool(data.get("summary_stale", False)),

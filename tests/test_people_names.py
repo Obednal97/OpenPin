@@ -144,3 +144,17 @@ def test_api_reports_voice_sources(voices, tmp_path, flask_client):
     assert item["speaker_names"] == {"Speaker 1": "Sam", "Speaker 2": "Alex"}
     assert item["speaker_name_sources"] == {"Speaker 1": {"source": "voice", "score": 0.82}}
     assert "vec" not in json.dumps(item)
+
+
+def test_read_names_cached_until_file_changes(voices):
+    voices.parent.mkdir(parents=True)
+    voices.write_text(json.dumps({"version": 2, "people": {"p1": {"name": "Sam", "samples": []}}}))
+    store._names_cache = None
+    real = json.loads
+    with patch("app.people.store.json.loads", side_effect=real) as loads:
+        first = store.read_names()
+        first["p1"] = "mutated"  # a copy: the cache is safe
+        assert store.read_names() == {"p1": "Sam"}
+        assert loads.call_count == 1
+    voices.write_text(json.dumps({"version": 2, "people": {"p1": {"name": "Samuel", "samples": []}}}))
+    assert store.read_names() == {"p1": "Samuel"}

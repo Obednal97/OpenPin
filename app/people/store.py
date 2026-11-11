@@ -134,20 +134,33 @@ def load() -> dict:
         return _load_unlocked()
 
 
+_names_cache: tuple[tuple[int, int], dict[str, str | None]] | None = None
+
+
 def read_names() -> dict[str, str | None]:
     """``{person id: name}`` without taking the store lock and without touching the file.
 
     The file is replaced atomically, so a plain read is safe even while another thread
     mutates the store, and from code holding the transcript lock. Missing or unreadable
-    gives {} (nothing is migrated or moved aside here).
+    gives {} (nothing is migrated or moved aside here). The parsed result is cached
+    against the file's (mtime, size), since the file holds every sample vector; a stale
+    read is harmless because the key changes with each write. Returns a copy.
     """
+    global _names_cache
     try:
+        st = VOICES_PATH.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        cached = _names_cache
+        if cached and cached[0] == key:
+            return dict(cached[1])
         people = json.loads(VOICES_PATH.read_text()).get("people")
     except (OSError, ValueError, AttributeError):
         return {}
     if not isinstance(people, dict):
         return {}
-    return {pid: p.get("name") for pid, p in people.items() if isinstance(p, dict)}
+    names = {pid: p.get("name") for pid, p in people.items() if isinstance(p, dict)}
+    _names_cache = (key, names)
+    return dict(names)
 
 
 def _mirror_me(data: dict) -> None:
