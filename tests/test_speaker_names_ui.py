@@ -1134,11 +1134,19 @@ await action(ed, 'save');
 out.acceptCalls = sets();
 // The owner's own voice match keeps the owner help
 t.stored_speaker_names = {}; t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
+const priorProfile = app.settings.profile;
 app.settings.profile = { name: 'harry fisher' };
 ed = await open('Speaker 2');
 out.ownerVoiceEditor = ed.innerHTML;
-app.settings.profile = {};
+app.settings.profile = priorProfile;
 await action(ed, 'cancel');
+
+// 6c. One Escape from the Did you mean prompt cancels the editor
+ed = await open('Speaker 1');
+const inp = await typeIn(ed, 'will');
+await action(ed, 'save');
+await fire(inp, 'keydown', { key: 'Escape' });
+out.dymEscapeClosed = !ed.isConnected;
 
 // 7. A typed name replaces the voice match's hint
 t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
@@ -1219,9 +1227,13 @@ class TestPicker:
         assert "Matched by voice." in html and "Not them" in html
         assert 'data-speaker-action="reject"' in html
         assert "recognised your voice" not in html  # another person: the normal hint, no owner copy
+        assert "Pick a name from the list or type a new one, with the full name if you can." in html
         assert pick["rejectCalls"] == [["reject", "s1", "Speaker 2"]]
         assert pick["afterReject"] == {"names": {}, "sources": {}, "closed": True}
         assert ">Speaker 2<" in pick["afterRejectHtml"]
+
+    def test_one_escape_from_did_you_mean_cancels(self, pick):
+        assert pick["dymEscapeClosed"]
 
     def test_accepting_a_voice_match_is_stored(self, pick):
         assert pick["acceptCalls"] == [["set", "s1", {"Speaker 2": "Harry Fisher"}]]

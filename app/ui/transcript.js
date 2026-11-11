@@ -1318,7 +1318,8 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
           + `<button type="button" class="action-btn subtle" data-speaker-action="use-known" data-speaker-name="${escapeHtml(maybe)}">${escapeHtml(maybe)}</button> `
           + `<button type="button" class="action-btn subtle" data-speaker-action="keep-typed">Keep “${escapeHtml(change[label])}”</button>`;
         dymEl.hidden = false;
-        listEl.hidden = true;
+        listOpen = false;
+        showList();
         return;
       }
     }
