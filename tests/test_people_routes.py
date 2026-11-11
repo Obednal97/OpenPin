@@ -521,3 +521,21 @@ def test_a_cleared_name_never_comes_back_by_voice(env):
     assert _read(env, S1)["speaker_voice_matches"]["rejected"] == {"Speaker 1": [harry], "Speaker 2": [store.ME]}
     speakers.set_names(S1, {"Speaker 1": "Harry Fisher"})  # typing them again lifts it
     assert _read(env, S1)["speaker_voice_matches"]["rejected"] == {"Speaker 2": [store.ME]}
+
+
+def test_a_deleted_person_is_not_learnt_again_from_their_typed_names(env):
+    env.cache[S1] = {"Speaker 1": _vec(0), "Speaker 2": _vec(1)}
+    env.cache[S2] = {"Speaker 1": _vec(0, 0.1), "Speaker 2": _vec(1)}
+    _write(env, S1, names={"Speaker 1": "Harry"})
+    _write(env, S2, names={"Speaker 1": "harry", "Speaker 2": "Sam"})
+    backlog.start()
+    assert worker.wait_idle(10)
+    pid = store.find_person(store.load(), "Harry")
+    assert env.client.delete(f"/people/{pid}").status_code == 200
+    assert _read(env, S1)["speaker_names_frozen"] == ["Speaker 1"]
+    t2 = _read(env, S2)
+    assert t2["speaker_names_frozen"] == ["Speaker 1"] and t2["speaker_names"] == {"Speaker 1": "harry", "Speaker 2": "Sam"}
+    backlog.start()
+    assert worker.wait_idle(10)
+    assert store.find_person(store.load(), "Harry") is None
+    assert store.find_person(store.load(), "Sam") is not None

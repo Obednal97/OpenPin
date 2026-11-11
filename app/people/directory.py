@@ -315,8 +315,9 @@ def merge(person_id: str, into) -> None:
 
 
 def delete(person_id: str) -> None:
-    """Forget someone's voice. Names their voice gave in past transcripts become typed
-    (frozen, so they never teach), so what each transcript shows stays the same."""
+    """Forget someone's voice. Names their voice gave in past transcripts become typed,
+    so what each transcript shows stays the same; those and the names typed with their
+    name are frozen, so they never teach the voice back."""
     from app.coaching.runner import labelling_fingerprint
 
     _others(person_id)
@@ -328,25 +329,26 @@ def delete(person_id: str) -> None:
 
         def edit(sid: str, t: dict) -> bool:
             block = _current_block(t)
-            if block is None:
-                return False
             before = json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True)
-            shown = sn.voice_matched(t, coaching_store.load(sid), profile, {**people, ME: profile})
             typed = sn.stored_names(t)
             frozen = t.get("speaker_names_frozen") if isinstance(t.get("speaker_names_frozen"), list) else []
-            for label, match in list(block["matches"].items()):
-                if not isinstance(match, dict) or match.get("person") != person_id:
-                    continue
-                del block["matches"][label]
-                if label in shown and name and label not in typed:
-                    typed[label] = name
-                    frozen = [*frozen, label] if label not in frozen else frozen
+            hit = [label for label, n in typed.items() if name and _norm(n) == _norm(name)]
+            if block is not None:
+                shown = sn.voice_matched(t, coaching_store.load(sid), profile, {**people, ME: profile})
+                for label, match in list(block["matches"].items()):
+                    if not isinstance(match, dict) or match.get("person") != person_id:
+                        continue
+                    del block["matches"][label]
+                    if label in shown and name and label not in typed:
+                        typed[label] = name
+                        hit.append(label)
+                _drop_rejections(block, person_id)
             if typed != sn.stored_names(t):
                 segments = t.get("segments") or []
                 t["speaker_names"] = {label: typed[label] for label in sn.speaker_labels(segments) if label in typed}
                 t["speaker_names_labelling"] = labelling_fingerprint(segments)
-                t["speaker_names_frozen"] = frozen
-            _drop_rejections(block, person_id)
+            if any(label not in frozen for label in hit):
+                t["speaker_names_frozen"] = [*frozen, *(label for label in hit if label not in frozen)]
             return json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True) != before
 
         _each_transcript(edit, people, people)  # the shown names stay the same: Notion isn't told
