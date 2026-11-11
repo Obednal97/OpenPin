@@ -9,6 +9,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from app.coaching import store as coaching_store
+from app.people import embeddings as voice_embeddings
 from app.state import speakers
 from app.utils import redownload_backup
 from app.utils import speaker_names as sn
@@ -673,7 +674,9 @@ def _trash_coaching_files(session_id):
     Takes the coaching store's own lock, so call it after releasing the transcript lock.
     """
     with coaching_store.session_lock(session_id):
-        return _trash_files(coaching_store.session_files(session_id))
+        result = _trash_files(coaching_store.session_files(session_id))
+    voice_embeddings.delete(session_id)  # derived data: plain delete, not trash
+    return result
 
 
 def _trash_location(locations):

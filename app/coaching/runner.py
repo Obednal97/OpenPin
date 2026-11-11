@@ -152,7 +152,9 @@ def labelling_fingerprint(segments: list[dict]) -> str:
     return store.text_hash(json.dumps(pairs))
 
 
-def _resolve_owner(sidecar: dict, labels: list[str], audio: str | None, segments: list[dict]):
+def _resolve_owner(
+    sidecar: dict, labels: list[str], audio: str | None, segments: list[dict], session_id: str | None = None
+):
     """Return ``(owner, reason)``: owner is None when the user must pick, with reason saying why.
 
     A saved owner (the user's pick first, then an earlier voice match) is reused only while the
@@ -170,7 +172,7 @@ def _resolve_owner(sidecar: dict, labels: list[str], audio: str | None, segments
         return saved, ""
     if not audio:
         return None, NO_AUDIO
-    match = voice.match_owner(audio, segments)
+    match = voice.match_owner(audio, segments, session_id)
     if match.get("labels"):
         owner = {"labels": list(match["labels"]), "source": "voice", "confidence": float(match["confidence"])}
         return {**owner, "labelling": labelling_fingerprint(segments)}, ""
@@ -294,6 +296,7 @@ def _analyse(
     force: bool,
     config: dict,
     previous_review: dict | None = None,
+    session_id: str | None = None,
 ) -> tuple[dict, set]:
     """Work out this run's outcome. Returns (fields to set, keys to remove) for the sidecar.
 
@@ -309,7 +312,7 @@ def _analyse(
     if not force and duration < MIN_COACHING_SECONDS:
         return {"status": "skipped", "status_reason": TOO_SHORT}, set(_REPORT_KEYS)
 
-    owner, reason = _resolve_owner(sidecar, labels, audio, segments)
+    owner, reason = _resolve_owner(sidecar, labels, audio, segments, session_id)
     if owner is None:
         fields = {"status": "needs_owner", "status_reason": reason, "candidates": _candidates(labels, segments, audio)}
         return fields, {"owner", "metrics", "review", "engagement", "report_stale"}
@@ -479,7 +482,7 @@ def _run_once(session_id: str, audio_path: str | None, force: bool) -> dict:
     try:
         audio = _resolve_audio(session_id, audio_path)
         words = store.load_words(session_id)
-        fields, drop = _analyse(sidecar, words, transcript, audio, force, config, before.get("review"))
+        fields, drop = _analyse(sidecar, words, transcript, audio, force, config, before.get("review"), session_id)
     except Exception as e:
         log.warning("coaching run for %s failed: %s", session_id, e, exc_info=True)
         fields, drop = {"status": "failed", "status_reason": f"Coaching failed: {e}"}, set()

@@ -297,7 +297,7 @@ def _none(reason: str) -> dict:
     return {"labels": [], "confidence": 0.0, "source": "none", "reason": reason}
 
 
-def match_owner(audio_path: str, segments: list[dict]) -> dict:
+def match_owner(audio_path: str, segments: list[dict], session_id: str | None = None) -> dict:
     """Which speaker labels are the owner. Never installs the model, never raises."""
     try:
         exemplars = _load_exemplars()
@@ -305,7 +305,12 @@ def match_owner(audio_path: str, segments: list[dict]) -> dict:
             return _none("no voice profile")
         if not model_available():
             return _none("voice model not installed")
-        embeddings = speaker_embeddings(audio_path, segments)
+        if session_id:
+            from app.people import embeddings as cache
+
+            embeddings = cache.get(session_id, segments, audio_path) or {}
+        else:
+            embeddings = speaker_embeddings(audio_path, segments)
         scores = {label: max(_cosine(e, ex) for ex in exemplars) for label, e in embeddings.items()}
         if not scores:
             return _none("no confident match")
