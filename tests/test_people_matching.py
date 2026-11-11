@@ -131,3 +131,26 @@ def test_calibrate_requires_min_named():
     inst = _instances_for(4, 4) + [(f"a{i}", "S2", _vec(0.0, 0.0), "a") for i in range(12)]
     out = matching.calibrate(inst, _library())
     assert out["threshold"] == 0.80
+
+
+C = [0.0, 0.0, 1.0]
+
+
+def test_calibrate_ignores_samples_from_no_recording():
+    # Your migrated v1 samples have no recording, so they can't be held out: your
+    # instances would match them at 1.0 and vouch for any threshold.
+    people = {**_library(), "me": {"name": None, "is_me": True, "samples": [{"vec": C, "session_id": None}]}}
+    inst = _instances_for(4, 4) + [(f"m{i}", "S1", C, "me") for i in range(12)]
+    out = matching.calibrate(inst, people)
+    assert out["threshold"] == matching.FALLBACK_THRESHOLD
+
+
+def test_calibrate_holds_the_wrong_rate_for_other_people_too():
+    # Hundreds of easy owner instances must not hide one wrong name in ten among the others.
+    me = [0.0, -1.0, 0.0]  # far from everyone else
+    people = {**_library(), "me": _person(me, tuple(f"m{i}" for i in range(12)), name=None)}
+    inst = [(f"m{i}", "S1", me, "me") for i in range(200)]
+    inst += [(f"a{i}", "S1", _vec(0.76), "a") for i in range(10)]
+    inst += [("b0", "S2", _vec(0.69), "b")]  # named as a below 0.7
+    out = matching.calibrate(inst, people)
+    assert out["threshold"] == 0.7

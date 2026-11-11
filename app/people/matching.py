@@ -5,6 +5,7 @@ leans towards leaving a speaker unnamed.
 """
 
 from app.coaching.voice import _cosine
+from app.people.store import ME
 from app.utils.config import load_config
 
 SAMPLE_CAP = 20
@@ -65,25 +66,42 @@ def match(
 def threshold_table(
     instances: list[tuple[str, str, list[float], str]], people: dict, thresholds: list[float] | None = None
 ) -> list[dict]:
-    """Leave-one-recording-out tally per threshold: ``{"threshold", "named", "right"}`` rows."""
+    """Leave-one-recording-out tally per threshold: ``{"threshold", "named", "right",
+    "others_named", "others_right"}`` rows (``others_``: instances that aren't you).
+
+    Samples from no recording (your migrated v1 ones) can't be held out, so they're left out.
+    """
+    people = {
+        pid: {"samples": [s for s in p.get("samples", []) if s.get("session_id") is not None]}
+        for pid, p in people.items()
+    }
     # Rank once per instance; thresholds only change which are named.
     ranked = [(_scores(vec, people, sid), true) for sid, _label, vec, true in instances]
     rows = []
     for t in thresholds if thresholds is not None else THRESHOLD_GRID:
-        named = right = 0
+        row = {"threshold": t, "named": 0, "right": 0, "others_named": 0, "others_right": 0}
         for scores, true in ranked:
             if not scores or scores[0][0] < t:
                 continue
             if len(scores) > 1 and scores[0][0] - scores[1][0] < AMBIGUITY_MARGIN:
                 continue
-            named += 1
-            right += scores[0][1] == true
-        rows.append({"threshold": t, "named": named, "right": right})
+            ok = scores[0][1] == true
+            row["named"] += 1
+            row["right"] += ok
+            if true != ME:
+                row["others_named"] += 1
+                row["others_right"] += ok
+        rows.append(row)
     return rows
 
 
+def _safe(named: int, right: int) -> bool:
+    return (named - right) / named < MAX_WRONG_RATE
+
+
 def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) -> dict:
-    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap.
+    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap,
+    overall and (once at least ``MIN_NAMED`` of them are named) for the instances that aren't you.
 
     ``named`` is how many instances that threshold names (0 when too few to test).
     """
@@ -92,8 +110,8 @@ def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) 
         return {"threshold": DEFAULT_THRESHOLD, "accuracy": None, "instances": n, "named": 0}
     table = threshold_table(instances, people, [*THRESHOLD_GRID, FALLBACK_THRESHOLD])
     for row in table[:-1]:
-        named, right = row["named"], row["right"]
-        if named >= MIN_NAMED and (named - right) / named < MAX_WRONG_RATE:
+        named, right, others = row["named"], row["right"], row["others_named"]
+        if named >= MIN_NAMED and _safe(named, right) and (others < MIN_NAMED or _safe(others, row["others_right"])):
             return {"threshold": row["threshold"], "accuracy": right / named, "instances": n, "named": named}
     named, right = table[-1]["named"], table[-1]["right"]
     accuracy = right / named if named else None
