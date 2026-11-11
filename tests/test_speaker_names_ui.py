@@ -327,7 +327,7 @@ const actionClick = (editor, action) =>
   let ed = editorOf();
   out.editorTyped = ed.innerHTML;
   out.editorAfterRow = row.inserted[0][0];
-  out.datalist = ed.querySelector('#speaker-name-suggestions').innerHTML;
+  out.datalist = ed.querySelector('.speaker-name-list').innerHTML;
   out.peopleCalls = calls.filter((x) => x[0] === 'people').length;
   out.inputFocused = !!ed.querySelector('.speaker-name-input').focused;
   out.editorOpen = r('speakerNameEditorOpen')();
@@ -611,15 +611,15 @@ class TestNameEditor:
             assert f'data-speaker-action="{action}"' in html
         clear = re.search(r'<button[^>]*data-speaker-action="clear"[^>]*>', html).group(0)
         assert "disabled" not in clear
-        assert 'list="speaker-name-suggestions"' in html
+        assert "<datalist" not in html and 'role="combobox"' in html and 'role="listbox"' in html
         assert 'maxlength="80"' in html
         assert tx["inputFocused"]
         assert tx["editorOpen"] is True
 
     def test_suggestions_from_people(self, tx):
         assert tx["peopleCalls"] == 1
-        assert '<option value="Sarah &lt;Jones&gt;"' in tx["datalist"]
-        assert '<option value="Priya"' in tx["datalist"]
+        assert 'data-pick="Sarah &lt;Jones&gt;"' in tx["datalist"]
+        assert 'data-pick="Priya"' in tx["datalist"]
 
     def test_escape_cancels(self, tx):
         assert tx["escCalls"] == []
@@ -657,7 +657,7 @@ class TestNameEditor:
         assert tx["defaultClearCalls"] == []
         # The hint says how to change it: in Coaching, or by typing another name
         hint = re.search(r'<p class="speaker-name-hint">(.*?)</p>', html, re.S).group(1)
-        assert "Which one is you" in hint and "Coaching" in hint and "type another name" in hint.lower()
+        assert "recognised your voice" in hint and "Coaching" in hint and "type another name" in hint.lower()
 
     def test_emptying_your_default_name_explains_instead_of_doing_nothing(self, tx):
         assert tx["defaultEmptyCalls"] == []
@@ -1003,3 +1003,216 @@ class TestRecordingsList:
         # A recording without names shows none
         b2 = html[html.index('data-sid="b2"') :]
         assert "recording-participants" not in b2
+
+
+# ---------------------------------------------------------------- picker, Did you mean, voice hint
+
+_PICK_JS = r"""
+const app = r('app');
+const out = {};
+const people = [
+  { name: 'Harry Fisher', recordings: 9, person_id: 'p1', has_voice: true },
+  { name: 'William Moss', recordings: 5, person_id: 'p2', has_voice: true },
+  { name: 'Priya Shah', recordings: 4, person_id: null, has_voice: false },
+  { name: 'Will Moran', recordings: 1, person_id: null, has_voice: false },
+];
+out.lev = [r('_txPickLevenshtein')('kitten', 'sitting'), r('_txPickLevenshtein')('', 'ab'), r('_txPickLevenshtein')('Priya', 'priya')];
+const dym = (typed, known = people) => r('_txPickDidYouMean')(typed, known);
+out.dym = {
+  firstWord: dym('will'), firstWordTwo: dym('Will', people.slice(0, 2)),
+  typo: dym('Priya Shaw'), exactCase: dym('priya shah'), none: dym('Zed'),
+  ties: dym('Harry Fishe', [{ name: 'Harry Fisher', recordings: 1 }, { name: 'Harry Fishers', recordings: 7 }]),
+};
+out.rows = {
+  all: r('_txPickRowsHtml')(people, '', -1),
+  will: r('_txPickRowsHtml')(people, 'will', 0),
+  exact: r('_txPickRowsHtml')(people, 'PRIYA SHAH', -1),
+  evil: r('_txPickRowsHtml')([{ name: 'A"<b>', recordings: 1 }], '<b', -1),
+  many: r('_txPickRowsHtml')(Array.from({ length: 20 }, (_, i) => ({ name: 'P' + i, recordings: 1 })), '', -1),
+};
+const T = () => ({
+  session_id: 's1', segments: [{ start: 0, text: 'a', speaker: 'Speaker 1' }, { start: 1, text: 'b', speaker: 'Speaker 2' }],
+  speaker_names: { 'Speaker 2': 'Harry Fisher' }, stored_speaker_names: {},
+  speaker_name_sources: { 'Speaker 2': { source: 'voice', score: 0.8 } },
+});
+out.button = r('_txSpeakerButtonHtml')('Speaker 2', T().speaker_names, T().speaker_name_sources);
+out.buttonTyped = r('_txSpeakerButtonHtml')('Speaker 2', { 'Speaker 2': 'X' }, {});
+const t = T();
+app.transcripts.s1 = t;
+Object.assign(app, { currentView: 'transcript', currentSessionId: 's1', activeTab: 'transcript' });
+app.recordings = [{ session_id: 's1', participants: [] }];
+let rejectReply;
+ctx.window.plaud = {
+  people: async () => people,
+  setSpeakerNames: async (sid, names) => { calls.push(['set', sid, names]); return { speaker_names: Object.fromEntries(Object.entries(names).filter(([, v]) => v)) }; },
+  rejectVoiceMatch: async (sid, label) => { calls.push(['reject', sid, label]); return rejectReply; },
+};
+const row = new El();
+const c = new El();
+const open = async (label) => {
+  await fire(c, 'click', { target: { closest: (s) => (s === '.segment-speaker' ? { dataset: { label }, closest: () => row } : null) } });
+  return row.inserted[row.inserted.length - 1][1];
+};
+const click = (ed, sel, attrs) => fire(ed, 'click', { target: { closest: (s) => (s === sel ? attrs : null) } });
+const action = (ed, a, name) => click(ed, '[data-speaker-action]', { dataset: { speakerAction: a, speakerName: name }, disabled: false });
+const typeIn = async (ed, v) => { const i = ed.querySelector('.speaker-name-input'); i.value = v; await fire(i, 'input'); return i; };
+const sets = () => calls.filter((x) => x[0] === 'set');
+r('renderTranscriptSegments')(c, t, 's1');
+
+// 1. Unknown first name: Did you mean, nothing saved yet
+let ed = await open('Speaker 1');
+out.editorUnnamed = ed.innerHTML;
+await typeIn(ed, 'will');
+await action(ed, 'save');
+out.dymBox = ed.querySelector('.speaker-name-dym').innerHTML;
+out.dymHidden = ed.querySelector('.speaker-name-dym').hidden;
+out.dymCalls = sets();
+// Pick the known name
+await action(ed, 'use-known', 'William Moss');
+out.pickKnownCalls = sets();
+
+// 2. Keep what was typed
+calls.length = 0;
+ed = await open('Speaker 1');
+await typeIn(ed, 'Will');
+await action(ed, 'save');
+await action(ed, 'keep-typed', 'Will');
+out.keepCalls = sets();
+
+// 3. Exact match ignoring case: the known spelling, no question
+calls.length = 0;
+ed = await open('Speaker 1');
+await typeIn(ed, 'priya shah');
+await action(ed, 'save');
+out.exactCalls = sets();
+
+// 4. Clicking a row fills the name and saves; Add new row saves what was typed, no question
+calls.length = 0;
+ed = await open('Speaker 1');
+await click(ed, '[data-pick]', { dataset: { pick: 'Harry Fisher' } });
+out.rowCalls = sets();
+calls.length = 0;
+ed = await open('Speaker 1');
+await typeIn(ed, 'will');
+await click(ed, '[data-pick-new]', {});
+out.addNewCalls = sets();
+
+// 5. Keyboard: ArrowDown selects a row (aria-activedescendant), Enter picks it
+calls.length = 0;
+ed = await open('Speaker 1');
+const input = await typeIn(ed, 'harry');
+await fire(input, 'keydown', { key: 'ArrowDown' });
+out.activeDescendant = input.attrs['aria-activedescendant'];
+await fire(input, 'keydown', { key: 'Enter' });
+out.enterPickCalls = sets();
+
+// 6. A voice-matched speaker: editor says so; Not them calls reject and shows the label again
+calls.length = 0;
+t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
+t.stored_speaker_names = {};
+t.speaker_name_sources = { 'Speaker 2': { source: 'voice', score: 0.8 } };
+r('renderTranscriptSegments')(c, t, 's1');
+out.voiceSegments = c.innerHTML;
+ed = await open('Speaker 2');
+out.voiceEditor = ed.innerHTML;
+rejectReply = { speaker_names: {}, speaker_name_sources: {} };
+await action(ed, 'reject');
+out.rejectCalls = calls.filter((x) => x[0] === 'reject');
+out.afterReject = { names: t.speaker_names, sources: t.speaker_name_sources, closed: !ed.isConnected };
+out.afterRejectHtml = c.innerHTML;
+
+// 7. A typed name replaces the voice match's hint
+t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
+t.speaker_name_sources = { 'Speaker 2': { source: 'voice', score: 0.8 } };
+ed = await open('Speaker 2');
+await typeIn(ed, 'Harry Fisher');
+await typeIn(ed, 'Priya Shah');
+await action(ed, 'save');
+out.typedOverVoice = t.speaker_name_sources;
+console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def pick():
+    # Reuse the fake DOM; the harness above runs inside an async wrapper like _TX_JS
+    script = "(async () => {\n" + _PICK_JS
+    return _run(script, ["utils.js", "recordings.js", "transcript.js", "coaching.js"], {})
+
+
+class TestPicker:
+    def test_levenshtein(self, pick):
+        assert pick["lev"] == [3, 2, 1]
+
+    def test_did_you_mean_rules(self, pick):
+        d = pick["dym"]
+        assert d["firstWord"] == "Will Moran"  # exactly one name starts with Will among the unknown spellings
+        assert d["firstWordTwo"] is None
+        assert d["typo"] == "Priya Shah"
+        assert d["exactCase"] is None  # an exact match is not a question
+        assert d["none"] is None
+        assert d["ties"] == "Harry Fisher"
+
+    def test_rows(self, pick):
+        rows = pick["rows"]
+        assert rows["all"].index("Harry Fisher") < rows["all"].index("Priya Shah")
+        assert rows["all"].count('role="option"') == 4
+        assert 'Add new person' not in rows["all"]
+        assert "Add new person: “will”" in rows["will"]
+        assert "Will Moran" in rows["will"] and "William Moss" in rows["will"] and "Priya" not in rows["will"]
+        assert "Add new person" not in rows["exact"]
+        assert "A&quot;&lt;b&gt;" in rows["evil"] and "<b>" not in rows["evil"] and "&lt;b&quot;" not in rows["evil"] and "Add new person: “&lt;b”" in rows["evil"]
+        assert rows["many"].count('role="option"') == 8
+        assert "voice" in rows["all"].split("Priya")[0]  # the voice marker
+
+    def test_editor_markup(self, pick):
+        html = pick["editorUnnamed"]
+        assert 'placeholder="Full name, such as Harry Fisher"' in html
+        assert 'role="combobox"' in html and 'aria-autocomplete="list"' in html and 'role="listbox"' in html
+        assert "<datalist" not in html
+
+    def test_did_you_mean_then_choice(self, pick):
+        assert pick["dymHidden"] is False
+        assert "Did you mean Will Moran?" in pick["dymBox"]
+        assert "Keep “will”" in pick["dymBox"]
+        assert pick["dymCalls"] == []
+        assert pick["pickKnownCalls"] == [["set", "s1", {"Speaker 1": "William Moss"}]]
+        assert pick["keepCalls"] == [["set", "s1", {"Speaker 1": "Will"}]]
+
+    def test_exact_match_uses_existing_spelling(self, pick):
+        assert pick["exactCalls"] == [["set", "s1", {"Speaker 1": "Priya Shah"}]]
+
+    def test_row_click_and_add_new_save(self, pick):
+        assert pick["rowCalls"] == [["set", "s1", {"Speaker 1": "Harry Fisher"}]]
+        assert pick["addNewCalls"] == [["set", "s1", {"Speaker 1": "will"}]]
+
+    def test_keyboard(self, pick):
+        assert pick["activeDescendant"]
+        assert pick["enterPickCalls"] == [["set", "s1", {"Speaker 1": "Harry Fisher"}]]
+
+    def test_voice_matched_name_is_marked(self, pick):
+        assert 'title="Matched by voice"' in pick["button"]
+        assert 'title="Matched by voice"' not in pick["buttonTyped"]
+
+    def test_voice_editor_and_not_them(self, pick):
+        html = pick["voiceEditor"]
+        assert "Matched by voice." in html and "Not them" in html
+        assert 'data-speaker-action="reject"' in html
+        assert "Open Pin recognised your voice" in html
+        assert pick["rejectCalls"] == [["reject", "s1", "Speaker 2"]]
+        assert pick["afterReject"] == {"names": {}, "sources": {}, "closed": True}
+        assert ">Speaker 2<" in pick["afterRejectHtml"]
+
+    def test_typed_name_drops_the_voice_marker(self, pick):
+        assert pick["typedOverVoice"] == {}
+
+
+def test_picker_copy_and_names():
+    flat = re.sub(r"'\s*\+\s*'|'\n\s*\+\s*'", "", TRANSCRIPT_JS)
+    assert "This is your name because Open Pin recognised your voice, or you picked this speaker in Coaching. Type another name to change it." in flat
+    assert "Full name, such as Harry Fisher" in TRANSCRIPT_JS
+    for sel in (".speaker-name-list", ".speaker-name-dym", ".speaker-name-voice"):
+        assert sel in CSS, sel
+    picker = TRANSCRIPT_JS[TRANSCRIPT_JS.index("_TX_PICK_MAX_ROWS") : TRANSCRIPT_JS.index("function renderEditableSummary")]
+    assert "—" not in picker
