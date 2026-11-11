@@ -461,3 +461,21 @@ def test_odd_state_file_never_breaks_state(env, content):
     assert st["phase"] in ("idle", "learning") and st["done"] == 0
     _go()
     assert backlog.state()["phase"] == "done"
+
+
+def test_naming_tells_notion_per_recording_and_the_window_once(env):
+    from app.utils import changes
+
+    [_named(env, i) for i in range(12)]
+    unnamed = [_write(env, 20 + i, emb={"Speaker 1": _vec(HARRY, 0.05)}) for i in range(5)]
+    real = backlog.apply.match_recording
+    steps = []
+
+    def spy(session_id, *a, **kw):
+        steps.append(session_id)
+        return real(session_id, *a, **kw)
+
+    with patch.object(backlog.apply, "match_recording", side_effect=spy), patch.object(changes, "bump") as bump:
+        _go()
+    assert {c.args[0] for c in env["enqueue"].call_args_list} >= set(unnamed)
+    assert len(steps) == 17 and bump.call_count == 1

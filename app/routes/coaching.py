@@ -201,12 +201,21 @@ def voice_setup():
     except Exception as e:
         log.warning("voice setup failed for %s: %s", sid, e, exc_info=True)
         return jsonify({"error": "Could not learn your voice from this recording"}), 500
+    if added:  # your voice changed: past matches to you may come or go
+        _rematch()
     return jsonify({"exemplars": added})
+
+
+def _rematch() -> None:
+    from app.people import worker
+
+    worker.enqueue("rematch")
 
 
 @bp.route("/coaching/voice", methods=["DELETE"])
 def voice_delete():
     voice.delete_profile()
+    _rematch()
     return jsonify({"deleted": True})
 
 

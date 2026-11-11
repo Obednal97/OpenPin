@@ -125,3 +125,10 @@ def test_rejected_rename_keeps_the_editor_and_text():
 def test_merge_offers_you_once_your_name_is_set():
     assert '<option value="me"' in JS and "You (${escapeHtml(_pplData.me.name)})" in JS
     assert "into === 'me' ? _pplData.me : _pplById(into)" in JS
+
+
+def test_a_running_backlog_polls_only_its_progress():
+    body = JS[JS.index("async function _pplPollBacklog(") :][:500]
+    assert "window.plaud.peopleBacklog()" in body
+    assert "if (!b || b.error || !b.running) return renderPeopleSettings(true);" in body  # once, when it stops
+    assert "if (running) _pplPollBacklog();" in JS

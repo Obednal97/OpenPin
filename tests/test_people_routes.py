@@ -297,6 +297,7 @@ def test_backlog_start_and_cancel(env):
     with patch.object(backlog, "cancel") as cancel:
         r = env.client.delete("/people/backlog")
     assert r.status_code == 200 and cancel.called
+    assert env.client.get("/people/backlog").get_json() == backlog.state()  # the light poll
 
 
 # ---------------------------------------------------------------- suggestions and MCP

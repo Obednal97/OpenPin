@@ -212,25 +212,6 @@ def _load_exemplars() -> list[list[float]]:
     return [s["vec"] for s in store.load()["people"][store.ME]["samples"]]
 
 
-def _save_exemplars(
-    exemplars: list[list[float]], session_id: str | None = None, labels: list[str] | None = None
-) -> None:
-    """Replace the owner's samples with ``exemplars`` (keeping the existing sample for any
-    vector already held) through the voice store, which writes atomically with mode 0600
-    and mirrors the vectors to PROFILE_PATH. Keeps the newest MAX_EXEMPLARS."""
-    from app.people import store
-
-    exemplars = exemplars[-MAX_EXEMPLARS:]
-
-    def fn(data: dict) -> None:
-        old = data["people"][store.ME]["samples"]
-        held = {i: next((s for s in old if s["vec"] == v), None) for i, v in enumerate(exemplars)}
-        out = _learn_into(data, [v for i, v in enumerate(exemplars) if held[i] is None], session_id, labels)
-        data["people"][store.ME]["samples"] = [held[i] for i in held if held[i] is not None] + out
-
-    store.mutate(fn)
-
-
 def _learn_into(data: dict, vectors: list[list[float]], session_id: str | None, labels: list[str] | None) -> list[dict]:
     """New owner samples for ``vectors``; any earlier sample for the same recording speaker
     is removed from everyone first, so re-learning never leaves a stale twin."""
@@ -258,20 +239,21 @@ def delete_profile() -> None:
 
 
 def _learn(vectors: list[list[float]], session_id: str | None, labels: list[str], replace: bool) -> None:
-    """Add (or swap in) owner samples in one store transaction: no read-then-write gap."""
+    """Add (or swap in) owner samples in one store transaction: no read-then-write gap.
+    The store keeps the MAX_EXEMPLARS most varied."""
     from app.people import store
 
     def fn(data: dict) -> None:
         new = _learn_into(data, vectors, session_id, labels)  # first: it may drop twins from `me`
         me = [] if replace else data["people"][store.ME]["samples"]
-        data["people"][store.ME]["samples"] = (me + new)[-MAX_EXEMPLARS:]
+        data["people"][store.ME]["samples"] = me + new
 
     store.mutate(fn)
 
 
 def add_exemplars(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
     """Add one exemplar per given label from this recording (voice setup and the
-    correction path). Returns how many were added. Oldest exemplars drop past 20."""
+    correction path). Returns how many were added. Past 20, the least varied drop."""
     embeddings = speaker_embeddings(audio_path, segments)
     got = [label for label in labels if label in embeddings]
     if got:

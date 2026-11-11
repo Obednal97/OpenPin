@@ -288,6 +288,23 @@ def test_apply_matches_drops_stale_labelling(env):
     assert _read(env["trn"]) == before
 
 
+def test_apply_matches_writes_nothing_for_no_matches_and_no_block(env):
+    _write(env["trn"])
+    mtime = (env["trn"] / f"{SID}.json").stat().st_mtime_ns
+    assert apply.apply_matches(SID, LABELLING, {}) is False
+    assert "speaker_voice_matches" not in _read(env["trn"])
+    assert (env["trn"] / f"{SID}.json").stat().st_mtime_ns == mtime
+
+
+def test_apply_matches_never_saves_a_person_rejected_meanwhile(env):
+    harry, sam = _person("Harry"), _person("Sam")
+    block = {"labelling": LABELLING, "matches": {}, "rejected": {"Speaker 1": [harry]}}
+    _write(env["trn"], speaker_voice_matches=block)  # "Not them" landed after the match was worked out
+    found = {"Speaker 1": {"person": harry, "score": 0.9}, "Speaker 2": {"person": sam, "score": 0.9}}
+    assert apply.apply_matches(SID, LABELLING, found) is True
+    assert _read(env["trn"])["speaker_voice_matches"]["matches"] == {"Speaker 2": {"person": sam, "score": 0.9}}
+
+
 def test_apply_matches_keeps_rejected(env):
     harry = _person("Harry")
     block = {"labelling": LABELLING, "matches": {}, "rejected": {"Speaker 2": ["p_x"]}}
@@ -315,10 +332,11 @@ def test_clearing_a_name_never_brings_it_back_from_its_own_sample(env):
     env["cache"][SID] = EMB[SID]
     speakers.set_names(SID, {"Speaker 1": "Harry"})
     _settle()
-    assert "Speaker 1" not in _read(env["trn"])["speaker_voice_matches"]["matches"]  # never its own sample
+    assert "speaker_voice_matches" not in _read(env["trn"])  # never its own sample: nothing to save
     # Even a match from elsewhere sitting under the typed name goes when it is cleared.
     t = _read(env["trn"])
-    t["speaker_voice_matches"]["matches"]["Speaker 1"] = {"person": "p_any", "score": 1.0}
+    match = {"person": "p_any", "score": 1.0}
+    t["speaker_voice_matches"] = {"labelling": LABELLING, "matches": {"Speaker 1": match}, "rejected": {}}
     (env["trn"] / f"{SID}.json").write_text(json.dumps(t))
     with worker._cond:  # the worker can't run yet
         speakers.set_names(SID, {"Speaker 1": None})

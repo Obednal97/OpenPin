@@ -122,12 +122,28 @@ function _pplInstalling() {
 function _pplSchedule() {
   if (_pplTimer) return;
   const d = _pplData;
-  if (!d || !(d.backlog && d.backlog.running) && !_pplInstalling()) return;
+  const running = !!(d && d.backlog && d.backlog.running);
+  if (!d || !running && !_pplInstalling()) return;
   _pplTimer = setTimeout(() => {
     _pplTimer = null;
     if (!_pplVisible()) return; // not shown: stop; opening Settings or the tab renders again
-    renderPeopleSettings(true);
+    if (running) _pplPollBacklog();
+    else renderPeopleSettings(true);
   }, _pplPollMs);
+}
+
+// While the backlog runs, poll only its progress; reload the whole directory once it stops.
+async function _pplPollBacklog() {
+  let b = null;
+  try {
+    b = await window.plaud.peopleBacklog();
+  } catch (err) {
+    b = null;
+  }
+  if (!b || b.error || !b.running) return renderPeopleSettings(true);
+  _pplData.backlog = b;
+  if (!_pplEditing) _pplRender(); // a poll never redraws over an open editor
+  _pplSchedule();
 }
 
 async function renderPeopleSettings(polling) {

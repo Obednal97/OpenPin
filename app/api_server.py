@@ -394,9 +394,13 @@ if __name__ == "__main__":
     _notion_queue.start_worker()
     # Learn voices from names typed in past recordings, then name them: once, in the
     # background, and only with the voice model installed (otherwise it stays pending).
-    from app.people import backlog as _people_backlog
+    # Never stops the app from starting.
+    try:
+        from app.people import backlog as _people_backlog
 
-    _people_backlog.start_on_launch()
+        _people_backlog.start_on_launch()
+    except Exception as e:
+        logging.warning(f"[People] Couldn't start learning from past recordings: {e}")
 
     start_port = int(os.environ.get("PLAUD_API_PORT", "5123"))
     # Walk past occupied ports if our initial pick was claimed in the window

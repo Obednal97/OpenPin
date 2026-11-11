@@ -54,11 +54,11 @@ def reject_in(data: dict, label: str, person_id: str) -> None:
         del block["matches"][label]
 
 
-def _edit(session_id: str, edit) -> bool:
+def _edit(session_id: str, edit, bump: bool = True) -> bool:
     """Run ``edit(data) -> bool`` (False: no write) under the transcript lock.
 
-    Returns whether the effective names changed; if so the window and Notion are told,
-    after the lock is released.
+    Returns whether the effective names changed; if so the window (unless ``bump`` is
+    False) and Notion are told, after the lock is released.
     """
     profile = speakers.profile_name()
     path = speakers._path(session_id)
@@ -75,15 +75,16 @@ def _edit(session_id: str, edit) -> bool:
         speakers._write_atomic(path, data)
         changed = speakers.names_for(session_id, data, profile=profile) != before
     if changed:
-        speakers._names_changed(session_id)
+        speakers._names_changed(session_id, bump=bump)
     return changed
 
 
-def apply_matches(session_id: str, labelling: str, matches: dict) -> bool:
+def apply_matches(session_id: str, labelling: str, matches: dict, bump: bool = True) -> bool:
     """Save ``matches`` for ``labelling``; dropped if the speakers were re-labelled since.
 
-    Keeps ``rejected`` for the same labelling (a new labelling starts it again).
-    Returns whether the effective names changed.
+    Keeps ``rejected`` for the same labelling (a new labelling starts it again), and never
+    saves a match to a person rejected for that label meanwhile. Returns whether the
+    effective names changed.
     """
     from app.coaching.runner import labelling_fingerprint
 
@@ -91,11 +92,18 @@ def apply_matches(session_id: str, labelling: str, matches: dict) -> bool:
         if labelling_fingerprint(data.get("segments") or []) != labelling:
             return False
         old = data.get("speaker_voice_matches")
+        if not isinstance(old, dict) and not matches:
+            return False
         block = _block(data, labelling)
-        block["matches"] = matches
+        rejected = block["rejected"]
+        block["matches"] = {
+            label: m
+            for label, m in matches.items()
+            if not (isinstance(rejected.get(label), list) and m.get("person") in rejected[label])
+        }
         return block != old
 
-    return _edit(session_id, edit)
+    return _edit(session_id, edit, bump)
 
 
 def add_rejection(session_id: str, label: str, person_id: str) -> None:
@@ -110,7 +118,12 @@ def add_rejection(session_id: str, label: str, person_id: str) -> None:
 
 
 def match_recording(
-    session_id: str, audio_path: str | None = None, *, cached_only: bool = False, people: dict | None = None
+    session_id: str,
+    audio_path: str | None = None,
+    *,
+    cached_only: bool = False,
+    people: dict | None = None,
+    bump: bool = True,
 ) -> bool:
     """Match a recording's speakers to known people and save the result.
 
@@ -118,7 +131,8 @@ def match_recording(
     Skipped before the threshold is calibrated, on a recording marked mixed up, and
     without labels or embeddings. ``cached_only`` uses the embedding cache and never
     audio; ``people`` (the store's people, loaded once by a caller matching many
-    recordings) saves re-reading the store. Returns whether the effective names changed.
+    recordings) saves re-reading the store; ``bump`` False leaves telling the window to
+    the caller. Returns whether the effective names changed.
     """
     from app.coaching.runner import labelling_fingerprint
 
@@ -144,4 +158,4 @@ def match_recording(
         people = people_store.load()["people"]
     found = matching.match(emb, people, threshold, rejected, exclude_session=session_id)
     found = {label: {"person": m["person"], "score": round(m["score"], 4)} for label, m in found.items()}
-    return apply_matches(session_id, labelling, found)
+    return apply_matches(session_id, labelling, found, bump)

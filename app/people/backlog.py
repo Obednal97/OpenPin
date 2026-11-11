@@ -27,6 +27,7 @@ from app.coaching import store as coaching_store
 from app.people import apply, embeddings, matching, worker
 from app.people import store as people_store
 from app.state import speakers
+from app.utils import changes
 from app.utils import speaker_names as sn
 from app.utils.config import load_config, update_config
 from app.utils.constants import PEOPLE_DIR
@@ -300,7 +301,15 @@ def run(cancel: threading.Event, should_yield: Callable[[], bool] | None = None)
         _calibrate()
         _update(lambda s: s.update(phase="naming"))
     people = people_store.load()["people"]
-    outcome = _phase("naming", "named", lambda sid: apply.match_recording(sid, people=people), cancel, should_yield)
+    named = []  # the window is told once per batch, not per recording (Notion still is)
+
+    def name(sid: str) -> None:
+        if apply.match_recording(sid, people=people, bump=False):
+            named.append(sid)
+
+    outcome = _phase("naming", "named", name, cancel, should_yield)
+    if named:
+        changes.bump()
     if outcome != "finished":
         return outcome == "yielded"
     _update(lambda s: s.update(phase="done"))

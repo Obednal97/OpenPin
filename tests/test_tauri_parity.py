@@ -351,6 +351,7 @@ class TestTauriBridgeAPISurface:
 
         for method, verb, call, rule in (
             ("peopleDirectory", "GET", "'/people/directory'", "/people/directory"),
+            ("peopleBacklog", "GET", "'/people/backlog'", "/people/backlog"),
             ("renamePerson", "POST", "`/people/${encodeURIComponent(id)}/rename`", "/people/<person_id>/rename"),
             ("mergePerson", "POST", "`/people/${encodeURIComponent(id)}/merge`", "/people/<person_id>/merge"),
             ("deletePerson", "DELETE", "`/people/${encodeURIComponent(id)}`", "/people/<person_id>"),
@@ -369,6 +370,14 @@ class TestTauriBridgeAPISurface:
         block = block[: block.index("]);")]
         for ep in ("'/coaching/voice/install'", "'/coaching/voice/setup'"):
             assert ep in block
+
+    def test_people_writes_never_time_out(self):
+        """People writes edit every transcript and wait for the voice job in hand."""
+        block = self.bridge_src[self.bridge_src.index("const NO_TIMEOUT_ENDPOINTS") :]
+        block = block[: block.index("async function _fetchWithTimeout")]
+        for ep in ("'/people/backlog'", "'/transcripts/speaker-names/reject'", "'/people/p_'"):
+            assert ep in block
+        assert "NO_TIMEOUT_PREFIXES.some((p) => endpoint.startsWith(p))" in self.bridge_src
 
 
 # ---------------------------------------------------------------------------

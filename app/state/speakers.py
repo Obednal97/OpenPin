@@ -75,14 +75,9 @@ def names_for(session_id: str, transcript: dict, *, profile: str | None) -> dict
     return sn.effective_names(transcript, coaching_store.load(session_id), profile, people_names(profile))
 
 
-def name_sources(session_id: str, transcript: dict, *, profile: str | None) -> dict[str, dict]:
-    """``{label: {"source": "voice", "score": float}}`` for the labels named by a voice match."""
-    scores = sn.voice_matched(transcript, coaching_store.load(session_id), profile, people_names(profile))
-    return {label: {"source": "voice", "score": score} for label, score in scores.items()}
-
-
 def names_and_sources(session_id: str, transcript: dict, *, profile: str | None) -> tuple[dict, dict]:
-    """``names_for`` and ``name_sources`` together, reading the sidecar and voices once."""
+    """``names_for``, plus ``{label: {"source": "voice", "score": float}}`` for the labels
+    named by a voice match, reading the sidecar and voices once."""
     sidecar = coaching_store.load(session_id)
     people = people_names(profile)
     names = sn.effective_names(transcript, sidecar, profile, people)
@@ -110,9 +105,11 @@ def _notion_linked(session_id: str) -> bool:
         return False
 
 
-def _names_changed(session_id: str) -> None:
-    """Tell the window and Notion that a recording's names changed. Never raises."""
-    changes.bump()
+def _names_changed(session_id: str, *, bump: bool = True) -> None:
+    """Tell the window (unless ``bump`` is False: the caller bumps once for many) and
+    Notion that a recording's names changed. Never raises."""
+    if bump:
+        changes.bump()
     try:
         if _notion_linked(session_id):
             from app.utils import notion_queue

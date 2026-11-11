@@ -125,7 +125,10 @@ def test_names_for_and_api_use_the_store(voices, tmp_path):
     voices.write_text(json.dumps({"version": 2, "people": {"p1": {"name": "Sam", "samples": [{"vec": [1.0]}]}}}))
     t = _t()
     assert speakers.names_for(SID, t, profile=None) == {"Speaker 1": "Sam"}
-    assert speakers.name_sources(SID, t, profile=None) == {"Speaker 1": {"source": "voice", "score": 0.82}}
+    assert speakers.names_and_sources(SID, t, profile=None) == (
+        {"Speaker 1": "Sam"},
+        {"Speaker 1": {"source": "voice", "score": 0.82}},
+    )
 
 
 def test_api_reports_voice_sources(voices, tmp_path, flask_client):

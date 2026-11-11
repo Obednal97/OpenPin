@@ -53,6 +53,12 @@ def delete_person(person_id):
     return jsonify(directory.directory())
 
 
+@bp.route("/people/backlog", methods=["GET"])
+def backlog_state():
+    """Just the backlog's progress: what the People section polls while it runs."""
+    return jsonify(backlog.state())
+
+
 @bp.route("/people/backlog", methods=["POST"])
 def start_backlog():
     if not backlog.start():
