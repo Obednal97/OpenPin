@@ -79,7 +79,7 @@ def _library(n=12):
 
 def test_calibrate_few_instances_uses_default():
     out = matching.calibrate([("a0", "S1", _vec(0.9), "a")], _library())
-    assert out == {"threshold": matching.DEFAULT_THRESHOLD, "accuracy": None, "instances": 1}
+    assert out == {"threshold": matching.DEFAULT_THRESHOLD, "accuracy": None, "instances": 1, "named": 0}
 
 
 def test_calibrate_picks_lowest_safe_threshold():
@@ -87,6 +87,7 @@ def test_calibrate_picks_lowest_safe_threshold():
     out = matching.calibrate(inst, _library())
     assert out["threshold"] == 0.625
     assert out["instances"] == 20
+    assert out["named"] == 10
     assert out["accuracy"] == 1.0
 
 
@@ -117,7 +118,7 @@ def test_current_threshold_reads_config(monkeypatch):
 def test_calibrate_one_person_uses_default():
     inst = [(f"a{i % 12}", "S1", _vec(0.9), "a") for i in range(30)]
     out = matching.calibrate(inst, _library())
-    assert out == {"threshold": matching.DEFAULT_THRESHOLD, "accuracy": None, "instances": 30}
+    assert out == {"threshold": matching.DEFAULT_THRESHOLD, "accuracy": None, "instances": 30, "named": 0}
 
 
 def test_calibrate_never_below_floor():

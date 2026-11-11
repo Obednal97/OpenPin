@@ -63,10 +63,13 @@ def match(
 
 
 def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) -> dict:
-    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap."""
+    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap.
+
+    ``named`` is how many instances that threshold names (0 when too few to test).
+    """
     n = len(instances)
     if n < CALIBRATION_MIN_INSTANCES or len({inst[3] for inst in instances}) < MIN_DISTINCT_PEOPLE:
-        return {"threshold": DEFAULT_THRESHOLD, "accuracy": None, "instances": n}
+        return {"threshold": DEFAULT_THRESHOLD, "accuracy": None, "instances": n, "named": 0}
     # Rank once per instance; thresholds only change which are named.
     ranked = [(_scores(vec, people, sid), true) for sid, _label, vec, true in instances]
 
@@ -84,6 +87,7 @@ def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) 
     for t in THRESHOLD_GRID:
         named, right = tally(t)
         if named >= MIN_NAMED and (named - right) / named < MAX_WRONG_RATE:
-            return {"threshold": t, "accuracy": right / named, "instances": n}
+            return {"threshold": t, "accuracy": right / named, "instances": n, "named": named}
     named, right = tally(FALLBACK_THRESHOLD)
-    return {"threshold": FALLBACK_THRESHOLD, "accuracy": right / named if named else None, "instances": n}
+    accuracy = right / named if named else None
+    return {"threshold": FALLBACK_THRESHOLD, "accuracy": accuracy, "instances": n, "named": named}

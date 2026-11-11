@@ -9,6 +9,9 @@ the first job. Kinds:
 - ``unlearn(session_id, label)``: the name was cleared; forget that sample.
 - ``rematch()``: samples changed; match every recording with cached embeddings again
   (maths only, no audio). Any number of these waiting collapse into one.
+- ``backlog()``: learn from past recordings, calibrate, name them (``app.people.backlog``).
+  It hands the thread back after any recording while other jobs wait, and queues itself
+  again to carry on.
 """
 
 from __future__ import annotations
@@ -59,16 +62,31 @@ def _learn(session_id: str, label: str, name: str) -> None:
     if sample is None:
         _forget(session_id, label)
         return
-    is_me = _norm(name) == _norm(speakers.profile_name())
+    add_samples([(name, sample)])
+    from app.people import backlog
+
+    backlog.maybe_recalibrate()
+    enqueue("rematch")
+
+
+def add_samples(named: list[tuple[str, dict]]) -> None:
+    """Store each ``(typed name, sample)`` in one store write.
+
+    Your profile name goes to ``me``; any other name to the person with that name
+    (case and spacing ignored), created if new. Never merges different spellings.
+    """
+    if not named:
+        return
+    profile = _norm(speakers.profile_name())
 
     def add(data: dict) -> None:
-        pid = people_store.ME if is_me else people_store.find_person(data, name)
-        if pid is None:
-            pid = people_store.create_person(data, name)
-        people_store.add_sample(data, pid, sample)
+        for name, sample in named:
+            pid = people_store.ME if profile and _norm(name) == profile else people_store.find_person(data, name)
+            if pid is None:
+                pid = people_store.create_person(data, name)
+            people_store.add_sample(data, pid, sample)
 
     people_store.mutate(add)
-    enqueue("rematch")
 
 
 def _sample_for(session_id: str, transcript: dict, label: str, name: str) -> dict | None:
@@ -128,7 +146,19 @@ def _rematch() -> None:
             log.warning("re-matching %s failed: %s", path.stem, e)
 
 
-_HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch": _rematch}
+def _backlog() -> None:
+    from app.people import backlog
+
+    if backlog.run(backlog.cancel_event, should_yield=_others_waiting):
+        enqueue("backlog")
+
+
+def _others_waiting() -> bool:
+    with _cond:
+        return bool(_queue)
+
+
+_HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch": _rematch, "backlog": _backlog}
 
 
 # ------------------------------------------------------------------- the queue
