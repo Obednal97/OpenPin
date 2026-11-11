@@ -6,9 +6,11 @@ pushed to Notion or read by AI tools, by replacing whole-word occurrences of eac
 named label, so renaming is always reversible ("Speaker 1" never touches
 "Speaker 10").
 
-Your own name (the profile name) is filled in on your speaker only once you have
-picked that speaker yourself in coaching, never from a voice match alone, and
-never over a name you typed. See ``effective_names``.
+A label's name comes, in order, from: a name you typed; your own pick in coaching
+(your profile name goes on the speaker you picked); a voice match recorded on the
+transcript for the current labelling (a person's name, or your profile name for
+you), unless the recording is marked speakers mixed up; otherwise nothing, and the
+label shows. See ``effective_names``.
 """
 
 import re
@@ -110,28 +112,100 @@ def confirmed_owner_labels(transcript: dict, sidecar: dict | None) -> list[str]:
     return _owner_default_labels(transcript, sidecar)
 
 
-def effective_names(transcript: dict, sidecar: dict | None, profile_name: str | None) -> dict[str, str]:
-    """The names to show: the stored ones, plus your profile name on your own speaker.
+def _voice_matches(transcript: dict, sidecar: dict | None) -> dict:
+    """The recorded voice matches ``{label: {person, score}}`` if they still count, else {}."""
+    from app.coaching.runner import labelling_fingerprint
 
-    The profile name goes on each owner label only when you picked that speaker yourself
-    (owner ``source`` "user") for the current labelling, the recording isn't marked
-    speakers mixed up or excluded from coaching, and you haven't typed a name for it.
-    Ordered by each label's first appearance.
+    block = transcript.get("speaker_voice_matches")
+    if not isinstance(block, dict) or (sidecar or {}).get("mixed_up") is True:
+        return {}
+    segments = transcript.get("segments") or []
+    if block.get("labelling") != labelling_fingerprint(segments):
+        return {}
+    matches = block.get("matches")
+    return matches if isinstance(matches, dict) else {}
+
+
+def _voice_name(match, profile_name: str | None, people_names: dict | None) -> str | None:
+    """The valid name a voice match gives, or None (deleted person, no name)."""
+    person = match.get("person") if isinstance(match, dict) else None
+    if not isinstance(person, str):
+        return None
+    if person == "me":
+        name = profile_name
+    elif person in (people_names or {}):
+        name = people_names[person]
+    else:
+        return None
+    if not isinstance(name, str):
+        return None
+    try:
+        return validate_name(name)
+    except ValueError:
+        return None
+
+
+def _profile_default(profile_name: str | None) -> str | None:
+    if not profile_name:
+        return None
+    try:
+        return validate_name(profile_name)
+    except ValueError:
+        return None
+
+
+def effective_names(
+    transcript: dict,
+    sidecar: dict | None,
+    profile_name: str | None,
+    people_names: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    """The names to show, per label in order of first appearance.
+
+    1. a name you typed;
+    2. your profile name on a label you picked as yourself (owner ``source`` "user") for
+       the current labelling, when the recording isn't mixed up or excluded from coaching;
+    3. a voice match valid for the current labelling, when the recording isn't marked
+       mixed up: the person's name (your profile name for ``me``). A match to a deleted
+       person, or to someone with no name, gives nothing. Excluding a recording from
+       coaching does not stop this: naming isn't coaching.
     """
     stored = stored_names(transcript)
-    default = None
-    if profile_name:
-        try:
-            default = validate_name(profile_name)
-        except ValueError:
-            default = None
+    default = _profile_default(profile_name)
     mine = set(_owner_default_labels(transcript, sidecar)) if default else set()
+    matches = _voice_matches(transcript, sidecar)
     out: dict[str, str] = {}
     for label in speaker_labels(transcript.get("segments")):
         if label in stored:
             out[label] = stored[label]
         elif label in mine:
             out[label] = default
+        else:
+            name = _voice_name(matches.get(label), default, people_names)
+            if name:
+                out[label] = name
+    return out
+
+
+def voice_matched(
+    transcript: dict,
+    sidecar: dict | None,
+    profile_name: str | None,
+    people_names: dict[str, str | None] | None = None,
+) -> dict[str, float]:
+    """Labels whose effective name came from a voice match, with the match score."""
+    default = _profile_default(profile_name)
+    stored = stored_names(transcript)
+    mine = set(_owner_default_labels(transcript, sidecar)) if default else set()
+    matches = _voice_matches(transcript, sidecar)
+    out: dict[str, float] = {}
+    for label in speaker_labels(transcript.get("segments")):
+        if label in stored or label in mine:
+            continue
+        m = matches.get(label)
+        if _voice_name(m, default, people_names):
+            score = m.get("score")
+            out[label] = float(score) if isinstance(score, (int, float)) else 0.0
     return out
 
 

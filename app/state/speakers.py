@@ -15,6 +15,7 @@ import os
 from threading import Lock
 
 from app.coaching import store as coaching_store
+from app.people import store as people_store
 from app.utils import changes
 from app.utils import speaker_names as sn
 from app.utils.config import load_config
@@ -52,6 +53,17 @@ def profile_name() -> str | None:
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
+def people_names(profile: str | None) -> dict[str, str | None]:
+    """``{person id: name}`` for voice matches, ``me`` being your profile name.
+
+    Never takes the voice-store lock (callers may hold the transcript lock), and never
+    reads the config: ``profile`` is passed in.
+    """
+    names = people_store.read_names()
+    names[people_store.ME] = profile or None
+    return names
+
+
 def names_for(session_id: str, transcript: dict, *, profile: str | None) -> dict[str, str]:
     """The effective names for an already-read transcript (stored names plus your own).
 
@@ -60,7 +72,13 @@ def names_for(session_id: str, transcript: dict, *, profile: str | None) -> dict
     the coaching sidecar, which takes no lock (it is written atomically), so it is safe to
     call while holding the transcript lock.
     """
-    return sn.effective_names(transcript, coaching_store.load(session_id), profile)
+    return sn.effective_names(transcript, coaching_store.load(session_id), profile, people_names(profile))
+
+
+def name_sources(session_id: str, transcript: dict, *, profile: str | None) -> dict[str, dict]:
+    """``{label: {"source": "voice", "score": float}}`` for the labels named by a voice match."""
+    scores = sn.voice_matched(transcript, coaching_store.load(session_id), profile, people_names(profile))
+    return {label: {"source": "voice", "score": score} for label, score in scores.items()}
 
 
 def get_names(session_id: str) -> dict[str, str]:
@@ -193,7 +211,13 @@ def participants(session_id: str, profile: str | None = None) -> list[str]:
     if profile is None:
         profile = profile_name() or ""
     t_path = _path(session_id)
-    key = (str(t_path), _mtime(t_path), _mtime(coaching_store.coaching_path(session_id)), profile)
+    key = (
+        str(t_path),
+        _mtime(t_path),
+        _mtime(coaching_store.coaching_path(session_id)),
+        profile,
+        _mtime(people_store.VOICES_PATH),
+    )
     with _cache_lock:
         hit = _participants_cache.get(session_id)
         if hit and hit[0] == key:
@@ -218,13 +242,12 @@ def owner_changed(session_id: str, before: dict | None, after: dict | None) -> N
     """
     try:
         profile = profile_name()
-        if not profile:
-            return
         transcript = _read(session_id)
         if transcript is None:
             return
-        old = sn.effective_names(transcript, before or {}, profile)
-        new = sn.effective_names(transcript, after or {}, profile)
+        people = people_names(profile)
+        old = sn.effective_names(transcript, before or {}, profile, people)
+        new = sn.effective_names(transcript, after or {}, profile, people)
         if old != new:
             _names_changed(session_id)
     except Exception as e:

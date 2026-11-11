@@ -974,6 +974,7 @@ def transcript_item(session_id, data: dict, profile: str) -> dict:
         # re-transcription just cleared them (the UI says so once).
         "speaker_names": speakers.names_for(session_id, data, profile=profile),
         "stored_speaker_names": sn.stored_names(data),
+        "speaker_name_sources": speakers.name_sources(session_id, data, profile=profile),
         "speaker_names_cleared": bool(data.get("speaker_names_cleared")),
         "summary": data.get("summary", ""),
         "summary_stale": bool(data.get("summary_stale", False)),

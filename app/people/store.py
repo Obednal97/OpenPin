@@ -134,6 +134,22 @@ def load() -> dict:
         return _load_unlocked()
 
 
+def read_names() -> dict[str, str | None]:
+    """``{person id: name}`` without taking the store lock and without touching the file.
+
+    The file is replaced atomically, so a plain read is safe even while another thread
+    mutates the store, and from code holding the transcript lock. Missing or unreadable
+    gives {} (nothing is migrated or moved aside here).
+    """
+    try:
+        people = json.loads(VOICES_PATH.read_text()).get("people")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(people, dict):
+        return {}
+    return {pid: p.get("name") for pid, p in people.items() if isinstance(p, dict)}
+
+
 def _mirror_me(data: dict) -> None:
     from app.coaching import voice
 
