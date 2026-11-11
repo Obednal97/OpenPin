@@ -283,20 +283,42 @@ def _check_merge(data: dict, person_id: str, into: str) -> tuple[dict, dict]:
 
 
 def merge(person_id: str, into) -> None:
-    """Fold ``person_id`` into ``into``: samples combine (trimmed to 20), matches and
-    rejections move over, typed names take ``into``'s name, and ``person_id`` goes."""
+    """Fold ``person_id`` into ``into`` (``me`` for you): samples combine (trimmed to 20),
+    matches and rejections move over, typed names take ``into``'s name (your profile
+    name for you, which must be set), and ``person_id`` goes."""
     _others(person_id)
-    _others(into)
+    if _check_id(into) == ME and not speakers.profile_name():
+        raise DirectoryError("Add your name in Settings first", 409)
     if into == person_id:
         raise DirectoryError("Pick someone else to merge into")
+    _merge(person_id, into, retype=True)
+
+
+def fold_into_me() -> None:
+    """After your profile name is saved: someone in People with that name is you, so fold
+    them into ``me``. Typed names already read as you, so they stay as typed."""
+    profile = speakers.profile_name()
+    if not profile or not any(
+        pid != ME and name and _norm(name) == _norm(profile) for pid, name in people_store.read_names().items()
+    ):
+        return
+    with worker.exclusive():
+        person_id = people_store.find_person(people_store.load(), profile)
+        if person_id:
+            _merge(person_id, ME, retype=False)
+
+
+def _merge(person_id: str, into: str, *, retype: bool) -> None:
     with worker.exclusive():
         data = people_store.load()
         source, target = _check_merge(data, person_id, into)
-        source_name, target_name = source.get("name"), target.get("name")
+        source_name = source.get("name")
+        target_name = speakers.profile_name() if into == ME else target.get("name")
+        retype = retype and bool(source_name and target_name)
         old_people = _names(data)
 
         def edit(sid: str, t: dict) -> bool:
-            retyped = bool(source_name and target_name) and _retype(t, source_name, target_name)
+            retyped = retype and _retype(t, source_name, target_name)
             return _repoint(t, person_id, into) or retyped
 
         new_people = {pid: n for pid, n in old_people.items() if pid != person_id}

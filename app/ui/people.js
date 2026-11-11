@@ -59,13 +59,14 @@ function _pplPersonRow(p, people) {
       <button class="action-btn subtle settings-btn-compact" data-ppl="edit-cancel">Cancel</button>`;
   } else if (editing === 'merge') {
     const others = people.filter((o) => o.id !== p.id);
-    const options = others.map((o) => `<option value="${escapeHtml(o.id)}"${_pplEditing.value === o.id ? ' selected' : ''}>${escapeHtml(o.name || 'Unnamed')}</option>`).join('');
+    const me = _pplData.me && _pplData.me.name ? `<option value="me"${_pplEditing.value === 'me' ? ' selected' : ''}>You (${escapeHtml(_pplData.me.name)})</option>` : '';
+    const options = me + others.map((o) => `<option value="${escapeHtml(o.id)}"${_pplEditing.value === o.id ? ' selected' : ''}>${escapeHtml(o.name || 'Unnamed')}</option>`).join('');
     actions = `<select class="settings-select ppl-select" data-ppl-input aria-label="Merge into">${options}</select>
       <button class="action-btn primary settings-btn-compact" data-ppl="merge-go" data-id="${id}">Merge</button>
       <button class="action-btn subtle settings-btn-compact" data-ppl="edit-cancel">Cancel</button>`;
   } else {
     actions = `<button type="button" class="ppl-link" data-ppl="rename" data-id="${id}">Rename</button>
-      <button type="button" class="ppl-link" data-ppl="merge" data-id="${id}"${people.length < 2 ? ' disabled' : ''}>Merge into…</button>
+      <button type="button" class="ppl-link" data-ppl="merge" data-id="${id}"${people.length < 2 && !(_pplData.me && _pplData.me.name) ? ' disabled' : ''}>Merge into…</button>
       <button type="button" class="ppl-link ppl-danger" data-ppl="delete" data-id="${id}">Delete</button>`;
   }
   const error = editing && _pplError ? `<p class="voice-error ppl-row-error" role="alert">${escapeHtml(_pplError)}</p>` : '';
@@ -194,7 +195,7 @@ async function _pplConfirmDelete(id) {
 
 async function _pplConfirmMerge(id, into) {
   const src = _pplById(id);
-  const dst = _pplById(into);
+  const dst = into === 'me' ? _pplData.me : _pplById(into);
   if (!src || !dst) return;
   const source = src.name || 'Unnamed';
   const target = dst.name || 'Unnamed';

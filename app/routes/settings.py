@@ -1,5 +1,7 @@
 """Settings routes."""
 
+import logging
+
 import requests as http_requests
 from flask import Blueprint, jsonify, request
 
@@ -11,6 +13,7 @@ from app.utils.system import get_ram_info
 from src.transcribe import delete_hf_token, get_hf_token, save_hf_token
 
 bp = Blueprint("settings", __name__)
+log = logging.getLogger(__name__)
 
 _HF_TOKEN_MAX_LEN = 256
 
@@ -223,6 +226,14 @@ def save_settings():
                 config.pop("save_directory", None)
 
     update_config(_apply)
+
+    if "profile" in data:
+        try:  # someone in People with your name is you
+            from app.people import directory
+
+            directory.fold_into_me()
+        except Exception as e:
+            log.warning("could not fold your namesake into your voice: %s", e)
 
     if "mcp_enabled" in data:
         error = _apply_mcp_enabled(data["mcp_enabled"] is True)

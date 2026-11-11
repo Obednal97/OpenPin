@@ -206,7 +206,6 @@ def test_merge_combines_and_trims_to_20(env):
 
 def test_merge_refuses_me_itself_and_unknown(env):
     harry = _person("Harry", 1, 0)
-    assert env.client.post(f"/people/{harry}/merge", json={"into": "me"}).status_code == 400
     assert env.client.post("/people/me/merge", json={"into": harry}).status_code == 400
     assert env.client.post(f"/people/{harry}/merge", json={"into": harry}).status_code == 400
     assert env.client.post(f"/people/{harry}/merge", json={"into": "nope"}).status_code == 400
@@ -539,3 +538,50 @@ def test_a_deleted_person_is_not_learnt_again_from_their_typed_names(env):
     assert worker.wait_idle(10)
     assert store.find_person(store.load(), "Harry") is None
     assert store.find_person(store.load(), "Sam") is not None
+
+
+def test_merge_into_you(env):
+    _me(2)
+    ollie = _person("Ollie", 3, 2, "o")
+    _write(env, S1, names={"Speaker 2": "ollie"})
+    _write(env, S2, matches={"Speaker 1": ollie})
+    _write(env, S3, rejected={"Speaker 2": [ollie]})
+    with patch.object(worker, "enqueue") as enqueue:
+        r = env.client.post(f"/people/{ollie}/merge", json={"into": "me"})
+    assert r.status_code == 200, r.get_json()
+    enqueue.assert_called_once_with("rematch")
+    people = store.load()["people"]
+    assert ollie not in people and len(people[store.ME]["samples"]) == 5
+    assert _read(env, S1)["speaker_names"] == {"Speaker 2": PROFILE}
+    assert _read(env, S2)["speaker_voice_matches"]["matches"]["Speaker 1"]["person"] == store.ME
+    assert _read(env, S3)["speaker_voice_matches"]["rejected"] == {"Speaker 2": [store.ME]}
+    assert speakers.get_names(S2) == {"Speaker 1": PROFILE}
+
+
+def test_merge_into_you_needs_your_name(env):
+    update_config(lambda c: c.update(profile={}))
+    ollie = _person("Ollie", 1, 2)
+    r = env.client.post(f"/people/{ollie}/merge", json={"into": "me"})
+    assert r.status_code == 409 and "name" in r.get_json()["error"]
+    assert ollie in store.load()["people"]
+
+
+def test_saving_your_name_folds_that_person_into_you(env):
+    update_config(lambda c: c.update(profile={}))
+    _me(2)
+    ollie = _person("Ollie", 3, 2, "o")
+    _person("Sam", 1, 1)
+    _write(env, S1, names={"Speaker 2": "ollie"})
+    _write(env, S2, matches={"Speaker 1": ollie}, rejected={"Speaker 2": [ollie]})
+    r = env.client.post("/settings", json={"profile": {"name": "Ollie"}})
+    assert r.status_code == 200
+    assert worker.wait_idle(10)
+    people = store.load()["people"]
+    assert ollie not in people and len(people[store.ME]["samples"]) == 5
+    assert [p["name"] for pid, p in people.items() if pid != store.ME] == ["Sam"]
+    assert _read(env, S1)["speaker_names"] == {"Speaker 2": "ollie"}  # typed names stay as typed
+    block = _read(env, S2)["speaker_voice_matches"]
+    assert block["matches"]["Speaker 1"]["person"] == store.ME and block["rejected"] == {"Speaker 2": [store.ME]}
+    # A name nobody in People has changes nothing.
+    env.client.post("/settings", json={"profile": {"name": "Someone New"}})
+    assert len(store.load()["people"]) == 2

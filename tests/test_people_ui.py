@@ -120,3 +120,8 @@ def test_rejected_rename_keeps_the_editor_and_text():
     assert "_pplEditing.value = input.value" in JS
     assert ", true);" in JS and "keepEditor" in JS
     assert "ppl-row-error" in JS
+
+
+def test_merge_offers_you_once_your_name_is_set():
+    assert '<option value="me"' in JS and "You (${escapeHtml(_pplData.me.name)})" in JS
+    assert "into === 'me' ? _pplData.me : _pplById(into)" in JS
