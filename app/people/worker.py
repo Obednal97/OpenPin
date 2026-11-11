@@ -7,6 +7,8 @@ the first job. Kinds:
 - ``match(session_id, audio_path)``: match a recording's speakers to known people.
 - ``learn(session_id, label, name)``: the speaker was named; teach that voice.
 - ``unlearn(session_id, label)``: the name was cleared; forget that sample.
+- ``forget_recording(session_id)``: the recording was marked mixed up; forget every
+  sample it taught (yours too) and re-match.
 - ``rematch()``: samples changed; match every recording with cached embeddings again
   (maths only, no audio). Any number of these waiting collapse into one.
 - ``backlog()``: learn from past recordings, calibrate, name them (``app.people.backlog``).
@@ -145,6 +147,15 @@ def _unlearn(session_id: str, label: str) -> None:
     _forget(session_id, label)
 
 
+def _forget_recording(session_id: str) -> None:
+    def drop(data: dict) -> None:
+        for person in data["people"].values():
+            person["samples"] = [s for s in person["samples"] if s.get("session_id") != session_id]
+
+    people_store.mutate(drop)
+    enqueue("rematch")
+
+
 def _rematch() -> None:
     """Match every recording with cached embeddings again (any one may now name or drop someone)."""
     if matching.current_threshold() is None or not speakers.TRANSCRIPTS_DIR.is_dir():
@@ -190,7 +201,14 @@ def exclusive() -> Iterator[None]:
         _job_lock.release()
 
 
-_HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch": _rematch, "backlog": _backlog}
+_HANDLERS = {
+    "match": _match,
+    "learn": _learn,
+    "unlearn": _unlearn,
+    "forget_recording": _forget_recording,
+    "rematch": _rematch,
+    "backlog": _backlog,
+}
 
 
 # ------------------------------------------------------------------- the queue

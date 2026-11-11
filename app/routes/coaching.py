@@ -276,6 +276,10 @@ def set_mixed_up(sid):
     saved = store.update(sid, _mark)
     # Mixed up undoes your pick for naming: your profile name leaves your speaker (and comes back).
     runner._owner_changed(sid, before, saved)
+    if flag and before.get("mixed_up") is not True:  # its speaker split was wrong: unteach it
+        from app.people import worker
+
+        worker.enqueue("forget_recording", session_id=sid)
     return _sidecar_response(saved)
 
 

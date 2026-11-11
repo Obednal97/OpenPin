@@ -533,7 +533,8 @@ def test_a_deleted_person_is_not_learnt_again_from_their_typed_names(env):
     assert env.client.delete(f"/people/{pid}").status_code == 200
     assert _read(env, S1)["speaker_names_frozen"] == ["Speaker 1"]
     t2 = _read(env, S2)
-    assert t2["speaker_names_frozen"] == ["Speaker 1"] and t2["speaker_names"] == {"Speaker 1": "harry", "Speaker 2": "Sam"}
+    assert t2["speaker_names_frozen"] == ["Speaker 1"]
+    assert t2["speaker_names"] == {"Speaker 1": "harry", "Speaker 2": "Sam"}
     backlog.start()
     assert worker.wait_idle(10)
     assert store.find_person(store.load(), "Harry") is None
@@ -585,3 +586,26 @@ def test_saving_your_name_folds_that_person_into_you(env):
     # A name nobody in People has changes nothing.
     env.client.post("/settings", json={"profile": {"name": "Someone New"}})
     assert len(store.load()["people"]) == 2
+
+
+def test_marking_mixed_up_forgets_what_the_recording_taught(env):
+    update_config(lambda c: c.update(people_match_threshold=0.7))
+    _me(2)
+    harry = _person("Harry", 2, 0, "h")
+
+    def taught(d):
+        d["people"][harry]["samples"] = [{"vec": _vec(0), "session_id": S1, "label": "Speaker 1", "added_at": None}]
+        d["people"][store.ME]["samples"].append({"vec": _vec(2), "session_id": S1, "label": "Speaker 2"})
+
+    store.mutate(taught)
+    _write(env, S1, names={"Speaker 1": "Harry", "Speaker 2": PROFILE})
+    _write(env, S2, matches={"Speaker 1": harry})
+    env.cache[S2] = {"Speaker 1": _vec(0), "Speaker 2": _vec(1)}
+    assert speakers.get_names(S2) == {"Speaker 1": "Harry"}
+    r = env.client.post(f"/coaching/{S1}/mixed-up", json={"mixed_up": True})
+    assert r.status_code == 200
+    assert worker.wait_idle(10)
+    people = store.load()["people"]
+    assert people[harry]["samples"] == []
+    assert [s["session_id"] for s in people[store.ME]["samples"]] == ["me0", "me1"]
+    assert speakers.get_names(S2) == {}  # re-matched without them
