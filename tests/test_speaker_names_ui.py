@@ -334,6 +334,8 @@ const actionClick = (editor, action) =>
 
   // 3. Esc cancels: no request, editor gone
   calls.length = 0;
+  await fire(ed.querySelector('.speaker-name-input'), 'keydown', { key: 'Escape' });
+  out.escFirstKeepsEditor = ed.isConnected;
   const escEv = await fire(ed.querySelector('.speaker-name-input'), 'keydown', { key: 'Escape' });
   out.escCalls = calls.slice();
   out.escClosed = !ed.isConnected && !r('speakerNameEditorOpen')();
@@ -572,6 +574,7 @@ const actionClick = (editor, action) =>
   out.switchRedraws = opened.slice();
   out.switchEditorAttached = edB.isConnected && r('speakerNameEditorOpen')();
   out.switchLabel = edB.innerHTML.includes('<strong>Speaker 2</strong>');
+  await fire(edB.querySelector('.speaker-name-input'), 'keydown', { key: 'Escape' }); // closes the list
   await fire(edB.querySelector('.speaker-name-input'), 'keydown', { key: 'Escape' });
   out.switchRedrawAfterClose = opened.slice();
   row.isConnected = true;
@@ -621,7 +624,8 @@ class TestNameEditor:
         assert 'data-pick="Sarah &lt;Jones&gt;"' in tx["datalist"]
         assert 'data-pick="Priya"' in tx["datalist"]
 
-    def test_escape_cancels(self, tx):
+    def test_escape_closes_the_list_then_cancels(self, tx):
+        assert tx["escFirstKeepsEditor"]
         assert tx["escCalls"] == []
         assert tx["escClosed"]
         assert tx["escPrevented"]
@@ -1121,6 +1125,21 @@ out.rejectCalls = calls.filter((x) => x[0] === 'reject');
 out.afterReject = { names: t.speaker_names, sources: t.speaker_name_sources, closed: !ed.isConnected };
 out.afterRejectHtml = c.innerHTML;
 
+// 6b. Accepting a voice match (saving the same name) stores it
+calls.length = 0;
+t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
+t.speaker_name_sources = { 'Speaker 2': { source: 'voice', score: 0.8 } };
+ed = await open('Speaker 2');
+await action(ed, 'save');
+out.acceptCalls = sets();
+// The owner's own voice match keeps the owner help
+t.stored_speaker_names = {}; t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
+app.settings.profile = { name: 'harry fisher' };
+ed = await open('Speaker 2');
+out.ownerVoiceEditor = ed.innerHTML;
+app.settings.profile = {};
+await action(ed, 'cancel');
+
 // 7. A typed name replaces the voice match's hint
 t.speaker_names = { 'Speaker 2': 'Harry Fisher' };
 t.speaker_name_sources = { 'Speaker 2': { source: 'voice', score: 0.8 } };
@@ -1199,10 +1218,16 @@ class TestPicker:
         html = pick["voiceEditor"]
         assert "Matched by voice." in html and "Not them" in html
         assert 'data-speaker-action="reject"' in html
-        assert "Open Pin recognised your voice" in html
+        assert "recognised your voice" not in html  # another person: the normal hint, no owner copy
         assert pick["rejectCalls"] == [["reject", "s1", "Speaker 2"]]
         assert pick["afterReject"] == {"names": {}, "sources": {}, "closed": True}
         assert ">Speaker 2<" in pick["afterRejectHtml"]
+
+    def test_accepting_a_voice_match_is_stored(self, pick):
+        assert pick["acceptCalls"] == [["set", "s1", {"Speaker 2": "Harry Fisher"}]]
+
+    def test_owner_voice_editor_keeps_owner_help(self, pick):
+        assert "recognised your voice" in pick["ownerVoiceEditor"]
 
     def test_typed_name_drops_the_voice_marker(self, pick):
         assert pick["typedOverVoice"] == {}

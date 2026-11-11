@@ -1200,7 +1200,8 @@ function _txSpeakerNameChange(t, label, typed) {
   const stored = _txStoredNames(t)[label];
   if (!name) return stored ? { [label]: null } : null;
   if (name === stored) return null;
-  if (!stored && name === _txNames(t)[label]) return null;
+  // Your default name stays as it is; a voice match saved as it is counts as accepting it
+  if (!stored && name === _txNames(t)[label] && !_txSources(t)[label]) return null;
   return { [label]: name };
 }
 
@@ -1218,7 +1219,10 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
   editor.className = 'speaker-name-editor';
   editor.setAttribute('role', 'group');
   editor.setAttribute('aria-label', `Name ${label}`);
-  editor.innerHTML = _txSpeakerEditorHtml(label, current, !!current && !hasStored, hasStored, byVoice);
+  // The owner help only fits your own name: a person matched by voice has the normal hint
+  const profileName = String((app.settings.profile || {}).name || '').trim().toLowerCase();
+  const isDefault = !!current && !hasStored && (!byVoice || current.toLowerCase() === profileName);
+  editor.innerHTML = _txSpeakerEditorHtml(label, current, isDefault, hasStored, byVoice);
   row.insertAdjacentElement('afterend', editor);
   _txSpeakerEditorEl = editor;
 
@@ -1323,6 +1327,8 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
       return;
     }
     busy = true;
+    listOpen = false;
+    showList();
     editor.querySelectorAll('button').forEach((b) => (b.disabled = true));
     await _txSaveSpeakerName(container, sessionId, t, change, fail);
   };
@@ -1358,13 +1364,15 @@ function _txOpenSpeakerEditor(container, sessionId, t, label, row) {
       listOpen = true;
       const n = rowCount();
       if (!n) return;
-      if (!rowCount()) return;
       active = e.key === 'ArrowDown' ? (active + 1) % n : (active - 1 + n) % n;
       showList();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      act('cancel');
+      if (listOpen && rowCount()) {
+        listOpen = false; // first Escape closes the list, the next cancels the editor
+        showList();
+      } else act('cancel');
     }
   });
 }
