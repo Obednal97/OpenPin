@@ -133,6 +133,8 @@ def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
         raise ValueError("names must map speaker labels to names")
     from app.coaching.runner import labelling_fingerprint
 
+    profile = profile_name()
+    people = people_names(profile)
     path = _path(session_id)
     with get_transcript_lock(session_id):
         try:
@@ -157,14 +159,58 @@ def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
                 after[label] = name
         # Keep the labels' order of appearance.
         after = {label: after[label] for label in sn.speaker_labels(segments) if label in after}
-        changed = after != before or data.get("speaker_names") != after
+        moved = [label for label in cleaned if after.get(label) != before.get(label)]
+        voice_fields = lambda: json.dumps([data.get("speaker_names_frozen"), data.get("speaker_voice_matches")])  # noqa: E731
+        voice_before = voice_fields()
+        _corrections(data, moved, after, people)
+        changed = after != before or data.get("speaker_names") != after or voice_fields() != voice_before
         if changed:
             data["speaker_names"] = after
             data["speaker_names_labelling"] = labelling_fingerprint(segments)
             _write_atomic(path, data)
     if after != before:
         _names_changed(session_id)
+    _queue_learning(session_id, moved, after)
     return after
+
+
+def _corrections(data: dict, moved: list[str], after: dict, people: dict) -> None:
+    """For each label whose typed name changed: drop its frozen mark, and if a voice match
+    named someone else there, reject that person for the label (typing the matched
+    person's own name accepts the match instead)."""
+    from app.people import apply
+
+    frozen = data.get("speaker_names_frozen")
+    if isinstance(frozen, list) and any(label in frozen for label in moved):
+        data["speaker_names_frozen"] = [label for label in frozen if label not in moved]
+    block = data.get("speaker_voice_matches")
+    matches = block.get("matches") if isinstance(block, dict) else None
+    if not isinstance(matches, dict):
+        return
+    for label in moved:
+        match = matches.get(label)
+        person = match.get("person") if isinstance(match, dict) else None
+        name = after.get(label)
+        if not isinstance(person, str) or name is None:
+            continue
+        matched_name = people.get(person)
+        if isinstance(matched_name, str) and people_store._norm_name(matched_name) == people_store._norm_name(name):
+            continue
+        apply.reject_in(data, label, person)
+
+
+def _queue_learning(session_id: str, labels: list[str], after: dict) -> None:
+    """Queue teaching (or forgetting) the voices of renamed speakers. Never raises."""
+    try:
+        from app.people import worker
+
+        for label in labels:
+            if after.get(label):
+                worker.enqueue("learn", session_id=session_id, label=label, name=after[label])
+            else:
+                worker.enqueue("unlearn", session_id=session_id, label=label)
+    except Exception as e:
+        log.warning("Could not queue voice learning for %s: %s", session_id, e)
 
 
 def ack_cleared(session_id: str) -> None:
