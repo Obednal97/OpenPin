@@ -181,6 +181,11 @@ def _instances() -> list[tuple[str, str, list[float], str]]:
     return out
 
 
+def instances() -> list[tuple[str, str, list[float], str]]:
+    """Public name for the calibration instances (``scripts/voice_eval.py`` uses it)."""
+    return _instances()
+
+
 def _instances_for(session_id: str, people: dict, profile: str) -> list[tuple[str, str, list[float], str]]:
     transcript = speakers._read(session_id)
     if transcript is None:

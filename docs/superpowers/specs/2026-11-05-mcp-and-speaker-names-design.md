@@ -45,7 +45,7 @@ Speaker naming doesn't exist yet. Transcripts only say "Speaker 1", "Speaker 2".
 | Existing summaries | Names swapped in **without any AI call from Open Pin** |
 | Notion | Already-pushed pages updated with the names, again with no AI call |
 | Setup | One click per client, with a backup of the settings file |
-| Your own name | Filled in on your speaker **only once you've confirmed** which speaker is you (your own pick), never from a voice match alone |
+| Your own name | Filled in on your speaker **only once you've confirmed** which speaker is you (your own pick), never from a voice match alone. *Superseded by [2026-11-11-voice-people-design.md](2026-11-11-voice-people-design.md): a voice match can now name you and others.* |
 | New tags | AI tools **may create new tags**, and new tags join the app's tag picker |
 
 ## Calls I made (the owner can overrule them)

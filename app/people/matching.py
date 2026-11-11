@@ -62,18 +62,14 @@ def match(
     return result
 
 
-def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) -> dict:
-    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap.
-
-    ``named`` is how many instances that threshold names (0 when too few to test).
-    """
-    n = len(instances)
-    if n < CALIBRATION_MIN_INSTANCES or len({inst[3] for inst in instances}) < MIN_DISTINCT_PEOPLE:
-        return {"threshold": DEFAULT_THRESHOLD, "accuracy": None, "instances": n, "named": 0}
+def threshold_table(
+    instances: list[tuple[str, str, list[float], str]], people: dict, thresholds: list[float] | None = None
+) -> list[dict]:
+    """Leave-one-recording-out tally per threshold: ``{"threshold", "named", "right"}`` rows."""
     # Rank once per instance; thresholds only change which are named.
     ranked = [(_scores(vec, people, sid), true) for sid, _label, vec, true in instances]
-
-    def tally(t: float) -> tuple[int, int]:
+    rows = []
+    for t in thresholds if thresholds is not None else THRESHOLD_GRID:
         named = right = 0
         for scores, true in ranked:
             if not scores or scores[0][0] < t:
@@ -82,12 +78,23 @@ def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) 
                 continue
             named += 1
             right += scores[0][1] == true
-        return named, right
+        rows.append({"threshold": t, "named": named, "right": right})
+    return rows
 
-    for t in THRESHOLD_GRID:
-        named, right = tally(t)
+
+def calibrate(instances: list[tuple[str, str, list[float], str]], people: dict) -> dict:
+    """Leave-one-recording-out: pick the lowest threshold with a wrong-name rate under the cap.
+
+    ``named`` is how many instances that threshold names (0 when too few to test).
+    """
+    n = len(instances)
+    if n < CALIBRATION_MIN_INSTANCES or len({inst[3] for inst in instances}) < MIN_DISTINCT_PEOPLE:
+        return {"threshold": DEFAULT_THRESHOLD, "accuracy": None, "instances": n, "named": 0}
+    table = threshold_table(instances, people, [*THRESHOLD_GRID, FALLBACK_THRESHOLD])
+    for row in table[:-1]:
+        named, right = row["named"], row["right"]
         if named >= MIN_NAMED and (named - right) / named < MAX_WRONG_RATE:
-            return {"threshold": t, "accuracy": right / named, "instances": n, "named": named}
-    named, right = tally(FALLBACK_THRESHOLD)
+            return {"threshold": row["threshold"], "accuracy": right / named, "instances": n, "named": named}
+    named, right = table[-1]["named"], table[-1]["right"]
     accuracy = right / named if named else None
     return {"threshold": FALLBACK_THRESHOLD, "accuracy": accuracy, "instances": n, "named": named}

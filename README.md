@@ -56,6 +56,8 @@ aren't supported.
 - **Speaker names**: click Speaker 2 in a transcript and give it a name, or let Claude work it out.
   It shows in the transcript, summary, exports, coaching and Notion, and names you've used before
   are suggested. Your own name goes on your speaker once you've told coaching which one is you.
+  Open Pin can also recognise people by voice: once it has heard a name typed on a few recordings
+  it names that person on others, learns from your corrections, and keeps it all on your Mac.
 - **Use with Claude**: Claude Desktop and Claude Code can search and read your recordings, name
   speakers and tag them, through a connector built into Open Pin. Off until you turn it on; see
   [Use with Claude](#use-with-claude).

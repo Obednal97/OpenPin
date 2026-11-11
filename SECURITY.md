@@ -32,6 +32,12 @@ stated here:
 - **Voice embeddings** (the numbers that describe your voice) are computed on the Mac with the
   WeSpeaker model and stored in `DATA_DIR/coaching/voice_profile.json` (mode `0600`). They are
   never sent anywhere. Removing your voice in Settings deletes the file.
+- **People's voices** (who is who by voice) are 256-number embeddings, not audio. They are in
+  `DATA_DIR/people/voices.json` and `DATA_DIR/people/embeddings/<session_id>.json` (mode `0600`),
+  computed on the Mac, never sent anywhere and never served through the MCP connector. "Forget my
+  voice" removes your own samples and the older `coaching/voice_profile.json`; deleting a person in
+  Settings › People removes their samples and their matches. Cached embeddings are removed with
+  their recording.
 - **Verbatim words** (the transcript with filler words and per-word timing, kept for coaching
   only) are stored in `DATA_DIR/coaching/<session_id>.words.json` and never leave the Mac or the
   backend: no route returns them. The transcript, summary and Notion page stay free of filler
