@@ -1035,14 +1035,23 @@ def _validate_segments(segments):
     return True, ""
 
 
-def _keep_names_for_edited_segments(transcript):
-    """After the user edited segments: keep names only for labels still there, for the new labelling."""
-    if not transcript.get("speaker_names"):
-        return
+def _keep_names_for_edited_segments(transcript, old_segments):
+    """After the user edited segments: keep names and voice matches only for labels still
+    there, for the new labelling (a match block that was already stale stays stale)."""
     from app.coaching.runner import labelling_fingerprint
 
-    transcript["speaker_names"] = sn.stored_names(transcript)
-    transcript["speaker_names_labelling"] = labelling_fingerprint(transcript.get("segments") or [])
+    segments = transcript.get("segments") or []
+    labelling = labelling_fingerprint(segments)
+    if transcript.get("speaker_names"):
+        transcript["speaker_names"] = sn.stored_names(transcript)
+        transcript["speaker_names_labelling"] = labelling
+    block = transcript.get("speaker_voice_matches")
+    if isinstance(block, dict) and block.get("labelling") == labelling_fingerprint(old_segments or []):
+        labels = set(sn.speaker_labels(segments))
+        for key in ("matches", "rejected"):
+            if isinstance(block.get(key), dict):
+                block[key] = {label: v for label, v in block[key].items() if label in labels}
+        block["labelling"] = labelling
 
 
 @bp.route("/transcripts/update", methods=["POST"])
@@ -1092,10 +1101,14 @@ def update_transcript():
                 return jsonify({"error": f"No speaker called {unknown[0]} in this recording"}), 400
             names = summary_names
 
+        names_moved = False
         if "segments" in data:
+            shown = speakers.names_for(session_id, transcript, profile=profile)
+            old_segments = transcript.get("segments")
             transcript["segments"] = data["segments"]
             transcript["text"] = " ".join(s.get("text", "") for s in data["segments"])
-            _keep_names_for_edited_segments(transcript)
+            _keep_names_for_edited_segments(transcript, old_segments)
+            names_moved = speakers.names_for(session_id, transcript, profile=profile) != shown
 
         if "summary" in data:
             summary = data["summary"]
@@ -1110,6 +1123,8 @@ def update_transcript():
     # After releasing the transcript lock: the coaching store has its own lock.
     if text_changed:
         coaching_store.mark_stale(session_id)
+    if names_moved:
+        speakers._names_changed(session_id)
     return jsonify({"saved": True})
 
 

@@ -8,6 +8,7 @@ import pytest
 
 from app.coaching import runner, voice
 from app.people import apply, backlog, store, worker
+from app.state import speakers
 from app.utils import changes
 from app.utils.config import update_config
 
@@ -475,3 +476,32 @@ def test_a_waiting_directory_write_makes_the_backlog_yield(env):
         assert not entered.is_set()
     waiting.join(5)
     assert entered.is_set() and worker._others_waiting() is False
+
+
+# ---------------------------------------------------------------- final review fixes
+
+
+def test_editing_segments_keeps_voice_names_for_labels_still_there(env):
+    harry, sam = _person("Harry Fisher", 3, 0), _person("Sam", 2, 1)
+    _write(env, S1, matches={"Speaker 1": harry, "Speaker 2": sam}, rejected={"Speaker 2": [harry]})
+    assert speakers.get_names(S1) == {"Speaker 1": "Harry Fisher", "Speaker 2": "Sam"}
+    segs = [{**SEGMENTS[0], "start": 1.0}]  # Speaker 2's only segment deleted, Speaker 1's moved
+    assert env.client.post("/transcripts/update", json={"session_id": S1, "segments": segs}).status_code == 200
+    assert speakers.get_names(S1) == {"Speaker 1": "Harry Fisher"}
+    block = _read(env, S1)["speaker_voice_matches"]
+    assert block["labelling"] == runner.labelling_fingerprint(segs)
+    assert list(block["matches"]) == ["Speaker 1"] and block["rejected"] == {}
+    assert S1 in _notion_sids(env)  # Sam's name went
+
+
+def test_editing_segments_keeps_a_stale_match_block_stale(env):
+    harry = _person("Harry Fisher", 3, 0)
+    _write(env, S1)
+    t = _read(env, S1)
+    t["speaker_voice_matches"] = {"labelling": "old", "matches": {"Speaker 1": {"person": harry}}, "rejected": {}}
+    (env.trn / f"{S1}.json").write_text(json.dumps(t))
+    segs = [{**SEGMENTS[0], "start": 1.0}, SEGMENTS[1]]
+    env.client.post("/transcripts/update", json={"session_id": S1, "segments": segs})
+    assert speakers.get_names(S1) == {}
+    assert _read(env, S1)["speaker_voice_matches"]["labelling"] == "old"
+    assert not env.notion.called
