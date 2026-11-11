@@ -201,7 +201,8 @@ TOOLS = [
             '"Speaker 3": null}. Labels not in the transcript are rejected. A name is 1 to 80 '
             "characters with no ':' or '*'. Only name someone you're reasonably sure of, and use "
             "list_people for existing spellings. Names show everywhere in Open Pin: the transcript, "
-            "summary, coaching and Notion. Returns the updated speaker map."
+            "summary, coaching and Notion. Names you set teach Open Pin that person's voice, so later "
+            "recordings are named automatically. Returns the updated speaker map."
         ),
         "inputSchema": {
             "type": "object",

@@ -408,8 +408,21 @@ window.plaud = {
     apiCall('POST', '/transcripts/speaker-names', { session_id, names }),
   ackSpeakerNamesCleared: (session_id) =>
     apiCall('POST', '/transcripts/speaker-names/ack-cleared', { session_id }),
-  // Every name typed for a speaker, [{ name, recordings }], most used first
+  // Name suggestions, [{ name, recordings, person_id, has_voice }]: people known by
+  // voice first, then other typed names, each most used first
   people: () => apiCall('GET', '/people'),
+  // "Not them" on a voice-matched speaker: { speaker_names, speaker_name_sources }
+  rejectVoiceMatch: (session_id, label) =>
+    apiCall('POST', '/transcripts/speaker-names/reject', { session_id, label }),
+
+  // People known by voice (Settings › People). Rename, merge and delete return the
+  // directory afterwards, or { error } with a message to show.
+  peopleDirectory: () => apiCall('GET', '/people/directory'),
+  renamePerson: (id, name) => apiCall('POST', `/people/${encodeURIComponent(id)}/rename`, { name }),
+  mergePerson: (id, into) => apiCall('POST', `/people/${encodeURIComponent(id)}/merge`, { into }),
+  deletePerson: (id) => apiCall('DELETE', `/people/${encodeURIComponent(id)}`),
+  startPeopleBacklog: () => apiCall('POST', '/people/backlog'),
+  cancelPeopleBacklog: () => apiCall('DELETE', '/people/backlog'),
 
   // Conversation coaching
   coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),

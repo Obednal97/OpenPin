@@ -1196,5 +1196,8 @@ def ack_speaker_names_cleared():
 
 @bp.route("/people")
 def list_people():
-    """Every speaker name used across the library, with counts (name suggestions)."""
-    return jsonify(speakers.list_people())
+    """Name suggestions: every speaker name used across the library and everyone known by voice,
+    ``[{name, recordings, person_id, has_voice}]``, people with a voice first."""
+    from app.people import directory
+
+    return jsonify(directory.suggestions())

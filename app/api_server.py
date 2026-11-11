@@ -35,6 +35,7 @@ from app.routes import (
     gdrive,
     mcp_api,
     notion,
+    people,
     recordings,
     settings,
     transcribe,
@@ -302,6 +303,7 @@ app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
 app.register_blueprint(coaching.bp)
+app.register_blueprint(people.bp)
 # AI tools (MCP): the guard above opens it with the MCP key only.
 app.register_blueprint(mcp_api.bp)
 
