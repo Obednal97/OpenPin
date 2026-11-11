@@ -122,11 +122,14 @@ def _names_changed(session_id: str) -> None:
         log.warning("Could not queue a Notion update for %s: %s", session_id, e)
 
 
-def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
+def set_names(session_id: str, changes_map: dict, *, from_ai: bool = False) -> dict[str, str]:
     """Set, change or clear speaker names (``{label: name or None}``). Returns the stored map.
 
     Raises KeyError when the recording has no transcript, ValueError for a label that isn't
-    in the transcript or a bad name (nothing is saved then).
+    in the transcript or a bad name (nothing is saved then). ``from_ai`` (the MCP route):
+    a name equal to the label's current voice-matched name changes nothing, since AI tools
+    see names without their source and may send a match back; in the app, saving it
+    accepts the match as typed.
     """
     validate_session_id(session_id)
     if not isinstance(changes_map, dict):
@@ -150,6 +153,16 @@ def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
             if not isinstance(label, str) or label not in labels:
                 raise ValueError(f"No speaker called {label} in this recording")
             cleaned[label] = None if name is None else sn.validate_name(name)
+        if from_ai:
+            sidecar = coaching_store.load(session_id)
+            matched = sn.voice_matched(data, sidecar, profile, people)
+            shown = sn.effective_names(data, sidecar, profile, people)
+            norm = people_store._norm_name
+            cleaned = {
+                label: name
+                for label, name in cleaned.items()
+                if not (name and label in matched and norm(name) == norm(shown[label]))
+            }
         before = sn.stored_names(data)
         after = dict(before)
         for label, name in cleaned.items():

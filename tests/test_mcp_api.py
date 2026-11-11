@@ -490,7 +490,7 @@ def test_set_speaker_names_goes_through_the_app_function(env):
     _recording(env, SID)
     with patch("app.state.speakers.set_names", return_value={}) as set_names:
         _post(env, f"/mcp/v1/recordings/{SID}/speaker-names", {"names": {"Speaker 2": "Sarah"}})
-    set_names.assert_called_once_with(SID, {"Speaker 2": "Sarah"})
+    set_names.assert_called_once_with(SID, {"Speaker 2": "Sarah"}, from_ai=True)
 
 
 def test_set_speaker_names_includes_your_confirmed_name(env):

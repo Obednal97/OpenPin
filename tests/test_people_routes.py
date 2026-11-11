@@ -609,3 +609,31 @@ def test_marking_mixed_up_forgets_what_the_recording_taught(env):
     assert people[harry]["samples"] == []
     assert [s["session_id"] for s in people[store.ME]["samples"]] == ["me0", "me1"]
     assert speakers.get_names(S2) == {}  # re-matched without them
+
+
+def test_ai_tools_sending_a_voice_match_back_teach_nothing(env):
+    from unittest.mock import call
+
+    from app.mcp import access
+
+    harry, sam = _person("Harry Fisher", 3, 0), _person("Sam", 1, 1)
+    _write(env, S1, matches={"Speaker 1": harry, "Speaker 2": sam})
+    access.enable(5123)
+    try:
+        env.client.environ_base.pop("HTTP_X_PLAUD_TOKEN", None)
+        env.client.environ_base["HTTP_X_OPEN_PIN_MCP_KEY"] = access.current_key()
+        names = {"Speaker 1": "harry fisher", "Speaker 2": "Samuel"}
+        with (
+            patch.object(worker, "enqueue") as enqueue,
+            patch("app.routes.mcp_api.recording_exists", return_value=True),
+        ):
+            r = env.client.post(f"/mcp/v1/recordings/{S1}/speaker-names", json={"names": names})
+    finally:
+        access.disable()
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["speakers"] == {"Speaker 1": "Harry Fisher", "Speaker 2": "Samuel"}
+    assert _read(env, S1)["speaker_names"] == {"Speaker 2": "Samuel"}  # the match stays a match
+    assert enqueue.call_args_list == [call("learn", session_id=S1, label="Speaker 2", name="Samuel")]
+    # Save in the app still accepts a match by storing it as typed.
+    speakers.set_names(S1, {"Speaker 1": "Harry Fisher"})
+    assert _read(env, S1)["speaker_names"]["Speaker 1"] == "Harry Fisher"
