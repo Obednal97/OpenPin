@@ -178,9 +178,7 @@ def test_typing_the_matched_name_accepts_it(env):
     speakers.set_names(SID, {"Speaker 1": " harry "})
     _settle()
     assert _samples("Harry") == [("1700000000", "Speaker 1"), (SID, "Speaker 1")]
-    saved = _read(env["trn"])["speaker_voice_matches"]
-    assert saved["rejected"] == {}
-    assert saved["matches"]["Speaker 1"]["person"] == harry
+    assert _read(env["trn"])["speaker_voice_matches"]["rejected"] == {}
 
 
 def test_profile_name_teaches_me(env):
@@ -300,6 +298,96 @@ def test_apply_matches_keeps_rejected(env):
     assert saved["matches"] == {"Speaker 1": {"person": harry, "score": 0.9}}
     # The same matches again change nothing.
     assert apply.apply_matches(SID, LABELLING, {"Speaker 1": {"person": harry, "score": 0.9}}) is False
+
+
+def test_apply_matches_for_new_labelling_resets_rejected(env):
+    harry = _person("Harry")
+    block = {"labelling": "old", "matches": {}, "rejected": {"Speaker 2": ["p_x"]}}
+    _write(env["trn"], speaker_voice_matches=block)
+    assert apply.apply_matches(SID, LABELLING, {"Speaker 1": {"person": harry, "score": 0.9}}) is True
+    saved = _read(env["trn"])["speaker_voice_matches"]
+    assert saved == {"labelling": LABELLING, "matches": {"Speaker 1": {"person": harry, "score": 0.9}}, "rejected": {}}
+
+
+def test_clearing_a_name_never_brings_it_back_from_its_own_sample(env):
+    _threshold()
+    _write(env["trn"])
+    env["cache"][SID] = EMB[SID]
+    speakers.set_names(SID, {"Speaker 1": "Harry"})
+    _settle()
+    assert "Speaker 1" not in _read(env["trn"])["speaker_voice_matches"]["matches"]  # never its own sample
+    # Even a match from elsewhere sitting under the typed name goes when it is cleared.
+    t = _read(env["trn"])
+    t["speaker_voice_matches"]["matches"]["Speaker 1"] = {"person": "p_any", "score": 1.0}
+    (env["trn"] / f"{SID}.json").write_text(json.dumps(t))
+    with worker._cond:  # the worker can't run yet
+        speakers.set_names(SID, {"Speaker 1": None})
+        assert speakers.get_names(SID) == {}
+        assert "Speaker 1" not in _read(env["trn"])["speaker_voice_matches"]["matches"]
+    _settle()
+    assert speakers.get_names(SID) == {}
+
+
+def test_correction_that_cannot_learn_still_moves_the_sample_off(env):
+    _profile("Ollie")
+    _write(env["trn"])
+    speakers.set_names(SID, {"Speaker 2": "Harry"})
+    _settle()
+    assert _samples("Harry") == [(SID, "Speaker 2")]
+    _sidecar(SID, excluded=True)
+    speakers.set_names(SID, {"Speaker 2": "Ollie"})
+    _settle()
+    assert _samples("Harry") == []
+    assert _me_samples() == []
+
+
+def test_rename_to_short_label_name_drops_old_sample(env):
+    _person("Harry", _sample(HARRY, SID, "Speaker 3"))
+    _write(env["trn"])
+    speakers.set_names(SID, {"Speaker 3": "Tom"})
+    _settle()
+    assert _people()["Harry"]["samples"] == []
+
+
+def test_one_rematch_for_many_learns(env):
+    _threshold()
+    _write(env["trn"])
+    passes = []
+    real = worker._HANDLERS["rematch"]
+    with patch.dict(worker._HANDLERS, {"rematch": lambda: passes.append(1) or real()}):
+        with worker._cond:
+            speakers.set_names(SID, {"Speaker 1": "Harry", "Speaker 2": "Sam", "Speaker 3": "Tom"})
+            speakers.set_names(SID, {"Speaker 3": "Tim"})
+        _settle()
+    assert passes == [1]
+    assert set(_people()) == {"Harry", "Sam"}
+
+
+def test_no_rejection_when_renaming_a_typed_name(env):
+    harry = _person("Harry", _sample(HARRY, "1700000000"))
+    block = {"labelling": LABELLING, "matches": {"Speaker 1": {"person": harry, "score": 0.9}}, "rejected": {}}
+    _write(env["trn"], speaker_names={"Speaker 1": "Alex"}, speaker_voice_matches=block)
+    speakers.set_names(SID, {"Speaker 1": "Sam"})
+    _settle()
+    assert _read(env["trn"])["speaker_voice_matches"]["rejected"] == {}
+
+
+def test_no_rejection_for_a_stale_match(env):
+    harry = _person("Harry", _sample(HARRY, "1700000000"))
+    block = {"labelling": "old", "matches": {"Speaker 1": {"person": harry, "score": 0.9}}, "rejected": {}}
+    _write(env["trn"], speaker_voice_matches=block)
+    speakers.set_names(SID, {"Speaker 1": "Sam"})
+    _settle()
+    assert _read(env["trn"])["speaker_voice_matches"]["rejected"] == {}
+
+
+def test_typing_a_rejected_name_lifts_the_rejection(env):
+    harry = _person("Harry", _sample(HARRY, "1700000000"))
+    block = {"labelling": LABELLING, "matches": {}, "rejected": {"Speaker 1": [harry, "p_other"]}}
+    _write(env["trn"], speaker_voice_matches=block)
+    speakers.set_names(SID, {"Speaker 1": "harry"})
+    _settle()
+    assert _read(env["trn"])["speaker_voice_matches"]["rejected"] == {"Speaker 1": ["p_other"]}
 
 
 def test_add_rejection(env):

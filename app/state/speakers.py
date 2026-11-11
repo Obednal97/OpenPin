@@ -160,10 +160,9 @@ def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
         # Keep the labels' order of appearance.
         after = {label: after[label] for label in sn.speaker_labels(segments) if label in after}
         moved = [label for label in cleaned if after.get(label) != before.get(label)]
-        voice_fields = lambda: json.dumps([data.get("speaker_names_frozen"), data.get("speaker_voice_matches")])  # noqa: E731
-        voice_before = voice_fields()
-        _corrections(data, moved, after, people)
-        changed = after != before or data.get("speaker_names") != after or voice_fields() != voice_before
+        voice_before = _voice_fields(data)
+        _corrections(data, moved, before, after, people, labelling_fingerprint(segments))
+        changed = after != before or data.get("speaker_names") != after or _voice_fields(data) != voice_before
         if changed:
             data["speaker_names"] = after
             data["speaker_names_labelling"] = labelling_fingerprint(segments)
@@ -174,29 +173,46 @@ def set_names(session_id: str, changes_map: dict) -> dict[str, str]:
     return after
 
 
-def _corrections(data: dict, moved: list[str], after: dict, people: dict) -> None:
-    """For each label whose typed name changed: drop its frozen mark, and if a voice match
-    named someone else there, reject that person for the label (typing the matched
-    person's own name accepts the match instead)."""
+def _voice_fields(data: dict) -> str:
+    return json.dumps([data.get("speaker_names_frozen"), data.get("speaker_voice_matches")], sort_keys=True)
+
+
+def _corrections(data: dict, moved: list[str], before: dict, after: dict, people: dict, labelling: str) -> None:
+    """Voice bookkeeping for each label whose typed name changed.
+
+    Its frozen mark goes, and so does its voice match (a cleared name must not fall back
+    to it). Typing a person's name lifts a rejection of them there. Naming a speaker that
+    had no typed name, over a current match to someone else, rejects that person for the
+    label (typing the matched person's own name accepts the match instead).
+    """
     from app.people import apply
 
     frozen = data.get("speaker_names_frozen")
     if isinstance(frozen, list) and any(label in frozen for label in moved):
         data["speaker_names_frozen"] = [label for label in frozen if label not in moved]
     block = data.get("speaker_voice_matches")
-    matches = block.get("matches") if isinstance(block, dict) else None
-    if not isinstance(matches, dict):
+    if not isinstance(block, dict):
         return
+    matches = block.get("matches") if isinstance(block.get("matches"), dict) else {}
+    rejected = block.get("rejected") if isinstance(block.get("rejected"), dict) else {}
+    current = block.get("labelling") == labelling
+
+    def same(person, name) -> bool:
+        known = people.get(person)
+        return isinstance(known, str) and people_store._norm_name(known) == people_store._norm_name(name)
+
     for label in moved:
-        match = matches.get(label)
-        person = match.get("person") if isinstance(match, dict) else None
+        match = matches.pop(label, None)
         name = after.get(label)
-        if not isinstance(person, str) or name is None:
+        if name is None:
             continue
-        matched_name = people.get(person)
-        if isinstance(matched_name, str) and people_store._norm_name(matched_name) == people_store._norm_name(name):
-            continue
-        apply.reject_in(data, label, person)
+        if isinstance(rejected.get(label), list) and any(same(p, name) for p in rejected[label]):
+            rejected[label] = [p for p in rejected[label] if not same(p, name)]
+            if not rejected[label]:
+                del rejected[label]
+        person = match.get("person") if isinstance(match, dict) else None
+        if current and before.get(label) is None and isinstance(person, str) and not same(person, name):
+            apply.reject_in(data, label, person)
 
 
 def _queue_learning(session_id: str, labels: list[str], after: dict) -> None:

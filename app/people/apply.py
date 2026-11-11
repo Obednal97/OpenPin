@@ -22,14 +22,18 @@ log = logging.getLogger(__name__)
 
 
 def _block(data: dict, labelling: str) -> dict:
-    """The transcript's voice-match block (created if absent), with ``rejected`` kept as is."""
+    """The transcript's voice-match block for ``labelling``, normalised in place.
+
+    A block made for another labelling starts again empty, ``rejected`` included:
+    after re-labelling, "Speaker 2" may be someone else.
+    """
     block = data.get("speaker_voice_matches")
-    if not isinstance(block, dict):
+    if not isinstance(block, dict) or block.get("labelling") != labelling:
         block = {}
-    rejected = block.get("rejected")
     matches = block.get("matches")
+    rejected = block.get("rejected")
     block = {
-        "labelling": block.get("labelling") or labelling,
+        "labelling": labelling,
         "matches": matches if isinstance(matches, dict) else {},
         "rejected": rejected if isinstance(rejected, dict) else {},
     }
@@ -78,7 +82,8 @@ def _edit(session_id: str, edit) -> bool:
 def apply_matches(session_id: str, labelling: str, matches: dict) -> bool:
     """Save ``matches`` for ``labelling``; dropped if the speakers were re-labelled since.
 
-    Keeps ``rejected``. Returns whether the effective names changed.
+    Keeps ``rejected`` for the same labelling (a new labelling starts it again).
+    Returns whether the effective names changed.
     """
     from app.coaching.runner import labelling_fingerprint
 
@@ -87,11 +92,8 @@ def apply_matches(session_id: str, labelling: str, matches: dict) -> bool:
             return False
         old = data.get("speaker_voice_matches")
         block = _block(data, labelling)
-        if old == {**block, "labelling": labelling, "matches": matches}:
-            return False
-        block["labelling"] = labelling
         block["matches"] = matches
-        return True
+        return block != old
 
     return _edit(session_id, edit)
 
@@ -112,6 +114,7 @@ def match_recording(
 ) -> bool:
     """Match a recording's speakers to known people and save the result.
 
+    A recording is never named from its own samples (they came from its typed names).
     Skipped before the threshold is calibrated, on a recording marked mixed up, and
     without labels or embeddings. ``cached_only`` uses the embedding cache and never
     audio; ``people`` (the store's people, loaded once by a caller matching many
@@ -135,11 +138,10 @@ def match_recording(
         emb = embeddings.get(session_id, segments, audio_path)
     if not emb:
         return False
-    block = transcript.get("speaker_voice_matches")
-    rejected = block.get("rejected") if isinstance(block, dict) else None
-    rejected = {k: v for k, v in rejected.items() if isinstance(v, list)} if isinstance(rejected, dict) else {}
+    rejected = _block(dict(transcript), labelling)["rejected"]
+    rejected = {k: v for k, v in rejected.items() if isinstance(v, list)}
     if people is None:
         people = people_store.load()["people"]
-    found = matching.match(emb, people, threshold, rejected)
+    found = matching.match(emb, people, threshold, rejected, exclude_session=session_id)
     found = {label: {"person": m["person"], "score": round(m["score"], 4)} for label, m in found.items()}
     return apply_matches(session_id, labelling, found)

@@ -7,8 +7,8 @@ the first job. Kinds:
 - ``match(session_id, audio_path)``: match a recording's speakers to known people.
 - ``learn(session_id, label, name)``: the speaker was named; teach that voice.
 - ``unlearn(session_id, label)``: the name was cleared; forget that sample.
-- ``rematch_person(person_id)``: someone's samples changed; match every recording
-  with cached embeddings again (maths only, no audio).
+- ``rematch()``: samples changed; match every recording with cached embeddings again
+  (maths only, no audio). Any number of these waiting collapse into one.
 """
 
 from __future__ import annotations
@@ -46,47 +46,66 @@ def _match(session_id: str, audio_path: str | None = None) -> None:
 def _learn(session_id: str, label: str, name: str) -> None:
     """Add this speaker's voice to the person they were named as.
 
-    Only while that is still the label's typed name, the label isn't frozen, the
-    recording isn't mixed up, and the label has enough speech. Your profile name
-    teaches ``me``, except on a recording excluded from coaching (then nothing).
+    Only while that is still the label's typed name (otherwise a later job handles
+    it), the label isn't frozen, the recording isn't mixed up, and the label has
+    enough speech. Your profile name teaches ``me``, except on a recording excluded
+    from coaching. When it can't learn, the speaker's earlier sample is still removed,
+    since the name it was learnt under is no longer theirs.
     """
     transcript = speakers._read(session_id)
     if transcript is None or _norm(sn.stored_names(transcript).get(label)) != _norm(name):
         return
-    frozen = transcript.get("speaker_names_frozen")
-    if isinstance(frozen, list) and label in frozen:
-        return
-    if coaching_store.load(session_id).get("mixed_up") is True:
-        return
-    segments = transcript.get("segments") or []
-    seconds = embeddings.speech_seconds(segments).get(label, 0.0)
-    if seconds < matching.MIN_LEARN_SECONDS:
+    sample = _sample_for(session_id, transcript, label, name)
+    if sample is None:
+        _forget(session_id, label)
         return
     is_me = _norm(name) == _norm(speakers.profile_name())
-    if is_me and runner.is_excluded(session_id):
-        return
-    emb = embeddings.get(session_id, segments)
-    vec = (emb or {}).get(label)
-    if not vec:
-        return
-    sample = {
-        "vec": vec,
-        "session_id": session_id,
-        "label": label,
-        "seconds": round(seconds, 1),
-        "added_at": people_store._now(),
-    }
-    out = {}
 
     def add(data: dict) -> None:
         pid = people_store.ME if is_me else people_store.find_person(data, name)
         if pid is None:
             pid = people_store.create_person(data, name)
         people_store.add_sample(data, pid, sample)
-        out["person"] = pid
 
     people_store.mutate(add)
-    enqueue("rematch_person", person_id=out["person"])
+    enqueue("rematch")
+
+
+def _sample_for(session_id: str, transcript: dict, label: str, name: str) -> dict | None:
+    """The sample this named speaker gives, or None when it mustn't or can't teach."""
+    frozen = transcript.get("speaker_names_frozen")
+    if isinstance(frozen, list) and label in frozen:
+        return None
+    if coaching_store.load(session_id).get("mixed_up") is True:
+        return None
+    segments = transcript.get("segments") or []
+    seconds = embeddings.speech_seconds(segments).get(label, 0.0)
+    if seconds < matching.MIN_LEARN_SECONDS:
+        return None
+    if _norm(name) == _norm(speakers.profile_name()) and runner.is_excluded(session_id):
+        return None
+    vec = (embeddings.get(session_id, segments) or {}).get(label)
+    if not vec:
+        return None
+    return {
+        "vec": vec,
+        "session_id": session_id,
+        "label": label,
+        "seconds": round(seconds, 1),
+        "added_at": people_store._now(),
+    }
+
+
+def _forget(session_id: str, label: str) -> None:
+    """Remove the sample this recording speaker gave, if any, and re-match."""
+    had = any(
+        (s.get("session_id"), s.get("label")) == (session_id, label)
+        for person in people_store.load()["people"].values()
+        for s in person["samples"]
+    )
+    if had:
+        people_store.mutate(lambda data: people_store.remove_sample(data, session_id, label))
+        enqueue("rematch")
 
 
 def _unlearn(session_id: str, label: str) -> None:
@@ -94,20 +113,10 @@ def _unlearn(session_id: str, label: str) -> None:
     transcript = speakers._read(session_id)
     if transcript is not None and sn.stored_names(transcript).get(label):
         return
-    had = any(
-        (s.get("session_id"), s.get("label")) == (session_id, label)
-        for person in people_store.load()["people"].values()
-        for s in person["samples"]
-    )
-    if not had:
-        return
-    out = {}
-    people_store.mutate(lambda data: out.update(person=people_store.remove_sample(data, session_id, label)))
-    if out.get("person"):
-        enqueue("rematch_person", person_id=out["person"])
+    _forget(session_id, label)
 
 
-def _rematch_person(person_id: str) -> None:
+def _rematch() -> None:
     """Match every recording with cached embeddings again (any one may now name or drop someone)."""
     if matching.current_threshold() is None or not speakers.TRANSCRIPTS_DIR.is_dir():
         return
@@ -119,7 +128,7 @@ def _rematch_person(person_id: str) -> None:
             log.warning("re-matching %s failed: %s", path.stem, e)
 
 
-_HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch_person": _rematch_person}
+_HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch": _rematch}
 
 
 # ------------------------------------------------------------------- the queue
