@@ -63,12 +63,10 @@ def test_exclude_session_skips_samples_and_empty_people():
     assert out == {}
 
 
-def _instances_for(people_sessions, genuine, impostor_like_b=0, stranger=None):
-    inst = []
-    for i in range(genuine):
-        inst.append((f"a{i}", "S1", _vec(0.75), "a"))
-    for i in range(impostor_like_b):
-        inst.append((f"a{i}", "S2", _vec(0.0, 0.6), "a"))
+def _instances_for(genuine_a, genuine_b, impostor_like_b=0):
+    inst = [(f"a{i}", "S1", _vec(0.75), "a") for i in range(genuine_a)]
+    inst += [(f"b{i}", "S1", _vec(0.0, 0.75), "b") for i in range(genuine_b)]
+    inst += [(f"a{i}", "S2", _vec(0.0, 0.6), "a") for i in range(impostor_like_b)]
     return inst
 
 
@@ -85,7 +83,7 @@ def test_calibrate_few_instances_uses_default():
 
 
 def test_calibrate_picks_lowest_safe_threshold():
-    inst = _instances_for(None, 10, 10)
+    inst = _instances_for(5, 5, 10)
     out = matching.calibrate(inst, _library())
     assert out["threshold"] == 0.625
     assert out["instances"] == 20
@@ -93,7 +91,8 @@ def test_calibrate_picks_lowest_safe_threshold():
 
 
 def test_calibrate_falls_back_when_nothing_safe():
-    inst = [(f"a{i}", "S1", _vec(0.0, 0.95), "a") for i in range(20)]
+    inst = [(f"a{i}", "S1", _vec(0.0, 0.95), "a") for i in range(10)]
+    inst += [(f"b{i}", "S1", _vec(0.95), "b") for i in range(10)]
     out = matching.calibrate(inst, _library())
     assert out["threshold"] == 0.80
 
@@ -113,3 +112,21 @@ def test_current_threshold_reads_config(monkeypatch):
     assert matching.current_threshold() == 0.65
     monkeypatch.setattr(matching, "load_config", lambda: {})
     assert matching.current_threshold() is None
+
+
+def test_calibrate_one_person_uses_default():
+    inst = [(f"a{i % 12}", "S1", _vec(0.9), "a") for i in range(30)]
+    out = matching.calibrate(inst, _library())
+    assert out == {"threshold": matching.DEFAULT_THRESHOLD, "accuracy": None, "instances": 30}
+
+
+def test_calibrate_never_below_floor():
+    out = matching.calibrate(_instances_for(10, 10), _library())
+    assert out["threshold"] == matching.MIN_THRESHOLD == 0.55
+
+
+def test_calibrate_requires_min_named():
+    # only 8 instances ever named, so no threshold qualifies: fallback
+    inst = _instances_for(4, 4) + [(f"a{i}", "S2", _vec(0.0, 0.0), "a") for i in range(12)]
+    out = matching.calibrate(inst, _library())
+    assert out["threshold"] == 0.80
