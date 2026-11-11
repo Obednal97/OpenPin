@@ -6,7 +6,7 @@ pass over the transcripts.
 
 from flask import Blueprint, jsonify, request
 
-from app.people import backlog, directory
+from app.people import backlog, directory, worker
 from app.utils.paths import InvalidSessionIdError, validate_session_id
 
 bp = Blueprint("people", __name__)
@@ -51,6 +51,13 @@ def delete_person(person_id):
     except directory.DirectoryError as e:
         return _refused(e)
     return jsonify(directory.directory())
+
+
+@bp.route("/people/fold-namesake", methods=["POST"])
+def fold_namesake():
+    """Your name was committed: queue folding the person with that name into you."""
+    worker.enqueue("fold_into_me")
+    return jsonify({"queued": True})
 
 
 @bp.route("/people/backlog", methods=["GET"])

@@ -430,6 +430,7 @@ window.plaud = {
   peopleBacklog: () => apiCall('GET', '/people/backlog'), // { phase, done, total, running }
   startPeopleBacklog: () => apiCall('POST', '/people/backlog'),
   cancelPeopleBacklog: () => apiCall('DELETE', '/people/backlog'),
+  foldNamesake: () => apiCall('POST', '/people/fold-namesake'), // { queued }
 
   // Conversation coaching
   coaching: (session_id) => apiCall('GET', `/coaching/${encodeURIComponent(session_id)}`),

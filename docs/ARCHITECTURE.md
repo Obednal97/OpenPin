@@ -720,8 +720,9 @@ and never goes through the MCP connector.
   learnt or rejected by a rename. Each holds the job lock throughout, so no voice job sees a person
   half changed. Deleting a person turns the names their voice gave into typed names, so
   transcripts read the same, and freezes those and the names typed with their name, so nothing
-  teaches the voice back. Merge into You folds a person into `me`; saving your profile name does
-  the same for a person with that name. No response carries a vector.
+  teaches the voice back. Merge into You folds a person into `me` (samples from recordings excluded from coaching are
+  dropped); committing your profile name (blur or Enter, or setup) queues a `fold_into_me` job that
+  does the same for a person with that name, read when the job runs. Autosaving the name never folds. No response carries a vector.
 - **Notion**: when a match or a directory change alters the names a transcript shows, the usual
   Notion queue is told, so the page is updated like after any rename.
 

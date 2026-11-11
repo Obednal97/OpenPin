@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from app.coaching import runner, voice
+from app.coaching import store as coaching_store
 from app.people import apply, backlog, store, worker
 from app.state import speakers
 from app.utils import changes
@@ -568,14 +569,35 @@ def test_merge_into_you_needs_your_name(env):
     assert ollie in store.load()["people"]
 
 
-def test_saving_your_name_folds_that_person_into_you(env):
+def _fold_setup(env):
     update_config(lambda c: c.update(profile={}))
     _me(2)
     ollie = _person("Ollie", 3, 2, "o")
     _person("Sam", 1, 1)
     _write(env, S1, names={"Speaker 2": "ollie"})
     _write(env, S2, matches={"Speaker 1": ollie}, rejected={"Speaker 2": [ollie]})
+    return ollie
+
+
+def test_saving_your_name_does_not_fold_the_namesake(env):
+    ollie = _fold_setup(env)
     r = env.client.post("/settings", json={"profile": {"name": "Ollie"}})
+    assert r.status_code == 200
+    assert worker.wait_idle(10)
+    assert ollie in store.load()["people"] and not worker.has_job("fold_into_me")
+
+
+def test_fold_route_only_queues_the_job(env):
+    with patch("app.people.worker.enqueue") as enqueue:
+        r = env.client.post("/people/fold-namesake")
+    assert r.status_code == 200 and r.get_json() == {"queued": True}
+    enqueue.assert_called_once_with("fold_into_me")
+
+
+def test_fold_job_folds_that_person_into_you(env):
+    ollie = _fold_setup(env)
+    update_config(lambda c: c.update(profile={"name": "Ollie"}))
+    r = env.client.post("/people/fold-namesake")
     assert r.status_code == 200
     assert worker.wait_idle(10)
     people = store.load()["people"]
@@ -585,8 +607,38 @@ def test_saving_your_name_folds_that_person_into_you(env):
     block = _read(env, S2)["speaker_voice_matches"]
     assert block["matches"]["Speaker 1"]["person"] == store.ME and block["rejected"] == {"Speaker 2": [store.ME]}
     # A name nobody in People has changes nothing.
-    env.client.post("/settings", json={"profile": {"name": "Someone New"}})
+    update_config(lambda c: c.update(profile={"name": "Someone New"}))
+    env.client.post("/people/fold-namesake")
+    assert worker.wait_idle(10)
     assert len(store.load()["people"]) == 2
+
+
+def test_fold_job_reads_the_name_when_it_runs(env):
+    ollie = _fold_setup(env)
+    update_config(lambda c: c.update(profile={"name": "Ollie"}))
+    with worker.exclusive():  # the job waits behind this
+        worker.enqueue("fold_into_me")
+        update_config(lambda c: c.update(profile={"name": "Ollie Bennett"}))
+    assert worker.wait_idle(10)
+    assert ollie in store.load()["people"]
+
+
+def test_merging_into_you_drops_samples_from_excluded_recordings(env):
+    _me(1)
+    sam = _person("Sam", 0, 1)
+
+    def fn(d):
+        d["people"][sam]["samples"] = [
+            {"vec": _vec(1), "session_id": sid, "label": "Speaker 1"} for sid in (S1, S2)
+        ] + [{"vec": _vec(1), "label": "Speaker 1"}]
+
+    store.mutate(fn)
+    coaching_store.update(S1, lambda d: d.update(excluded=True))
+    r = env.client.post(f"/people/{sam}/merge", json={"into": "me"})
+    assert r.status_code == 200
+    assert worker.wait_idle(10)
+    kept = [s.get("session_id") for s in store.load()["people"][store.ME]["samples"]]
+    assert S1 not in kept and S2 in kept and None in kept and len(kept) == 3
 
 
 def test_marking_mixed_up_forgets_what_the_recording_taught(env):

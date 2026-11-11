@@ -132,3 +132,13 @@ def test_a_running_backlog_polls_only_its_progress():
     assert "window.plaud.peopleBacklog()" in body
     assert "if (!b || b.error || !b.running) return renderPeopleSettings(true);" in body  # once, when it stops
     assert "if (running) _pplPollBacklog();" in JS
+
+
+def test_namesake_fold_runs_on_commit_only_never_from_the_autosave():
+    setup_js = (APP / "ui" / "setup.js").read_text()
+    assert SETTINGS_JS.count("foldNamesake") == 1 and "foldNamesake" in setup_js
+    handler = SETTINGS_JS[SETTINGS_JS.index("function commitProfileName") :]
+    assert "foldNamesake" in handler[: handler.index("\n}\n")]
+    assert "'change'" in SETTINGS_JS and "commitProfileName" in SETTINGS_JS
+    save_now = SETTINGS_JS[SETTINGS_JS.index("function scheduleProfileSave") :]
+    assert "foldNamesake" not in save_now[: save_now.index("function commitProfileName")]

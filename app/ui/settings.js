@@ -1427,25 +1427,42 @@ function _setProfileSaveStatus(text, isError = false) {
   if (text && !isError) _profileStatusTimer = setTimeout(() => { el.textContent = ''; }, 2000);
 }
 
-async function saveProfileNow() {
+// Saves run one after another, so a later one compares against what the earlier one stored.
+let _profileSaving = Promise.resolve(true);
+
+function saveProfileNow() {
   clearTimeout(_profileSaveTimer);
   _profileSaveTimer = null;
+  _profileSaving = _profileSaving.then(_saveProfileFields);
+  return _profileSaving;
+}
+
+// Resolves false when the save failed.
+async function _saveProfileFields() {
   const profile = _readProfileFields();
   const before = app.settings.profile || {};
   const same = Object.keys(profile).every((k) => (before[k] || '') === profile[k]);
-  if (same) return;
+  if (same) return true;
   try {
     await window.plaud.saveSettings({ profile });
     app.settings.profile = profile;
     _setProfileSaveStatus('Saved');
+    return true;
   } catch (err) {
     _setProfileSaveStatus(`Not saved: ${err.message}`, true);
+    return false;
   }
 }
 
 function scheduleProfileSave() {
   clearTimeout(_profileSaveTimer);
   _profileSaveTimer = setTimeout(saveProfileNow, PROFILE_SAVE_DELAY_MS);
+}
+
+// The name is committed (blur or Enter): once it is saved, anyone in People with it is you.
+async function commitProfileName() {
+  if (!(await saveProfileNow()) || !$('#profile-name').value.trim()) return;
+  try { await window.plaud.foldNamesake(); } catch {}
 }
 
 function initSettingsEvents() {
@@ -1643,7 +1660,7 @@ function initSettingsEvents() {
     const el = $(`#${id}`);
     if (!el) return;
     el.addEventListener('input', scheduleProfileSave);
-    el.addEventListener('change', saveProfileNow);
+    el.addEventListener('change', id === 'profile-name' ? commitProfileName : saveProfileNow);
     el.addEventListener('blur', saveProfileNow);
   });
 

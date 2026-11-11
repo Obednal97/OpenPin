@@ -227,14 +227,6 @@ def save_settings():
 
     update_config(_apply)
 
-    if "profile" in data:
-        try:  # someone in People with your name is you
-            from app.people import directory
-
-            directory.fold_into_me()
-        except Exception as e:
-            log.warning("could not fold your namesake into your voice: %s", e)
-
     if "mcp_enabled" in data:
         error = _apply_mcp_enabled(data["mcp_enabled"] is True)
         if error:

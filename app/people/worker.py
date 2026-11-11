@@ -168,6 +168,13 @@ def _rematch() -> None:
             log.warning("re-matching %s failed: %s", path.stem, e)
 
 
+def _fold_into_me() -> None:
+    """Fold the person named like your profile name (as it is now) into ``me``."""
+    from app.people import directory
+
+    directory.fold_into_me()
+
+
 def _backlog() -> None:
     from app.people import backlog
 
@@ -207,6 +214,7 @@ _HANDLERS = {
     "unlearn": _unlearn,
     "forget_recording": _forget_recording,
     "rematch": _rematch,
+    "fold_into_me": _fold_into_me,
     "backlog": _backlog,
 }
 

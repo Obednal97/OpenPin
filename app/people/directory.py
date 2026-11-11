@@ -15,8 +15,8 @@ import json
 import re
 from collections.abc import Callable
 
+from app.coaching import runner, voice
 from app.coaching import store as coaching_store
-from app.coaching import voice
 from app.people import apply, backlog, worker
 from app.people import store as people_store
 from app.state import speakers
@@ -324,9 +324,14 @@ def _merge(person_id: str, into: str, *, retype: bool) -> None:
         new_people = {pid: n for pid, n in old_people.items() if pid != person_id}
         later = _each_transcript(edit, old_people, new_people)
 
+        # Decided out here: is_excluded reads a sidecar, which mustn't happen under the store lock.
+        excluded = {
+            sid for s in source["samples"] if (sid := s.get("session_id")) and into == ME and runner.is_excluded(sid)
+        }
+
         def combine(d: dict) -> None:
             source, target = _check_merge(d, person_id, into)
-            target["samples"].extend(source["samples"])
+            target["samples"].extend(s for s in source["samples"] if s.get("session_id") not in excluded)
             del d["people"][person_id]
 
         people_store.mutate(combine)
