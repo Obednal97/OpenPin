@@ -505,3 +505,19 @@ def test_editing_segments_keeps_a_stale_match_block_stale(env):
     assert speakers.get_names(S1) == {}
     assert _read(env, S1)["speaker_voice_matches"]["labelling"] == "old"
     assert not env.notion.called
+
+
+def test_a_cleared_name_never_comes_back_by_voice(env):
+    update_config(lambda c: c.update(people_match_threshold=0.7))
+    harry = _person("Harry Fisher", 3, 0)
+    env.cache[S1] = {"Speaker 1": _vec(0), "Speaker 2": _vec(2)}
+    _me(3)
+    _write(env, S1)
+    speakers.set_names(S1, {"Speaker 1": "harry fisher", "Speaker 2": PROFILE})
+    assert worker.wait_idle(10)
+    speakers.set_names(S1, {"Speaker 1": None, "Speaker 2": None})
+    assert worker.wait_idle(10)
+    assert speakers.get_names(S1) == {}
+    assert _read(env, S1)["speaker_voice_matches"]["rejected"] == {"Speaker 1": [harry], "Speaker 2": [store.ME]}
+    speakers.set_names(S1, {"Speaker 1": "Harry Fisher"})  # typing them again lifts it
+    assert _read(env, S1)["speaker_voice_matches"]["rejected"] == {"Speaker 2": [store.ME]}

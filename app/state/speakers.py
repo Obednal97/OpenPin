@@ -181,25 +181,31 @@ def _corrections(data: dict, moved: list[str], before: dict, after: dict, people
     """Voice bookkeeping for each label whose typed name changed.
 
     Its frozen mark goes, and so does its voice match (a cleared name must not fall back
-    to it). Typing a person's name lifts a rejection of them there. Naming a speaker that
-    had no typed name, over a current match to someone else, rejects that person for the
-    label (typing the matched person's own name accepts the match instead).
+    to it). Clearing a known person's name (yours included) rejects them for the label,
+    so their voice doesn't name it again. Typing a person's name lifts a rejection of
+    them there. Naming a speaker that had no typed name, over a current match to someone
+    else, rejects that person for the label (typing the matched person's own name
+    accepts the match instead).
     """
     from app.people import apply
+
+    def same(person, name) -> bool:
+        known = people.get(person)
+        return isinstance(known, str) and people_store._norm_name(known) == people_store._norm_name(name)
 
     frozen = data.get("speaker_names_frozen")
     if isinstance(frozen, list) and any(label in frozen for label in moved):
         data["speaker_names_frozen"] = [label for label in frozen if label not in moved]
+    for label in moved:
+        if after.get(label) is None and before.get(label):
+            for person in [p for p in people if same(p, before[label])]:
+                apply.reject_in(data, label, person)
     block = data.get("speaker_voice_matches")
     if not isinstance(block, dict):
         return
     matches = block.get("matches") if isinstance(block.get("matches"), dict) else {}
     rejected = block.get("rejected") if isinstance(block.get("rejected"), dict) else {}
     current = block.get("labelling") == labelling
-
-    def same(person, name) -> bool:
-        known = people.get(person)
-        return isinstance(known, str) and people_store._norm_name(known) == people_store._norm_name(name)
 
     for label in moved:
         match = matches.pop(label, None)
