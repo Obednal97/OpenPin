@@ -8,7 +8,6 @@ from the optional ``diarize`` extra, so they are imported lazily and
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -208,64 +207,66 @@ def speaker_embeddings(
 
 
 def _load_exemplars() -> list[list[float]]:
-    try:
-        data = json.loads(PROFILE_PATH.read_text())
-        ex = data["exemplars"]
-        if data.get("version") != 1 or not isinstance(ex, list):
-            return []
-        return [[float(x) for x in e] for e in ex if e]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return []
+    from app.people import store
+
+    return [s["vec"] for s in store.load()["people"][store.ME]["samples"]]
 
 
-def _save_exemplars(exemplars: list[list[float]]) -> None:
-    """Atomic write (temp + replace), file mode 0600. Keeps the newest MAX_EXEMPLARS."""
+def _save_exemplars(
+    exemplars: list[list[float]], session_id: str | None = None, labels: list[str] | None = None
+) -> None:
+    """Replace the owner's samples with ``exemplars`` (keeping the existing sample for any
+    vector already held) through the voice store, which writes atomically with mode 0600
+    and mirrors the vectors to PROFILE_PATH. Keeps the newest MAX_EXEMPLARS."""
+    from app.people import store
+
     exemplars = exemplars[-MAX_EXEMPLARS:]
-    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": 1,
-        "exemplars": exemplars,
-        "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }
-    fd, tmp = tempfile.mkstemp(dir=PROFILE_PATH.parent, prefix=".voice_profile-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, PROFILE_PATH)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+
+    def fn(data: dict) -> None:
+        old = data["people"][store.ME]["samples"]
+        out = []
+        for i, vec in enumerate(exemplars):
+            held = next((s for s in old if s["vec"] == vec), None)
+            if held is not None:
+                out.append(held)
+                continue
+            label = labels[i] if labels and i < len(labels) else None
+            if session_id is not None:
+                store.remove_sample(data, session_id, label)
+            out.append({"vec": vec, "session_id": session_id, "label": label, "seconds": 0, "added_at": stamp})
+        data["people"][store.ME]["samples"] = out
+
+    store.mutate(fn)
 
 
 def delete_profile() -> None:
-    try:
-        PROFILE_PATH.unlink()
-    except FileNotFoundError:
-        pass
+    """Forget the owner's voice: clear the ``me`` samples and remove the v1 file."""
+    from app.people import store
+
+    store.mutate(lambda data: data["people"][store.ME].update(samples=[]))  # also unlinks the v1 mirror
 
 
-def add_exemplars(audio_path: str, segments: list[dict], labels: list[str]) -> int:
+def add_exemplars(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
     """Add one exemplar per given label from this recording (voice setup and the
     correction path). Returns how many were added. Oldest exemplars drop past 20."""
     embeddings = speaker_embeddings(audio_path, segments)
-    new = [embeddings[label] for label in labels if label in embeddings]
+    got = [label for label in labels if label in embeddings]
+    new = [embeddings[label] for label in got]
     if new:
-        _save_exemplars(_load_exemplars() + new)
+        _save_exemplars(_load_exemplars() + new, session_id, got)
     return len(new)
 
 
-def replace_profile(audio_path: str, segments: list[dict], labels: list[str]) -> int:
+def replace_profile(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
     """Redo voice setup: build exemplars from this recording and swap them in for the old
     profile, but only if at least one was produced (a failed redo keeps the old voice).
     Returns how many exemplars the new profile has (0 = nothing changed)."""
     embeddings = speaker_embeddings(audio_path, segments)
-    new = [embeddings[label] for label in labels if label in embeddings]
+    got = [label for label in labels if label in embeddings]
+    new = [embeddings[label] for label in got]
     if new:
-        _save_exemplars(new)
+        _save_exemplars(new, session_id, got)
     return len(new)
 
 

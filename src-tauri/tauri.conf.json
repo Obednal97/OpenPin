@@ -52,6 +52,7 @@
       "../app/api_server.py": "app/api_server.py",
       "../app/coaching/*": "app/coaching/",
       "../app/mcp/*": "app/mcp/",
+      "../app/people/*": "app/people/",
       "../app/routes/*": "app/routes/",
       "../app/state/*": "app/state/",
       "../app/providers/*": "app/providers/",

@@ -616,7 +616,7 @@ def _learn_and_run(session_id: str, segments: list[dict], chosen: list[str], lea
     # An excluded recording never teaches the voice profile (it may have been excluded since the pick).
     if learn and audio and voice.model_available() and not is_excluded(session_id):
         try:
-            voice.add_exemplars(audio, segments, chosen)
+            voice.add_exemplars(audio, segments, chosen, session_id=session_id)
         except Exception as e:
             log.warning("could not add voice exemplars for %s: %s", session_id, e, exc_info=True)
     return audio, _run_once(session_id, audio, force=True)

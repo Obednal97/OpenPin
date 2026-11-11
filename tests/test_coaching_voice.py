@@ -8,6 +8,7 @@ import stat
 import pytest
 
 from app.coaching import voice
+from app.people import store as people_store
 
 
 def _unit(v):
@@ -22,6 +23,7 @@ OTHER = _unit([0.0, 1.0, 0.0])
 @pytest.fixture(autouse=True)
 def _profile_path(tmp_path, monkeypatch):
     monkeypatch.setattr(voice, "PROFILE_PATH", tmp_path / "coaching" / "voice_profile.json")
+    monkeypatch.setattr(people_store, "VOICES_PATH", tmp_path / "people" / "voices.json")
 
 
 def _fake(monkeypatch, vectors):

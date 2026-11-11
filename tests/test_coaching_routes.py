@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.coaching import runner, store, voice
+from app.people import store as people_store
 from app.routes import coaching as routes
 from app.utils.config import load_config, update_config
 
@@ -26,6 +27,7 @@ def env(tmp_path, monkeypatch, flask_client):
     monkeypatch.setattr(store, "COACHING_DIR", coaching_dir)
     monkeypatch.setattr(runner, "TRANSCRIPTS_DIR", trn)
     monkeypatch.setattr(voice, "PROFILE_PATH", coaching_dir / "voice_profile.json")
+    monkeypatch.setattr(people_store, "VOICES_PATH", tmp_path / "people" / "voices.json")
     monkeypatch.setattr(runner, "current", lambda sid: store.load(sid), raising=False)
     monkeypatch.setattr(routes, "_voice_state", {"installing": False, "error": None})
     (trn / f"{SID}.json").write_text(json.dumps({"text": "x", "segments": SEGMENTS}))
@@ -269,7 +271,7 @@ def test_voice_setup_adds_exemplars(env, monkeypatch, tmp_path):
     monkeypatch.setattr(voice, "add_exemplars", add)
     r = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Speaker 1"]})
     assert r.get_json() == {"exemplars": 1}
-    add.assert_called_once_with(str(audio), SEGMENTS, ["Speaker 1"])
+    add.assert_called_once_with(str(audio), SEGMENTS, ["Speaker 1"], session_id=SID)
     bad = env.post("/coaching/voice/setup", json={"session_id": SID, "labels": ["Nobody"]})
     assert bad.status_code == 400
 
