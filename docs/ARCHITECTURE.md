@@ -696,14 +696,20 @@ and never goes through the MCP connector.
 - **Calibration**: the threshold is its own setting (`people_match_threshold`), not the coaching
   one. `matching.calibrate` tests every named speaker with 15 s or more of speech against the
   library without its own recording and picks the lowest threshold on a 0.025 grid, from the
-  0.55 floor, that names at least 10 with under 2% wrong. Below 20 instances or 2 people it uses
-  0.70; if nothing qualifies it falls back to 0.80. It runs after the backlog and again when the
-  instances double. `scripts/voice_eval.py` prints the same table for a real library.
+  0.55 floor, that names at least 10 with under 2% wrong (and under 2% for the people who aren't
+  you, once 10 of them are named). Samples from no recording (your migrated v1 ones) are left out,
+  since they can't be held out. Below 20 instances or 2 people it uses 0.70; if nothing qualifies
+  it falls back to 0.80. It runs after the backlog and again when the instances double. `scripts/voice_eval.py` prints the same table for a real library.
 - **Effective name** (`app/utils/speaker_names.py`): per speaker, in order, a name you typed; your
   profile name where you picked the speaker as yourself for coaching; a voice match valid for the
   current labelling. Matches live on the transcript (`speaker_voice_matches`) and are stored for
-  that labelling only. A match to a deleted or nameless person shows nothing.
-- **Worker** (`worker.py`): one background thread runs `match`, `learn`, `unlearn`, `rematch` and
+  that labelling only (editing segments keeps them for the labels still there). A match to a
+  deleted or nameless person shows nothing. Clearing a known person's typed name rejects them for
+  that label, so their voice doesn't name it again. A name sent through the MCP connector that
+  equals the label's voice-matched name changes nothing, so AI tools can't turn matches into
+  typed names that teach.
+- **Worker** (`worker.py`): one background thread runs `match`, `learn`, `unlearn`,
+  `forget_recording` (a recording marked mixed up forgets every sample it taught), `rematch` and
   `backlog` jobs one at a time; identical waiting jobs are not queued twice. A job lock covers each
   job. A backlog hands the thread back after any recording while other jobs wait.
 - **Backlog** (`backlog.py`): runs at launch and from Settings › People, newest recording first,
@@ -712,8 +718,10 @@ and never goes through the MCP connector.
 - **Directory** (`directory.py`, `routes/people.py`): list, rename, merge and delete people. These
   edit each transcript directly under its lock, never through `speakers.set_names`, so nothing is
   learnt or rejected by a rename. Each holds the job lock throughout, so no voice job sees a person
-  half changed. Deleting a person turns the names their voice gave into typed, frozen names, so
-  transcripts read the same. No response carries a vector.
+  half changed. Deleting a person turns the names their voice gave into typed names, so
+  transcripts read the same, and freezes those and the names typed with their name, so nothing
+  teaches the voice back. Merge into You folds a person into `me`; saving your profile name does
+  the same for a person with that name. No response carries a vector.
 - **Notion**: when a match or a directory change alters the names a transcript shows, the usual
   Notion queue is told, so the page is updated like after any rename.
 
