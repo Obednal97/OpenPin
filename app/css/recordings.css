@@ -79,6 +79,23 @@
 }
 .tag-filter:hover { border-color: var(--accent); color: var(--text); }
 .tag-filter.active { background: var(--accent-fill); color: var(--white); border-color: var(--accent-fill); }
+/* Person filter: a chip-sized select, filled while it filters */
+.person-filter {
+  flex-shrink: 0;
+  max-width: 200px;
+  margin-top: 5px;
+  font: var(--weight-medium) var(--text-xs) var(--font);
+  padding: 2px var(--sp-5) 2px var(--sp-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border);
+  background: transparent url("data:image/svg+xml,%3Csvg width='8' height='5' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right var(--sp-2) center;
+  color: var(--text-secondary);
+  appearance: none;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.person-filter:hover, .person-filter:focus { outline: none; border-color: var(--accent); color: var(--text); }
+.person-filter.active { background-color: var(--accent-fill); color: var(--white); border-color: var(--accent-fill); }
 
 /* === MODULE: Recordings List === */
 .recordings-list { display: flex; flex-direction: column; gap: var(--sp-2); }

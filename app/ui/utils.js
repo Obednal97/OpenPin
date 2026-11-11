@@ -36,6 +36,7 @@ const app = {
   selectedIds: new Set(),
   searchQuery: '',
   activeTagFilters: new Set(),
+  personFilter: '', // a name: only recordings that person was in
   syncing: false,
   syncKind: null, // 'ble' | 'wifi' while app.syncing
   syncGen: 0, // bumped by each sync flow; see _claimSync() in renderer.js
