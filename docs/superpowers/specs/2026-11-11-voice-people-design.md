@@ -76,7 +76,7 @@ He also wants a **people directory** in Settings: who Open Pin knows by voice, h
 
 ### The voice store
 
-One file, `COACHING_DIR / "voices.json"` (mode 0600, atomic writes like `voice_profile.json` today), replaces `voice_profile.json`:
+One file, `DATA_DIR / "people" / "voices.json"` (not in `COACHING_DIR`, which reads every `*.json` there as a recording) (mode 0600, atomic writes like `voice_profile.json` today), replaces `voice_profile.json`:
 
 ```json
 {
@@ -120,7 +120,7 @@ The transcript JSON keeps `speaker_names` (typed, as today) and gains:
 - Runs after the speakers are final, at the same hook that starts coaching (`app/routes/transcribe.py`, next to `start_coaching_async`), in a background worker shared with backlog jobs (one recording at a time).
 - Only when the voice model is installed and the recording's audio is on the Mac. No model means no matching and no error, and the People section offers to install it.
 - For each label: one embedding (`speaker_embeddings`, as today). Score per person = best cosine over their samples. Apply the threshold and the ambiguity rule above, and skip any person in `rejected` for that label.
-- **Embedding cache (my call, after the builder check):** each recording's per-label embeddings are saved once in `COACHING_DIR/embeddings/<session_id>.json` (mode 0600, with the labelling fingerprint, and recomputed when it changes). Coaching's owner match, learning, the backlog and re-matching all read it, so audio is converted and embedded once per recording. Deleting a recording deletes its cache file. These are voice data and stay on the Mac like `voices.json`; SECURITY.md says so.
+- **Embedding cache (my call, after the builder check):** each recording's per-label embeddings are saved once in `DATA_DIR/people/embeddings/<session_id>.json` (mode 0600, with the labelling fingerprint, and recomputed when it changes). Coaching's owner match, learning, the backlog and re-matching all read it, so audio is converted and embedded once per recording. Deleting a recording deletes its cache file. These are voice data and stay on the Mac like `voices.json`; SECURITY.md says so.
 - **Learning someone new names them in the past too:** when a person gains samples, every recording without a typed name for that speaker is re-matched from the cache (maths only, no audio work), in the background worker. Changes queue Notion updates as usual. So naming Harry once fills him in everywhere the voice is confident.
 - A change in the matched names counts as a name change: it bumps the library change counter and queues a full Notion update when the page exists (`speakers._names_changed`).
 
