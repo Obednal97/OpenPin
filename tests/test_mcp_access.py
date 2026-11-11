@@ -233,8 +233,7 @@ def test_disable_leaves_another_process_file(access):
     path.write_text(json.dumps({"port": 1, "key": "k", "pid": os.getpid() + 1}))
     access.disable()
     assert path.exists()
-    access.remove_connection_file()
-    assert not path.exists()
+    path.unlink()
 
 
 def test_disable_without_file_is_fine(access):

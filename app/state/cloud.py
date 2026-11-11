@@ -18,7 +18,6 @@ from app.utils import pairing_store
 from app.utils.audio import unwrap_ogg_to_raw_opus, wrap_opus_ogg
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
-    CLOUD_RECORDINGS_DIR,
     PLAUD_API_DOMAINS,
     PLAUD_CONFIG_PATH,
     PLAUD_WEB_HOST,
@@ -26,6 +25,7 @@ from app.utils.constants import (
     get_all_recordings_dirs,
     get_recordings_dir,
 )
+from app.utils.fileio import atomic_write
 from app.utils.paths import InvalidSessionIdError, is_auxiliary_stem, validate_session_id
 from app.utils.recording_utils import extract_recording_date
 
@@ -177,11 +177,8 @@ def _decode_body(raw):
         text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
         text = text.strip()
         if text.startswith("gAAAAAB"):
-            try:
-                from cryptography.fernet import Fernet
-            except ImportError:
-                logging.warning("[Cloud] cryptography unavailable; can't decrypt Plaud's reply")
-                return {}
+            from cryptography.fernet import Fernet
+
             text = Fernet(PLAUD_FERNET_KEY).decrypt(text.encode()).decode("utf-8")
         body = json.loads(text)
         return body if isinstance(body, dict) else {}
@@ -447,11 +444,7 @@ def save_cloud_token(token, api_domain=None, ut=None, urt=None):
         data["ut"] = ut
     if urt:
         data["urt"] = urt
-    # Write atomically: write to a sibling temp file then rename so a crash
-    # mid-write cannot leave a partial config file.
-    tmp_path = PLAUD_CONFIG_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2))
-    tmp_path.replace(PLAUD_CONFIG_PATH)
+    atomic_write(PLAUD_CONFIG_PATH, json.dumps(data, indent=2))
 
 
 def cloud_api(endpoint, method="GET", params=None, json_body=None):
@@ -631,14 +624,6 @@ def get_login_url(region="eu"):
         logging.warning("[Cloud] Couldn't save the sign-in id: %s", e)
     login_url = f"{PLAUD_WEB_HOST}/launch-desktop?from=desktop&desktop_uuid={desktop_uuid}"
     return login_url, desktop_uuid
-
-
-def auto_detect():
-    """Check if we can auto-detect the Plaud desktop app token."""
-    token, api_domain = _extract_plaud_desktop_token()
-    if token:
-        return {"found": True, "api_domain": api_domain}
-    return {"found": False}
 
 
 # Region in a sign-in code's suffix ("aws:eu-central-1") -> PLAUD_API_DOMAINS key.
@@ -862,7 +847,6 @@ def download_cloud_recordings():
     if not files:
         return {"files": [], "message": "No recordings in cloud"}
 
-    CLOUD_RECORDINGS_DIR.mkdir(exist_ok=True)
     active_rec_dir = get_recordings_dir()
     active_rec_dir.mkdir(exist_ok=True)
     config = load_config()
@@ -1176,45 +1160,6 @@ def trash_cloud_files(cloud_ids):
     )
     r.raise_for_status()
     return r.json()
-
-
-def list_cloud_recordings():
-    """List recordings available in the Plaud cloud."""
-    data = cloud_api(
-        "/file/simple/web",
-        params={
-            "skip": 0,
-            "limit": 9999,
-            "is_trash": 0,
-            "sort_by": "start_time",
-            "is_desc": "true",
-        },
-    )
-    files = data.get("data_file_list", data.get("data_list", []))
-    result = []
-    for f in files:
-        dur = f.get("duration", 0)
-        if dur > 10000:
-            dur = dur / 1000
-        ts = f.get("start_time", 0)
-        if ts > 1e12:
-            ts = ts / 1000
-        result.append(
-            {
-                "file_id": f.get("id", ""),
-                "filename": f.get("filename", "unknown"),
-                "duration": dur,
-                "start_time": ts,
-                "scene": f.get("scene", 0),
-            }
-        )
-    return result
-
-
-def list_cloud_devices():
-    """List devices bound to the Plaud account."""
-    data = cloud_api("/device/list")
-    return data.get("data_devices", [])
 
 
 def _cloud_call_error(exc):

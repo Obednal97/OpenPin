@@ -52,7 +52,6 @@ BUNDLED_REQUIREMENTS_DIR = PROJECT_ROOT / "app" / "requirements"
 BLE_SERVICE_UUID = "00001910-0000-1000-8000-00805f9b34fb"  # Plaud data service
 BLE_WRITE_UUID = "00002bb1-0000-1000-8000-00805f9b34fb"
 BLE_NOTIFY_UUID = "00002bb0-0000-1000-8000-00805f9b34fb"
-BLE_BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 
 # Device authentication — both SN_SIG and BIND_TOKEN are now per-device
 # SN_SIG: obtained from POST /device/sn-sign with {"sns": ["<sn>"]}
@@ -107,7 +106,6 @@ def get_all_recordings_dirs():
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 COACHING_DIR = DATA_DIR / "coaching"
 PEOPLE_DIR = DATA_DIR / "people"
-SESSIONS_DIR = DATA_DIR / "sessions"
 APP_KEY_PATH = PROJECT_ROOT / "keys" / "e2ee_private.pem"
 CONFIG_PATH = DATA_DIR / ".plaud_v2_config.json"
 PLAUD_CONFIG_PATH = DATA_DIR / ".plaud_config.json"

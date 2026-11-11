@@ -166,7 +166,7 @@ def parent(tmp_path, monkeypatch):
             events.append("awake end")
 
     monkeypatch.setattr(dev, "_syncing", SpyLock(events))
-    monkeypatch.setattr(dev, "_keep_awake", KeepAwake)
+    monkeypatch.setattr(dev, "keep_awake", KeepAwake)
     monkeypatch.setattr(dev, "DATA_DIR", tmp_path)
     monkeypatch.setattr(dev, "get_recordings_dir", lambda: tmp_path / "rec")
     monkeypatch.setattr(dev, "load_config", lambda: {})
@@ -624,3 +624,19 @@ def test_wifi_sync_log_never_contains_credentials(parent, monkeypatch, tmp_path)
     text = (tmp_path / "wifi_sync.log").read_text()
     assert "Starting WiFi sync" in text and "token received" in text and "signature received" in text
     assert token not in text and sig not in text
+
+
+def test_wifi_skips_what_bluetooth_skips(tmp_path, monkeypatch):
+    """Deleted ids, a recording in another recordings folder, and (cloud mode) one in Drive."""
+    import app.state.device as dev
+    import app.state.gdrive as gdrive
+
+    active, other = tmp_path / "active", tmp_path / "other"
+    active.mkdir()
+    other.mkdir()
+    (active / "100.ogg").write_bytes(b"x")
+    (other / "200.ogg").write_bytes(b"x")
+    monkeypatch.setattr(dev, "get_all_recordings_dirs", lambda: [active, other])
+    monkeypatch.setattr(dev, "load_config", lambda: {"deleted_ids": [300], "storage_mode": "cloud"})
+    monkeypatch.setattr(gdrive, "get_synced_files", lambda: {"400": {}})
+    assert {"100", "200", "300", "400"} <= dev._wifi_skip_ids()

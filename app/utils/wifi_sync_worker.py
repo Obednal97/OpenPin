@@ -78,6 +78,10 @@ from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     describe_status_reply,
     reply_matches,
 )
+from app.utils.constants import BLE_NOTIFY_UUID as N  # noqa: E402
+from app.utils.constants import BLE_WRITE_UUID as W  # noqa: E402
+from app.utils.fileio import atomic_write  # noqa: E402
+from app.utils.system import keep_awake  # noqa: E402
 
 WS_PORT_CANDIDATES = [8081, 8082, 8083]
 BIND_TOKEN = None  # Set from args — per-device token from cloud API
@@ -248,12 +252,7 @@ def _fsync_dir(path):
 def _write_json_durably(path, data, strict=False):
     """Atomically replace `path` with JSON and fsync it. Raises OSError if the
     file can't be written or fsynced (with strict, also if the directory can't)."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(json.dumps(data, indent=2).encode("utf-8"))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(data, indent=2), fsync=True)
     if not _fsync_dir(path.parent) and strict:
         raise OSError(f"could not fsync {path.parent}")
 
@@ -1205,23 +1204,12 @@ def compute_budget(total_bytes):
     }
 
 
-def _atomic_write(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(path)
-
-
 async def wait_event(event, timeout):
-    """Wait for an asyncio.Event; True if it was set, False on timeout.
-
-    Catches asyncio.TimeoutError explicitly: on Python 3.10 (allowed by
-    pyproject) it is NOT the builtin TimeoutError, so `except TimeoutError`
-    would let the timeout escape and skip the clean error result.
-    """
+    """Wait for an asyncio.Event; True if it was set, False on timeout."""
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
         return True
-    except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+    except TimeoutError:
         return False
 
 
@@ -1256,7 +1244,7 @@ def _save_wifi_partial(recordings_dir, sid, raw, expected_size, reason):
     if raw:
         try:
             if not partial_path.exists() or partial_path.stat().st_size <= len(raw):
-                _atomic_write(partial_path, raw)
+                atomic_write(partial_path, raw)
         except OSError:
             pass
     return {
@@ -1306,7 +1294,7 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
     enc_path = recordings_dir / f"{sid}_encrypted.bin"
     try:
-        _atomic_write(enc_path, raw)
+        atomic_write(enc_path, raw)
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
     partial_path.unlink(missing_ok=True)
@@ -1317,7 +1305,7 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
             return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "decrypt_failed", "error": str(e)}
     final_path = recordings_dir / f"{sid}.ogg"
     try:
-        _atomic_write(final_path, wrap_opus_ogg(frames))
+        atomic_write(final_path, wrap_opus_ogg(frames))
     except OSError as e:
         return {"session_id": sid, "ogg_path": None, "duration": 0, "status": "write_failed", "error": str(e)}
     if raw_size <= 500_000 and not size_mismatch:
@@ -1330,8 +1318,6 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 
 
 SN_SIG = None  # Set from args — per-device signature from cloud API
-W = "00002bb1-0000-1000-8000-00805f9b34fb"
-N = "00002bb0-0000-1000-8000-00805f9b34fb"
 
 
 async def ble_connect_and_setup():
@@ -1467,7 +1453,7 @@ async def ble_connect_and_setup():
             await cl.write_gatt_char(W, enc(pt), response=False)
             try:
                 await asyncio.wait_for(cmd_evt.wait(), timeout=timeout)
-            except (asyncio.TimeoutError, TimeoutError):  # noqa: UP041 — distinct classes on Python 3.10
+            except TimeoutError:
                 pass
             return cmd_resp[0]
         finally:
@@ -1772,37 +1758,6 @@ async def run_guarded(body, cleanup):
             loop.remove_signal_handler(signal.SIGTERM)
 
 
-class _KeepAwake:
-    """NSProcessInfo activity (as app/state/device.py's _keep_awake): no App Nap
-    and no idle system sleep while the Mac is on the hotspot. No-op without pyobjc."""
-
-    _OPTIONS = 0x00FFFFFF  # NSActivityUserInitiated
-
-    def __init__(self, reason):
-        self._reason = reason
-        self._token = None
-
-    def __enter__(self):
-        try:
-            from Foundation import NSProcessInfo
-
-            self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(self._OPTIONS, self._reason)
-        except Exception:
-            self._token = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._token is not None:
-            try:
-                from Foundation import NSProcessInfo
-
-                NSProcessInfo.processInfo().endActivity_(self._token)
-            except Exception:
-                pass
-            self._token = None
-        return False
-
-
 def _emit_result(result):
     """Final JSON result on stdout; never raises (the parent may be gone)."""
     try:
@@ -1883,9 +1838,6 @@ async def transfer(args):
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
     app_rsa_key = load_pem_private_key(app_key_path.read_bytes(), password=None)
-    # The app's own modules (decrypt, ogg wrapping) are imported lazily from the
-    # project root.
-    sys.path.insert(0, str(app_key_path.parent.parent))
     status(f"WiFi interface: {get_wifi_interface()}", 3)
 
     wifi_ssid = f"Plaud{sn[-4:]}"
@@ -2037,7 +1989,7 @@ async def main():
                         }
                     )
                     return
-        with _KeepAwake("Plaud WiFi sync"):
+        with keep_awake("Plaud WiFi sync"):
             try:
                 result = await transfer(args)
             except Exception as e:  # the restore already ran (run_guarded's cleanup)

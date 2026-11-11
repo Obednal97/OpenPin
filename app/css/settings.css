@@ -60,16 +60,6 @@
   white-space: nowrap;
   flex: 1;
 }
-.webhook-status {
-  font-size: var(--text-xs);
-  padding: var(--sp-0_5) var(--sp-1_5);
-  border-radius: var(--radius-full);
-  font-weight: var(--weight-semibold);
-  flex-shrink: 0;
-  margin: 0 var(--sp-2);
-}
-.webhook-status.active { background: var(--green-subtle); color: var(--green-text); }
-.webhook-status.failed { background: var(--destructive-subtle); color: var(--destructive); }
 .webhook-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .webhook-name {
   font-size: var(--text-sm);
@@ -173,32 +163,6 @@
 .proc-select:hover { border-color: var(--border-strong); }
 .proc-select:focus { border-color: var(--accent); outline: none; }
 
-.proc-recommended {
-  font-size: 10px;
-  font-weight: var(--weight-bold);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 2px var(--sp-1_5);
-  border-radius: var(--radius-full);
-  background: var(--accent-subtle);
-  color: var(--accent);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.proc-recommended.hidden { display: none; }
-
-.proc-toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: var(--sp-2);
-  font-size: var(--text-sm);
-}
-
 /* Inline key input within processing sections */
 .proc-key-inline {
   background: var(--bg-input);
@@ -285,14 +249,6 @@
   padding: var(--sp-3);
 }
 .ai-key-group + .ai-key-group { margin-top: var(--sp-3); }
-.ai-key-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--sp-2);
-}
-.ai-key-name { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
-.ai-key-detail { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: 1px; }
 .ai-key-badge {
   flex-shrink: 0;
   white-space: nowrap;
@@ -423,12 +379,6 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-2);
 }
-.dm-toggles {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-}
 .dm-toggle-row {
   padding: var(--sp-2) var(--sp-3);
   background: var(--bg-input);
@@ -519,18 +469,6 @@
   margin-left: var(--sp-2);
   vertical-align: middle;
   animation: spin 0.7s linear infinite;
-}
-
-/* === MODULE: Indeterminate Progress === */
-.progress-bar.indeterminate .progress-fill {
-  width: 30% !important;
-  margin-left: 0 !important;
-  transition: none !important;
-  animation: indeterminate-sweep 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-@keyframes indeterminate-sweep {
-  0%   { margin-left: -30% !important; }
-  100% { margin-left: 100% !important; }
 }
 
 /* === MODULE: Delete Dialog === */

@@ -11,11 +11,12 @@ from flask import Blueprint, jsonify, request
 from app.coaching import store as coaching_store
 from app.people import embeddings as voice_embeddings
 from app.state import speakers
-from app.utils import redownload_backup
+from app.utils import redownload_backup, transcripts
 from app.utils import speaker_names as sn
 from app.utils import tags as tags_store
 from app.utils.config import _config_lock, load_config, save_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR, get_all_recordings_dirs, get_recordings_dir
+from app.utils.fileio import atomic_write
 from app.utils.paths import (
     InvalidSessionIdError,
     PathOutsideError,
@@ -404,55 +405,6 @@ def remove_recording_tags():
     return _change_tags(tags_store.remove_tags)
 
 
-@bp.route("/tags", methods=["GET"])
-def list_tags():
-    """Every tag with how many recordings carry it."""
-    return jsonify({"tags": tags_store.all_tags()})
-
-
-@bp.route("/recordings/tag", methods=["POST"])
-def tag_recording():
-    """Set a recording's whole tag list.
-
-    Kept for compatibility only: the app adds and removes single tags through
-    /recordings/tags/add and /recordings/tags/remove, so a stale window can't
-    wipe a tag something else added.
-    """
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    tags = data.get("tags", [])
-    if not session_id:
-        return jsonify({"error": "No session_id"}), 400
-    try:
-        validate_session_id(session_id)
-    except InvalidSessionIdError as e:
-        return _invalid(e)
-    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-        return jsonify({"error": "tags must be a list of strings"}), 400
-
-    update_config(lambda c: c.setdefault("recording_tags", {}).__setitem__(session_id, tags))
-
-    # Also persist tags in the transcript JSON for recovery after config resets
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if transcript_path.exists():
-        try:
-            import json as _json
-
-            with get_transcript_lock(session_id):
-                t_data = _json.loads(transcript_path.read_text())
-                t_data["tags"] = tags
-                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
-
-    from app.utils import changes
-
-    changes.bump()
-    notion_queued = tags_store.enqueue_notion_sync(session_id)
-
-    return jsonify({"saved": True, "notion_queued": notion_queued})
-
-
 @bp.route("/recordings/rename", methods=["POST"])
 def rename_recording():
     """Set a custom title for a recording."""
@@ -476,20 +428,16 @@ def rename_recording():
     update_config(_apply)
 
     # Also persist name in the transcript JSON for recovery after config resets
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    if transcript_path.exists():
-        try:
-            import json as _json
+    def _name(t_data):
+        if title:
+            t_data["custom_name"] = title
+        else:
+            t_data.pop("custom_name", None)
 
-            with get_transcript_lock(session_id):
-                t_data = _json.loads(transcript_path.read_text())
-                if title:
-                    t_data["custom_name"] = title
-                else:
-                    t_data.pop("custom_name", None)
-                transcript_path.write_text(_json.dumps(t_data, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+    try:
+        transcripts.update(TRANSCRIPTS_DIR / f"{session_id}.json", _name)
+    except Exception:
+        pass
 
     # Rename reaches Notion as a properties-only update (never raises).
     from app.routes.notion import enqueue_property_sync
@@ -946,13 +894,7 @@ def load_transcript(session_id) -> dict | None:
     Read under the transcript lock: without it, json.loads can catch a partial write
     from a diarization or summarization background task. The caller validates the id.
     """
-    path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    try:
-        with get_transcript_lock(session_id):
-            data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return transcripts.load(TRANSCRIPTS_DIR / f"{session_id}.json")
 
 
 def transcript_item(session_id, data: dict, profile: str) -> dict:
@@ -1116,8 +1058,8 @@ def update_transcript():
             # A summary the user saved by hand is current by definition.
             transcript.pop("summary_stale", None)
 
-        json_path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2))
-        txt_path.write_text(transcript.get("text", ""))
+        atomic_write(json_path, json.dumps(transcript, ensure_ascii=False, indent=2))
+        atomic_write(txt_path, transcript.get("text", ""))
         text_changed = transcript.get("text") != old_text
 
     # After releasing the transcript lock: the coaching store has its own lock.
@@ -1126,39 +1068,6 @@ def update_transcript():
     if names_moved:
         speakers._names_changed(session_id)
     return jsonify({"saved": True})
-
-
-@bp.route("/transcripts/delete", methods=["POST"])
-def delete_transcript():
-    """Move just the transcript for a recording to the Trash (keeps the audio).
-
-    Response: {"deleted": [paths], "trashed": bool, "trash_location": ..., "errors": [...]}.
-    """
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("session_id", "")
-    if not session_id:
-        return jsonify({"error": "No session_id provided"}), 400
-    try:
-        validate_session_id(session_id)
-    except InvalidSessionIdError as e:
-        return _invalid(e)
-
-    paths = [TRANSCRIPTS_DIR / f"{session_id}.{ext}" for ext in ("json", "txt")]
-    with get_transcript_lock(session_id):
-        deleted, locations, errors = _trash_files(paths)
-    # Coaching is built from the transcript, so its data goes with it (after the
-    # transcript lock is released: the coaching store has its own lock).
-    ct, cloc, cerrs = _trash_coaching_files(session_id)
-    deleted, locations, errors = deleted + ct, locations | cloc, errors + cerrs
-
-    return jsonify(
-        {
-            "deleted": deleted,
-            "trashed": not errors,
-            "trash_location": _trash_location(locations),
-            "errors": errors,
-        }
-    )
 
 
 # ---------------------------------------------------------------- speaker names

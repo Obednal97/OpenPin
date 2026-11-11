@@ -11,15 +11,15 @@ The pure rules (validation, applying names, the profile default) are in
 
 import json
 import logging
-import os
 from threading import Lock
 
 from app.coaching import store as coaching_store
 from app.people import store as people_store
-from app.utils import changes
+from app.utils import changes, transcripts
 from app.utils import speaker_names as sn
 from app.utils.config import load_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.fileio import atomic_write
 from app.utils.paths import validate_session_id
 from app.utils.transcript_locks import get_transcript_lock
 
@@ -32,18 +32,11 @@ def _path(session_id: str):
 
 def _read(session_id: str) -> dict | None:
     """The transcript JSON, or None when there is none (or it is unreadable)."""
-    try:
-        with get_transcript_lock(session_id):
-            data = json.loads(_path(session_id).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return transcripts.load(_path(session_id))
 
 
 def _write_atomic(path, data: dict) -> None:
-    tmp = path.with_name(f".{path.name}.names.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def profile_name() -> str | None:

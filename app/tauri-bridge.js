@@ -76,7 +76,7 @@ function _bridgeHeaders(extra) {
   return headers;
 }
 
-// --- HTTP proxy (same logic as preload.js apiCall) ---
+// --- HTTP proxy ---
 
 const REPORT_ENDPOINTS = new Set([
   '/device/connect', '/device/scan', '/device/scan-known', '/device/wifi-sync',
@@ -92,7 +92,7 @@ const NO_TIMEOUT_ENDPOINTS = new Set([
   '/transcribe', '/summarize', '/notion/push', // Notion creates of long transcripts can exceed 30s
   '/notion/duplicates', // reads every page of the database the first time
   '/cloud/sync',
-  '/gdrive/sync', '/gdrive/upload',
+  '/gdrive/sync',
   '/recordings/redownload', '/recordings/crop', '/recordings/export',
   '/coaching/voice/install', // downloads and installs the speaker model
   '/coaching/voice/setup', // a first setup can load the model and decode a whole recording
@@ -257,10 +257,8 @@ async function apiCall(method, endpoint, body = null) {
 
 const _eventCallbacks = {
   'startup-error': [],
-  'startup-status': [],
   'oauth-callback': [],
   'system-wake': [],
-  'notification-action': [],
   'update-status': [],
   'tray-sync': [],
 };
@@ -334,7 +332,7 @@ function addListener(eventName, callback) {
   }
 }
 
-// --- Expose window.plaud (identical API to preload.js) ---
+// --- Expose window.plaud ---
 
 window.plaud = {
   // Device
@@ -395,12 +393,9 @@ window.plaud = {
   redownloadRecordings: (session_ids) => apiCall('POST', '/recordings/redownload', { session_ids }),
   restoreRedownload: (sessionIds) => apiCall('POST', '/recordings/restore-redownload', { session_ids: sessionIds }),
   cloudTrash: (ids) => apiCall('POST', '/cloud/trash', { ids }),
-  deleteTranscript: (session_id) => apiCall('POST', '/transcripts/delete', { session_id }),
-  tagRecording: (session_id, tags) => apiCall('POST', '/recordings/tag', { session_id, tags }),
   // Add or remove single tags: { tags: { sid: [...] }, errors?: { sid: msg } }.
   addTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/add', { session_ids, tags }),
   removeTags: (session_ids, tags) => apiCall('POST', '/recordings/tags/remove', { session_ids, tags }),
-  listTags: () => apiCall('GET', '/tags'),
   renameRecording: (session_id, title) => apiCall('POST', '/recordings/rename', { session_id, title }),
   exportRecording: (session_id) => apiCall('POST', '/recordings/export', { session_id }),
   cropRecording: (session_id, start, end, mode) =>
@@ -473,9 +468,7 @@ window.plaud = {
     apiCall('POST', '/cloud/exchange-token', { auth_code, desktop_uuid, source: source || 'paste' }),
   cloudLoginToken: (token, region) => apiCall('POST', '/cloud/login-token', { token, region }),
   cloudLogout: () => apiCall('POST', '/cloud/logout'),
-  cloudRecordings: () => apiCall('GET', '/cloud/recordings'),
   cloudSync: (direction) => apiCall('POST', '/cloud/sync', { direction }),
-  cloudDevices: () => apiCall('GET', '/cloud/devices'),
   cloudBindDevice: (sn, name, model) => apiCall('POST', '/cloud/bind-device', { sn, name, model }),
   cloudSnSign: (sn) => apiCall('POST', '/cloud/sn-sign', { sn }),
 
@@ -492,7 +485,6 @@ window.plaud = {
   // URL resolution; callers checking server status need a fresh value.
   getApiInfo: () => invoke('get_api_info'),
   onStartupError: (callback) => addListener('startup-error', callback),
-  onStartupStatus: (callback) => addListener('startup-status', callback),
 
   // Notion
   notionStatus: () => apiCall('GET', '/notion/status'),
@@ -517,10 +509,7 @@ window.plaud = {
   gdriveFolders: (q) => apiCall('GET', `/gdrive/folders${q ? '?q=' + encodeURIComponent(q) : ''}`),
   gdriveCreateFolder: (name) => apiCall('POST', '/gdrive/create-folder', { name }),
   gdriveSetFolder: (folder_id, folder_name) => apiCall('POST', '/gdrive/set-folder', { folder_id, folder_name }),
-  gdriveUpload: (session_id) => apiCall('POST', '/gdrive/upload', { session_id }),
   gdriveSync: () => apiCall('POST', '/gdrive/sync'),
-  gdriveSyncStatus: () => apiCall('GET', '/gdrive/sync-status'),
-  gdriveUploadProgress: () => apiCall('GET', '/gdrive/upload-progress'),
 
   // Theme — invoke Rust command, then apply the resolved theme to the DOM
   cycleTheme: async () => {
@@ -557,9 +546,7 @@ window.plaud = {
   onSystemWake: (callback) => addListener('system-wake', callback),
   // Tray "Sync Device" menu item — routed through the normal in-app sync flow
   onTraySync: (callback) => addListener('tray-sync', callback),
-  showNotification: (title, body, actionLabel) =>
-    invoke('show_notification', { title, body, actionLabel }),
-  onNotificationAction: (callback) => addListener('notification-action', callback),
+  showNotification: (title, body) => invoke('show_notification', { title, body }),
 
   // Directory picker
   selectDirectory: () => invoke('select_directory'),

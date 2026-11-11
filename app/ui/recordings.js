@@ -548,10 +548,6 @@ async function confirmRedownload(sessionId) {
 
 // Put back the copy that "Re-download from device" set aside.
 async function restoreRedownload(sessionId) {
-  if (!window.plaud || typeof window.plaud.restoreRedownload !== 'function') {
-    toast('Restore is not available in this version', 'error');
-    return false;
-  }
   try {
     const res = await window.plaud.restoreRedownload([sessionId]);
     if (res && res.error) {
@@ -676,12 +672,7 @@ function showMoveDialog(ids, onMoved) {
   });
 
   document.getElementById('move-browse-btn').addEventListener('click', async () => {
-    let dir;
-    if (window.plaud.selectDirectory) {
-      dir = await window.plaud.selectDirectory();
-    } else {
-      dir = prompt('Enter the full destination path:');
-    }
+    const dir = await window.plaud.selectDirectory();
     if (dir) doMove(dir);
     else cleanup();
   });

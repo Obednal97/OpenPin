@@ -28,8 +28,8 @@
      onRetry(fn)                           Retry on the failure screen
                                            calls fn (renderer: init)
 
-   Without get_startup_status (an older shell), it falls back to
-   polling /health for up to a minute.
+   If get_startup_status fails (the IPC call errors or returns no
+   phase), it falls back to polling /health for up to a minute.
    ============================================================ */
 
 (function () {
@@ -39,7 +39,7 @@
   const SLOW_HINT_MS = 8000; // after this, explain that first launch is slow
   const STARTING_CEILING_MS = 10 * 60 * 1000; // Rust still "starting"
   const READY_GRACE_MS = 30000; // Rust "ready" but /health unreachable from the page
-  const NO_STATUS_CEILING_MS = 60000; // no startup status available (older shell)
+  const NO_STATUS_CEILING_MS = 60000; // no startup status available (IPC call failed)
   const BG_POLL_INTERVAL_MS = 5000;
   const RECOVERY_POLL_MS = 2000; // failure screen: check whether Rust became ready
 
@@ -59,7 +59,7 @@
     return core.invoke(cmd, args);
   }
 
-  /** Latest startup status from Rust, or null if the shell doesn't provide one. */
+  /** Latest startup status from Rust, or null if the IPC call fails. */
   async function readStartupStatus() {
     try {
       const st = await invokeRust('get_startup_status');

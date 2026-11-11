@@ -13,14 +13,13 @@ Format (version 1)::
 
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from app.utils import pairing_store
 from app.utils.config import load_config, update_config
 from app.utils.constants import DATA_DIR, PROJECT_ROOT
+from app.utils.fileio import atomic_write
 
 # The app's pre-rename name; a file-format id, kept so older exports import.
 FORMAT = "plaud-v2-pairing"
@@ -216,21 +215,7 @@ def resolve_import_path(raw) -> Path:
 
 def write_export(target: Path, data: dict) -> None:
     """Write ``data`` to ``target`` atomically with mode 0600."""
-    text = json.dumps(data, indent=2) + "\n"
-    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".plaud-pairing-", suffix=".tmp")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, str(target))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write(target, json.dumps(data, indent=2) + "\n", mode=0o600, fsync=True)
 
 
 def export_to(raw_path) -> dict:

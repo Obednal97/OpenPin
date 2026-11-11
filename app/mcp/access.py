@@ -22,11 +22,11 @@ import os
 import secrets
 import shlex
 import sys
-import tempfile
 import threading
 from pathlib import Path
 
 from app.utils import constants
+from app.utils.fileio import atomic_write
 
 MCP_KEY_HEADER = "X-Open-Pin-MCP-Key"
 CONNECTION_FILE_NAME = "mcp-connection.json"
@@ -129,20 +129,7 @@ def _launcher_text() -> str:
 def _atomic_write(path: Path, text: str, mode: int) -> None:
     """Write via a temp file in the same folder, created with ``mode``, then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write(path, text, mode=mode, fsync=True)
 
 
 def write_launcher() -> Path:
@@ -241,9 +228,3 @@ def mark_off(port: int) -> None:
         _port = int(port)
         _remove_file(force=True)
         _write_off_marker()
-
-
-def remove_connection_file() -> None:
-    """Delete the connection file whoever wrote it (a stale one left by a crash)."""
-    with _lock:
-        _remove_file(force=True)

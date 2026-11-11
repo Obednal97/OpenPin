@@ -124,10 +124,6 @@ pub fn run() {
             // this copy's path if the app was moved (see migrate.rs).
             migrate::fix_login_item(app.handle());
 
-            // Keep the latest startup message for the page to poll: the first
-            // ones are emitted before the page has loaded.
-            lifecycle::track_startup_messages(app.handle());
-
             // SIGTERM/SIGINT (logout, `kill`, Ctrl-C in dev) would otherwise
             // end the process without stopping the Python backend.
             lifecycle::handle_termination_signals(app.handle());

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import threading
 import traceback
 from pathlib import Path
@@ -17,6 +16,7 @@ from app.providers.transcribe import transcribe_deepgram, transcribe_groq, trans
 from app.providers.validate import validate_key as do_validate_key
 from app.utils.config import load_config, update_config
 from app.utils.constants import TRANSCRIPTS_DIR
+from app.utils.fileio import atomic_write
 from app.utils.paths import (
     InvalidSessionIdError,
     PathOutsideError,
@@ -139,13 +139,6 @@ _TRANSCRIPTION_KEYS = (
 )
 
 
-def _write_text_atomic(path, text):
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
     """Merge a fresh transcription into the existing transcript JSON.
 
@@ -178,9 +171,9 @@ def _merge_transcript(session_id, transcript_path, new_fields, txt_text=None):
         )
         if not labels_pending:
             drop_if_relabelled(merged, existing.get("segments"))
-        _write_text_atomic(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
+        atomic_write(transcript_path, json.dumps(merged, indent=2, ensure_ascii=False))
         if txt_text is not None:
-            _write_text_atomic(transcript_path.with_suffix(".txt"), txt_text)
+            atomic_write(transcript_path.with_suffix(".txt"), txt_text)
     # After releasing the transcript lock: the coaching store has its own lock.
     if existing.get("text") != new_fields.get("text"):
         coaching_store.mark_stale(session_id)
@@ -264,9 +257,9 @@ def _background_diarize(
             # the same labelling, drop them for a different one, or when no labels came back
             # (failed, or "none"), since then they can't return.
             drop_if_relabelled(td, old_segments)
-            _write_text_atomic(tp, json.dumps(td, indent=2, ensure_ascii=False))
+            atomic_write(tp, json.dumps(td, indent=2, ensure_ascii=False))
             if write_txt and t_obj is not None:
-                _write_text_atomic(tp.with_suffix(".txt"), t_obj.formatted)
+                atomic_write(tp.with_suffix(".txt"), t_obj.formatted)
     except (OSError, ValueError) as e:
         logging.warning("[bg-diarize] Could not update transcript %s: %s", session_id, e)
         return
@@ -336,7 +329,7 @@ def _auto_title(session_id, transcript_path, text, segments):
                 return ""
             t_data["auto_title"] = title
             t_data["auto_title_source"] = "transcript"
-            _write_text_atomic(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
+            atomic_write(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
 
         def _set_name(cfg):
             names = cfg.setdefault("recording_names", {})
@@ -796,7 +789,7 @@ def summarize_transcript():
                 t_data["summary_stale"] = True
             else:
                 t_data.pop("summary_stale", None)
-            _write_text_atomic(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
+            atomic_write(transcript_path, json.dumps(t_data, indent=2, ensure_ascii=False))
 
         def _set_default_name(cfg):
             names = cfg.setdefault("recording_names", {})

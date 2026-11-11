@@ -1,14 +1,10 @@
 """Notion MCP integration state and operations."""
 
-import base64
-import hashlib
 import json
 import logging
-import os
-import queue
 import threading
 import time
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests as http_requests
 
@@ -155,13 +151,6 @@ def _discover():
 def _resource():
     """The RFC 8707 resource indicator for authorize/token requests."""
     return _notion_state.get("resource") or NOTION_MCP_URL
-
-
-def _generate_pkce():
-    """Generate PKCE code_verifier and code_challenge."""
-    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
-    return code_verifier, code_challenge
 
 
 def _register_client(registration_endpoint):
@@ -527,7 +516,7 @@ def start_connect():
         _notion_state["client_id"] = client_id
         _notion_state["client_secret"] = client_secret
 
-    code_verifier, code_challenge = _generate_pkce()
+    code_verifier, code_challenge = oauth_page.pkce_pair()
     _notion_state["code_verifier"] = code_verifier
 
     import uuid as uuid_mod
@@ -597,65 +586,9 @@ def _on_connected():
 
 def _start_callback_server():
     """Start a temporary HTTP server to handle the OAuth callback."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    class CallbackHandler(BaseHTTPRequestHandler):
-        def _signal(self, result):
-            """Put result onto the queue without blocking if it's already full."""
-            try:
-                type(self)._result_queue.put_nowait(result)
-            except queue.Full:
-                pass  # First result already wins; ignore duplicates
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            if parsed.path == "/notion/callback":
-                params = parse_qs(parsed.query)
-                code = params.get("code", [None])[0]
-                state = params.get("state", [None])[0]
-                error = params.get("error", [None])[0]
-
-                if error:
-                    if error == "access_denied":
-                        oauth_page.send(self, "notion", "cancelled")
-                    else:
-                        desc = params.get("error_description", [""])[0]
-                        oauth_page.send(self, "notion", "failed", f"{error}: {desc}" if desc else error)
-                    self._signal({"error": error})
-                    return
-
-                if state != _notion_state.get("state"):
-                    oauth_page.send(self, "notion", "expired")
-                    self._signal({"error": "csrf_mismatch"})
-                    return
-
-                try:
-                    _exchange_code(code)
-                    oauth_page.send(self, "notion", "connected")
-                    self._signal({"ok": True})
-                except Exception as e:
-                    oauth_page.send(self, "notion", "failed", str(e))
-                    self._signal({"error": str(e)})
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-        def log_message(self, format, *args):
-            pass
-
-    result_queue: queue.Queue = queue.Queue(maxsize=1)
-    CallbackHandler._result_queue = result_queue  # type: ignore[attr-defined]
-
-    def run_server():
-        server = HTTPServer(("127.0.0.1", NOTION_CALLBACK_PORT), CallbackHandler)
-        server.timeout = 1
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline and result_queue.empty():
-            server.handle_request()
-        server.server_close()
-
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
+    oauth_page.serve_callback(
+        NOTION_CALLBACK_PORT, "/notion/callback", "notion", lambda: _notion_state.get("state"), _exchange_code
+    )
 
 
 def disconnect():
@@ -683,10 +616,6 @@ def set_database(db_id, db_name=""):
 
 def get_database_id():
     return _notion_state.get("database_id")
-
-
-def get_database_name():
-    return _notion_state.get("database_name")
 
 
 # Load saved state on import

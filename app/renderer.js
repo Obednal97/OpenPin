@@ -473,25 +473,6 @@ window.plaud.onUpdateStatus((data) => {
     message.textContent = `v${data.version} ready to install`;
     actionBtn.style.display = '';
     actionBtn.textContent = 'Restart to update';
-  } else if (data.status === 'major-update-downloading') {
-    // Major version DMG downloading
-    banner.classList.remove('hidden');
-    const pct = data.percent ? ` ${data.percent}%` : '...';
-    message.textContent = `Downloading v${data.version} (major upgrade)${pct}`;
-    actionBtn.style.display = 'none';
-  } else if (data.status === 'major-update') {
-    // Major version DMG ready — auto-opened by main process
-    banner.classList.remove('hidden');
-    message.textContent = `v${data.version} ready — drag to Applications to install`;
-    actionBtn.style.display = '';
-    actionBtn.textContent = 'Open DMG Again';
-    actionBtn.disabled = false;
-    actionBtn.onclick = (e) => {
-      e.preventDefault();
-      if (data.dmgPath) {
-        window.plaud.openExternal(`file://${data.dmgPath}`);
-      }
-    };
   } else if (data.status === 'error') {
     console.error('[Updater]', data.message);
     // If an update was in progress (banner showing), say what went wrong
@@ -549,9 +530,9 @@ function offerWifiSync(totalSize, fileCount, isBackground) {
     // App is in tray/background — show system notification
     window.plaud.showNotification(
       'Large recordings detected',
-      `${sizeStr} to sync. Click to use Wi-Fi transfer (temporarily disconnects the internet).`,
-      'wifi-sync',
+      `${sizeStr} to sync. Confirm the Wi-Fi transfer in Open Pin (it temporarily disconnects the internet).`,
     );
+    startWifiSync(); // shows the Wi-Fi confirmation in the window
     return;
   }
 
@@ -851,13 +832,6 @@ $('#wifi-confirm-overlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) dismissWifiConfirm();
 });
 
-// Handle notification action from background
-window.plaud.onNotificationAction((action) => {
-  if (action === 'wifi-sync') {
-    startWifiSync();
-  }
-});
-
 // ---- System Wake Recovery ----
 // BLE connections die during macOS sleep — detect wake and force reconnect cycle
 // On macOS the WKWebView's NSURLSession can also be stranded by sleep, making
@@ -986,7 +960,7 @@ function showStartupError(error) {
 
   const footer = document.createElement('div');
   footer.style.cssText = 'margin-top:12px;font-size:11px;opacity:0.5;';
-  footer.textContent = `This error has been automatically reported. Error code: ${code}`;
+  footer.textContent = `Details are in the log. To share them, use Report a bug › Export bug report. Error code: ${code}`;
   p.appendChild(footer);
 }
 

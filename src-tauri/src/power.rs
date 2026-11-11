@@ -21,8 +21,6 @@ use tauri::{AppHandle, Emitter};
 
 /// Frontend event sent once per wake (renderer.js: `onSystemWake`).
 pub const WAKE_EVENT: &str = "system-wake";
-/// Frontend event sent just before the machine sleeps. Nothing listens yet.
-pub const WILL_SLEEP_EVENT: &str = "system-will-sleep";
 
 const FALLBACK_TICK: Duration = Duration::from_secs(5);
 /// Wall-clock gap between two fallback ticks that counts as a sleep.
@@ -143,14 +141,12 @@ pub fn install_workspace_observers(app: &AppHandle) {
     let on_wake = RcBlock::new(move |_note: NonNull<NSNotification>| {
         emit_wake(&wake_app, "NSWorkspaceDidWakeNotification", None);
     });
-    let sleep_app = app.clone();
-    let on_will_sleep = RcBlock::new(move |_note: NonNull<NSNotification>| {
+    let on_will_sleep = RcBlock::new(|_note: NonNull<NSNotification>| {
         log::info!("[PowerMonitor] System going to sleep");
-        let _ = sleep_app.emit(WILL_SLEEP_EVENT, ());
     });
 
-    // SAFETY: the notification names are AppKit's own constants; the blocks
-    // only capture an AppHandle (Send + Sync) and run on the main queue.
+    // SAFETY: the notification names are AppKit's own constants; the wake
+    // block only captures an AppHandle (Send + Sync); both run on the main queue.
     unsafe {
         let wake_token = center.addObserverForName_object_queue_usingBlock(
             Some(NSWorkspaceDidWakeNotification),

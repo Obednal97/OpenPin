@@ -8,6 +8,7 @@ Spawned by the Tauri Rust shell as a child process on localhost:5123.
 import hmac
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -372,6 +373,10 @@ if __name__ == "__main__":
     _install_exit_cleanup()
 
     _clean_partial_files()
+    # Older versions left a BLE session key file here on every connect; nothing reads them.
+    from app.utils.constants import DATA_DIR as _data_dir
+
+    shutil.rmtree(_data_dir / "sessions", ignore_errors=True)
 
     # Recover metadata from transcript files and start background workers
     # *here* (not at module-import time). This guarantees init runs before

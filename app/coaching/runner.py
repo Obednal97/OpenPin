@@ -47,10 +47,10 @@ from app.coaching.metrics import compute_metrics
 from app.coaching.review import review_conversation
 from app.coaching.targets import LAUGHTER_MAX_S, MIN_COACHING_SECONDS
 from app.providers.llm_json import ollama_unavailable
+from app.utils import transcripts
 from app.utils.config import load_config
 from app.utils.constants import TRANSCRIPTS_DIR
 from app.utils.paths import InvalidSessionIdError, validate_session_id
-from app.utils.transcript_locks import get_transcript_lock
 
 log = logging.getLogger(__name__)
 
@@ -94,13 +94,7 @@ def has_transcript(session_id: str) -> bool:
 
 
 def _read_transcript(session_id: str) -> dict | None:
-    path = TRANSCRIPTS_DIR / f"{session_id}.json"
-    try:
-        with get_transcript_lock(session_id):
-            data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return transcripts.load(TRANSCRIPTS_DIR / f"{session_id}.json")
 
 
 def _find_audio(session_id: str) -> str | None:

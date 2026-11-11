@@ -31,16 +31,4 @@ cp "$APP"/assets/*.svg "$DIST/assets/" 2>/dev/null || true
 # Root-level SVG icons (e.g. notion-icon.svg)
 cp "$APP"/*.svg "$DIST/" 2>/dev/null || true
 
-# App icons
-cp "$APP"/icon*.png "$DIST/" 2>/dev/null || true
-cp "$APP"/icon.icns "$DIST/" 2>/dev/null || true
-cp "$APP"/trayTemplate*.png "$DIST/" 2>/dev/null || true
-
-# Python backend files (needed by the sidecar)
-cp "$APP"/api_server.py "$DIST/"
-cp -r "$APP"/routes "$DIST/routes"
-cp -r "$APP"/state "$DIST/state"
-cp -r "$APP"/providers "$DIST/providers"
-cp -r "$APP"/utils "$DIST/utils"
-
 echo "Frontend prepared in $DIST"

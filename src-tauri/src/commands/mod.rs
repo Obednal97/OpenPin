@@ -245,7 +245,13 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 // a secret, so it can be rotated without an app release.
 
 mod report_scrub;
-pub(crate) mod sha256;
+
+use sha2::{Digest, Sha256};
+
+/// SHA-256 as lowercase hex.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
 
 /// Base URL of the update Worker (infra/update-worker/).
 pub(crate) const WORKER_BASE: &str = "https://openpin.bednal.com";
@@ -434,18 +440,10 @@ pub(crate) fn running_app_path() -> String {
 
 /// SHA-256 of a file on disk (hex).
 fn file_sha256(path: &std::path::Path) -> Result<String, String> {
-    use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
-    let mut h = sha256::Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize_hex())
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).map_err(|e| format!("Read error: {e}"))?;
+    Ok(format!("{:x}", h.finalize()))
 }
 
 /// Does an already-downloaded file match the release asset?
@@ -602,7 +600,7 @@ fn download_update_with_idle(
     let total = resp.content_length().unwrap_or(expected);
     let result = (|| -> Result<(), String> {
         let mut file = std::fs::File::create(&part).map_err(|e| format!("Failed to create file: {e}"))?;
-        let mut hasher = sha256::Sha256::new();
+        let mut hasher = Sha256::new();
         let mut downloaded: u64 = 0;
         let mut last_pct: u32 = u32::MAX;
         let mut buf = vec![0u8; 1 << 16];
@@ -629,7 +627,7 @@ fn download_update_with_idle(
         if downloaded != expected {
             return Err(format!("Download incomplete: got {downloaded} of {expected} bytes"));
         }
-        let digest = hasher.finalize_hex();
+        let digest = format!("{:x}", hasher.finalize());
         if let Some(want) = &release.asset.sha256 {
             if !digest.eq_ignore_ascii_case(want) {
                 return Err("Downloaded update failed its checksum — not installing it".to_string());
@@ -883,7 +881,7 @@ fn platform_uuid() -> Option<String> {
 /// Same value the old `shasum`-based version produced, so it stays stable.
 fn device_id() -> String {
     match platform_uuid() {
-        Some(uuid) => sha256::hex_digest(uuid.as_bytes()).chars().take(8).collect(),
+        Some(uuid) => sha256_hex(uuid.as_bytes()).chars().take(8).collect(),
         None => "unknown".to_string(),
     }
 }
@@ -905,12 +903,12 @@ fn tail_lines(s: &str, max_lines: usize) -> String {
 /// can't be brute-forced back to the serial but still groups reports from one
 /// device.
 fn id_tag(salt: &str, value: &str) -> String {
-    let mut h = sha256::Sha256::new();
+    let mut h = Sha256::new();
     h.update(b"plaud-v2-report-id:");
     h.update(salt.as_bytes());
     h.update(b":");
     h.update(value.to_ascii_uppercase().as_bytes());
-    h.finalize_hex().chars().take(8).collect()
+    format!("{:x}", h.finalize()).chars().take(8).collect()
 }
 
 fn is_word_byte(b: u8) -> bool {
@@ -1115,32 +1113,14 @@ fn python_env_info() -> String {
     info.join("\n")
 }
 
-/// Backend fields for the system-info block, or None if the server lock is
-/// held and `wait` is false.
-fn server_snapshot(wait: bool) -> Option<(bool, u16, String, String)> {
-    let server = if wait {
+/// System info for an exported report. `python_env_info` runs `pip` twice
+/// (a second or more).
+fn system_info_block(version: &str) -> String {
+    let (python_running, port, py_path, py_ver) = {
         // Tolerate a poisoned lock.
-        python::get_server().lock().unwrap_or_else(|e| e.into_inner())
-    } else {
-        match python::get_server().try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        }
-    };
-    Some((server.process.is_some(), server.port, server.python_path.clone(), server.python_version.clone()))
-}
-
-/// `include_python_env` runs `pip` twice (a second or more); the panic path
-/// passes false: it skips that, and it never waits for the backend lock —
-/// the panicking thread may be the one holding it (the panic hook runs
-/// before unwinding releases it), so a blocking `lock()` would stall the
-/// report until the hook gives up. If the lock is busy the backend lines say
-/// so instead.
-fn system_info_block(version: &str, include_python_env: bool) -> String {
-    let (python_running, port, py_path, py_ver) = match server_snapshot(include_python_env) {
-        Some((running, port, path, ver)) => (if running { "running" } else { "not running" }, port.to_string(), path, ver),
-        None => ("unknown (lock busy)", "unknown".to_string(), "unknown".to_string(), "unknown".to_string()),
+        let server = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
+        let running = if server.process.is_some() { "running" } else { "not running" };
+        (running, server.port, server.python_path.clone(), server.python_version.clone())
     };
 
     let mem_mb = {
@@ -1158,11 +1138,7 @@ fn system_info_block(version: &str, include_python_env: bool) -> String {
             .unwrap_or(0)
     };
 
-    let py_env = if include_python_env {
-        python_env_info()
-    } else {
-        "_(skipped)_".to_string()
-    };
+    let py_env = python_env_info();
 
     format!(
         "- **Device:** `{}`\n- **Version:** {version}\n- **Framework:** Tauri\n- **macOS:** {}\n- **Arch:** {}\n- **RAM:** {} MB\n- **API port:** {port}\n- **Python:** {py_ver}\n- **Python path:** `{py_path}`\n- **Python server:** {}\n\n**Python environment**\n{py_env}",
@@ -1188,7 +1164,7 @@ fn diagnostics_log_path() -> std::path::PathBuf {
     crate::paths::app_support_dir().join("diagnostics.log")
 }
 
-fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &str) {
+fn append_diagnostic(context: &str, message: &str, stack: &str) {
     let path = diagnostics_log_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1202,7 +1178,6 @@ fn append_diagnostic(context: &str, message: &str, stack: &str, fingerprint: &st
         "version": app_version(),
         "context": context,
         "message": message,
-        "fingerprint": fingerprint,
         "stackTruncated": stack_trunc,
     }).to_string();
     line.push('\n');
@@ -1269,65 +1244,19 @@ pub fn open_diagnostics_log() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn error_fingerprint(message: &str) -> String {
-    // Strip variable parts for deduplication:
-    // BLE UUIDs and long hex strings → HEX, digits → N.
-    // (Digits are hex digits too, so short runs must have their digits
-    // replaced when flushed — they used to be kept verbatim, so
-    // "timeout after 30s" and "after 45s" fingerprinted differently.)
-    fn flush(result: &mut String, run: &mut String) {
-        if run.len() >= 8 {
-            result.push_str("HEX");
-        } else {
-            result.extend(run.chars().map(|c| if c.is_ascii_digit() { 'N' } else { c }));
-        }
-        run.clear();
-    }
-    let mut result = String::new();
-    let mut hex_run = String::new();
-    for c in message.chars() {
-        if c.is_ascii_hexdigit() {
-            hex_run.push(c);
-        } else {
-            flush(&mut result, &mut hex_run);
-            result.push(c);
-        }
-    }
-    flush(&mut result, &mut hex_run);
-    result.chars().take(100).collect()
-}
-
 // ---- Error logging ----
 //
 // Errors are only logged: to the app log and the local diagnostics log.
 // Nothing is sent anywhere. To report a bug, people export a bug report
 // (`export_bug_report`) and attach it to a GitHub issue themselves.
 
-fn record_error_locally(message: &str, stack: Option<&str>, context: Option<&str>) {
-    let ctx = context.unwrap_or("unknown");
-    log::error!("[BugReporter] {ctx}: {message}");
-    let fingerprint = error_fingerprint(message);
-    append_diagnostic(ctx, message, stack.unwrap_or_default(), &fingerprint);
-}
-
 /// Log an error and append it to the local diagnostics log. Sends nothing.
 /// (Signature relied on by the frontend IPC and by the panic hook.)
 #[tauri::command]
 pub fn report_error(message: String, stack: Option<String>, context: Option<String>) {
-    record_error_locally(&message, stack.as_deref(), context.as_deref());
-}
-
-/// For the panic hook: same as `report_error`. It used to wait up to
-/// `timeout` for a network send; the signature is kept, and it always
-/// returns true now that there is nothing to wait for.
-pub fn report_error_blocking(
-    message: String,
-    stack: Option<String>,
-    context: Option<String>,
-    _timeout: std::time::Duration,
-) -> bool {
-    record_error_locally(&message, stack.as_deref(), context.as_deref());
-    true
+    let ctx = context.as_deref().unwrap_or("unknown");
+    log::error!("[BugReporter] {ctx}: {message}");
+    append_diagnostic(ctx, &message, stack.as_deref().unwrap_or_default());
 }
 
 // ---- Bug report export ----
@@ -1391,7 +1320,7 @@ fn gather_report_inputs(
 ) -> ReportInputs {
     let log_dir = crate::paths::log_dir();
     ReportInputs {
-        sys_info: system_info_block(&version, true),
+        sys_info: system_info_block(&version),
         version,
         is_dev: is_dev_mode(),
         backend_health: backend_health()
@@ -1702,39 +1631,11 @@ pub struct NotificationResult {
 }
 
 #[tauri::command]
-pub fn show_notification(
-    app: tauri::AppHandle,
-    title: String,
-    body: String,
-    action_label: Option<String>,
-) -> NotificationResult {
-    use tauri::Emitter;
+pub fn show_notification(app: tauri::AppHandle, title: String, body: String) -> NotificationResult {
     use tauri_plugin_notification::NotificationExt;
 
-    let mut builder = app.notification().builder().title(&title).body(&body);
-
-    if let Some(ref label) = action_label {
-        builder = builder.action_type_id(label);
-    }
-
-    let result = builder.show();
-
-    // Show window when any notification is interacted with
-    // (Tauri notification plugin doesn't have per-notification callbacks,
-    // so we handle this globally via the plugin's event system)
-    if let Some(label) = action_label {
-        let app_clone = app.clone();
-        std::thread::spawn(move || {
-            // Small delay to let the notification appear
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            // Emit notification-action event for the frontend, using the
-            // action label as payload so the frontend can dispatch accordingly.
-            let _ = app_clone.emit("notification-action", label);
-        });
-    }
-
     NotificationResult {
-        shown: result.is_ok(),
+        shown: app.notification().builder().title(&title).body(&body).show().is_ok(),
     }
 }
 
@@ -1788,6 +1689,17 @@ mod tests {
         assert!(!is_hex_sha256("abc"));
         assert!(is_translocated("/private/var/folders/x/AppTranslocation/ABC/d/Open Pin.app"));
         assert!(!is_translocated("/Applications/Open Pin.app"));
+    }
+
+    #[test]
+    fn sha256_known_vectors() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // NIST "one million a", streamed from a file as update downloads are.
+        let path = std::env::temp_dir().join(format!("open-pin-sha-{}", std::process::id()));
+        std::fs::write(&path, vec![b'a'; 1_000_000]).unwrap();
+        let digest = file_sha256(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(digest, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
     }
 
     /// Runs the real install script against fake bundles, with stub
@@ -2171,18 +2083,6 @@ exit 0"#
     }
 
     #[test]
-    fn panic_path_never_waits_for_the_server_lock() {
-        // Same thread holding the lock = the panicking thread's situation; a
-        // blocking lock() here would deadlock the test.
-        let guard = python::get_server().lock().unwrap_or_else(|e| e.into_inner());
-        assert!(server_snapshot(false).is_none());
-        let info = system_info_block("2.3.0", false);
-        assert!(info.contains("**Python server:** unknown (lock busy)"), "{info}");
-        drop(guard);
-        assert!(server_snapshot(true).is_some());
-    }
-
-    #[test]
     fn report_text_has_no_secrets() {
         let msg = "Notion push failed for jdoe@example.com: 401 at https://api.notion.com/v1/pages/0123456789abcdef0123456789abcdef \
                    (Authorization: Bearer ntn_123456789012345678901234567890abcd) GET http://127.0.0.1:5123/audio?token=s3cr3t \
@@ -2227,7 +2127,7 @@ exit 0"#
         assert_eq!(dest.metadata().unwrap().len(), r.asset.size);
         let digest = file_sha256(&dest).unwrap();
         let shasum = std::process::Command::new("/usr/bin/shasum").args(["-a", "256"]).arg(&dest).output().unwrap();
-        assert!(String::from_utf8_lossy(&shasum.stdout).starts_with(&digest), "pure-Rust SHA-256 disagrees with shasum");
+        assert!(String::from_utf8_lossy(&shasum.stdout).starts_with(&digest), "SHA-256 disagrees with shasum");
         let mut good = r.clone();
         good.asset.sha256 = Some(digest);
         assert!(cached_download_matches(&dest, &good.asset));
