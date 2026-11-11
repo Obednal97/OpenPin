@@ -2,8 +2,11 @@
 
 Changes to a person reach every transcript directly, one at a time under its transcript
 lock, and never through ``speakers.set_names``: a rename is not a correction, so nothing
-is learnt, forgotten or rejected. The store lock and a transcript lock are never held
-together. Nothing here returns a vector.
+is learnt, forgotten or rejected. Each write holds the people worker's job lock
+(``worker.exclusive``) throughout, so no voice job runs halfway through it. It checks
+the store, edits the transcripts, then writes the store last (checking again), so one
+stopped by a quit can simply be run again. The store lock and a transcript lock are
+never held together. Nothing here returns a vector.
 """
 
 from __future__ import annotations
@@ -136,14 +139,16 @@ def suggestions() -> list[dict]:
 def _each_transcript(edit: Callable[[str, dict], bool], old_people: dict, new_people: dict) -> list[str]:
     """Run ``edit(session_id, data) -> changed`` on every transcript, one at a time under its lock.
 
-    The names shown before use ``old_people`` and after ``new_people`` (``{id: name}``, the
-    store before and after the change), so a name that changed through the store alone
-    counts too. Returns the session ids whose shown names changed (nothing is told here).
+    ``old_people`` and ``new_people`` are ``{id: name}`` for the store before and after the
+    change the caller writes once this returns. A transcript whose shown names changed
+    through the edit alone is told at once (``_names_changed``, after its lock); the ids of
+    those whose shown names change only with the store write are returned, for the caller
+    to tell after it.
     """
     profile = speakers.profile_name()
     old_people = {**old_people, ME: profile}
     new_people = {**new_people, ME: profile}
-    changed = []
+    later = []
     for sid in _sessions():
         path = speakers._path(sid)
         with get_transcript_lock(sid):
@@ -157,10 +162,13 @@ def _each_transcript(edit: Callable[[str, dict], bool], old_people: dict, new_pe
             before = sn.effective_names(data, sidecar, profile, old_people)
             if edit(sid, data):
                 speakers._write_atomic(path, data)
+            now = sn.effective_names(data, sidecar, profile, old_people)
             after = sn.effective_names(data, sidecar, profile, new_people)
-        if after != before:
-            changed.append(sid)
-    return changed
+        if now != before:
+            speakers._names_changed(sid)
+        if after != now:  # told again after the store write (the Notion queue collapses repeats)
+            later.append(sid)
+    return later
 
 
 def _retype(data: dict, old_name: str, new_name: str) -> bool:
@@ -236,30 +244,42 @@ def _clean_name(name) -> str:
     return name
 
 
+def _names(data: dict) -> dict[str, str | None]:
+    return {pid: p.get("name") for pid, p in data["people"].items()}
+
+
+def _check_rename(data: dict, person_id: str, name: str) -> dict:
+    person = _person(data, person_id)
+    other = people_store.find_person(data, name)
+    if other and other != person_id:
+        raise DirectoryError(f"{data['people'][other]['name']} is already in People. Merge them instead.", 409)
+    return person
+
+
 def rename(person_id: str, name) -> None:
     """Rename someone everywhere: the directory, and every typed name with their old name."""
     _others(person_id)
     name = _clean_name(name)
-    old: dict = {}
+    with worker.exclusive():
+        data = people_store.load()
+        old_name = _check_rename(data, person_id, name).get("name")
+        old_people = _names(data)
 
-    def fn(data: dict) -> None:
-        person = _person(data, person_id)
-        other = people_store.find_person(data, name)
-        if other and other != person_id:
-            raise DirectoryError(f"{data['people'][other]['name']} is already in People. Merge them instead.", 409)
-        old["people"] = {pid: p.get("name") for pid, p in data["people"].items()}
-        old["name"] = person.get("name")
-        person["name"] = name
+        def edit(sid: str, t: dict) -> bool:
+            return bool(old_name) and _retype(t, old_name, name)
 
-    people_store.mutate(fn)
-    new_people = {**old["people"], person_id: name}
-    old_name = old["name"]
+        later = _each_transcript(edit, old_people, {**old_people, person_id: name})
+        people_store.mutate(lambda d: _check_rename(d, person_id, name).update(name=name))
+        for sid in later:
+            speakers._names_changed(sid)
+    changes.bump()
 
-    def edit(sid: str, data: dict) -> bool:
-        return bool(old_name) and _retype(data, old_name, name)
 
-    for sid in _each_transcript(edit, old["people"], new_people):
-        speakers._names_changed(sid)
+def _check_merge(data: dict, person_id: str, into: str) -> tuple[dict, dict]:
+    source, target = _person(data, person_id), _person(data, into)
+    if target.get("name"):
+        _clean_name(target["name"])  # refuses merging into your own name
+    return source, target
 
 
 def merge(person_id: str, into) -> None:
@@ -269,29 +289,29 @@ def merge(person_id: str, into) -> None:
     _others(into)
     if into == person_id:
         raise DirectoryError("Pick someone else to merge into")
-    old: dict = {}
+    with worker.exclusive():
+        data = people_store.load()
+        source, target = _check_merge(data, person_id, into)
+        source_name, target_name = source.get("name"), target.get("name")
+        old_people = _names(data)
 
-    def fn(data: dict) -> None:
-        source = _person(data, person_id)
-        target = _person(data, into)
-        if target.get("name"):
-            _clean_name(target["name"])  # refuses merging into your own name
-        old["people"] = {pid: p.get("name") for pid, p in data["people"].items()}
-        old["source"], old["target"] = source.get("name"), target.get("name")
-        target["samples"].extend(source["samples"])
-        del data["people"][person_id]
+        def edit(sid: str, t: dict) -> bool:
+            retyped = bool(source_name and target_name) and _retype(t, source_name, target_name)
+            return _repoint(t, person_id, into) or retyped
 
-    people_store.mutate(fn)
-    new_people = {pid: n for pid, n in old["people"].items() if pid != person_id}
-    source_name, target_name = old["source"], old["target"]
+        new_people = {pid: n for pid, n in old_people.items() if pid != person_id}
+        later = _each_transcript(edit, old_people, new_people)
 
-    def edit(sid: str, data: dict) -> bool:
-        retyped = bool(source_name and target_name) and _retype(data, source_name, target_name)
-        return _repoint(data, person_id, into) or retyped
+        def combine(d: dict) -> None:
+            source, target = _check_merge(d, person_id, into)
+            target["samples"].extend(source["samples"])
+            del d["people"][person_id]
 
-    for sid in _each_transcript(edit, old["people"], new_people):
-        speakers._names_changed(sid)
+        people_store.mutate(combine)
+        for sid in later:
+            speakers._names_changed(sid)
     worker.enqueue("rematch")
+    changes.bump()
 
 
 def delete(person_id: str) -> None:
@@ -300,36 +320,37 @@ def delete(person_id: str) -> None:
     from app.coaching.runner import labelling_fingerprint
 
     _others(person_id)
-    data = people_store.load()
-    name = _person(data, person_id).get("name")
-    people = {pid: p.get("name") for pid, p in data["people"].items()}
-    profile = speakers.profile_name()
+    with worker.exclusive():
+        data = people_store.load()
+        name = _person(data, person_id).get("name")
+        people = _names(data)
+        profile = speakers.profile_name()
 
-    def edit(sid: str, t: dict) -> bool:
-        block = _current_block(t)
-        if block is None:
-            return False
-        before = json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True)
-        shown = sn.voice_matched(t, coaching_store.load(sid), profile, {**people, ME: profile})
-        typed = sn.stored_names(t)
-        frozen = t.get("speaker_names_frozen") if isinstance(t.get("speaker_names_frozen"), list) else []
-        for label, match in list(block["matches"].items()):
-            if not isinstance(match, dict) or match.get("person") != person_id:
-                continue
-            del block["matches"][label]
-            if label in shown and name and label not in typed:
-                typed[label] = name
-                frozen = [*frozen, label] if label not in frozen else frozen
-        if typed != sn.stored_names(t):
-            segments = t.get("segments") or []
-            t["speaker_names"] = {label: typed[label] for label in sn.speaker_labels(segments) if label in typed}
-            t["speaker_names_labelling"] = labelling_fingerprint(segments)
-            t["speaker_names_frozen"] = frozen
-        _drop_rejections(block, person_id)
-        return json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True) != before
+        def edit(sid: str, t: dict) -> bool:
+            block = _current_block(t)
+            if block is None:
+                return False
+            before = json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True)
+            shown = sn.voice_matched(t, coaching_store.load(sid), profile, {**people, ME: profile})
+            typed = sn.stored_names(t)
+            frozen = t.get("speaker_names_frozen") if isinstance(t.get("speaker_names_frozen"), list) else []
+            for label, match in list(block["matches"].items()):
+                if not isinstance(match, dict) or match.get("person") != person_id:
+                    continue
+                del block["matches"][label]
+                if label in shown and name and label not in typed:
+                    typed[label] = name
+                    frozen = [*frozen, label] if label not in frozen else frozen
+            if typed != sn.stored_names(t):
+                segments = t.get("segments") or []
+                t["speaker_names"] = {label: typed[label] for label in sn.speaker_labels(segments) if label in typed}
+                t["speaker_names_labelling"] = labelling_fingerprint(segments)
+                t["speaker_names_frozen"] = frozen
+            _drop_rejections(block, person_id)
+            return json.dumps([t.get("speaker_names"), t.get("speaker_names_frozen"), block], sort_keys=True) != before
 
-    _each_transcript(edit, people, people)  # the shown names stay the same: Notion isn't told
-    people_store.mutate(lambda d: d["people"].pop(person_id, None))
+        _each_transcript(edit, people, people)  # the shown names stay the same: Notion isn't told
+        people_store.mutate(lambda d: d["people"].pop(person_id, None))
     changes.bump()
 
 

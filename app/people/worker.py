@@ -10,8 +10,14 @@ the first job. Kinds:
 - ``rematch()``: samples changed; match every recording with cached embeddings again
   (maths only, no audio). Any number of these waiting collapse into one.
 - ``backlog()``: learn from past recordings, calibrate, name them (``app.people.backlog``).
-  It hands the thread back after any recording while other jobs wait, and queues itself
-  again to carry on.
+  It hands the thread back after any recording while other jobs (or a directory write)
+  wait, and queues itself again to carry on.
+
+Every job runs holding the job lock, and the people directory's writes (rename, merge,
+delete) hold it throughout via ``exclusive()``, so a job never sees a person renamed,
+merged or deleted halfway through (a learn job reads the typed name, embeds, then
+stores the sample under that name). Lock order: the job lock first, then the transcript
+and store locks one at a time; never take the job lock while holding either.
 """
 
 from __future__ import annotations
@@ -19,6 +25,8 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from app.coaching import runner
 from app.coaching import store as coaching_store
@@ -34,6 +42,8 @@ _queue: deque[tuple[str, tuple]] = deque()
 _busy = False
 _current: str | None = None  # the kind of the job running now
 _thread: threading.Thread | None = None
+_job_lock = threading.RLock()  # held by each job, and by directory writes (``exclusive``)
+_exclusive_waiting = 0  # directory writes waiting for the job lock (guarded by _cond)
 
 
 def _norm(name: str | None) -> str:
@@ -156,7 +166,28 @@ def _backlog() -> None:
 
 def _others_waiting() -> bool:
     with _cond:
-        return bool(_queue)
+        return bool(_queue) or _exclusive_waiting > 0
+
+
+@contextmanager
+def exclusive() -> Iterator[None]:
+    """Hold the job lock: waits for the job in hand to finish, and no job starts meanwhile.
+
+    A running backlog hands back after its current recording. Don't call it while holding
+    a transcript or store lock.
+    """
+    global _exclusive_waiting
+    with _cond:
+        _exclusive_waiting += 1
+    try:
+        _job_lock.acquire()
+    finally:
+        with _cond:
+            _exclusive_waiting -= 1
+    try:
+        yield
+    finally:
+        _job_lock.release()
 
 
 _HANDLERS = {"match": _match, "learn": _learn, "unlearn": _unlearn, "rematch": _rematch, "backlog": _backlog}
@@ -189,7 +220,8 @@ def _run() -> None:
             kind, kw = _queue.popleft()
             _busy, _current = True, kind
         try:
-            _HANDLERS[kind](**dict(kw))
+            with _job_lock:
+                _HANDLERS[kind](**dict(kw))
         except Exception as e:
             log.warning("people job %s failed: %s", kind, e, exc_info=True)
         finally:

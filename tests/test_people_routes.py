@@ -341,3 +341,137 @@ def test_set_speaker_names_tool_says_names_teach_voices():
         "Names you set teach Open Pin that person's voice, so later recordings are named automatically."
         in tool["description"]
     )
+
+
+def test_merge_when_both_match_labels_on_one_recording(env):
+    harry = _person("Harry Fisher", 2, 0, "h")
+    dup = _person("Harry F", 2, 0, "d")
+    _write(env, S1, matches={"Speaker 1": dup, "Speaker 2": harry})
+    before = changes.current()
+    with patch.object(worker, "enqueue"):
+        assert env.client.post(f"/people/{dup}/merge", json={"into": harry}).status_code == 200
+    matches = _read(env, S1)["speaker_voice_matches"]["matches"]
+    assert {label: m["person"] for label, m in matches.items()} == {"Speaker 1": harry, "Speaker 2": harry}
+    names = {t["session_id"]: t["speaker_names"] for t in env.client.get("/transcripts").get_json()}
+    assert names[S1] == {"Speaker 1": "Harry Fisher", "Speaker 2": "Harry Fisher"}
+    assert _notion_sids(env) == {S1}
+    assert changes.current() > before
+
+
+def test_rename_bumps_changes_even_when_no_transcript_shows_them(env):
+    sam = _person("Sam", 1, 1)
+    before = changes.current()
+    assert env.client.post(f"/people/{sam}/rename", json={"name": "Sam Jones"}).status_code == 200
+    assert changes.current() > before
+
+
+# ---------------------------------------------------------------- a quit midway, then a retry
+
+
+def _fail_store_write_once():
+    real = store.mutate
+    calls = {"n": 0}
+
+    def flaky(fn):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("quit")
+        return real(fn)
+
+    return patch.object(store, "mutate", side_effect=flaky)
+
+
+def test_rename_stopped_after_the_transcripts_completes_on_retry(env):
+    from app.people import directory
+
+    harry = _person("Harry", 2, 0)
+    _write(env, S1, names={"Speaker 1": "Harry"})
+    _write(env, S2, matches={"Speaker 1": harry})
+    with _fail_store_write_once(), pytest.raises(RuntimeError):
+        directory.rename(harry, "Harry Fisher")
+    assert store.load()["people"][harry]["name"] == "Harry"  # the store is written last
+    assert _read(env, S1)["speaker_names"] == {"Speaker 1": "Harry Fisher"}  # after the transcripts
+    env.notion.reset_mock()
+    r = env.client.post(f"/people/{harry}/rename", json={"name": "Harry Fisher"})
+    assert r.status_code == 200, r.get_json()
+    people = store.load()["people"]
+    assert people[harry]["name"] == "Harry Fisher" and len(people) == 2  # me + Harry
+    assert _read(env, S1)["speaker_names"] == {"Speaker 1": "Harry Fisher"}
+    assert S2 in _notion_sids(env)  # the voice-matched name changes only now
+
+
+def test_merge_stopped_after_the_transcripts_completes_on_retry(env):
+    from app.people import directory
+
+    harry = _person("Harry Fisher", 2, 0, "h")
+    dup = _person("Harry F", 2, 0, "d")
+    _write(env, S1, names={"Speaker 1": "Harry F"})
+    _write(env, S2, matches={"Speaker 1": dup})
+    with patch.object(worker, "enqueue"):
+        with _fail_store_write_once(), pytest.raises(RuntimeError):
+            directory.merge(dup, harry)
+        assert dup in store.load()["people"]  # the store is written last
+        assert _read(env, S1)["speaker_names"] == {"Speaker 1": "Harry Fisher"}  # after the transcripts
+        r = env.client.post(f"/people/{dup}/merge", json={"into": harry})
+    assert r.status_code == 200, r.get_json()
+    people = store.load()["people"]
+    assert dup not in people and len(people[harry]["samples"]) == 4
+    assert _read(env, S1)["speaker_names"] == {"Speaker 1": "Harry Fisher"}
+    assert _read(env, S2)["speaker_voice_matches"]["matches"]["Speaker 1"]["person"] == harry
+
+
+# ---------------------------------------------------------------- directory writes wait for voice jobs
+
+
+def test_rename_waits_for_a_learn_job_in_hand(env):
+    import threading
+
+    from app.people import directory
+
+    harry = _person("Harry", 2, 0)
+    _write(env, S1, names={"Speaker 1": "Harry"})
+    env.cache[S1] = {"Speaker 1": _vec(0, 0.5), "Speaker 2": _vec(1)}
+    embedding, release = threading.Event(), threading.Event()
+
+    def slow_get(sid, segments, audio=None):
+        embedding.set()
+        assert release.wait(10)
+        return env.cache.get(sid)
+
+    with patch("app.people.embeddings.get", side_effect=slow_get):
+        worker.enqueue("learn", session_id=S1, label="Speaker 1", name="Harry")
+        assert embedding.wait(10)
+        renaming = threading.Thread(target=directory.rename, args=(harry, "Harry Fisher"))
+        renaming.start()
+        renaming.join(0.3)
+        assert renaming.is_alive()  # waits for the learn job
+        release.set()
+        renaming.join(10)
+        assert worker.wait_idle(10)
+    people = store.load()["people"]
+    assert [p["name"] for pid, p in people.items() if pid != store.ME] == ["Harry Fisher"]
+    assert any(s["session_id"] == S1 for s in people[harry]["samples"])
+    assert _read(env, S1)["speaker_names"] == {"Speaker 1": "Harry Fisher"}
+
+
+def test_a_waiting_directory_write_makes_the_backlog_yield(env):
+    import threading
+
+    assert worker._others_waiting() is False
+    with worker.exclusive():
+        entered = threading.Event()
+
+        def wait_turn():
+            with worker.exclusive():
+                entered.set()
+
+        waiting = threading.Thread(target=wait_turn)
+        waiting.start()
+        for _ in range(100):
+            if worker._others_waiting():
+                break
+            waiting.join(0.01)
+        assert worker._others_waiting() is True
+        assert not entered.is_set()
+    waiting.join(5)
+    assert entered.is_set() and worker._others_waiting() is False
