@@ -221,30 +221,52 @@ def _save_exemplars(
     from app.people import store
 
     exemplars = exemplars[-MAX_EXEMPLARS:]
-    stamp = datetime.now(UTC).isoformat(timespec="seconds")
 
     def fn(data: dict) -> None:
         old = data["people"][store.ME]["samples"]
-        out = []
-        for i, vec in enumerate(exemplars):
-            held = next((s for s in old if s["vec"] == vec), None)
-            if held is not None:
-                out.append(held)
-                continue
-            label = labels[i] if labels and i < len(labels) else None
-            if session_id is not None:
-                store.remove_sample(data, session_id, label)
-            out.append({"vec": vec, "session_id": session_id, "label": label, "seconds": 0, "added_at": stamp})
-        data["people"][store.ME]["samples"] = out
+        held = {i: next((s for s in old if s["vec"] == v), None) for i, v in enumerate(exemplars)}
+        out = _learn_into(data, [v for i, v in enumerate(exemplars) if held[i] is None], session_id, labels)
+        data["people"][store.ME]["samples"] = [held[i] for i in held if held[i] is not None] + out
 
     store.mutate(fn)
 
 
+def _learn_into(data: dict, vectors: list[list[float]], session_id: str | None, labels: list[str] | None) -> list[dict]:
+    """New owner samples for ``vectors``; any earlier sample for the same recording speaker
+    is removed from everyone first, so re-learning never leaves a stale twin."""
+    from app.people import store
+
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    out = []
+    for i, vec in enumerate(vectors):
+        label = labels[i] if labels and i < len(labels) else None
+        if session_id is not None:
+            store.remove_sample(data, session_id, label)
+        out.append({"vec": vec, "session_id": session_id, "label": label, "seconds": 0, "added_at": stamp})
+    return out
+
+
 def delete_profile() -> None:
-    """Forget the owner's voice: clear the ``me`` samples and remove the v1 file."""
+    """Forget the owner's voice: clear the ``me`` samples and remove the v1 file and its backup."""
     from app.people import store
 
     store.mutate(lambda data: data["people"][store.ME].update(samples=[]))  # also unlinks the v1 mirror
+    try:
+        PROFILE_PATH.with_name(PROFILE_PATH.name + ".v1-backup").unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _learn(vectors: list[list[float]], session_id: str | None, labels: list[str], replace: bool) -> None:
+    """Add (or swap in) owner samples in one store transaction: no read-then-write gap."""
+    from app.people import store
+
+    def fn(data: dict) -> None:
+        new = _learn_into(data, vectors, session_id, labels)  # first: it may drop twins from `me`
+        me = [] if replace else data["people"][store.ME]["samples"]
+        data["people"][store.ME]["samples"] = (me + new)[-MAX_EXEMPLARS:]
+
+    store.mutate(fn)
 
 
 def add_exemplars(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
@@ -252,10 +274,9 @@ def add_exemplars(audio_path: str, segments: list[dict], labels: list[str], sess
     correction path). Returns how many were added. Oldest exemplars drop past 20."""
     embeddings = speaker_embeddings(audio_path, segments)
     got = [label for label in labels if label in embeddings]
-    new = [embeddings[label] for label in got]
-    if new:
-        _save_exemplars(_load_exemplars() + new, session_id, got)
-    return len(new)
+    if got:
+        _learn([embeddings[label] for label in got], session_id, got, replace=False)
+    return len(got)
 
 
 def replace_profile(audio_path: str, segments: list[dict], labels: list[str], session_id: str | None = None) -> int:
@@ -264,10 +285,9 @@ def replace_profile(audio_path: str, segments: list[dict], labels: list[str], se
     Returns how many exemplars the new profile has (0 = nothing changed)."""
     embeddings = speaker_embeddings(audio_path, segments)
     got = [label for label in labels if label in embeddings]
-    new = [embeddings[label] for label in got]
-    if new:
-        _save_exemplars(new, session_id, got)
-    return len(new)
+    if got:
+        _learn([embeddings[label] for label in got], session_id, got, replace=True)
+    return len(got)
 
 
 # ------------------------------------------------------------------ matching

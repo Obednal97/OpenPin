@@ -87,17 +87,22 @@ def _read_v1() -> list[list[float]] | None:
 
 def _load_unlocked() -> dict:
     try:
-        data = json.loads(VOICES_PATH.read_text())
+        text = VOICES_PATH.read_text()
+    except FileNotFoundError:
+        return _migrate_v1()
+    # Any other OSError propagates: a transient read failure must never look like "no voices".
+    try:
+        data = json.loads(text)
         if data.get("version") == 2 and isinstance(data.get("people"), dict):
             data["people"].setdefault(ME, {"name": None, "is_me": True, "samples": []})
             return data
-        log.warning("voices.json has an unknown shape; ignoring it")
-        return _empty()
-    except FileNotFoundError:
+    except (ValueError, AttributeError):
         pass
-    except (OSError, ValueError, AttributeError) as e:
-        log.warning("could not read voices.json: %s", e)
-        return _empty()
+    # Unreadable or unknown shape: keep the bad file aside and recover the owner from the v1 mirror.
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    bad = VOICES_PATH.with_name(f"{VOICES_PATH.name}.corrupt-{stamp}")
+    log.warning("voices.json is unreadable; kept as %s", bad.name)
+    os.replace(VOICES_PATH, bad)
     return _migrate_v1()
 
 
