@@ -302,6 +302,11 @@ APP_SECTION_END = "End of Open Pin section"
 _SECTION_APP_NAMES = ("Open Pin", "Plaud V2")
 SESSION_ID_PROP = "Session ID"
 TAGS_PROP = "Tags"
+# The people named on a recording (not you), as chips to filter by. Open Pin owns it:
+# every push replaces it. Kept apart from Tags, whose values flow back into the app.
+PEOPLE_PROP = "People"
+# Multi-select columns the app writes, with their schema key prefix.
+_MULTI_COLUMNS = ((TAGS_PROP, "tags"), (PEOPLE_PROP, "people"))
 
 _NAMES_RE = "(?:" + "|".join(re.escape(n) for n in _SECTION_APP_NAMES) + ")"
 _SECTION_START_RE = re.compile(r"^#{1,6}[ \t]+" + _NAMES_RE + r" — transcript & summary.*$", re.M)
@@ -317,6 +322,16 @@ _POLL_BUDGET_QUEUE = 90.0
 _PENDING_CREATE_MAX_AGE = 24 * 3600
 
 _sleep = _time.sleep  # patched in tests
+
+
+def _people_names(session_id, t_data):
+    """The names on a recording, you left out, for the People column (in order)."""
+    from app.state import speakers
+
+    profile = speakers.profile_name()
+    me = (profile or "").strip().casefold()
+    names = speakers.names_for(session_id, t_data, profile=profile).values()
+    return _sanitize_tags(n for n in names if n.strip().casefold() != me)
 
 
 def _build_app_section(t_data, session_id, stamp=None):
@@ -723,31 +738,41 @@ def _fetch_db_schema(db_id):
     schema = state.get("schema") if isinstance(state.get("schema"), dict) else {}
 
     ds = re.search(r"collection://([0-9a-fA-F-]{32,36})", text)
-    tags = schema.get(TAGS_PROP)
     sess = schema.get(SESSION_ID_PROP)
-    tags_exists = isinstance(tags, dict) and tags.get("type") == "multi_select"
-    options, options_known = {}, True
-    if tags_exists:
-        options, options_known = _parse_tag_options(tags)
-        if options_known and not options and _text_suggests_tag_options(text[: m.start()] + text[m.end() :]):
-            options_known = False
-        if not options_known:
+    out = {
+        "db_id": db_id,
+        "data_source_id": ds.group(1) if ds else None,
+        "session_prop": isinstance(sess, dict) and sess.get("type") in ("text", "rich_text"),
+        "session_conflict": isinstance(sess, dict) and sess.get("type") not in ("text", "rich_text"),
+    }
+    outside = text[: m.start()] + text[m.end() :]
+    for prop, key in _MULTI_COLUMNS:
+        out.update(_multi_select_state(schema.get(prop), prop, key, outside))
+    return out
+
+
+def _multi_select_state(column, prop, key, outside_text):
+    """A multi-select column's schema keys: ``<key>_exists``, ``_conflict`` (the name is
+    taken by another type), ``_options`` ``{name: color}`` and ``_options_known``: False
+    when the column exists but its option list couldn't be read (missing, malformed, or
+    contradicted by the rest of the response). Then "SET MULTI_SELECT(...)" must not be
+    sent: it replaces the list."""
+    exists = isinstance(column, dict) and column.get("type") == "multi_select"
+    options, known = {}, True
+    if exists:
+        options, known = _parse_tag_options(column)
+        if known and not options and _text_suggests_tag_options(outside_text, prop):
+            known = False
+        if not known:
             logging.warning(
-                "Couldn't read the Tags options from the Notion database schema; treating them as unknown "
+                f"Couldn't read the {prop} options from the Notion database schema; treating them as unknown "
                 "(no option changes this time)"
             )
     return {
-        "db_id": db_id,
-        "data_source_id": ds.group(1) if ds else None,
-        "tags_exists": tags_exists,
-        "tags_conflict": isinstance(tags, dict) and tags.get("type") != "multi_select",
-        "tag_options": options,
-        # False: the Tags column exists but its option list couldn't be read
-        # (missing, malformed, or contradicted by the rest of the response).
-        # Then "SET MULTI_SELECT(...)" must not be sent: it replaces the list.
-        "tag_options_known": options_known,
-        "session_prop": isinstance(sess, dict) and sess.get("type") in ("text", "rich_text"),
-        "session_conflict": isinstance(sess, dict) and sess.get("type") not in ("text", "rich_text"),
+        f"{key}_exists": exists,
+        f"{key}_conflict": isinstance(column, dict) and not exists,
+        f"{key}_options": options,
+        f"{key}_options_known": known,
     }
 
 
@@ -770,21 +795,21 @@ def _parse_tag_options(prop):
     return options, True
 
 
-_TAGS_Q = re.escape(TAGS_PROP)
-# Signs, outside the parsed schema JSON, that the Tags column has options:
-# a JSON property object with a non-empty "options" list, or DDL listing them.
-_TAG_OPTION_HINTS = (
-    re.compile(r'"' + _TAGS_Q + r'"\s*:\s*\{[^{}]*?(?:\{[^{}]*?)?"options"\s*:\s*\[\s*[^\]\s]'),
-    re.compile(r"[\"']" + _TAGS_Q + r"[\"']\s+MULTI_SELECT\s*\(\s*'", re.I),
-)
 _TAG_OPTION_LINE_HINT = re.compile(r"\boptions?\b\W{0,5}[\[({]?\s*[\"'{]", re.I)
 
 
-def _text_suggests_tag_options(text):
-    if any(rx.search(text) for rx in _TAG_OPTION_HINTS):
+def _text_suggests_tag_options(text, prop=TAGS_PROP):
+    """Signs, outside the parsed schema JSON, that column ``prop`` has options: a JSON
+    property object with a non-empty "options" list, or DDL listing them."""
+    q = re.escape(prop)
+    hints = (
+        re.compile(r'"' + q + r'"\s*:\s*\{[^{}]*?(?:\{[^{}]*?)?"options"\s*:\s*\[\s*[^\]\s]'),
+        re.compile(r"[\"']" + q + r"[\"']\s+MULTI_SELECT\s*\(\s*'", re.I),
+    )
+    if any(rx.search(text) for rx in hints):
         return True
     for line in text.splitlines():
-        if (f'"{TAGS_PROP}"' in line or f"'{TAGS_PROP}'" in line) and _TAG_OPTION_LINE_HINT.search(line):
+        if (f'"{prop}"' in line or f"'{prop}'" in line) and _TAG_OPTION_LINE_HINT.search(line):
             return True
     return False
 
@@ -819,20 +844,21 @@ def _sanitize_tags(tags):
     return out
 
 
-def _writable_tags(tags, schema):
-    """Tags safe to write to a page, or None to leave the page's Tags alone.
+def _writable_tags(tags, schema, key="tags"):
+    """Values safe to write to a page's multi-select (Tags, or People with ``key``
+    "people"), or None to leave the page's column alone.
 
-    With an unknown option list, only tags known to exist (read from the
+    With an unknown option list, only values known to exist (read from the
     partial list) are sent. If none are known the property is left untouched:
-    an empty list would clear the page's tags.
+    an empty list would clear the page's values.
     """
-    if not tags or not schema or not schema.get("tags_exists") or schema.get("tag_options_known", True):
+    if not tags or not schema or not schema.get(f"{key}_exists") or schema.get(f"{key}_options_known", True):
         return tags
-    existing = {n.casefold() for n in schema["tag_options"]}
+    existing = {n.casefold() for n in schema.get(f"{key}_options") or {}}
     known = [t for t in tags if t.casefold() in existing]
     if len(known) < len(tags):
         logging.warning(
-            f"Not writing tags {sorted(set(tags) - set(known))} to Notion: the database's Tags options couldn't "
+            f"Not writing {sorted(set(tags) - set(known))} to Notion's {key} column: its options couldn't "
             "be read, so they can't safely be added"
         )
     return known or None
@@ -847,15 +873,19 @@ def _options_sql(options):
     return ", ".join(parts)
 
 
-def _schema_satisfies(schema, needed_tags):
+def _schema_satisfies(schema, needed):
+    """``needed``: ``{key: values}`` for the multi-select columns (see _MULTI_COLUMNS)."""
     if not (schema["session_prop"] or schema["session_conflict"]):
         return False
-    if not needed_tags or schema["tags_conflict"]:
-        return True
-    if not schema.get("tag_options_known", True):
-        return False  # re-read next time; maybe the list parses then
-    existing = {name.casefold() for name in schema["tag_options"]}
-    return schema["tags_exists"] and all(t.casefold() in existing for t in needed_tags)
+    for key, values in needed.items():
+        if not values or schema.get(f"{key}_conflict"):
+            continue
+        if not schema.get(f"{key}_options_known", True):
+            return False  # re-read next time; maybe the list parses then
+        existing = {name.casefold() for name in schema.get(f"{key}_options") or {}}
+        if not schema.get(f"{key}_exists") or not all(v.casefold() in existing for v in values):
+            return False
+    return True
 
 
 # Failures worth retrying as-is: rate limits, timeouts, Notion/gateway
@@ -892,9 +922,10 @@ def _is_transient_error(err):
     return any(marker in lower for marker in _TRANSIENT_MARKERS)
 
 
-def _ensure_schema(tags):
+def _ensure_schema(tags, people=()):
     """Make sure the database has a Session ID text column and, when this
-    recording has tags, a Tags multi-select with every one of them as an option.
+    recording has tags, a Tags multi-select with every one of them as an option;
+    the same for the People column and ``people`` (the names on the recording).
 
     Rules (a mistake here deletes the user's tag options from *every* page):
     - The schema is re-fetched right before any change; if that fetch fails we
@@ -905,7 +936,7 @@ def _ensure_schema(tags):
       new ones — never a list built from a cache.
     - If the fresh option list can't be read (missing/malformed, or empty
       while the response mentions options), it is unknown and never SET.
-    - No Tags column is created for a recording without tags.
+    - No Tags (People) column is created for a recording without tags (people).
     - A transient failure to add options raises a retryable error; Notion
       rejecting the options themselves raises a permanent one.
 
@@ -916,7 +947,7 @@ def _ensure_schema(tags):
     db_id = notion.get_database_id()
     if not db_id:
         return None
-    needed = set(_sanitize_tags(tags))
+    needed = {"tags": set(_sanitize_tags(tags)), "people": set(_sanitize_tags(people))}
     with _schema_lock:
         cache = _schema_cache if _schema_cache and _schema_cache.get("db_id") == db_id else None
         if cache and _schema_satisfies(cache, needed):
@@ -944,26 +975,32 @@ def _ensure_schema(tags):
                 logging.warning(f"Notion schema change failed ({statement[:60]}…): {e}")
                 return e
 
-        if needed and not fresh["tags_conflict"]:
-            if not fresh["tags_exists"]:
-                new_opts = dict.fromkeys(needed, "default")
-                option_error = _run(f'ADD COLUMN "{TAGS_PROP}" MULTI_SELECT({_options_sql(new_opts)})')
-                if option_error is None:
-                    fresh["tags_exists"] = True
-                    fresh["tag_options"] = new_opts
-            elif not fresh.get("tag_options_known", True):
+        for prop, key in _MULTI_COLUMNS:
+            values = needed[key]
+            if not values or fresh.get(f"{key}_conflict"):
+                continue
+            if not fresh.get(f"{key}_exists"):
+                new_opts = dict.fromkeys(values, "default")
+                error = _run(f'ADD COLUMN "{prop}" MULTI_SELECT({_options_sql(new_opts)})')
+                if error is None:
+                    fresh[f"{key}_exists"] = True
+                    fresh[f"{key}_options"] = new_opts
+            elif not fresh.get(f"{key}_options_known", True):
                 # Never SET the list from a view we couldn't read: it would
-                # replace the user's options. The page gets known tags only.
-                logging.warning("Not adding Notion tag options: the current option list couldn't be read")
+                # replace the user's options. The page gets known values only.
+                logging.warning(f"Not adding Notion {prop} options: the current option list couldn't be read")
+                error = None
             else:
-                existing = {name.casefold() for name in fresh["tag_options"]}
-                missing = {t for t in needed if t.casefold() not in existing}
+                existing = {name.casefold() for name in fresh[f"{key}_options"]}
+                missing = {t for t in values if t.casefold() not in existing}
+                error = None
                 if missing:
-                    union = dict(fresh["tag_options"])
+                    union = dict(fresh[f"{key}_options"])
                     union.update(dict.fromkeys(missing, "default"))
-                    option_error = _run(f'ALTER COLUMN "{TAGS_PROP}" SET MULTI_SELECT({_options_sql(union)})')
-                    if option_error is None:
-                        fresh["tag_options"] = union
+                    error = _run(f'ALTER COLUMN "{prop}" SET MULTI_SELECT({_options_sql(union)})')
+                    if error is None:
+                        fresh[f"{key}_options"] = union
+            option_error = option_error or error
 
         if not fresh["session_prop"] and not fresh["session_conflict"]:
             if _run(f'ADD COLUMN "{SESSION_ID_PROP}" RICH_TEXT') is None:
@@ -980,22 +1017,22 @@ def _ensure_schema(tags):
         return fresh
 
 
-def _page_properties(title, tags, session_id, schema):
+def _page_properties(title, tags, session_id, schema, people=None):
     """Properties for a page write. ``title`` None leaves the title alone.
 
-    Notion MCP takes multi-select values as a JSON-array string. Tags are only
-    sent when the column exists (an empty list clears them, None leaves them
-    alone); with an unknown schema, only non-empty tags are sent.
+    Notion MCP takes multi-select values as a JSON-array string. Tags and
+    people are only sent when their column exists (an empty list clears them,
+    None leaves them alone); with an unknown schema, only non-empty lists are sent.
     """
     props = {}
     if title is not None:
         props["title"] = title
+    for (prop, key), values in zip(_MULTI_COLUMNS, (tags, people), strict=True):
+        column_ok = bool(values) if schema is None else schema.get(f"{key}_exists")
+        if values is not None and column_ok:
+            props[prop] = json.dumps(values)
     if schema is None:
-        if tags:
-            props[TAGS_PROP] = json.dumps(tags)
         return props
-    if schema["tags_exists"] and tags is not None:
-        props[TAGS_PROP] = json.dumps(tags)
     if schema["session_prop"]:
         props[SESSION_ID_PROP] = session_id
     return props
@@ -1169,8 +1206,8 @@ def _resume_pending_create(session_id, budget):
 # ---------------------------------------------------------------------------
 
 
-def _create_page(session_id, t_data, app_title, tags, schema, poll_budget):
-    properties = _page_properties(app_title, tags, session_id, schema)
+def _create_page(session_id, t_data, app_title, tags, schema, poll_budget, people=None):
+    properties = _page_properties(app_title, tags, session_id, schema, people or None)
     result = notion.mcp_call(
         "notion-create-pages",
         {
@@ -1642,7 +1679,7 @@ def _import_page_tags(session_id, page_tags):
         logging.warning(f"Could not add the Notion page's tags to transcript {session_id}: {e}")
 
 
-def _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how, info=None):
+def _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how, info=None, people=None):
     """Make an existing page this recording's page without touching its body.
 
     Sets the Session ID (and merged tags), saves the URL and records the
@@ -1653,7 +1690,7 @@ def _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how, info=
         info = _parse_fetch(notion.mcp_call("notion-fetch", {"id": page_id}))
     page_tags = _sanitize_tags(_tag_values(info["properties"].get(TAGS_PROP)))
     merged = _sanitize_tags(list(tags or []) + page_tags)
-    props = _page_properties(None, _writable_tags(merged, schema) or None, session_id, schema)
+    props = _page_properties(None, _writable_tags(merged, schema) or None, session_id, schema, people)
     if props:
         try:
             notion.mcp_call(
@@ -1689,7 +1726,7 @@ def _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how, info=
     }
 
 
-def _link_page(session_id, link_url, t_data, app_title, tags, schema, mode):
+def _link_page(session_id, link_url, t_data, app_title, tags, schema, mode, people=None):
     """The user chose an existing page for this recording (``link_url``)."""
     page_id = _extract_page_id(link_url)
     saved = _get_notion_page_url(session_id)
@@ -1712,8 +1749,8 @@ def _link_page(session_id, link_url, t_data, app_title, tags, schema, mode):
     if owner == session_id:
         # Already this recording's page (made by the app): a normal update.
         _save_notion_page_url(session_id, page_url)
-        return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode)
-    return _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how="manual", info=info)
+        return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode, people)
+    return _adopt_legacy_page(session_id, page_url, app_title, tags, schema, how="manual", info=info, people=people)
 
 
 def _read_schema_for_scan():
@@ -1854,11 +1891,18 @@ def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False,
     app_title = custom_title or t_data.get("auto_title", "") or session_id
     tags = _sanitize_tags(config.get("recording_tags", {}).get(session_id, []))
 
-    schema = _ensure_schema(tags)
+    try:
+        people = _people_names(session_id, t_data)
+    except Exception as e:
+        logging.warning(f"Could not read the people on {session_id} for Notion: {e}")
+        people = None  # leave the page's People alone
+
+    schema = _ensure_schema(tags, people or ())
     tags = _writable_tags(tags, schema)
+    people = _writable_tags(people, schema, "people")
 
     if link_url:
-        return _link_page(session_id, link_url, t_data, app_title, tags, schema, mode)
+        return _link_page(session_id, link_url, t_data, app_title, tags, schema, mode, people)
 
     page_url = _get_notion_page_url(session_id)
     gone_id = None
@@ -1881,7 +1925,9 @@ def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False,
                 outcome, found = _match_legacy_page(session_id, t_data, schema)
                 if outcome == notion_legacy.MATCH_CONFIDENT:
                     try:
-                        return _adopt_legacy_page(session_id, found[0]["url"], app_title, tags, schema, how="auto")
+                        return _adopt_legacy_page(
+                            session_id, found[0]["url"], app_title, tags, schema, how="auto", people=people
+                        )
                     except Exception as e:
                         if not _is_page_gone_error(e):
                             raise
@@ -1894,14 +1940,14 @@ def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False,
                     return _needs_review(session_id, found)
                 if outcome == MATCH_UNCHECKED:
                     return _needs_review(session_id, [], unchecked=True)
-            return _create_page(session_id, t_data, app_title, tags, schema, poll_budget)
+            return _create_page(session_id, t_data, app_title, tags, schema, poll_budget, people)
 
         page_id = _extract_page_id(page_url)
         if not page_id:
             return {"error": "Could not parse page ID from saved Notion URL"}
 
         try:
-            return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode)
+            return _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode, people)
         except Exception as e:
             if gone_id is not None or not _is_page_gone_error(e):
                 raise
@@ -1916,7 +1962,7 @@ def _push_locked(session_id, t_data, config, mode, poll_budget, force_new=False,
             page_url = None
 
 
-def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode):
+def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags, schema, mode, people=None):
     """Update an existing page: properties, then (full mode) the app section.
 
     A legacy page the recording adopted keeps its body (see
@@ -1928,7 +1974,7 @@ def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags
         resolved_title = None
     else:
         resolved_title = _resolve_title_for_update(session_id, app_title, page_url)
-    properties = _page_properties(resolved_title, tags, session_id, schema)
+    properties = _page_properties(resolved_title, tags, session_id, schema, people)
     if properties:
         try:
             notion.mcp_call(
@@ -1950,6 +1996,37 @@ def _update_existing_page(session_id, page_id, page_url, t_data, app_title, tags
         if note:
             out["content_note"] = note
     return out
+
+
+PEOPLE_BACKFILL_KEY = "notion_people_backfilled"
+
+
+def backfill_people():
+    """Once: queue a properties-only update for every recording already in Notion that has
+    people on it, so older pages get the People column. Waits until Notion is set up; never
+    raises."""
+    try:
+        if load_config().get(PEOPLE_BACKFILL_KEY) or not (notion.is_connected() and notion.get_database_id()):
+            return 0
+        from app.utils import notion_queue
+
+        queued = 0
+        for path in sorted(TRANSCRIPTS_DIR.glob("*.json")):
+            sid = path.stem
+            try:
+                validate_session_id(sid)
+                t_data = _read_transcript_json(sid)
+                if t_data and _get_notion_page_url(sid) and _people_names(sid, t_data):
+                    notion_queue.enqueue(sid, notion_queue.KIND_PROPERTIES)
+                    queued += 1
+            except Exception as e:
+                logging.warning(f"Not filling People in Notion for {sid}: {e}")
+        update_config(lambda c: c.__setitem__(PEOPLE_BACKFILL_KEY, True))
+        logging.info(f"Queued {queued} Notion pages to fill in People")
+        return queued
+    except Exception as e:
+        logging.warning(f"Could not queue the Notion People fill: {e}")
+        return 0
 
 
 def enqueue_property_sync(session_id):

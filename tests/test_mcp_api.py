@@ -461,7 +461,7 @@ def test_people_and_tags(env):
     _recording(env, SID, speaker_names={"Speaker 2": "Sarah Jones"})
     save_config({"recording_tags": {SID: ["Work"]}})
     status, body = _get(env, "/mcp/v1/people")
-    assert status == 200 and body == {"items": [{"name": "Sarah Jones", "recordings": 1}]}
+    assert status == 200 and body == {"items": [{"name": "Sarah Jones", "recordings": 1, "you": False}]}
     status, body = _get(env, "/mcp/v1/tags")
     assert status == 200
     assert {"tag": "Work", "recordings": 1} in body["items"]
@@ -737,7 +737,7 @@ def test_connector_end_to_end(env):
     assert payload(4) == {"tags": []}
     got = payload(5)
     assert got["summary"] == "Sarah Jones agreed." and "transcript" not in got
-    assert payload(6) == {"items": [{"name": "Sarah Jones", "recordings": 1}]}
+    assert payload(6) == {"items": [{"name": "Sarah Jones", "recordings": 1, "you": False}]}
     for i in (7, 8):
         assert replies[i] == {"content": [{"type": "text", "text": NOT_FOUND}], "isError": True}
 
@@ -841,3 +841,26 @@ def test_out_of_range_cursor_is_400(env):
         status, body = _get(env, "/mcp/v1/recordings", cursor=cursor)
         assert status == 400, (value, body)
         assert "cursor" in body["error"]
+
+
+# ---------------------------------------------------------------- people filter
+
+
+def test_person_filter_is_exact_and_people_marks_you(env):
+    _recording(env, SID, speaker_names={"Speaker 2": "Sam Carter"})
+    _recording(env, SID2, speaker_names={"Speaker 2": "Sam"})
+    save_config({"recording_tags": {SID2: ["Sam Carter"]}, "profile": {"name": "Alex"}})
+    _sidecar(env, SID2, {"owner": _user_owner(["Speaker 1"])})
+    ids = lambda **q: [i["id"] for i in _get(env, "/mcp/v1/recordings", **q)[1]["items"]]  # noqa: E731
+    # query matches the tag too; person only where Sam Carter is a speaker
+    assert set(ids(query="sam carter")) == {SID, SID2}
+    assert ids(person="  sam   CARTER ") == [SID]
+    assert ids(person="Alex") == [SID2]
+    assert ids(person="Nobody") == []
+    assert _get(env, "/mcp/v1/people")[1] == {
+        "items": [
+            {"name": "Alex", "recordings": 1, "you": True},
+            {"name": "Sam", "recordings": 1, "you": False},
+            {"name": "Sam Carter", "recordings": 1, "you": False},
+        ]
+    }

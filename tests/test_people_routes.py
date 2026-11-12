@@ -327,11 +327,14 @@ def test_mcp_people_has_no_vectors(env):
     try:
         env.client.environ_base.pop("HTTP_X_PLAUD_TOKEN", None)
         env.client.environ_base["HTTP_X_OPEN_PIN_MCP_KEY"] = access.current_key()
-        r = env.client.get("/mcp/v1/people")
+        # The library lists recordings with audio; this one has only a transcript
+        listed = [{"session_id": S1, "has_transcript": True, "participants": speakers.participants(S1)}]
+        with patch("app.routes.recordings.collect_recordings", return_value=listed):
+            r = env.client.get("/mcp/v1/people")
     finally:
         access.disable()
     assert r.status_code == 200
-    assert r.get_json() == {"items": [{"name": "Harry", "recordings": 1}]}
+    assert r.get_json() == {"items": [{"name": "Harry", "recordings": 1, "you": False}]}
     assert "vec" not in r.get_data(as_text=True)
 
 

@@ -87,9 +87,10 @@ def test_someone_no_longer_named_stays_selected(out):
 def test_wiring():
     html = (APP / "index.html").read_text()
     assert html.index('id="person-filter"') < html.index('id="tag-filters"')
-    assert "$('#person-filter').addEventListener('change', (e) => showRecordingsWith(e.target.value));" in (
-        APP / "renderer.js"
-    ).read_text()
+    assert (
+        "$('#person-filter').addEventListener('change', (e) => showRecordingsWith(e.target.value));"
+        in (APP / "renderer.js").read_text()
+    )
     people = (UI / "people.js").read_text()
     assert "case 'recordings': closeSettings(); return showRecordingsWith(el.dataset.name);" in people
     assert 'data-ppl="recordings" data-name="${escapeHtml(p.name)}"' in people

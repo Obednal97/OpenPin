@@ -47,6 +47,7 @@ def list_recordings():
             end=args.get("to"),
             limit=args.get("limit"),
             cursor=args.get("cursor"),
+            person=args.get("person"),
         )
     except library.BadRequest as e:
         return _error(str(e), 400)
@@ -67,7 +68,7 @@ def get_recording(recording_id):
 
 @bp.route("/people", methods=["GET"])
 def list_people():
-    return jsonify({"items": speakers.list_people()})
+    return jsonify({"items": library.people()})
 
 
 @bp.route("/tags", methods=["GET"])

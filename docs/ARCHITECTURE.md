@@ -588,9 +588,9 @@ hears about the change. The connector speaks MCP's JSON-RPC itself (`initialize`
 
 | Tool | What it does |
 |---|---|
-| `list_recordings` | Search and list, newest first (`query`, `tag`, `from`, `to`, `limit` up to 100, `cursor`). Matches title, tags, speaker names, transcript and summary, case-insensitively |
+| `list_recordings` | Search and list, newest first (`query`, `person`, `tag`, `from`, `to`, `limit` up to 100, `cursor`). `query` matches title, tags, speaker names, transcript and summary, case-insensitively; `person` keeps only recordings where that name is a speaker (typed or voice-matched; case and spacing ignored) |
 | `get_recording` | One recording: file info (name, format, size, folder shown with `~`, local or Google Drive, whether audio is on the Mac), times, tags, Notion link, speakers, and optionally the transcript, summary and coaching (status, metrics, review and, once measured, engagement). Never raw audio. Coaching is left out for recordings excluded from it |
-| `list_people` | Every speaker name used, with recording counts |
+| `list_people` | Everyone named in a recording (typed or voice-matched, the user once confirmed), with recording counts and `you` for the user (`library.people()`, from the list's participants) |
 | `list_tags` | Every tag, with counts |
 | `set_speaker_names` | Set, change or clear (null) names by label |
 | `add_tags`, `remove_tags` | Change tags one at a time; adding may create a tag |
@@ -624,7 +624,7 @@ safe the app's own tag saving adds and removes single tags (`/recordings/tags/ad
 - Your own name (`profile.name`) fills in on your speaker only when you picked that speaker
   yourself in coaching (owner source `user`) for the current labelling, you haven't typed a name
   for it, and the recording isn't marked mixed up or excluded. A voice match alone never names
-  anyone. Undoing the pick removes it. `list_people` counts typed names only.
+  anyone. Undoing the pick removes it. The window's name suggestions (`speakers.list_people`) count typed names only.
 - In the window each transcript label is clickable (name field with suggestions from `list_people`,
   Save, Clear, Cancel), every line shows the name with the label as a hint, and the coaching
   report and list participants use names.
@@ -735,7 +735,12 @@ and never goes through the MCP connector.
 - The app writes its content between a heading (`Open Pin — transcript & summary`) and an end
   marker, and only ever replaces that section. Sections written before the rename (headed
   `Plaud V2 — transcript & summary`) are recognised too and replaced with the new markers. Tag and title changes update **properties only**.
-- Schema changes only add: a `Session ID` column, a `Tags` multi-select, new tag options.
+- Schema changes only add: a `Session ID` column, `Tags` and `People` multi-selects, new options.
+- **People** lists the recording's names (typed or voice-matched), the user left out. Open Pin owns
+  it: every push replaces it (empty clears it), unlike Tags, whose page values flow back into the
+  app. Name changes already queue a full update. On launch, once Notion is set up, every pushed
+  recording with names gets a properties-only update to fill the column (`backfill_people`,
+  config `notion_people_backfilled`). A `People` column of another type is left alone.
 - Pushes go through a **durable queue** on disk (`.notion_queue.json`), retried with backoff,
   paused while Notion auth is broken, with failures listed in Settings with a Retry button.
 - **Pages from before v2.4.0** have no Session ID (title, Tags, and a body of summary, `---`,

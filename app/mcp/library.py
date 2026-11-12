@@ -309,7 +309,25 @@ def parse_include(raw) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- the read models
 
 
-def list_recordings(query=None, tag=None, start=None, end=None, limit=None, cursor=None) -> dict:
+def _person_key(name) -> str:
+    """A name as people are matched: case and spacing don't matter."""
+    return " ".join(name.split()).casefold() if isinstance(name, str) else ""
+
+
+def people() -> list[dict]:
+    """Everyone named in a recording (typed or recognised by voice, the user included once
+    they've confirmed their speaker): ``[{name, recordings, you}]``, most recordings first."""
+    me = _person_key(speakers.profile_name())
+    found: dict[str, dict] = {}
+    for entry in recordings.collect_recordings():
+        for key, name in {_person_key(n): n for n in reversed(entry.get("participants") or [])}.items():
+            if key:
+                hit = found.setdefault(key, {"name": name, "recordings": 0, "you": key == me})
+                hit["recordings"] += 1
+    return sorted(found.values(), key=lambda p: (-p["recordings"], p["name"].casefold()))
+
+
+def list_recordings(query=None, tag=None, start=None, end=None, limit=None, cursor=None, person=None) -> dict:
     """``{items, next_cursor}``: recordings newest first, filtered and paged."""
     limit = parse_limit(limit)
     after = decode_cursor(cursor)
@@ -319,6 +337,7 @@ def list_recordings(query=None, tag=None, start=None, end=None, limit=None, curs
         raise BadRequest("from is after to")
     needle = query.strip().casefold() if isinstance(query, str) and query.strip() else None
     wanted_tag = tag.strip().casefold() if isinstance(tag, str) and tag.strip() else None
+    wanted_person = _person_key(person) or None
 
     page: list[_Row] = []
     more = False
@@ -326,6 +345,8 @@ def list_recordings(query=None, tag=None, start=None, end=None, limit=None, curs
         if after is not None and not row.sort_key < after:
             continue
         if wanted_tag and wanted_tag not in {t.casefold() for t in row.entry.get("tags") or [] if isinstance(t, str)}:
+            continue
+        if wanted_person and wanted_person not in {_person_key(n) for n in row.entry.get("participants") or []}:
             continue
         if (lower or upper) and row.when is None:
             continue
