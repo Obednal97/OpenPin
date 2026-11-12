@@ -42,15 +42,22 @@ function _pplMeRow(me) {
     : '<a href="#" class="ppl-link" data-ppl="add-name">Add your name</a>';
   return `<div class="ppl-row ppl-me">
     <div class="ppl-main">${name}<span class="ppl-badge">You</span></div>
-    <div class="ppl-meta">${me.samples} of 20 samples</div>
+    <div class="ppl-meta">${me.name ? `${_pplRecordings(me)} · ` : ''}${me.samples} of 20 samples</div>
     <div class="ppl-actions"><a href="#" class="ppl-link" data-ppl="voice">Your voice &amp; coaching</a></div>
   </div>`;
+}
+
+// "3 recordings", as a link to the recordings list filtered to that person.
+function _pplRecordings(p) {
+  const text = _pplPlural(p.recordings || 0, 'recording', 'recordings');
+  if (!p.recordings || !p.name) return text;
+  return `<button type="button" class="ppl-link" data-ppl="recordings" data-name="${escapeHtml(p.name)}" title="Show these recordings">${text}</button>`;
 }
 
 function _pplPersonRow(p, people) {
   const id = escapeHtml(p.id);
   const last = p.last_heard ? ` · Last heard ${escapeHtml(_pplDate(p.last_heard))}` : '';
-  const meta = `${_pplPlural(p.recordings || 0, 'recording', 'recordings')} · ${p.samples} of 20 samples · ${_pplSize(p.bytes)}${last}`;
+  const meta = `${_pplRecordings(p)} · ${p.samples} of 20 samples · ${_pplSize(p.bytes)}${last}`;
   const editing = _pplEditing && _pplEditing.id === p.id ? _pplEditing.mode : '';
   let actions;
   if (editing === 'rename') {
@@ -248,6 +255,7 @@ function _pplClick(e) {
   const input = root.querySelector('[data-ppl-input]');
   switch (el.dataset.ppl) {
     case 'add-name': return _pplAddName();
+    case 'recordings': closeSettings(); return showRecordingsWith(el.dataset.name);
     case 'voice': return _pplFocusSoon('#voice-coaching-section');
     case 'rename': _pplEditing = { id, mode: 'rename' }; _pplError = ''; return _pplRender();
     case 'merge': _pplEditing = { id, mode: 'merge' }; _pplError = ''; return _pplRender();

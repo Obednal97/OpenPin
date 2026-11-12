@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 # Launched as a Tauri sidecar — sys.path is configured here so that
@@ -397,6 +398,10 @@ if __name__ == "__main__":
     from app.utils import notion_queue as _notion_queue
 
     _notion_queue.start_worker()
+    # Older Notion pages get the People column, once (in the background).
+    from app.routes import notion as _notion_routes
+
+    threading.Thread(target=_notion_routes.backfill_people, name="notion-people-backfill", daemon=True).start()
     # Learn voices from names typed in past recordings, then name them: once, in the
     # background, and only with the voice model installed (otherwise it stays pending).
     # Never stops the app from starting.

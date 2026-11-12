@@ -102,7 +102,8 @@ TOOLS = [
             "Find recordings in the user's Open Pin library, newest first. `query` is a plain, "
             "case-insensitive substring search over each recording's title, tags, speaker names, "
             "transcript and summary, so a person's name, a topic or a phrase someone said all work. "
-            "Narrow with `tag` and a `from`/`to` date range. Each item has id, title, recorded_at "
+            "Narrow with `person` (recordings that person was in, by exact name from list_people), "
+            "`tag` and a `from`/`to` date range. Each item has id, title, recorded_at "
             "(ISO 8601 with the Mac's UTC offset), duration_s, tags, participants (named speakers, "
             "plus the user when they've confirmed which speaker they are), has_transcript, "
             "has_summary, coaching_status and notion_url. Returns {items, next_cursor}: pass "
@@ -114,6 +115,13 @@ TOOLS = [
                 "query": {
                     "type": "string",
                     "description": "Text to look for in titles, tags, speaker names, transcripts and summaries.",
+                },
+                "person": {
+                    "type": "string",
+                    "description": (
+                        "Only recordings this person was in, named or recognised by voice: a name from "
+                        "list_people (case doesn't matter). Unlike query, it skips recordings that only mention them."
+                    ),
                 },
                 "tag": {"type": "string", "description": "Only recordings with this tag."},
                 "from": {
@@ -173,9 +181,11 @@ TOOLS = [
         "name": "list_people",
         "title": "List named speakers",
         "description": (
-            "Every speaker name used across the library, with how many recordings each appears in. "
-            "Check it before set_speaker_names so the same person keeps the same spelling (reuse "
-            '"Sarah Jones" rather than adding "Sarah J"), and to see who the user talks to.'
+            "Everyone named in the library, typed or recognised by voice, with how many recordings "
+            "each is in; `you` marks the user. Use a name with list_recordings' `person` to find "
+            "every recording with someone. Check it before set_speaker_names so the same person keeps "
+            'the same spelling (reuse "Sarah Jones" rather than adding "Sarah J"), and to see who the '
+            "user talks to."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": _READ_ONLY,
@@ -476,7 +486,7 @@ def _recording_path(recording_id: str, suffix: str = "") -> str:
 
 def _run_tool(name: str, args: dict):
     if name == "list_recordings":
-        query = {k: args[k] for k in ("query", "tag", "from", "to", "limit", "cursor") if k in args}
+        query = {k: args[k] for k in ("query", "person", "tag", "from", "to", "limit", "cursor") if k in args}
         return backend("GET", "/recordings", query=query)
     if name == "get_recording":
         include = args.get("include", _INCLUDE_PARTS)

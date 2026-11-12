@@ -405,6 +405,8 @@ $('#delete-selected-btn').addEventListener('click', deleteSelected);
 $('#move-selected-btn').addEventListener('click', moveSelected);
 $('#transcribe-selected-btn').addEventListener('click', transcribeSelected);
 
+$('#person-filter').addEventListener('change', (e) => showRecordingsWith(e.target.value));
+
 // Search
 $('#search-input').addEventListener('input', (e) => {
   app.searchQuery = e.target.value;

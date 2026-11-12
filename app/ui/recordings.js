@@ -16,6 +16,43 @@ async function loadRecordings() {
   }
 }
 
+// Names compare the way People does: case and spacing don't matter.
+function _personKey(name) {
+  return (name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// Show only the recordings a person was in, by typed name or voice match ('' for everyone).
+function showRecordingsWith(name) {
+  app.personFilter = name || '';
+  if (app.currentView === 'transcript') closeTranscript();
+  else renderRecordingsList();
+}
+
+// The person picker: everyone named in a recording, most recordings first.
+function renderPersonFilter() {
+  const select = $('#person-filter');
+  const people = new Map();
+  app.recordings.forEach((rec) => {
+    new Set((rec.participants || []).map(_personKey)).forEach((key) => {
+      if (!key) return;
+      const hit = people.get(key);
+      if (hit) hit.count++;
+      else people.set(key, { name: rec.participants.find((n) => _personKey(n) === key), count: 1 });
+    });
+  });
+  const active = _personKey(app.personFilter);
+  // A filter on someone no longer named anywhere stays visible rather than silently clearing
+  if (active && !people.has(active)) people.set(active, { name: app.personFilter, count: 0 });
+  const rows = [...people.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  select.classList.toggle('hidden', rows.length === 0);
+  select.classList.toggle('active', !!active);
+  select.innerHTML =
+    '<option value="">Everyone</option>' +
+    rows
+      .map((p) => `<option value="${escapeHtml(p.name)}"${_personKey(p.name) === active ? ' selected' : ''}>${escapeHtml(p.name)} (${p.count})</option>`)
+      .join('');
+}
+
 function getFilteredRecordings() {
   let filtered = app.recordings;
 
@@ -24,6 +61,11 @@ function getFilteredRecordings() {
       const tags = rec.tags || [];
       return [...app.activeTagFilters].some((f) => tags.includes(f));
     });
+  }
+
+  if (app.personFilter) {
+    const key = _personKey(app.personFilter);
+    filtered = filtered.filter((rec) => (rec.participants || []).some((n) => _personKey(n) === key));
   }
 
   if (app.searchQuery) {
@@ -93,9 +135,11 @@ function renderRecordingsList() {
   }
   dom.emptyState.classList.add('hidden');
 
-  if (filtered.length === 0 && app.searchQuery) {
+  if (filtered.length === 0 && (app.searchQuery || app.personFilter)) {
+    const person = app.personFilter ? ` with ${escapeHtml(app.personFilter)}` : '';
+    const query = app.searchQuery ? ` ${person ? 'that ' : ''}match "${escapeHtml(app.searchQuery)}"` : '';
     dom.recordingsList.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-muted);">
-      No recordings match "${escapeHtml(app.searchQuery)}"
+      No recordings${person}${query}
     </div>`;
     updateSelectBar();
     return;
@@ -294,6 +338,7 @@ function updateSelectBar() {
   }
 
   selectBar.classList.remove('hidden');
+  renderPersonFilter();
 
   if (app.selectMode && app.selectedIds.size > 0) {
     selectActions.classList.remove('hidden');

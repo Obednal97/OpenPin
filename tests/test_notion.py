@@ -22,7 +22,7 @@ def _schema(**over):
         "data_source_id": "ds-id",
         "tags_exists": True,
         "tags_conflict": False,
-        "tag_options": {"A": "blue"},
+        "tags_options": {"A": "blue"},
         "session_prop": True,
         "session_conflict": False,
     }
@@ -1106,7 +1106,7 @@ def test_schema_adds_missing_options_as_union_keeping_colours(schema_fake):
     s = rn._ensure_schema(["A", "C"])
     assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('A':blue, 'B':red, 'C':default)"]
     assert schema_fake.of("notion-update-data-source")[0]["data_source_id"] == DS_UUID
-    assert set(s["tag_options"]) == {"A", "B", "C"}
+    assert set(s["tags_options"]) == {"A", "B", "C"}
 
 
 def test_schema_never_sets_from_stale_cache(schema_fake):
@@ -1114,7 +1114,7 @@ def test_schema_never_sets_from_stale_cache(schema_fake):
 
     # Cache from earlier in the session: only "Z" (since deleted in Notion),
     # and it lacks C, so a change is needed — it must come from a fresh fetch.
-    rn._schema_cache = {**_schema(), "tag_options": {"Z": "default"}}
+    rn._schema_cache = {**_schema(), "tags_options": {"Z": "default"}}
     schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
     rn._ensure_schema(["C"])
     assert schema_fake.methods() == ["notion-fetch", "notion-update-data-source"]
@@ -1795,7 +1795,7 @@ def test_push_sends_sanitized_tags(env, fake):
     _write_transcript(env.trn, SID, {"text": "x"})
     with patch.object(rn, "_ensure_schema", return_value=_schema()) as ens:
         rn.push_to_notion(SID, mode="properties")
-    ens.assert_called_once_with(["Q1 Q2", "B"])
+    ens.assert_called_once_with(["Q1 Q2", "B"], ())
     assert json.loads(fake.of("notion-update-page")[0]["properties"]["Tags"]) == ["Q1 Q2", "B"]
 
 
@@ -1869,9 +1869,9 @@ def test_schema_unparseable_options_are_unknown_and_not_altered(schema_fake, tag
     schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": tags_prop, "Session ID": {"type": "text"}})
     s = rn._ensure_schema(["A", "C"])
     assert _ddl(schema_fake) == []
-    assert s["tags_exists"] is True and s["tag_options_known"] is False
+    assert s["tags_exists"] is True and s["tags_options_known"] is False
     # Not cached as good enough: the next push re-reads the schema.
-    assert rn._schema_satisfies(s, {"A"}) is False
+    assert rn._schema_satisfies(s, {"tags": {"A"}}) is False
 
 
 def test_unknown_options_page_gets_only_known_tags(schema_fake):
@@ -1903,7 +1903,7 @@ def test_schema_empty_options_contradicted_by_text_not_altered(schema_fake, extr
     schema_fake.handlers["notion-fetch"] = _db_fetch_with_extra(props, extra)
     s = rn._ensure_schema(["C"])
     assert _ddl(schema_fake) == []
-    assert s["tag_options_known"] is False
+    assert s["tags_options_known"] is False
 
 
 def test_schema_genuinely_empty_options_are_added(schema_fake):
@@ -1918,7 +1918,7 @@ def test_schema_genuinely_empty_options_are_added(schema_fake):
     schema_fake.handlers["notion-fetch"] = _db_fetch(props)
     s = rn._ensure_schema(["C"])
     assert _ddl(schema_fake) == ["ALTER COLUMN \"Tags\" SET MULTI_SELECT('C':default)"]
-    assert s["tag_options_known"] is True
+    assert s["tags_options_known"] is True
 
 
 def test_push_with_unknown_options_still_pushes_page(env, fake):
@@ -1932,3 +1932,109 @@ def test_push_with_unknown_options_still_pushes_page(env, fake):
     assert fake.of("notion-update-data-source") == []
     props = fake.of("notion-update-page")[0]["properties"]
     assert "Tags" not in props and props["Session ID"] == SID
+
+
+# ---------------------------------------------------------------------------
+# People: the names on a recording (not you) as a multi-select Open Pin owns
+# ---------------------------------------------------------------------------
+
+PEOPLE_SEGS = [
+    {"start": 0, "end": 1, "speaker": "Speaker 1", "text": "Hi."},
+    {"start": 1, "end": 2, "speaker": "Speaker 2", "text": "Hello."},
+    {"start": 2, "end": 3, "speaker": "Speaker 3", "text": "Hey."},
+]
+
+
+def _people_transcript(env, names):
+    _write_transcript(env.trn, SID, {"text": "x", "segments": PEOPLE_SEGS, "speaker_names": names})
+
+
+def test_people_written_without_you_or_unnamed_speakers(env, fake):
+    from app.routes import notion as rn
+
+    _save_page(profile={"name": "Alex"})
+    _people_transcript(env, {"Speaker 1": "alex", "Speaker 2": "Sam, Carter"})
+    schema = _schema(people_exists=True, people_options={"Sam Carter": "default"})
+    with patch.object(rn, "_ensure_schema", return_value=schema) as ens:
+        rn.push_to_notion(SID, mode="properties")
+    ens.assert_called_once_with([], ["Sam Carter"])
+    assert json.loads(fake.of("notion-update-page")[0]["properties"]["People"]) == ["Sam Carter"]
+
+
+def test_people_replaced_on_each_push_and_cleared_when_none(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _people_transcript(env, {})
+    with patch.object(rn, "_ensure_schema", return_value=_schema(people_exists=True)):
+        rn.push_to_notion(SID, mode="properties")
+    assert json.loads(fake.of("notion-update-page")[0]["properties"]["People"]) == []
+    # No column yet and nobody named: none is made or written
+    with patch.object(rn, "_ensure_schema", return_value=_schema()):
+        rn.push_to_notion(SID, mode="properties")
+    assert "People" not in fake.of("notion-update-page")[1]["properties"]
+
+
+def test_unreadable_names_leave_people_alone(env, fake):
+    from app.routes import notion as rn
+
+    _save_page()
+    _people_transcript(env, {"Speaker 2": "Sam Carter"})
+    with (
+        patch.object(rn, "_ensure_schema", return_value=_schema(people_exists=True)),
+        patch.object(rn, "_people_names", side_effect=RuntimeError("boom")),
+    ):
+        rn.push_to_notion(SID, mode="properties")
+    assert "People" not in fake.of("notion-update-page")[0]["properties"]
+
+
+def test_schema_adds_people_column_then_options_by_union(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"Tags": TAGS_AB, "Session ID": {"type": "text"}})
+    s = rn._ensure_schema(["A"], ["Sam Carter"])
+    assert _ddl(schema_fake) == ["ADD COLUMN \"People\" MULTI_SELECT('Sam Carter':default)"]
+    assert s["people_exists"] and set(s["tags_options"]) == {"A", "B"}
+
+    people = {"type": "multi_select", "options": [{"name": "Sam Carter", "color": "green"}]}
+    schema_fake.handlers["notion-fetch"] = _db_fetch(
+        {"Tags": TAGS_AB, "People": people, "Session ID": {"type": "text"}}
+    )
+    rn.reset_schema_cache()
+    rn._ensure_schema([], ["Priya"])
+    assert _ddl(schema_fake)[-1] == "ALTER COLUMN \"People\" SET MULTI_SELECT('Priya':default, 'Sam Carter':green)"
+
+
+def test_people_column_of_another_type_is_left_alone(schema_fake):
+    from app.routes import notion as rn
+
+    schema_fake.handlers["notion-fetch"] = _db_fetch({"People": {"type": "person"}, "Session ID": {"type": "text"}})
+    s = rn._ensure_schema([], ["Sam Carter"])
+    assert _ddl(schema_fake) == [] and s["people_conflict"] and not s["people_exists"]
+    assert "People" not in rn._page_properties("T", None, SID, s, ["Sam Carter"])
+
+
+def test_backfill_queues_pages_with_people_once(env):
+    from app.routes import notion as rn
+    from app.utils.config import load_config, save_config
+
+    other, unpushed = "1715000100", "1715000200"
+    save_config({"notion_page_urls": {SID: PAGE_URL, other: PAGE_URL}})
+    _people_transcript(env, {"Speaker 2": "Sam Carter"})
+    _write_transcript(env.trn, other, {"text": "x", "segments": PEOPLE_SEGS})  # nobody named
+    _write_transcript(env.trn, unpushed, {"text": "x", "segments": PEOPLE_SEGS, "speaker_names": {"Speaker 2": "Sam"}})
+    with patch("app.utils.notion_queue.enqueue") as enq:
+        assert rn.backfill_people() == 1
+        assert rn.backfill_people() == 0
+    enq.assert_called_once_with(SID, "properties")
+    assert load_config()[rn.PEOPLE_BACKFILL_KEY] is True
+
+
+def test_backfill_waits_for_notion(env):
+    from app.routes import notion as rn
+    from app.utils.config import load_config
+
+    with patch("app.state.notion.is_connected", return_value=False), patch("app.utils.notion_queue.enqueue") as enq:
+        assert rn.backfill_people() == 0
+    enq.assert_not_called()
+    assert rn.PEOPLE_BACKFILL_KEY not in load_config()
