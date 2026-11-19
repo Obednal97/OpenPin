@@ -10,7 +10,7 @@ scripts/rsa_session.json
 .gdrive_config.json
 .notion_queue.json
 *.json.bak
-keys/
+/keys
 
 # Runtime data
 recordings/
