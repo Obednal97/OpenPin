@@ -190,6 +190,26 @@ def _release_orphaned_links():
     return sent
 
 
+def _missing_pairing_error(sn, logged_in, bind_error=None):
+    """Why this Mac lacks a NotePin's pairing credentials, in words the user can act on.
+
+    The usual cause when signed in: Plaud won't register the NotePin because it
+    is still on another Plaud account (bind_error carries Plaud's own reason).
+    """
+    which = f"this NotePin (serial ending {sn[-4:]})"
+    if not logged_in:
+        return (
+            f"This Mac doesn't have the pairing credentials for {which}. They come from Plaud once per "
+            "device: sign in under Settings › Plaud Cloud, connect, then you can sign out."
+        )
+    reason = f" {bind_error.rstrip('.')}." if bind_error else ""
+    return (
+        f"Couldn't register {which} to your Plaud account.{reason} If it's still on someone else's "
+        "Plaud account, they need to remove it there first (Plaud app › the device › Unbind), "
+        "then connect again."
+    )
+
+
 async def _disconnect_quietly(cl, timeout=5):
     """Best-effort disconnect of a BleakClient we no longer track."""
     try:
@@ -921,14 +941,7 @@ async def connect_device(address=None):
             if not sn:
                 return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
             if not is_logged_in():
-                return {
-                    "connected": False,
-                    "error": (
-                        f"This Mac doesn't have the pairing credentials for this NotePin (serial ending {sn[-4:]}). "
-                        "They come from Plaud once per device: sign in under Settings › Plaud Cloud, connect, "
-                        "then you can sign out."
-                    ),
-                }
+                return {"connected": False, "error": _missing_pairing_error(sn, False)}
             if cloud_status == SN_SIGN_WRONG_TOKEN_STATUS:
                 return {
                     "connected": False,
@@ -1041,18 +1054,22 @@ async def connect_device(address=None):
     from app.state.cloud import is_logged_in as cloud_logged_in
 
     device_token = get_device_bind_token(sn)
+    bind_error = None
     if not device_token and sn and cloud_logged_in():
         # BIND_TOKEN missing — try creating it now (handles first-time pairing)
         logging.info(f"[BLE] No BIND_TOKEN for {sn}, attempting cloud bind...")
         try:
-            cloud_bind_device(sn)
+            bind_error = (cloud_bind_device(sn) or {}).get("error")
             device_token = get_device_bind_token(sn)
-            logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
+            logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'} ({bind_error or 'ok'})")
         except Exception as e:
+            bind_error = str(e)
             logging.warning(f"[BLE] Cloud bind failed: {e}")
+    if not device_token:
+        await _disconnect_quietly(cl)
+        _reset_state()
+        return {"connected": False, "error": _missing_pairing_error(sn, cloud_logged_in(), bind_error)}
     try:
-        if not device_token:
-            raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
         if len(device_token) > 32:
             logging.warning(
                 "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
@@ -2033,6 +2050,7 @@ def _do_wifi_sync_locked(deadline):
 
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        bind_error = None
         secrets.extend(s for s in (device_token, device_sig) if s)
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
         if (not device_token or not device_sig) and sn and is_logged_in():
@@ -2041,6 +2059,7 @@ def _do_wifi_sync_locked(deadline):
                 if not device_token:
                     bind_result = bind_device(sn)
                     device_token = get_device_bind_token(sn)
+                    bind_error = (bind_result or {}).get("error")
                     secrets.extend(s for s in (device_token, (bind_result or {}).get("token")) if s)
                     _wlog(f"bind_device: {'token received' if device_token else (bind_result or {}).get('error')}")
                 if not device_sig:
@@ -2061,6 +2080,8 @@ def _do_wifi_sync_locked(deadline):
             _wlog("ABORT: missing credentials")
             if not is_logged_in():
                 return {"error": "Log into Plaud Cloud in Settings first, then try again."}
+            if not device_token:
+                return {"error": _missing_pairing_error(sn, True, bind_error)}
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps(
             {

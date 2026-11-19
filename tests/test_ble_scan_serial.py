@@ -243,6 +243,31 @@ def test_missing_credentials_signed_in_passes_on_plauds_reason(connect_env, monk
     assert "T" * 32 not in error
 
 
+def test_device_on_another_account_passes_on_plauds_reason(connect_env, monkeypatch):
+    """Plaud won't bind a NotePin that's on another account: say so, not "BIND_TOKEN missing"."""
+    monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: None)
+    monkeypatch.setattr("app.state.cloud.is_logged_in", lambda: True)
+    monkeypatch.setattr(
+        "app.state.cloud.bind_device",
+        lambda sn: {"error": "Plaud wouldn't register this NotePin (device already bind other)", "status": -1},
+    )
+    notepin = FakeNotePin()
+    result = _connect(monkeypatch, notepin, ADDR)
+    assert result["connected"] is False
+    error = result["error"]
+    assert f"serial ending {SN[-4:]}" in error and SN not in error
+    assert "Plaud wouldn't register this NotePin (device already bind other)." in error
+    assert "Unbind" in error
+    assert notepin.client.is_connected is False
+
+
+def test_no_bind_token_signed_out_says_sign_in(connect_env, monkeypatch):
+    monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: None)
+    result = _connect(monkeypatch, FakeNotePin(), ADDR)
+    assert result["connected"] is False
+    assert "sign in under Settings › Plaud Cloud" in result["error"]
+
+
 def test_wrong_kind_of_sign_in_points_to_import_pairing(connect_env, monkeypatch):
     """Issue #104: sn-sign's -3901 ("token type does not match parse mode") can't be
     fixed by signing in again from this app, so point to Import pairing."""

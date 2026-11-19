@@ -640,3 +640,15 @@ def test_wifi_skips_what_bluetooth_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(dev, "load_config", lambda: {"deleted_ids": [300], "storage_mode": "cloud"})
     monkeypatch.setattr(gdrive, "get_synced_files", lambda: {"400": {}})
     assert {"100", "200", "300", "400"} <= dev._wifi_skip_ids()
+
+
+def test_wifi_sync_passes_on_why_plaud_wont_bind(parent, monkeypatch):
+    """A NotePin on another Plaud account: Wi-Fi sync says why, not just "not registered"."""
+    monkeypatch.setattr("app.state.cloud.get_device_bind_token", lambda sn: None)
+    monkeypatch.setattr("app.state.cloud.get_device_sn_signature", lambda sn: "U0lH")
+    monkeypatch.setattr(
+        "app.state.cloud.bind_device",
+        lambda sn: {"error": "Plaud wouldn't register this NotePin (device already bind other)"},
+    )
+    error = dev.do_wifi_sync_blocking()["error"]
+    assert "(device already bind other)." in error and "Unbind" in error
