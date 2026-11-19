@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -974,6 +975,15 @@ async def connect_device(address=None):
             await asyncio.sleep(0.1)
             if ack.is_set() or done.is_set():
                 break
+        # A blob without an ACK means the NotePin used a public key it already had,
+        # which may be another app's (e.g. Plaud's phone app after pairing there).
+        cached_key = done.is_set() and not ack.is_set()
+        logging.warning(
+            "[BLE] Key exchange: %s",
+            "NotePin used the public key it already had"
+            if cached_key
+            else ("NotePin asked for this app's public key" if ack.is_set() else "no reply"),
+        )
         if ack.is_set() and not done.is_set():
             pem = get_public_key_full_pem().encode()
             pc = (len(pem) + 99) // 100
@@ -994,10 +1004,27 @@ async def connect_device(address=None):
         blob = bytearray()
         for i in sorted(rsa.keys()):
             blob.extend(rsa[i])
+        # With the wrong private key, PKCS#1 v1.5 decryption doesn't fail: it
+        # returns random bytes of random length, so check the result instead.
         dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
         key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
-        if ChaCha20Poly1305(key).decrypt(nonce, ct, aad) != b"PLAUD.AI":
-            raise ValueError("BLE handshake identity check failed: decrypted token mismatch")
+        try:
+            blob_ok = len(dec) > 56 and ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI"
+        except InvalidTag:
+            blob_ok = False
+        if not blob_ok:
+            logging.warning("[BLE] Session blob isn't for this app's key (cached key: %s)", cached_key)
+            await _disconnect_quietly(cl)
+            _reset_state()
+            if cached_key:
+                return {
+                    "connected": False,
+                    "error": (
+                        "This NotePin is paired with another app, such as Plaud's phone app. Unpair or "
+                        "remove it there, close that app, then connect again here."
+                    ),
+                }
+            return {"connected": False, "error": "The NotePin's reply couldn't be read. Try connecting again."}
         try:
             await cl.stop_notify(N)
         except Exception:

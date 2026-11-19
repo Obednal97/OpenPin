@@ -8,6 +8,7 @@ scan merges later packets and falls back to the paired device's last address.
 
 import asyncio
 import base64
+import os
 import struct
 from types import SimpleNamespace
 
@@ -434,3 +435,16 @@ def test_scan_known_skips_scanning_once_connected(monkeypatch, paired):
         body = routes.scan_known().get_json()
     assert body == {"found": False, "reason": "already_connected", "connected": True}
     assert scans == []
+
+
+@pytest.mark.parametrize("plaintext_len", [20, 170])
+def test_blob_for_another_apps_key_says_unpair_there(connect_env, monkeypatch, plaintext_len):
+    """Harry's NotePin, 19 Nov 2026: it had Plaud's phone app's key cached, so our RSA
+    decrypt returned random bytes ("ChaCha20Poly1305 key must be 32 bytes")."""
+    notepin = FakeNotePin()
+    notepin.session_plaintext = lambda *_: os.urandom(plaintext_len)
+    result = _connect(monkeypatch, notepin, ADDR)
+    assert result["connected"] is False
+    assert "paired with another app" in result["error"]
+    assert notepin.client.is_connected is False
+    assert dev._device_state["client"] is None
