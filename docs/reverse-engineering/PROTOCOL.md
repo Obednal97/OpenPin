@@ -90,9 +90,13 @@ once per device, when the user is signed in to Plaud Cloud. After that the app w
 either is missing at connect time, the app tries to fetch it, and fails with "Not logged into Plaud
 Cloud" if it can't.
 
-The app uses the same key pair (`APP_KEY_PATH` in `constants.py`, the default in `src/crypto.py`)
-for the BLE handshake and to decrypt recordings. Older notes call it `app_private.pem`; that file
-name is gone.
+The app sends the e2ee key pair (`APP_KEY_PATH` in `constants.py`, the default in `src/crypto.py`)
+in the BLE handshake. Plaud's apps have also shipped a second pair, `keys/app_private.pem`, and a
+NotePin keeps whichever public key an app last gave it. So the session blob is tried with each
+known key (`open_session_blob`, `KNOWN_PRIVATE_KEY_PATHS`), and the key that opens it goes first
+when decrypting that NotePin's recordings: with the repeating keystream layout a wrong RSA key
+still passes the Opus check about half the time, so the order matters (**Implemented**, v2.12.1;
+that the NotePin encrypts file keys with the same cached key is **Inferred**).
 
 ## 5. Handshake
 

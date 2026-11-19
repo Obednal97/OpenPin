@@ -89,14 +89,26 @@ def _looks_like_opus(frames, check_far_frame=True):
 def decrypt_ble_file(data, app_key):
     """Decrypt a BLE/WiFi-downloaded ASR file -> raw Opus frames.
 
-    Raises BleDecryptError when the file isn't a PLAUD.AI container, the file
-    key can't be recovered, or neither keystream layout yields valid Opus
+    ``app_key`` is a private key or a list of them: the NotePin encrypts each
+    file key with whichever app public key it has cached, so each key is tried
+    and the Opus check decides. Raises BleDecryptError when the file isn't a
+    PLAUD.AI container or no key and keystream layout yields valid Opus
     frames. It never returns undecrypted/garbage bytes.
     """
     if len(data) < 0x300:
         raise BleDecryptError(f"File too small to decrypt ({len(data)} bytes)")
     if data[:8] != b"PLAUD.AI":
         raise BleDecryptError("Missing PLAUD.AI header")
+    error = None
+    for key in app_key if isinstance(app_key, (list, tuple)) else [app_key]:
+        try:
+            return _decrypt_with_key(data, key)
+        except BleDecryptError as e:
+            error = e
+    raise error
+
+
+def _decrypt_with_key(data, app_key):
     nonce = data[0x84:0x90]
     rsa_blob = data[0x100:0x200]
     try:

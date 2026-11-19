@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 # Default key paths — use e2ee keys (matches official Plaud app)
@@ -20,6 +22,9 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 KEYS_DIR = Path(__file__).parent.parent / "keys"
 PRIVATE_KEY_PATH = KEYS_DIR / "e2ee_private.pem"
 PUBLIC_KEY_PATH = KEYS_DIR / "e2ee_public.pem"
+# Plaud's apps have shipped two key pairs, and a NotePin keeps whichever public
+# key an app last gave it (Harry's NotePin, March and November 2026). Ours first.
+KNOWN_PRIVATE_KEY_PATHS = (PRIVATE_KEY_PATH, KEYS_DIR / "app_private.pem")
 
 
 def load_rsa_private_key(path: str | Path | None = None):
@@ -47,3 +52,27 @@ def rsa_decrypt(encrypted_data: bytes, private_key=None) -> bytes:
         encrypted_data,
         asym_padding.PKCS1v15(),
     )
+
+
+def open_session_blob(blob: bytes, decrypt=rsa_decrypt, load_key=load_rsa_private_key):
+    """(key, nonce, aad, key path) from the NotePin's session blob, or None.
+
+    Tries each known key. With the wrong key PKCS#1 v1.5 returns random bytes of
+    random length instead of failing, so each result is checked against the
+    PLAUD.AI tag. The NotePin encrypts recordings' file keys with the same
+    cached key, so decrypt them with this one first: with the repeating
+    keystream layout a wrong key still passes the Opus check about half the
+    time. ``decrypt``/``load_key`` are parameters so tests can fake them.
+    """
+    for path in KNOWN_PRIVATE_KEY_PATHS:
+        try:
+            dec = decrypt(blob, load_key(path))
+        except (OSError, ValueError):
+            continue
+        key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
+        try:
+            if len(dec) > 56 and ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI":
+                return key, nonce, aad, path
+        except InvalidTag:
+            continue
+    return None
