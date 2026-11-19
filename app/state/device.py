@@ -765,7 +765,15 @@ async def scan_device():
                     "rssi": d.get("rssi", -60),
                     "serial_number": sn,
                 }
-        # Paired device not found — fall through to return strongest
+        # Paired device not found: fall back to the strongest one that hasn't
+        # said whose it is. Never one advertising another serial: that's
+        # someone else's NotePin nearby (adding a second one goes through
+        # scan-all, where the user picks it).
+        others = sorted({d["serial_number"][-4:] for d in devices if d.get("serial_number")})
+        devices = [d for d in devices if not d.get("serial_number")]
+        if not devices and others:
+            print(f"[BLE] Paired device not found; only other NotePins in range (serial ending {', '.join(others)})")
+            return {"found": False, "reason": "other_notepin", "others": others}
         if devices:
             d = devices[0]
             result = {
@@ -774,15 +782,13 @@ async def scan_device():
                 "address": d["address"],
                 "rssi": d.get("rssi", -60),
             }
-            if d.get("serial_number"):
-                result["serial_number"] = d["serial_number"]
-            elif len(known_sns) == 1 and len(devices) == 1:
+            if len(known_sns) == 1 and len(devices) == 1 and not others:
                 # One paired device, one Plaud in range, and it didn't say
                 # which it is: assume it's ours. A wrong guess only makes the
                 # handshake fail, the same as having no serial.
                 result["serial_number"] = next(iter(known_sns))
                 print("[BLE] Only one Plaud in range and one paired device: assuming it's the paired one")
-            elif not result.get("serial_number"):
+            else:
                 print("[BLE] Paired device not recognised; using the strongest device, serial unknown")
             return result
     else:

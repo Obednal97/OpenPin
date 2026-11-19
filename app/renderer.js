@@ -179,6 +179,10 @@ dom.scanBtn.addEventListener('click', async () => {
         dom.statusEl.className = 'device-status disconnected';
         dom.statusText.textContent = 'Disconnected';
       }
+    } else if (result.reason === 'other_notepin') {
+      toast(`Found a NotePin (serial ending ${result.others.join(', ')}), but not yours. Make sure yours is nearby and awake.`, 'error');
+      dom.statusEl.className = 'device-status disconnected';
+      dom.statusText.textContent = 'Disconnected';
     } else {
       toast('Device not found. Make sure it is nearby and awake.', 'error');
       dom.statusEl.className = 'device-status disconnected';

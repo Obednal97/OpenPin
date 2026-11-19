@@ -121,11 +121,18 @@ def test_scan_device_does_not_guess_with_several_devices(fake_scanner, paired):
     assert "serial_number" not in result
 
 
-def test_scan_device_does_not_relabel_another_devices_serial(fake_scanner, paired):
-    """A device that says it's someone else's keeps its own serial."""
+def test_scan_device_skips_a_notepin_advertising_another_serial(fake_scanner, paired):
+    """Someone else's NotePin nearby is never connected to (or relabelled as ours)."""
     fake_scanner += [(device(OTHER_ADDR), adv(mfr_data=mfr(OTHER_SN)))]
     result = asyncio.run(dev.scan_device())
-    assert result["serial_number"] == OTHER_SN
+    assert result == {"found": False, "reason": "other_notepin", "others": [OTHER_SN[-4:]]}
+
+
+def test_scan_device_prefers_an_unidentified_notepin_to_someone_elses(fake_scanner, paired):
+    fake_scanner += [(device(OTHER_ADDR), adv(mfr_data=mfr(OTHER_SN), rssi=-30)), (device("third"), adv(rssi=-70))]
+    result = asyncio.run(dev.scan_device())
+    assert result["address"] == "third"
+    assert "serial_number" not in result  # another NotePin is about: don't assume it's ours
 
 
 def test_scan_device_unpaired_returns_advertised_serial(fake_scanner, monkeypatch):
