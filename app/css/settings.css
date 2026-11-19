@@ -453,6 +453,51 @@
 .dm-info-dot.on { background: var(--green); }
 .dm-info-dot.off { background: var(--control-off); }
 .dm-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
+
+/* Troubleshoot connection (ui/troubleshoot.js) */
+.ct-panel { width: 480px; }
+.ct-spacer { flex: 1; }
+.ct-heading {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+.ct-heading:first-child { margin-top: 0; }
+.ct-check { display: flex; gap: var(--sp-2); align-items: baseline; padding: var(--sp-1) 0; }
+.ct-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--control-off); }
+.ct-dot.ct-ok { background: var(--green); }
+.ct-dot.ct-warn { background: var(--orange); }
+.ct-dot.ct-bad { background: var(--destructive); }
+.ct-check-label { font-size: var(--text-sm); }
+.ct-check-detail { font-size: var(--text-xs); color: var(--text-tertiary); line-height: 1.4; }
+.ct-question { margin-bottom: var(--sp-3); }
+.ct-question-text { font-size: var(--text-sm); margin-bottom: var(--sp-1); }
+.ct-options { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.ct-option {
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.ct-option:hover { background: var(--bg-hover); color: var(--text); }
+.ct-option.active { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.ct-finding {
+  padding: var(--sp-3);
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--sp-2);
+}
+.ct-finding-title { font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.ct-finding ol { margin: var(--sp-1) 0 0; padding-left: var(--sp-4); }
+.ct-finding li { font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.5; margin-top: var(--sp-1); }
+.ct-finding .ct-action { margin-top: var(--sp-2); }
 .dm-scanning {
   text-align: center;
   padding: var(--sp-4);

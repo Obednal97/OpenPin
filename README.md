@@ -178,8 +178,11 @@ Common problems:
 
 - **Stuck on the startup screen.** Click **Retry**. If it keeps failing, quit, delete
   `~/Library/Application Support/com.plaud.v2/venv` and open the app again.
-- **Device not found.** Check the NotePin is on, nearby and not connected to the Plaud phone app,
-  and that Bluetooth is allowed in **System Settings › Privacy & Security › Bluetooth**.
+- **Device not found, or it won't connect.** Open **Settings › Device › Troubleshoot connection**:
+  it checks Bluetooth, the NotePin, your pairing and your Plaud account, and says what to fix. The
+  usual causes: Plaud's phone app is connected to the NotePin (close it), the battery is low
+  (flashing purple light), Bluetooth isn't allowed in **System Settings › Privacy & Security ›
+  Bluetooth**, or the NotePin is on a different Plaud account from the one you signed in with.
 - **"Open Pin is running from a temporary location".** Move the app to Applications and open it
   from there.
 - **Update won't install.** Allow Open Pin in **System Settings › Privacy & Security › App

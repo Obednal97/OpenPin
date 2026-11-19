@@ -440,3 +440,29 @@ def test_connect_route_records_how_it_ended(flask_client, monkeypatch):
     monkeypatch.setattr(dev, "run_async", boom)
     assert flask_client.post("/device/connect", json={"address": ADDR}).status_code == 500
     assert dev.get_last_connect()["error"] == "Unexpected error (RuntimeError)"
+
+
+# -- the window (static checks: there are no JavaScript tests) ----------------------
+
+
+def test_troubleshooter_is_wired_into_the_frontend():
+    import re
+    from pathlib import Path
+
+    app_dir = Path(__file__).parent.parent / "app"
+    html = (app_dir / "index.html").read_text()
+    bridge = (app_dir / "tauri-bridge.js").read_text()
+    js = (app_dir / "ui" / "troubleshoot.js").read_text()
+    setup = (app_dir / "ui" / "setup.js").read_text()
+
+    assert 'id="dm-troubleshoot-btn"' in html
+    # Loaded before setup.js, which opens it from the onboarding error screens.
+    assert html.index('src="ui/troubleshoot.js"') < html.index('src="ui/setup.js"')
+    assert "apiCall('POST', '/device/troubleshoot', body)" in bridge
+    assert "'/device/troubleshoot'," in bridge.split("NO_TIMEOUT_ENDPOINTS")[1].split("]);")[0]
+    # One global scope for every script: this file may add a single name to it.
+    assert re.findall(r"^(?:async )?(?:function|const|let|var|class) (\w+)", js, re.M) == [
+        "openConnectionTroubleshooter"
+    ]
+    assert "openBugReport()" in js  # ends in the existing bug report export
+    assert setup.count("_setupTroubleshoot)") == 2  # no-devices and connect-error screens

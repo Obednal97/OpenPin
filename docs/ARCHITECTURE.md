@@ -89,7 +89,7 @@ is on (see [MCP server and speaker names](#mcp-server-and-speaker-names-appmcp-a
 | Path | Responsibility |
 |---|---|
 | `app/api_server.py` | Flask app, request security (below), blueprint registration, startup housekeeping (partial files, WiFi recovery, Notion queue), port binding |
-| `app/routes/` | HTTP endpoints, one blueprint per area: `core` (`/health`, `/audio`), `device` (`/device/*`: scan, connect, sync, WiFi sync, record, find-my, depair), `recordings` (list, tag, rename, crop, move, delete, re-download, transcripts), `transcribe` (`/transcribe`, `/summarize`, `/validate-key`), `notion` (`/notion/*`), `gdrive` (`/gdrive/*`), `cloud` (`/cloud/*`), `settings` (including the AI tools switch and the one-click Claude setup, `/mcp/setup/*`), `coaching`, `mcp_api` (`/mcp/v1/*`, the MCP key only), `diagnostics` (`/diagnostics`: checks for a bug report, no secrets) |
+| `app/routes/` | HTTP endpoints, one blueprint per area: `core` (`/health`, `/audio`), `device` (`/device/*`: scan, connect, sync, WiFi sync, record, find-my, depair), `recordings` (list, tag, rename, crop, move, delete, re-download, transcripts), `transcribe` (`/transcribe`, `/summarize`, `/validate-key`), `notion` (`/notion/*`), `gdrive` (`/gdrive/*`), `cloud` (`/cloud/*`), `settings` (including the AI tools switch and the one-click Claude setup, `/mcp/setup/*`), `coaching`, `mcp_api` (`/mcp/v1/*`, the MCP key only), `diagnostics` (`/diagnostics`: checks for a bug report, no secrets), `troubleshoot` (`/device/troubleshoot`: why the NotePin won't connect and what to do, behind Settings › Device › Troubleshoot connection; no secrets) |
 | `app/state/` | Long-lived state and logic: `device.py` (BLE connection, handshake, encrypted command channel, file download, WiFi-sync orchestration), `notion.py` (Notion OAuth and MCP session), `gdrive.py` (Drive OAuth and uploads), `cloud.py` (Plaud account and cloud sync), `speakers.py` (speaker names: set, clear, list people, participants) |
 | `app/mcp/` | AI tool access ([below](#mcp-server-and-speaker-names-appmcp-approutesmcp_apipy-appstatespeakerspy)): `access.py` (MCP key, connection file, launcher), `server.py` (the stdio connector, standard library only), `library.py` (what the `/mcp/v1` reads return), `clients.py` (editing Claude Desktop and Claude Code settings files) |
 | `app/providers/` | AI: `transcribe.py` (Deepgram, Groq, OpenAI), `summarize.py` (summary cascade), `validate.py` (API key checks), `_models.py` (every model ID in one place) |
@@ -114,6 +114,7 @@ is on (see [MCP server and speaker names](#mcp-server-and-speaker-names-appmcp-a
 | `ui/settings.js` | All settings tabs |
 | `ui/mcp-settings.js` | Settings › General › AI tools (switch, Connect and Disconnect for Claude Desktop and Claude Code) and the library change poll |
 | `ui/setup.js` | First-run onboarding: Plaud sign-in, Bluetooth permission, scan, pair, profile |
+| `ui/troubleshoot.js` | Settings › Device › Troubleshoot connection (also opened from onboarding's error screens). Shows the checks, questions and fixes `app/routes/troubleshoot.py` returns, retries the connection, and hands its summary to Report a bug |
 | `renderer.js` | Start-up, sync buttons and progress, polling, WiFi-sync UI, wake handling, updates banner |
 
 CSS lives in `app/css/` (`tokens.css` holds the design tokens; light and dark themes), imported
@@ -242,6 +243,11 @@ The protocol is documented in [reverse-engineering/PROTOCOL.md](reverse-engineer
    a ChaCha20 keystream, check the result looks like Opus, wrap it in Ogg. A file that fails the
    check raises an error instead of saving noise.
 7. Optionally delete the file from the device, only after an exact, clean download.
+
+A failed connect returns `{connected: false, code, error}`: `error` tells the user what to do next,
+`code` (`not_found`, `signed_out`, `bind_refused`, `other_app_key`, `handshake_rejected`, ...) is
+what the troubleshooter keys its advice on. The last result is kept in memory
+(`dev.get_last_connect()`); `/diagnostics` reports its code.
 
 Progress counts only the recordings this Mac is missing, not every file on the device. The sync
 first works out which files it will download and their total size, reports "2 new recordings to
