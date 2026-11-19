@@ -38,7 +38,8 @@ The token can be rotated without a release. Installs up to v2.5.x call the same 
    including pre-releases. To try a build on your own Macs first, publish it as a GitHub
    pre-release, then promote it (`gh release edit <tag> --prerelease=false --latest`) for
    everyone. `--latest` matters: without it GitHub keeps the previous release as "Latest", and
-   `/v1/latest` keeps serving that.
+   `/v1/latest` keeps serving that. Run `scripts/publish-update.sh <version>` again after promoting,
+   so the stable channel's KV answer moves too.
 2. Versions compare as `major.minor.patch`; anything after `-` or `+` is ignored, so
    `2.4.0-beta` is never newer than `2.4.0`. Any non-2xx answer is shown as an update error, never
    as "up to date".
@@ -219,6 +220,9 @@ gh release create "v$V" \
   "$OUT/Open.Pin_${V}_aarch64.dmg.sha256" \
   --title "v$V" --notes-file release-notes.md
 
+# Tell the update Worker now, so installs get it even while GitHub refuses the Worker:
+scripts/publish-update.sh "$V"
+
 # What installs will see (allow up to 5 minutes for the Worker's cache):
 W=https://openpin.bednal.com
 curl -s "$W/v1/latest" | jq '{version, asset}'                   # version = $V, sha256 not null
@@ -233,8 +237,10 @@ Check an older install updates and that `update.log` ends cleanly.
 The repository is public, so the update Worker reads releases **without a token**. A read-only
 `GH_TOKEN` is optional and only raises GitHub's API rate limit. Unauthenticated reads do get
 `403` rate-limit errors now and then (Cloudflare's egress IPs are shared); the Worker then serves
-the last good answer from KV, so apps see no error, but a new release only reaches them once a
-GitHub call succeeds. A token removes that delay.
+the last good answer from KV, so apps see no error. `scripts/publish-update.sh` (run in
+[Publish](#publish)) writes that KV answer for each new release, so a refusal never holds one back;
+without it, a release only reaches stable installs once a GitHub call succeeds (on 2026-11-19 they
+were told 2.11.2 was current for hours after 2.12.1 shipped). A token makes refusals rarer.
 
 1. GitHub › Settings › Developer settings › Fine-grained tokens › **Generate new token**, for
    repository **Obednal97/OpenPin** only, with **Contents: Read-only** (Metadata: Read-only is
