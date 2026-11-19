@@ -1329,10 +1329,11 @@ def pick_notepin(seen, sn=None, address=None):
 
     seen: {address: (device, advertised serial or None)}. Returns (device,
     certain) or (None, False). Ours is the one advertising our serial, else
-    the one at the Bluetooth address it last had on this Mac (it may not have
-    advertised its serial yet), else the only Plaud in range if it hasn't said
-    which it is. Never a device advertising another serial: before 2.12.2 the
-    last Plaud heard was used, so a friend's NotePin nearby failed the sync.
+    the one at the Bluetooth address the app was just connected to (it may not
+    have advertised its serial yet). Only with no address to go on, the only
+    Plaud in range if it hasn't said which it is. Never a device advertising
+    another serial: before 2.12.2 the last Plaud heard was used, so a friend's
+    NotePin nearby failed the sync.
     """
     if not sn:
         return (list(seen.values())[-1][0], True) if seen else (None, False)
@@ -1341,7 +1342,7 @@ def pick_notepin(seen, sn=None, address=None):
             return device, True
     if address in seen and seen[address][1] is None:
         return seen[address][0], True
-    if len(seen) == 1:
+    if not address and len(seen) == 1:
         device, serial = next(iter(seen.values()))
         if serial is None:
             return device, False

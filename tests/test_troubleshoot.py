@@ -291,6 +291,17 @@ def test_route_nothing_in_range_falls_back_to_the_paired_serial(env):
     assert asked(data) == ["led", "phone_app"]
 
 
+def test_route_someone_elses_notepin_is_not_taken_for_ours(env):
+    env["scan"] = [{"name": "PLAUD", "address": "other", "rssi": -40, "serial_number": "8820B50200009122"}]
+    data = run(env)
+    f = data["facts"]
+    assert f["found"] is False and f["others_only"] is True
+    assert f["serial_last4"] == "5678" and f["rssi"] is None  # still diagnosing our own
+    assert asked(data) == ["led", "phone_app"]
+    check = next(c for c in data["checks"] if c["id"] == "notepin")
+    assert check["state"] == "bad" and "serial ending 9122" in check["detail"]
+
+
 def test_route_recognises_a_paired_notepin_by_its_address(env):
     env["scan"] = [{"name": "PLAUD", "address": ADDR, "rssi": -70}]  # no serial advertised
     assert run(env)["facts"]["serial_last4"] == "5678"

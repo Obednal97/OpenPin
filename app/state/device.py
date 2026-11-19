@@ -765,7 +765,15 @@ async def scan_device():
                     "rssi": d.get("rssi", -60),
                     "serial_number": sn,
                 }
-        # Paired device not found — fall through to return strongest
+        # Paired device not found: fall back to the strongest one that hasn't
+        # said whose it is. Never one advertising another serial: that's
+        # someone else's NotePin nearby (adding a second one goes through
+        # scan-all, where the user picks it).
+        others = sorted({d["serial_number"][-4:] for d in devices if d.get("serial_number")})
+        devices = [d for d in devices if not d.get("serial_number")]
+        if not devices and others:
+            print(f"[BLE] Paired device not found; only other NotePins in range (serial ending {', '.join(others)})")
+            return {"found": False, "reason": "other_notepin", "others": others}
         if devices:
             d = devices[0]
             result = {
@@ -774,15 +782,13 @@ async def scan_device():
                 "address": d["address"],
                 "rssi": d.get("rssi", -60),
             }
-            if d.get("serial_number"):
-                result["serial_number"] = d["serial_number"]
-            elif len(known_sns) == 1 and len(devices) == 1:
+            if len(known_sns) == 1 and len(devices) == 1 and not others:
                 # One paired device, one Plaud in range, and it didn't say
                 # which it is: assume it's ours. A wrong guess only makes the
                 # handshake fail, the same as having no serial.
                 result["serial_number"] = next(iter(known_sns))
                 print("[BLE] Only one Plaud in range and one paired device: assuming it's the paired one")
-            elif not result.get("serial_number"):
+            else:
                 print("[BLE] Paired device not recognised; using the strongest device, serial unknown")
             return result
     else:
@@ -2100,6 +2106,12 @@ def _do_wifi_sync_locked(deadline):
             append_rotating_log(_wifi_log, f"{datetime.now().isoformat()} {msg}\n")
 
     proc = None
+    # The NotePin the app is connected to now: the worker reconnects to it and
+    # no other (its address on this Mac, else the one it last had here).
+    cl = _device_state.get("client")
+    address = getattr(cl, "address", None) or (
+        ((load_config().get("paired_devices") or {}).get(sn) or {}).get("last_address")
+    )
     try:
         # Disconnect BLE first — the worker needs to make its own connection.
         # The device invalidates crypto sessions when BLE drops, so the worker
@@ -2170,8 +2182,7 @@ def _do_wifi_sync_locked(deadline):
         worker_args = json.dumps(
             {
                 "sn": sn,
-                # Where this NotePin last was, in case its scan doesn't carry the serial.
-                "address": ((load_config().get("paired_devices") or {}).get(sn) or {}).get("last_address"),
+                "address": address,
                 "recordings_dir": str(get_recordings_dir()),
                 "app_key_path": str(APP_KEY_PATH),
                 "dismissed": sorted(_wifi_skip_ids()),

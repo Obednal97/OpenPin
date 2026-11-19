@@ -127,13 +127,16 @@ def _gather():
                 "serial_last4": sn[-4:] if sn else None,
             }
         )
-    facts["found"] = bool(devices)
+    # With a NotePin paired, one advertising another serial is someone else's.
+    ours = [d for d in devices if not paired or not _serial_of(d) or _serial_of(d) in paired]
+    facts["found"] = bool(ours)
+    facts["others_only"] = bool(devices) and not ours
 
     # The NotePin in question: a paired one in range, else the strongest with a
     # serial, else the only one this Mac has paired.
     sn = dev.get_state().get("serial_number") if facts["connected"] else None
     if not sn:
-        with_serial = [d for d in devices if _serial_of(d)]
+        with_serial = [d for d in ours if _serial_of(d)]
         target = next((d for d in with_serial if _serial_of(d) in paired), with_serial[0] if with_serial else None)
         if target:
             sn, facts["rssi"] = _serial_of(target), target.get("rssi")
@@ -188,7 +191,12 @@ def _checks(facts):
         add("notepin", "NotePin", "ok", "Connected")
     elif bluetooth == "on":
         pins = facts.get("notepins") or []
-        if pins:
+        if facts.get("others_only"):
+            other = ", ".join(sorted({p["serial_last4"] for p in pins if p.get("serial_last4")}))
+            add(
+                "notepin", "NotePin in range", "bad", f"Only someone else's (serial ending {other}); yours wasn't found"
+            )
+        elif pins:
             seen = "; ".join(f"{p.get('name') or 'Plaud device'}{_signal(p.get('rssi'))}" for p in pins[:3])
             weak = facts.get("rssi") is not None and facts["rssi"] < WEAK_RSSI
             add("notepin", "NotePin in range", "warn" if weak else "ok", f"Found: {seen}")
