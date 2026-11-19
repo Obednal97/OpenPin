@@ -56,6 +56,7 @@ def _plant_cloud(monkeypatch):
 
 def test_diagnostics_shape(flask_client, monkeypatch):
     monkeypatch.setitem(dev._device_state, "last_handshake", None)
+    monkeypatch.setitem(dev._device_state, "last_connect", None)
     monkeypatch.setitem(dev._device_state, "connected", False)  # another file may leave a fake device connected
     r = flask_client.get("/diagnostics")
     assert r.status_code == 200
@@ -63,7 +64,12 @@ def test_diagnostics_shape(flask_client, monkeypatch):
     assert set(data) == {"cloud", "devices", "connection", "processing", "integrations", "storage"}
     assert data["cloud"] == {"signed_in": False, "has_user_token": False, "region": "api-euc1.plaud.ai"}
     assert data["devices"] == []
-    assert data["connection"] == {"connected": False, "port_version": None, "last_handshake": None}
+    assert data["connection"] == {
+        "connected": False,
+        "port_version": None,
+        "last_handshake": None,
+        "last_connect": None,
+    }
     processing = data["processing"]
     assert processing["transcription_provider"] == "deepgram"
     assert processing["summarization_provider"] == "anthropic"
@@ -138,7 +144,6 @@ def test_last_handshake_is_recorded_and_survives_disconnect(connect_env, flask_c
 
 def test_rejected_handshake_is_recorded(connect_env, monkeypatch):  # noqa: F811
     monkeypatch.setitem(dev._device_state, "last_handshake", None)
-    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", True)
     device = FakeNotePin(hs_status=1, silent={3, 4, 6, 9})
     assert connect(monkeypatch, device)["connected"] is False
     last = dev.get_last_handshake()

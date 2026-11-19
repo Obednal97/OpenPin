@@ -94,7 +94,8 @@ def test_cmd_without_reply_times_out_to_none(ble):
     assert device.sent_cmds()[-1] == 36
 
 
-def test_worker_handshake_rejection_only_warns_by_default(ble, monkeypatch, caplog):
+def test_worker_handshake_rejection_only_warns_with_the_switch_off(ble, monkeypatch, caplog):
+    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", False)
     monkeypatch.setattr(worker, "HANDSHAKE_REPLY_TIMEOUT_S", 0.05)
     ble(FakeNotePin(hs_status=1, silent={3, 4}))
     with caplog.at_level("WARNING"):
@@ -104,10 +105,9 @@ def test_worker_handshake_rejection_only_warns_by_default(ble, monkeypatch, capl
 
 
 def test_worker_handshake_rejection_raises_clear_error(ble, monkeypatch):
-    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", True)
     monkeypatch.setattr(worker, "HANDSHAKE_REPLY_TIMEOUT_S", 0.05)
     device = ble(FakeNotePin(hs_status=1, silent={3, 4}))
-    with pytest.raises(ValueError, match="rejected this Mac's pairing token"):
+    with pytest.raises(ValueError, match="didn't accept this Mac's pairing token"):
         asyncio.run(worker.ble_connect_and_setup())
     assert device.client.is_connected is False
 
