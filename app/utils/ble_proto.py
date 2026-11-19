@@ -49,14 +49,46 @@ def reply_matches(reply, expected):
 
 # -- cmd 1: handshake (BIND_TOKEN) ----------------------------------------------
 
-HANDSHAKE_REJECTED_ERROR = "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device"
+# A rejected handshake (see handshake_verdict) fails the connect. What each cmd 1
+# status means is the SDK's ConnectBleFailed list (COMMANDS.md, cmd 1); only
+# status 1 has been seen on hardware, so the advice is worded to be safe either way.
+HANDSHAKE_REJECTED_ERROR = (
+    "The NotePin refused this Mac's pairing. Connect again; if it keeps happening, use "
+    "Troubleshoot connection in Settings › Device."
+)
+_HANDSHAKE_STATUS_ERRORS = {
+    1: (
+        "The NotePin didn't accept this Mac's pairing token, so it was paired with a different Plaud account "
+        "or app. Sign in to the Plaud account it's registered to (Settings › Plaud Cloud), then scan and "
+        "connect again in Settings › Device, or import a pairing file from a Mac where it works."
+    ),
+    2: "The NotePin is recording, so it won't pair right now. Stop the recording, then connect again.",
+    3: (
+        "The NotePin refused the connection. Connect again; if it keeps happening, restart the NotePin "
+        "(hold its button for about 12 seconds) and try once more."
+    ),
+    4: (
+        "The NotePin couldn't verify this Mac's pairing credentials. Sign in under Settings › Plaud Cloud, "
+        "then scan and connect again in Settings › Device, or import a pairing file from a Mac where it works."
+    ),
+    255: (
+        "The NotePin isn't ready to pair. If Plaud's phone app is connected to it, close that app (or turn "
+        "off Bluetooth on the phone), then connect again."
+    ),
+}
 
-# Whether a HANDSHAKE_REJECTED verdict fails the connect. Off until a real
-# NotePin has shown what a rejected token looks like: the status byte's meaning
-# is unconfirmed, so for now a "rejection" is only logged (a WARNING with the raw
-# replies) and the connect carries on exactly as in v2.4.0. Turn on once the
-# hardware logs confirm the semantics (docs/reverse-engineering/README.md, Q7).
-FAIL_ON_HANDSHAKE_REJECTED = False
+
+def handshake_rejected_error(statuses):
+    """What to tell the user after a rejected handshake, from the cmd 1 reply statuses."""
+    status = next((s for s in statuses or [] if s), None)
+    return _HANDSHAKE_STATUS_ERRORS.get(status, HANDSHAKE_REJECTED_ERROR)
+
+
+# Whether a HANDSHAKE_REJECTED verdict fails the connect. On: status 1 (token
+# mismatch) and the legacy-token retry were both confirmed on hardware on
+# 3 November 2026, and a rejected NotePin answers no later command, so carrying
+# on only gave a "connected" device that then dropped without a reason.
+FAIL_ON_HANDSHAKE_REJECTED = True
 
 # How long to wait for each reply during bind_handshake(). At most
 # HANDSHAKE_MAX_REPLY_WAITS replies are awaited (cmd 1 twice, cmd 4, the cmd 3

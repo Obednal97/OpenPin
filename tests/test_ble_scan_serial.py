@@ -174,7 +174,7 @@ def test_connect_without_serial_unknown_address_still_explains(connect_env, monk
     notepin = FakeNotePin()
     result = _connect(monkeypatch, notepin, OTHER_ADDR)
     assert result["connected"] is False
-    assert "serial number unknown" in result["error"]
+    assert "serial number didn't come through" in result["error"]
     # The Mac must let go of the link, or the NotePin stops advertising and
     # every later scan says "Device not found".
     assert notepin.client.is_connected is False

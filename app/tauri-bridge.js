@@ -88,6 +88,7 @@ const REPORT_ENDPOINTS = new Set([
 // Endpoints that are legitimately long-running — never abort these on timeout
 const NO_TIMEOUT_ENDPOINTS = new Set([
   '/device/connect', // BLE pairing — service discovery can take 30-45s on slow links
+  '/device/troubleshoot', // waits for Bluetooth, scans, then asks Plaud
   '/device/sync', '/device/wifi-sync',
   '/transcribe', '/summarize', '/notion/push', // Notion creates of long transcripts can exceed 30s
   '/notion/duplicates', // reads every page of the database the first time
@@ -351,6 +352,8 @@ window.plaud = {
   checkNew: () => apiCall('GET', '/device/check-new'),
   // Pairing backup (Settings › Device). Responses never contain credentials.
   pairingStatus: () => apiCall('GET', '/device/pairing'),
+  // Settings › Device › Troubleshoot connection: {} runs the checks, {facts, answers} re-reads them
+  troubleshootConnection: (body) => apiCall('POST', '/device/troubleshoot', body),
   exportPairing: (path) => apiCall('POST', '/device/pairing/export', { path }),
   importPairing: (path) => apiCall('POST', '/device/pairing/import', { path }),
   // Native save/open panels from the dialog plugin (capability dialog:default

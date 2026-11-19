@@ -41,6 +41,7 @@ from app.routes import (
     recordings,
     settings,
     transcribe,
+    troubleshoot,
 )
 from app.utils import changes
 
@@ -304,6 +305,7 @@ app.register_blueprint(recordings.bp)
 app.register_blueprint(transcribe.bp)
 app.register_blueprint(settings.bp)
 app.register_blueprint(diagnostics.bp)
+app.register_blueprint(troubleshoot.bp)
 app.register_blueprint(coaching.bp)
 app.register_blueprint(people.bp)
 # AI tools (MCP): the guard above opens it with the MCP key only.

@@ -47,7 +47,7 @@ function showSetupWelcome() {
       <img src="assets/icon-black.svg" alt="" class="app-wordmark-light" height="56">
     </div>
     <h2>Welcome to Open Pin</h2>
-    <p>Your private, local voice recorder companion. Sync, transcribe, and organise recordings from your Plaud NotePin S — no cloud required.</p>
+    <p>Your private, local voice recorder companion. Sync, transcribe, and organise recordings from your Plaud NotePin S. No cloud required.</p>
     <button class="action-btn primary" id="setup-get-started">Get started</button>
     <button class="setup-skip" id="setup-skip-welcome">Skip for now</button>
     <p class="setup-disclaimer">Open Pin is an independent project. It isn't made by, affiliated with or endorsed by PLAUD. Plaud and NotePin are trademarks of their owners. Use it with your own NotePin and your own Plaud account, at your own risk.</p>
@@ -81,7 +81,8 @@ function _showCloudLogin() {
       </svg>
     </div>
     <h2>Sign in to Plaud</h2>
-    <p>Your Plaud account is needed to register your device. This is a one-time setup — after this, the app works fully offline.</p>
+    <p>Open Pin needs your Plaud account once, to fetch your NotePin's pairing keys. After that it works offline and you can sign out.</p>
+    <p class="setup-hint">Use the account your NotePin is set up on. Sign in with Apple and signing in with an email address or Google can be two separate Plaud accounts.</p>
     <button class="action-btn primary" id="setup-cloud-login">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="margin-right:4px;">
         <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -221,7 +222,7 @@ async function _startScan() {
     <div class="setup-spinner"></div>
     <h2>Looking for devices</h2>
     <p>Looking for nearby Plaud devices...</p>
-    <p class="setup-hint">Make sure your Plaud is nearby, charged, and not connected to the phone app.</p>
+    <p class="setup-hint">Keep your NotePin nearby and charged, and close Plaud's app on your phone so it isn't connected there.</p>
   `);
 
   try {
@@ -230,7 +231,7 @@ async function _startScan() {
     if (devices.length > 0) {
       _showDevices(devices);
     } else {
-      _showNoDevices();
+      _showNoDevices(result.error); // e.g. Bluetooth is off or not allowed
     }
   } catch (err) {
     _showNoDevices(err.message);
@@ -290,16 +291,18 @@ function _showNoDevices(errorMsg) {
     <h2>No devices found</h2>
     <p>${errorMsg ? escapeHtml(errorMsg) : 'Could not find a Plaud device nearby.'}</p>
     <p class="setup-hint">
-      Check that your Plaud NotePin S is:<br>
-      &bull; Nearby (within a few feet)<br>
-      &bull; Charged and powered on<br>
-      &bull; Not connected to the Plaud phone app
+      Check that your NotePin is:<br>
+      &bull; Within a metre or two of this Mac<br>
+      &bull; Charged: a steady white light means ready to connect, flashing purple means the battery is low<br>
+      &bull; Not connected to Plaud's phone app (close the app)
     </p>
     <button class="action-btn primary" id="setup-retry">Try again</button>
+    <button class="action-btn subtle" id="setup-troubleshoot-scan" style="margin-top:8px;">Troubleshoot connection</button>
     <button class="setup-skip" id="setup-skip-notfound">Skip for now</button>
   `);
 
   $('#setup-retry').addEventListener('click', _startScan);
+  $('#setup-troubleshoot-scan').addEventListener('click', _setupTroubleshoot);
   $('#setup-skip-notfound').addEventListener('click', dismissSetup);
 }
 
@@ -335,11 +338,26 @@ function _showConnectError(error, address, serialNumber, name) {
     <h2>Connection failed</h2>
     <p>${escapeHtml(error)}</p>
     <button class="action-btn primary" id="setup-retry-connect">Try again</button>
+    ${app.cloudState && app.cloudState.logged_in ? '' : '<button class="action-btn subtle" id="setup-error-signin" style="margin-top:8px;">Sign in to Plaud</button>'}
+    <button class="action-btn subtle" id="setup-error-import" style="margin-top:8px;">Import a pairing file…</button>
+    <button class="action-btn subtle" id="setup-troubleshoot-connect" style="margin-top:8px;">Troubleshoot connection</button>
     <button class="setup-skip" id="setup-skip-error">Skip for now</button>
   `);
 
-  $('#setup-retry-connect').addEventListener('click', () => _connectDevice(address, serialNumber, name));
+  const retryConnect = () => _connectDevice(address, serialNumber, name);
+  $('#setup-retry-connect').addEventListener('click', retryConnect);
+  $('#setup-error-signin')?.addEventListener('click', _showCloudLogin);
+  // A pairing file from a Mac where this NotePin works stands in for the Plaud sign-in.
+  $('#setup-error-import').addEventListener('click', async () => {
+    if (await importPairingFile()) retryConnect();
+  });
+  $('#setup-troubleshoot-connect').addEventListener('click', _setupTroubleshoot);
   $('#setup-skip-error').addEventListener('click', dismissSetup);
+}
+
+// The Settings › Device troubleshooter, finishing in this flow.
+function _setupTroubleshoot() {
+  openConnectionTroubleshooter({ onConnected: _showSuccess, onSignIn: _showCloudLogin });
 }
 
 // ---- Step 6: Success ----

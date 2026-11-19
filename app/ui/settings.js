@@ -1161,6 +1161,7 @@ async function importPairingFile() {
         ? " Couldn't save it to the Keychain, so keep the file."
         : '';
     toast(`Imported the pairing for serial ${_pairingSerialTails(imported)}.${keychainNote}`, 'success');
+    return true;
   } catch (err) {
     toast(`Import failed: ${err.message}`, 'error');
   } finally {
@@ -2090,8 +2091,10 @@ function initSettingsEvents() {
       const devices = data.devices || [];
 
       if (devices.length === 0) {
+        // data.error: Bluetooth is off or Open Pin isn't allowed to use it
         results.innerHTML = `<p class="settings-desc" style="text-align:center;padding:12px;">
-          No devices found. Make sure your NotePin is nearby and not connected to the Plaud phone app.
+          ${escapeHtml(data.error || "No NotePin found. Make sure it's nearby, charged and not connected to Plaud's phone app.")}
+          Troubleshoot connection below checks the rest.
         </p>`;
       } else {
         results.innerHTML = devices
@@ -2138,6 +2141,7 @@ function initSettingsEvents() {
                 toast(`Connection failed: ${conn.error || 'Unknown error'}`, 'error');
                 results.innerHTML = `<p class="settings-desc" style="text-align:center;color:var(--primary);">
                   Connection failed. ${escapeHtml(conn.error || 'Try again.')}
+                  If it keeps failing, use Troubleshoot connection below.
                 </p>`;
               }
             } catch (err) {
@@ -2152,6 +2156,8 @@ function initSettingsEvents() {
       setLoading(btn, false);
     }
   });
+
+  $('#dm-troubleshoot-btn').addEventListener('click', () => openConnectionTroubleshooter());
 
   // Device manager force sync
   $('#dm-sync-btn').addEventListener('click', async () => {

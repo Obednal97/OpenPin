@@ -22,12 +22,12 @@ from app.utils import ble_proto, pairing_store, sync_progress
 from app.utils.audio import BleDecryptError, decrypt_ble_file, wrap_opus_ogg
 from app.utils.ble_proto import (
     HANDSHAKE_REJECTED,
-    HANDSHAKE_REJECTED_ERROR,
     HANDSHAKE_REPLY_TIMEOUT_S,
     SN_SIG_REPLY_WAIT_S,
     SN_SIG_SEND_REPEATS,
     FileListAssembler,
     bind_handshake,
+    handshake_rejected_error,
 )
 from app.utils.config import load_config, update_config
 from app.utils.constants import (
@@ -205,10 +205,54 @@ def _missing_pairing_error(sn, logged_in, bind_error=None):
         )
     reason = f" {bind_error.rstrip('.')}." if bind_error else ""
     return (
-        f"Couldn't register {which} to your Plaud account.{reason} If it's still on someone else's "
-        "Plaud account, they need to remove it there first (Plaud app › the device › Unbind), "
-        "then connect again."
+        f"Couldn't register {which} to your Plaud account.{reason} If it's still on another Plaud "
+        "account (someone else's, or a second one of yours: Sign in with Apple and an email sign-in can be "
+        "separate accounts), remove it there first (Plaud app › the device › Unbind), then connect again."
     )
+
+
+def _fail(code, error, **extra):
+    """A failed connect: `error` is for the user, `code` for the troubleshooter (routes/troubleshoot.py)."""
+    return {"connected": False, "code": code, "error": error, **extra}
+
+
+def record_connect(result):
+    """Remember how the last connect ended, for the troubleshooter and GET /diagnostics."""
+    _device_state["last_connect"] = {
+        "connected": bool(result.get("connected")),
+        "code": result.get("code"),
+        "error": result.get("error"),
+        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def get_last_connect():
+    last = _device_state.get("last_connect")
+    return dict(last) if last else None
+
+
+_BLUETOOTH_UNAVAILABLE = {
+    "off": "Bluetooth is turned off on this Mac. Turn it on in System Settings › Bluetooth, then try again.",
+    "denied": (
+        "Open Pin isn't allowed to use Bluetooth. Allow it in System Settings › Privacy & Security › "
+        "Bluetooth, then try again."
+    ),
+    "unavailable": (
+        "Bluetooth isn't available on this Mac right now. Turn Bluetooth off and on in System Settings, then try again."
+    ),
+}
+
+
+def bluetooth_unavailable(exc):
+    """(state, message) if `exc` is bleak saying this Mac's Bluetooth can't be used, else None.
+
+    state: "off", "denied" (no permission) or "unavailable".
+    """
+    if type(exc).__name__ != "BleakBluetoothNotAvailableError":
+        return None
+    reason = getattr(getattr(exc, "reason", None), "name", "")
+    state = "off" if reason == "POWERED_OFF" else "denied" if reason.startswith("DENIED") else "unavailable"
+    return state, _BLUETOOTH_UNAVAILABLE[state]
 
 
 async def _disconnect_quietly(cl, timeout=5):
@@ -413,6 +457,10 @@ def _record_handshake(verdict, hs_info):
         "token_len": hs_info.get("token_len"),
         "at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+
+
+def _last_statuses():
+    return (_device_state.get("last_handshake") or {}).get("statuses") or []
 
 
 def get_last_handshake():
@@ -806,7 +854,11 @@ async def connect_device(address=None):
     if not address:
         scan_result = await scan_device()
         if not scan_result["found"]:
-            return {"connected": False, "error": "Device not found"}
+            return _fail(
+                "not_found",
+                "No NotePin found nearby. Check it's switched on, charged and close to this Mac, and that "
+                "Plaud's phone app isn't connected to it.",
+            )
         address = scan_result["address"]
         _device_state["device_name"] = scan_result["name"]
         if scan_result.get("serial_number") and not _device_state.get("serial_number"):
@@ -874,11 +926,11 @@ async def connect_device(address=None):
     if not cl or not _has_services(cl):
         if cl:
             await _disconnect_quietly(cl)
-        sn = _device_state.get("serial_number", "unknown")
-        return {
-            "connected": False,
-            "error": f"Service discovery failed after 3 connection attempts (device: {sn}). Try moving the device closer and reconnecting.",
-        }
+        return _fail(
+            "link_lost",
+            "Couldn't hold a Bluetooth connection to the NotePin (3 attempts). Move it closer to this Mac "
+            "and connect again.",
+        )
 
     _device_state["client"] = cl
 
@@ -940,27 +992,27 @@ async def connect_device(address=None):
             _reset_state()
             # Specific error message depending on what's missing
             if not sn:
-                return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
+                return _fail(
+                    "serial_unknown",
+                    "The NotePin's serial number didn't come through. Move it closer, scan for it in "
+                    "Settings › Device and connect again.",
+                )
             if not is_logged_in():
-                return {"connected": False, "error": _missing_pairing_error(sn, False)}
+                return _fail("signed_out", _missing_pairing_error(sn, False))
             if cloud_status == SN_SIGN_WRONG_TOKEN_STATUS:
-                return {
-                    "connected": False,
-                    "error": (
-                        f"Plaud Cloud won't hand out the pairing for this NotePin (serial ending {sn[-4:]}) "
-                        "to this sign-in. Import a pairing file instead: export one in Settings › Device on a "
-                        "Mac where this NotePin already works, then choose Import pairing here."
-                    ),
-                }
+                return _fail(
+                    "wrong_token_type",
+                    f"Plaud Cloud won't hand out the pairing for this NotePin (serial ending {sn[-4:]}) "
+                    "to this sign-in. Import a pairing file instead: export one in Settings › Device on a "
+                    "Mac where this NotePin already works, then choose Import pairing here.",
+                )
             reason = f" {cloud_error.rstrip('.')}." if cloud_error else ""
-            return {
-                "connected": False,
-                "error": (
-                    f"Couldn't get the pairing credentials for this NotePin (serial ending {sn[-4:]}) "
-                    f"from Plaud Cloud.{reason} Check you're signed in to the Plaud account this NotePin "
-                    "belongs to (Settings › Plaud Cloud), then connect again."
-                ),
-            }
+            return _fail(
+                "cloud_refused",
+                f"Couldn't get the pairing credentials for this NotePin (serial ending {sn[-4:]}) "
+                f"from Plaud Cloud.{reason} Check you're signed in to the Plaud account this NotePin "
+                "belongs to (Settings › Plaud Cloud), then connect again.",
+            )
         sig = base64.b64decode(sn_sig_b64)
         tc = (len(sig) + 99) // 100
         # Send SN_SIG several times for reliability on weak connections
@@ -996,10 +1048,11 @@ async def connect_device(address=None):
         elif not done.is_set():
             await _disconnect_quietly(cl)
             _reset_state()
-            return {
-                "connected": False,
-                "error": "Handshake failed — device did not respond. Try moving it closer and reconnecting.",
-            }
+            return _fail(
+                "no_reply",
+                "The NotePin did not respond to the pairing request. Move it closer, make sure Plaud's "
+                "phone app isn't connected to it, then connect again.",
+            )
 
         blob = bytearray()
         for i in sorted(rsa.keys()):
@@ -1017,14 +1070,12 @@ async def connect_device(address=None):
             await _disconnect_quietly(cl)
             _reset_state()
             if cached_key:
-                return {
-                    "connected": False,
-                    "error": (
-                        "This NotePin is paired with another app, such as Plaud's phone app. Unpair or "
-                        "remove it there, close that app, then connect again here."
-                    ),
-                }
-            return {"connected": False, "error": "The NotePin's reply couldn't be read. Try connecting again."}
+                return _fail(
+                    "other_app_key",
+                    "This NotePin is paired with another app, such as Plaud's phone app. Unpair or "
+                    "remove it there, close that app, then connect again here.",
+                )
+            return _fail("unreadable_reply", "The NotePin's reply couldn't be read. Try connecting again.")
         try:
             await cl.stop_notify(N)
         except Exception:
@@ -1035,18 +1086,18 @@ async def connect_device(address=None):
         err_msg = str(e)
         # Translate raw BLE errors to user-friendly messages
         if "service discovery" in err_msg.lower():
-            return {
-                "connected": False,
-                "error": "Connection was lost during setup. Try moving the device closer and reconnecting.",
-            }
+            return _fail(
+                "link_lost", "The connection was lost during setup. Move the NotePin closer and connect again."
+            )
         if "disconnected" in err_msg.lower() or "not connected" in err_msg.lower():
-            return {"connected": False, "error": "Device disconnected during setup. Try reconnecting."}
+            return _fail(
+                "link_lost",
+                "The NotePin disconnected during setup. Make sure Plaud's phone app isn't connected to it, "
+                "then connect again.",
+            )
         if "timeout" in err_msg.lower():
-            return {
-                "connected": False,
-                "error": "Device took too long to respond. Try moving it closer and reconnecting.",
-            }
-        return {"connected": False, "error": f"Connection failed during handshake: {err_msg}"}
+            return _fail("timeout", "The NotePin took too long to respond. Move it closer and connect again.")
+        return _fail("error", f"Connection failed during pairing: {err_msg}")
 
     _device_state["session_keys"] = (key, nonce, aad)
     cipher = ChaCha20Poly1305(key)
@@ -1095,7 +1146,10 @@ async def connect_device(address=None):
     if not device_token:
         await _disconnect_quietly(cl)
         _reset_state()
-        return {"connected": False, "error": _missing_pairing_error(sn, cloud_logged_in(), bind_error)}
+        return _fail(
+            "bind_refused" if cloud_logged_in() else "signed_out",
+            _missing_pairing_error(sn, cloud_logged_in(), bind_error),
+        )
     try:
         if len(device_token) > 32:
             logging.warning(
@@ -1122,7 +1176,7 @@ async def connect_device(address=None):
     if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
         await _disconnect_quietly(cl)
         _reset_state()
-        return {"connected": False, "error": HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
+        return _fail("handshake_rejected", handshake_rejected_error(_last_statuses()), pairing_rejected=True)
     _device_state["port_version"] = hs_info["port_version"]
     if hs_info["port_version"] is not None and hs_info["port_version"] < 7:
         # BLE data packets and the file list use an older layout below port

@@ -1234,6 +1234,34 @@ def bind_device(sn, name="Plaud NotePin S", model="882", version_number=65546):
         return {"error": _cloud_call_error(e)}
 
 
+def check_device_binding(sn, model="882"):
+    """Which Plaud account a NotePin is registered to, as far as this sign-in can tell.
+
+    POST /device-app/device/check-sn-info. Returns {"state", "msg"}: state is
+    "self" (this account), "other" (another account), "none" (not registered)
+    or "unknown". Seen on a real account: {is_bind: true, msg: "device already
+    bind to self"}. The other answers haven't been captured, so they are read
+    from Plaud's wording and is_bind, and anything unclear is "unknown". The
+    reply's token_list (older bind tokens) is never passed on.
+    """
+    try:
+        body = cloud_api("/device-app/device/check-sn-info", method="POST", json_body={"sn": sn, "model": model})
+    except Exception as e:
+        return {"state": "unknown", "msg": _cloud_call_error(e)}
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    msg = str(data.get("msg") or _plaud_msg(body))[:120]
+    is_bind = data.get("is_bind", body.get("is_bind"))
+    if "self" in msg.lower():
+        state = "self"
+    elif "other" in msg.lower():
+        state = "other"
+    elif is_bind is False and body.get("status") == 0:
+        state = "none"
+    else:
+        state = "unknown"
+    return {"state": state, "msg": msg}
+
+
 def get_device_bind_token(sn):
     """Get the stored BIND_TOKEN for a device, or None if not available.
 

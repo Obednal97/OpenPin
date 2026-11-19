@@ -66,7 +66,6 @@ if _PROJECT_ROOT not in sys.path:
 from app.utils import ble_proto, sync_progress  # noqa: E402 — needs the path set above
 from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     HANDSHAKE_REJECTED,
-    HANDSHAKE_REJECTED_ERROR,
     HANDSHAKE_REPLY_TIMEOUT_S,  # cmd 1 / 4 / 3 replies during the BLE setup (<= 6 s total)
     SN_SIG_REPLY_WAIT_S,
     SN_SIG_SEND_REPEATS,
@@ -76,6 +75,7 @@ from app.utils.ble_proto import (  # noqa: E402 — needs the path set above
     bind_handshake,
     cmd_id_of,
     describe_status_reply,
+    handshake_rejected_error,
     reply_matches,
 )
 from app.utils.constants import BLE_NOTIFY_UUID as N  # noqa: E402
@@ -1478,11 +1478,11 @@ async def ble_connect_and_setup():
         # cmd 1 twice, then cmd 4 with the local time zone — the same code as device.py.
         # Only a rejection stops here; "no reply at all" is logged by
         # bind_handshake() and the sync carries on, as in v2.4.0.
-        verdict, _info = await bind_handshake(
+        verdict, hs_info = await bind_handshake(
             lambda pt: cmd("handshake", pt, timeout=HANDSHAKE_REPLY_TIMEOUT_S), token32, log=lambda m: status(m, 3)
         )
         if verdict == HANDSHAKE_REJECTED and ble_proto.FAIL_ON_HANDSHAKE_REJECTED:
-            raise ValueError(HANDSHAKE_REJECTED_ERROR)
+            raise ValueError(handshake_rejected_error([h["status"] for h in hs_info["hs"] if h]))
     except ValueError:
         try:
             await asyncio.wait_for(cl.disconnect(), 10)

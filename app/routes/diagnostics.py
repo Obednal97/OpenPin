@@ -65,6 +65,8 @@ def _connection():
         "connected": bool(dev.is_connected()),
         "port_version": dev._device_state.get("port_version"),
         "last_handshake": dev.get_last_handshake(),
+        # How the last connect ended: the code only (the message is for the UI).
+        "last_connect": {k: v for k, v in (dev.get_last_connect() or {}).items() if k != "error"} or None,
     }
 
 

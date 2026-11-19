@@ -42,6 +42,15 @@ def _background_flag(default):
     return default
 
 
+def _bluetooth_problem(base, exc):
+    """The reply when this Mac's Bluetooth is off or not allowed (the user's to fix, so
+    not a 500), or None for any other error. `code` is "bluetooth_off" / "_denied" / "_unavailable"."""
+    problem = dev.bluetooth_unavailable(exc)
+    if not problem:
+        return None
+    return jsonify({**base, "code": f"bluetooth_{problem[0]}", "error": problem[1]})
+
+
 def _busy_response():
     """409 returned while a BLE sync owns the link (it holds _ble_lock for its
     whole run, so other BLE calls would just queue behind it)."""
@@ -54,7 +63,7 @@ def scan():
         result = dev.run_async(dev.scan_device())
         return jsonify(result)
     except Exception as e:
-        return jsonify(_error_json({"found": False}, e)), 500
+        return _bluetooth_problem({"found": False}, e) or (jsonify(_error_json({"found": False}, e)), 500)
 
 
 @bp.route("/scan-all", methods=["POST"])
@@ -64,7 +73,7 @@ def scan_all():
         devices = dev.run_async(dev.scan_devices_with_retry(attempts=2, scan_duration=6))
         return jsonify({"devices": devices})
     except Exception as e:
-        return jsonify({"devices": [], "error": str(e)}), 500
+        return _bluetooth_problem({"devices": []}, e) or (jsonify({"devices": [], "error": str(e)}), 500)
 
 
 @bp.route("/connect", methods=["POST"])
@@ -81,9 +90,16 @@ def connect():
         result = dev.run_async(dev.connect_device(address))
         if result.get("connected"):
             dev.save_known_device(address, result.get("device_name"), serial_number)
+        dev.record_connect(result)
         return jsonify(result)
     except Exception as e:
         dev.set_connected(False)
+        bluetooth = _bluetooth_problem({"connected": False}, e)
+        if bluetooth:
+            dev.record_connect(bluetooth.get_json())
+            return bluetooth
+        # No raw exception text in the record: it can hold addresses and paths.
+        dev.record_connect({"code": "error", "error": f"Unexpected error ({type(e).__name__})"})
         err = _error_json({"connected": False}, e)
         if serial_number:
             err["device_sn"] = serial_number
@@ -293,7 +309,7 @@ def scan_known():
                 )
         return jsonify({"found": False, "reason": "not_in_range"})
     except Exception as e:
-        return jsonify({"found": False, "error": str(e)})
+        return _bluetooth_problem({"found": False}, e) or jsonify({"found": False, "error": str(e)})
 
 
 @bp.route("/check-new")

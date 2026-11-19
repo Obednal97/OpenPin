@@ -114,7 +114,7 @@ unanswered, so (**Implemented**):
 | Status in the replies | Device answers cmd 4 (or a cmd 3 probe) | Result |
 |---|---|---|
 | any | yes | connected (a non-zero status is logged as a warning) |
-| non-zero in either | no | rejected: "The NotePin rejected this Mac's pairing token — re-pair the device in Settings › Device" |
+| non-zero in either | no | rejected, with a message for that status (`ble_proto.handshake_rejected_error()`): 1 points to the Plaud account the NotePin is on, 2 says to stop the recording, 255 to close Plaud's phone app |
 | no reply to either | no | connected, as in v2.4.0, with a warning ("no reply to cmd 1 (x2), cmd 4 or cmd 3 — continuing the connect"); later commands decide |
 | 0 | no | connected, as before (weak link) |
 

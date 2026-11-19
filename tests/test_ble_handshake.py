@@ -55,9 +55,9 @@ def test_accepted_handshake_connects(connect_env, monkeypatch):
     assert device.received[0][6:38] == TOKEN.encode()
 
 
-def test_rejected_bind_token_only_warns_by_default(connect_env, monkeypatch, caplog):
-    """Until hardware confirms the status semantics, a 'rejection' is logged, not fatal (as v2.4.0)."""
-    assert ble_proto.FAIL_ON_HANDSHAKE_REJECTED is False
+def test_rejected_bind_token_only_warns_with_the_switch_off(connect_env, monkeypatch, caplog):
+    """The old behaviour (up to v2.11): a 'rejection' is logged, not fatal."""
+    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", False)
     device = FakeNotePin(hs_status=1, silent={3, 4, 6, 9})
     with caplog.at_level("WARNING"):
         result = connect(monkeypatch, device)
@@ -66,16 +66,40 @@ def test_rejected_bind_token_only_warns_by_default(connect_env, monkeypatch, cap
 
 
 def test_rejected_bind_token_fails_connect(connect_env, monkeypatch):
-    """With the switch on: non-zero handshake status and no answer to later commands = rejected."""
-    monkeypatch.setattr(ble_proto, "FAIL_ON_HANDSHAKE_REJECTED", True)
+    """Non-zero handshake status and no answer to later commands = rejected (the default)."""
+    assert ble_proto.FAIL_ON_HANDSHAKE_REJECTED is True
     device = FakeNotePin(hs_status=1, silent={3, 4, 6, 9})
     result = connect(monkeypatch, device)
-    assert result == {"connected": False, "error": ble_proto.HANDSHAKE_REJECTED_ERROR, "pairing_rejected": True}
-    assert "re-pair the device in Settings › Device" in result["error"]
+    assert result == {
+        "connected": False,
+        "code": "handshake_rejected",
+        "error": ble_proto.handshake_rejected_error([1]),
+        "pairing_rejected": True,
+    }
+    assert "different Plaud account" in result["error"]
     assert dev._device_state["connected"] is False
     assert dev._device_state["client"] is None
     assert device.client.is_connected is False
     assert dev.is_connected() is False
+
+
+@pytest.mark.parametrize(
+    ("status", "says"),
+    [
+        (1, "different Plaud account"),
+        (2, "Stop the recording"),
+        (3, "refused the connection"),
+        (4, "couldn't verify this Mac's pairing credentials"),
+        (255, "isn't ready to pair"),
+        (7, "Troubleshoot connection"),
+    ],
+)
+def test_each_rejection_status_says_what_to_do(connect_env, monkeypatch, status, says):
+    """The SDK's ConnectBleFailed codes (COMMANDS.md, cmd 1), each with its own next step."""
+    result = connect(monkeypatch, FakeNotePin(hs_status=status, silent={3, 4, 6, 9}))
+    assert result["connected"] is False
+    assert says in result["error"]
+    assert "—" not in result["error"]
 
 
 def test_nonzero_status_but_working_device_still_connects(connect_env, monkeypatch, caplog):
@@ -226,7 +250,7 @@ def test_short_token_that_also_fails_is_reported(connect_env, monkeypatch, caplo
     device = FakeNotePin(port_version=7, token_len=20)  # accepts neither 32 nor 16
     with caplog.at_level("WARNING"):
         result = connect(monkeypatch, device)
-    assert result["connected"] is True  # FAIL_ON_HANDSHAKE_REJECTED is off
+    assert result["connected"] is False and result["code"] == "handshake_rejected"
     assert "16-byte token didn't help either (rejected)" in caplog.text
     assert "Handshake looks rejected" in caplog.text
 
