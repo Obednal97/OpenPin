@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -188,6 +189,26 @@ def _release_orphaned_links():
     sent = sum(1 for cl in list(_orphaned_clients) if _cancel_link(cl))
     _orphaned_clients.clear()
     return sent
+
+
+def _missing_pairing_error(sn, logged_in, bind_error=None):
+    """Why this Mac lacks a NotePin's pairing credentials, in words the user can act on.
+
+    The usual cause when signed in: Plaud won't register the NotePin because it
+    is still on another Plaud account (bind_error carries Plaud's own reason).
+    """
+    which = f"this NotePin (serial ending {sn[-4:]})"
+    if not logged_in:
+        return (
+            f"This Mac doesn't have the pairing credentials for {which}. They come from Plaud once per "
+            "device: sign in under Settings › Plaud Cloud, connect, then you can sign out."
+        )
+    reason = f" {bind_error.rstrip('.')}." if bind_error else ""
+    return (
+        f"Couldn't register {which} to your Plaud account.{reason} If it's still on someone else's "
+        "Plaud account, they need to remove it there first (Plaud app › the device › Unbind), "
+        "then connect again."
+    )
 
 
 async def _disconnect_quietly(cl, timeout=5):
@@ -921,14 +942,7 @@ async def connect_device(address=None):
             if not sn:
                 return {"connected": False, "error": "Device serial number unknown. Try scanning for the device first."}
             if not is_logged_in():
-                return {
-                    "connected": False,
-                    "error": (
-                        f"This Mac doesn't have the pairing credentials for this NotePin (serial ending {sn[-4:]}). "
-                        "They come from Plaud once per device: sign in under Settings › Plaud Cloud, connect, "
-                        "then you can sign out."
-                    ),
-                }
+                return {"connected": False, "error": _missing_pairing_error(sn, False)}
             if cloud_status == SN_SIGN_WRONG_TOKEN_STATUS:
                 return {
                     "connected": False,
@@ -961,6 +975,15 @@ async def connect_device(address=None):
             await asyncio.sleep(0.1)
             if ack.is_set() or done.is_set():
                 break
+        # A blob without an ACK means the NotePin used a public key it already had,
+        # which may be another app's (e.g. Plaud's phone app after pairing there).
+        cached_key = done.is_set() and not ack.is_set()
+        logging.warning(
+            "[BLE] Key exchange: %s",
+            "NotePin used the public key it already had"
+            if cached_key
+            else ("NotePin asked for this app's public key" if ack.is_set() else "no reply"),
+        )
         if ack.is_set() and not done.is_set():
             pem = get_public_key_full_pem().encode()
             pc = (len(pem) + 99) // 100
@@ -981,10 +1004,27 @@ async def connect_device(address=None):
         blob = bytearray()
         for i in sorted(rsa.keys()):
             blob.extend(rsa[i])
+        # With the wrong private key, PKCS#1 v1.5 decryption doesn't fail: it
+        # returns random bytes of random length, so check the result instead.
         dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
         key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
-        if ChaCha20Poly1305(key).decrypt(nonce, ct, aad) != b"PLAUD.AI":
-            raise ValueError("BLE handshake identity check failed: decrypted token mismatch")
+        try:
+            blob_ok = len(dec) > 56 and ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI"
+        except InvalidTag:
+            blob_ok = False
+        if not blob_ok:
+            logging.warning("[BLE] Session blob isn't for this app's key (cached key: %s)", cached_key)
+            await _disconnect_quietly(cl)
+            _reset_state()
+            if cached_key:
+                return {
+                    "connected": False,
+                    "error": (
+                        "This NotePin is paired with another app, such as Plaud's phone app. Unpair or "
+                        "remove it there, close that app, then connect again here."
+                    ),
+                }
+            return {"connected": False, "error": "The NotePin's reply couldn't be read. Try connecting again."}
         try:
             await cl.stop_notify(N)
         except Exception:
@@ -1041,18 +1081,22 @@ async def connect_device(address=None):
     from app.state.cloud import is_logged_in as cloud_logged_in
 
     device_token = get_device_bind_token(sn)
+    bind_error = None
     if not device_token and sn and cloud_logged_in():
         # BIND_TOKEN missing — try creating it now (handles first-time pairing)
         logging.info(f"[BLE] No BIND_TOKEN for {sn}, attempting cloud bind...")
         try:
-            cloud_bind_device(sn)
+            bind_error = (cloud_bind_device(sn) or {}).get("error")
             device_token = get_device_bind_token(sn)
-            logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'}")
+            logging.info(f"[BLE] Cloud bind result: token={'yes' if device_token else 'NO'} ({bind_error or 'ok'})")
         except Exception as e:
+            bind_error = str(e)
             logging.warning(f"[BLE] Cloud bind failed: {e}")
+    if not device_token:
+        await _disconnect_quietly(cl)
+        _reset_state()
+        return {"connected": False, "error": _missing_pairing_error(sn, cloud_logged_in(), bind_error)}
     try:
-        if not device_token:
-            raise ValueError("BIND_TOKEN missing — cannot proceed with BLE handshake")
         if len(device_token) > 32:
             logging.warning(
                 "[BLE] BIND_TOKEN length %d exceeds 32-byte handshake field; truncating "
@@ -2033,6 +2077,7 @@ def _do_wifi_sync_locked(deadline):
 
         device_token = get_device_bind_token(sn) if sn else None
         device_sig = get_device_sn_signature(sn) if sn else None
+        bind_error = None
         secrets.extend(s for s in (device_token, device_sig) if s)
         # Auto-fetch credentials from cloud if missing (same as BLE pairing flow)
         if (not device_token or not device_sig) and sn and is_logged_in():
@@ -2041,6 +2086,7 @@ def _do_wifi_sync_locked(deadline):
                 if not device_token:
                     bind_result = bind_device(sn)
                     device_token = get_device_bind_token(sn)
+                    bind_error = (bind_result or {}).get("error")
                     secrets.extend(s for s in (device_token, (bind_result or {}).get("token")) if s)
                     _wlog(f"bind_device: {'token received' if device_token else (bind_result or {}).get('error')}")
                 if not device_sig:
@@ -2061,6 +2107,8 @@ def _do_wifi_sync_locked(deadline):
             _wlog("ABORT: missing credentials")
             if not is_logged_in():
                 return {"error": "Log into Plaud Cloud in Settings first, then try again."}
+            if not device_token:
+                return {"error": _missing_pairing_error(sn, True, bind_error)}
             return {"error": "Device not registered. Log into Plaud Cloud in Settings to bind your device."}
         worker_args = json.dumps(
             {
