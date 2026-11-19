@@ -1321,28 +1321,77 @@ SN_SIG = None  # Set from args — per-device signature from cloud API
 
 
 _session_key_path = None  # set by ble_connect_and_setup()
+_ble_failure = None  # why ble_connect_and_setup() returned None, for the user
 
 
-async def ble_connect_and_setup():
-    """Full BLE connect + handshake + setup, returns (client, key, nonce, aad, cipher, enc_func)."""
+def pick_notepin(seen, sn=None, address=None):
+    """Choose our NotePin from the Plaud devices a scan saw.
+
+    seen: {address: (device, advertised serial or None)}. Returns (device,
+    certain) or (None, False). Ours is the one advertising our serial, else
+    the one at the Bluetooth address it last had on this Mac (it may not have
+    advertised its serial yet), else the only Plaud in range if it hasn't said
+    which it is. Never a device advertising another serial: before 2.12.2 the
+    last Plaud heard was used, so a friend's NotePin nearby failed the sync.
+    """
+    if not sn:
+        return (list(seen.values())[-1][0], True) if seen else (None, False)
+    for device, serial in seen.values():
+        if serial == sn:
+            return device, True
+    if address in seen and seen[address][1] is None:
+        return seen[address][0], True
+    if len(seen) == 1:
+        device, serial = next(iter(seen.values()))
+        if serial is None:
+            return device, False
+    return None, False
+
+
+async def ble_connect_and_setup(sn=None, address=None):
+    """Full BLE connect + handshake + setup, returns (client, key, nonce, aad, cipher, enc_func).
+
+    sn/address pick our NotePin when others are in range (see pick_notepin).
+    Returns None on failure, with the reason in _ble_failure.
+    """
     import base64
 
     from bleak import BleakClient, BleakScanner
 
     from src.crypto import get_public_key_full_pem, load_rsa_private_key, open_session_blob, rsa_decrypt
+    from src.scanner import parse_manufacturer_data
 
+    global _ble_failure
+    _ble_failure = None
     status("BLE scanning...", 2)
+    seen = {}  # address -> (device, serial or None), across scans
     target = None
     for attempt in range(10):
         found = await BleakScanner.discover(timeout=5, return_adv=True)
         for a, (d, adv) in found.items():
             if 0x5D in adv.manufacturer_data:
-                target = d
-        if target:
+                info = parse_manufacturer_data(adv.manufacturer_data) or {}
+                serial = info.get("serial_number") or (seen.get(a) or (None, None))[1]
+                seen[a] = (d, serial)
+        target, certain = pick_notepin(seen, sn, address)
+        # An unidentified lone NotePin is only assumed to be ours after a
+        # second scan has had the chance to hear its serial.
+        if target and (certain or attempt >= 1):
             break
         status(f"BLE scan {attempt + 1}...", 2)
     if not target:
+        others = sorted({s[-4:] for _, s in seen.values() if s and s != sn})
+        if others:
+            _ble_failure = (
+                f"Found a NotePin (serial ending {', '.join(others)}), but not yours"
+                f"{f' (serial ending {sn[-4:]})' if sn else ''}. Bring yours closer and make sure it's on, "
+                "then try again."
+            )
+        else:
+            _ble_failure = "Couldn't find your NotePin over Bluetooth. Make sure it's on and nearby, then try again."
+        status(_ble_failure, 0)
         return None
+    status(f"BLE found {'our NotePin' if sn else 'a NotePin'} ({len(seen)} Plaud device(s) in range)", 2)
 
     cl = BleakClient(target, timeout=30.0)
     await cl.connect()
@@ -1397,6 +1446,10 @@ async def ble_connect_and_setup():
         await asyncio.wait_for(done.wait(), timeout=15)
     elif not done.is_set():
         status("Handshake failed — device did not respond to SN_SIG", 0)
+        _ble_failure = (
+            "Your NotePin didn't answer over Bluetooth. Try again; if it keeps happening, "
+            "restart it by holding its button for 12 seconds."
+        )
         try:
             await cl.stop_notify(N)
         except Exception:
@@ -1838,11 +1891,11 @@ async def transfer(args):
 
     # Do our own BLE connection (device invalidates sessions when BLE drops)
     try:
-        ble = await ble_connect_and_setup()
+        ble = await ble_connect_and_setup(sn, args.get("address"))
     except ValueError as e:
         return {"error": f"BLE handshake failed: {e}"}
     if not ble:
-        return {"error": "BLE connection failed"}
+        return {"error": _ble_failure or "BLE connection failed"}
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
     # The NotePin encrypts file keys with whichever app key it has cached.
