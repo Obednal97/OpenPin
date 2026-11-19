@@ -304,9 +304,11 @@ def test_pick_uses_the_last_address_when_no_serial_is_advertised():
     assert worker.pick_notepin(seen, OURS, address="a") == ("ours", True)
 
 
-def test_pick_assumes_a_lone_unidentified_notepin_but_says_it_is_unsure():
+def test_pick_assumes_a_lone_unidentified_notepin_only_without_an_address():
     assert worker.pick_notepin({"a": ("anon", None)}, OURS) == ("anon", False)
     assert worker.pick_notepin({}, OURS) == (None, False)
+    # Knowing where ours was, a NotePin elsewhere that hasn't said whose it is isn't ours.
+    assert worker.pick_notepin({"z": ("anon", None)}, OURS, address="a") == (None, False)
 
 
 def _adv(serial):

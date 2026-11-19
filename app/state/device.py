@@ -2106,6 +2106,12 @@ def _do_wifi_sync_locked(deadline):
             append_rotating_log(_wifi_log, f"{datetime.now().isoformat()} {msg}\n")
 
     proc = None
+    # The NotePin the app is connected to now: the worker reconnects to it and
+    # no other (its address on this Mac, else the one it last had here).
+    cl = _device_state.get("client")
+    address = getattr(cl, "address", None) or (
+        ((load_config().get("paired_devices") or {}).get(sn) or {}).get("last_address")
+    )
     try:
         # Disconnect BLE first — the worker needs to make its own connection.
         # The device invalidates crypto sessions when BLE drops, so the worker
@@ -2176,8 +2182,7 @@ def _do_wifi_sync_locked(deadline):
         worker_args = json.dumps(
             {
                 "sn": sn,
-                # Where this NotePin last was, in case its scan doesn't carry the serial.
-                "address": ((load_config().get("paired_devices") or {}).get(sn) or {}).get("last_address"),
+                "address": address,
                 "recordings_dir": str(get_recordings_dir()),
                 "app_key_path": str(APP_KEY_PATH),
                 "dismissed": sorted(_wifi_skip_ids()),

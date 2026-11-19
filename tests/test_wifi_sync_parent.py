@@ -9,6 +9,7 @@ import json
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -256,6 +257,16 @@ def test_parent_success_passes_state_dir_and_reports_budget(parent, monkeypatch,
     assert "recover True" not in parent
     assert parent == ["awake: Plaud WiFi sync", "worker exited 0", "awake end", "sync slot released"]
     assert dev._wifi_sync_status["message"] == "Complete: 1 file(s)"
+
+
+def test_parent_passes_the_connected_notepins_address(parent, monkeypatch):
+    proc = FakeProc(parent, exits_after=1, stdout=json.dumps({"files": [], "method": "wifi"}).encode() + b"\n")
+    spawn(monkeypatch, proc)
+    # No disconnect(): the parent logs that and carries on, which is all this needs.
+    monkeypatch.setitem(dev._device_state, "client", SimpleNamespace(address="UUID-NOW"))
+    monkeypatch.setattr(dev, "_get_loop", lambda: None)
+    dev.do_wifi_sync_blocking()
+    assert json.loads(proc.stdin.written)["address"] == "UUID-NOW"
 
 
 def test_parent_refuses_while_sync_slot_taken(parent, monkeypatch):
