@@ -280,3 +280,51 @@ def test_wifi_list_json_counts(tmp_path):
     assert cid == 11 and info == {"status": 0, "count": 1}
     assert pkt[8 + jlen :] == struct.pack("<IIH", 1, 100, 0)
     assert json.loads(pkt[8 : 8 + jlen]) == info
+
+
+# -- Picking our NotePin from a scan ---------------------------------------------
+
+OURS, THEIRS = "8820B50200001111", "8820B50200002222"
+
+
+def test_pick_prefers_our_serial_over_a_nearer_or_later_notepin():
+    seen = {"a": ("ours", OURS), "b": ("theirs", THEIRS)}
+    assert worker.pick_notepin(seen, OURS) == ("ours", True)
+    seen = {"b": ("theirs", THEIRS), "a": ("ours", OURS)}
+    assert worker.pick_notepin(seen, OURS) == ("ours", True)
+
+
+def test_pick_never_takes_a_notepin_advertising_another_serial():
+    assert worker.pick_notepin({"b": ("theirs", THEIRS)}, OURS, address="b") == (None, False)
+    assert worker.pick_notepin({"b": ("theirs", THEIRS), "c": ("anon", None)}, OURS) == (None, False)
+
+
+def test_pick_uses_the_last_address_when_no_serial_is_advertised():
+    seen = {"b": ("theirs", THEIRS), "a": ("ours", None)}
+    assert worker.pick_notepin(seen, OURS, address="a") == ("ours", True)
+
+
+def test_pick_assumes_a_lone_unidentified_notepin_but_says_it_is_unsure():
+    assert worker.pick_notepin({"a": ("anon", None)}, OURS) == ("anon", False)
+    assert worker.pick_notepin({}, OURS) == (None, False)
+
+
+def _adv(serial):
+    """Advertising data in the NotePin S format src/scanner.py parses."""
+    sn = bytes.fromhex(serial)
+    return SimpleNamespace(manufacturer_data={0x5D: bytes([0, 0x56, 1, 0, 0, len(sn)]) + sn + bytes([0, 1])})
+
+
+def test_scan_reports_a_friends_notepin_instead_of_connecting_to_it(monkeypatch, statuses):
+    class Scanner:
+        @staticmethod
+        async def discover(timeout=5, return_adv=True):
+            return {"b": ("theirs", _adv(THEIRS))}
+
+    def client(*a, **k):
+        raise AssertionError("must not connect to someone else's NotePin")
+
+    monkeypatch.setattr(bleak, "BleakScanner", Scanner)
+    monkeypatch.setattr(bleak, "BleakClient", client)
+    assert asyncio.run(worker.ble_connect_and_setup(OURS)) is None
+    assert worker._ble_failure.startswith("Found a NotePin (serial ending 2222), but not yours (serial ending 1111)")

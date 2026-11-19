@@ -2170,6 +2170,8 @@ def _do_wifi_sync_locked(deadline):
         worker_args = json.dumps(
             {
                 "sn": sn,
+                # Where this NotePin last was, in case its scan doesn't carry the serial.
+                "address": ((load_config().get("paired_devices") or {}).get(sn) or {}).get("last_address"),
                 "recordings_dir": str(get_recordings_dir()),
                 "app_key_path": str(APP_KEY_PATH),
                 "dismissed": sorted(_wifi_skip_ids()),

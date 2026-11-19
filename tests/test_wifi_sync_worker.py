@@ -776,7 +776,7 @@ def test_transfer_sigterm_cleans_up_in_order(mac, tmp_path, monkeypatch, capsys)
     async def ble_cmd(name, pt, **kw):
         events.append(name)
 
-    async def fake_ble():
+    async def fake_ble(*_):
         return Client(), b"k" * 32, b"n" * 12, b"a" * 12, None, ble_cmd
 
     class Server:

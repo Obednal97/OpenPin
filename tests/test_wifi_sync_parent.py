@@ -235,6 +235,8 @@ def test_parent_success_passes_state_dir_and_reports_budget(parent, monkeypatch,
         stderr_lines=[{"status": "2 file(s) found", "percent": 35, "budget_s": 777, "remaining_s": 600}],
     )
     spawn(monkeypatch, proc)
+    paired = {"paired_devices": {"8810A00012345678": {"last_address": "UUID-OURS"}}}
+    monkeypatch.setattr(dev, "load_config", lambda: paired)
     seen = {}
     real_apply = dev._apply_wifi_progress
 
@@ -248,6 +250,7 @@ def test_parent_success_passes_state_dir_and_reports_budget(parent, monkeypatch,
     assert result == out
     args = json.loads(proc.stdin.written)
     assert args["state_dir"] == str(tmp_path)
+    assert args["sn"] == "8810A00012345678" and args["address"] == "UUID-OURS"
     assert seen["active"] is True and seen["budget_s"] == 777
     assert seen["deadline"] == pytest.approx(time.time() + 600, abs=5)
     assert "recover True" not in parent
