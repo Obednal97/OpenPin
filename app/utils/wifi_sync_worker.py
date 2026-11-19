@@ -1320,13 +1320,16 @@ def save_wifi_download(recordings_dir, sid, raw, expected_size, app_rsa_key):
 SN_SIG = None  # Set from args — per-device signature from cloud API
 
 
+_session_key_path = None  # set by ble_connect_and_setup()
+
+
 async def ble_connect_and_setup():
     """Full BLE connect + handshake + setup, returns (client, key, nonce, aad, cipher, enc_func)."""
     import base64
 
     from bleak import BleakClient, BleakScanner
 
-    from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
+    from src.crypto import get_public_key_full_pem, load_rsa_private_key, open_session_blob, rsa_decrypt
 
     status("BLE scanning...", 2)
     target = None
@@ -1402,11 +1405,16 @@ async def ble_connect_and_setup():
     blob = bytearray()
     for i in sorted(rsa.keys()):
         blob.extend(rsa[i])
-    dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
-    key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
+    opened = open_session_blob(bytes(blob), rsa_decrypt, load_rsa_private_key)
+    if not opened:
+        raise ValueError(
+            "This NotePin is paired with another app, such as Plaud's phone app. Unpair or remove it there, "
+            "close that app, then connect again."
+        )
+    key, nonce, aad, key_path = opened
+    global _session_key_path
+    _session_key_path = key_path
     cipher = ChaCha20Poly1305(key)
-    if cipher.decrypt(nonce, ct, aad) != b"PLAUD.AI":
-        raise ValueError("BLE handshake identity check failed: decrypted token mismatch")
     try:
         await cl.stop_notify(N)
     except Exception:
@@ -1837,7 +1845,14 @@ async def transfer(args):
         return {"error": "BLE connection failed"}
     cl, key, nonce, aad, cipher, ble_cmd = ble
 
-    app_rsa_key = load_pem_private_key(app_key_path.read_bytes(), password=None)
+    # The NotePin encrypts file keys with whichever app key it has cached.
+    from src.crypto import KNOWN_PRIVATE_KEY_PATHS
+
+    # The key that opened the session blob is the one the NotePin has cached and
+    # encrypts file keys with, so it goes first (see open_session_blob).
+    first = [_session_key_path] if _session_key_path else []
+    paths = [p for p in dict.fromkeys([*first, app_key_path, *KNOWN_PRIVATE_KEY_PATHS]) if p.exists()]
+    app_rsa_key = [load_pem_private_key(p.read_bytes(), password=None) for p in paths]
     status(f"WiFi interface: {get_wifi_interface()}", 3)
 
     wifi_ssid = f"Plaud{sn[-4:]}"

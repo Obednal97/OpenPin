@@ -14,7 +14,6 @@ import threading
 import time
 from datetime import datetime
 
-from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -45,7 +44,13 @@ from app.utils.constants import (
 )
 from app.utils.fileio import atomic_write
 from app.utils.system import keep_awake
-from src.crypto import get_public_key_full_pem, load_rsa_private_key, rsa_decrypt
+from src.crypto import (
+    KNOWN_PRIVATE_KEY_PATHS,
+    get_public_key_full_pem,
+    load_rsa_private_key,
+    open_session_blob,
+    rsa_decrypt,
+)
 
 # Module-level state
 _device_state = {
@@ -118,6 +123,7 @@ def _reset_state():
     _device_state["port_version"] = None
     _device_state["client"] = None
     _device_state["session_keys"] = None
+    _device_state["key_path"] = None
     _device_state["cipher"] = None
     _device_state["battery"] = None
     _device_state["device_name"] = None
@@ -1057,16 +1063,13 @@ async def connect_device(address=None):
         blob = bytearray()
         for i in sorted(rsa.keys()):
             blob.extend(rsa[i])
-        # With the wrong private key, PKCS#1 v1.5 decryption doesn't fail: it
-        # returns random bytes of random length, so check the result instead.
-        dec = rsa_decrypt(bytes(blob), load_rsa_private_key())
-        key, nonce, aad, ct = dec[:32], dec[32:44], dec[44:56], dec[56:]
-        try:
-            blob_ok = len(dec) > 56 and ChaCha20Poly1305(key).decrypt(nonce, ct, aad) == b"PLAUD.AI"
-        except InvalidTag:
-            blob_ok = False
-        if not blob_ok:
-            logging.warning("[BLE] Session blob isn't for this app's key (cached key: %s)", cached_key)
+        opened = open_session_blob(bytes(blob), rsa_decrypt, load_rsa_private_key)
+        if opened:
+            key, nonce, aad, key_path = opened
+            _device_state["key_path"] = key_path
+            logging.warning("[BLE] Session blob opened with %s", key_path.name)
+        else:
+            logging.warning("[BLE] Session blob isn't for any known app key (cached key: %s)", cached_key)
             await _disconnect_quietly(cl)
             _reset_state()
             if cached_key:
@@ -2398,7 +2401,11 @@ async def _sync_files_inner(background=False):
     """Internal BLE sync implementation."""
     if not APP_KEY_PATH.exists():
         return {"error": f"Missing {APP_KEY_PATH}"}
-    app_rsa_key = load_pem_private_key(APP_KEY_PATH.read_bytes(), password=None)
+    # The NotePin encrypts file keys with the app key it has cached: the one that
+    # opened the session blob, so that goes first (see open_session_blob).
+    first = [_device_state.get("key_path")] if _device_state.get("key_path") else []
+    paths = [p for p in dict.fromkeys([*first, APP_KEY_PATH, *KNOWN_PRIVATE_KEY_PATHS]) if p.exists()]
+    app_rsa_key = [load_pem_private_key(p.read_bytes(), password=None) for p in paths]
 
     files = await list_device_files()
     if not files:
